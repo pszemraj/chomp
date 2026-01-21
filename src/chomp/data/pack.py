@@ -24,7 +24,7 @@ from typing import Any, Deque, Iterable, List
 import numpy as np
 
 
-class _ChunkedTokenBuffer:
+class _ChunkedIntBuffer:
     """A chunked 1D int32 buffer with efficient take()."""
 
     def __init__(self):
@@ -106,14 +106,37 @@ class PackerState:
     """JSON-serializable packer state."""
 
     remaining_tokens: List[int]
+    remaining_segments: List[int]
+    next_segment_id: int
 
     def to_dict(self) -> dict[str, Any]:
-        return {"remaining_tokens": self.remaining_tokens}
+        return {
+            "remaining_tokens": self.remaining_tokens,
+            "remaining_segments": self.remaining_segments,
+            "next_segment_id": int(self.next_segment_id),
+        }
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> "PackerState":
         toks = d.get("remaining_tokens") or []
-        return PackerState(remaining_tokens=list(toks))
+        segs = d.get("remaining_segments")
+        if segs is None:
+            segs_list = [1 for _ in range(len(toks))]
+        else:
+            segs_list = list(segs)
+        if len(segs_list) != len(toks):
+            raise ValueError(
+                f"remaining_segments length ({len(segs_list)}) must match remaining_tokens ({len(toks)})"
+            )
+        next_id = d.get("next_segment_id")
+        if next_id is None:
+            max_seg = max(segs_list) if segs_list else 0
+            next_id = max_seg + 1
+        return PackerState(
+            remaining_tokens=list(toks),
+            remaining_segments=segs_list,
+            next_segment_id=int(next_id),
+        )
 
 
 class TokenPacker:
@@ -138,7 +161,9 @@ class TokenPacker:
         self.eos_id = int(eos_id)
         self.max_doc_tokens = None if max_doc_tokens is None else int(max_doc_tokens)
 
-        self._buf = _ChunkedTokenBuffer()
+        self._token_buf = _ChunkedIntBuffer()
+        self._segment_buf = _ChunkedIntBuffer()
+        self._next_segment_id = 1
 
     def add_document(self, tokens: Iterable[int]) -> None:
         arr = np.asarray(list(tokens), dtype=np.int32)
@@ -155,21 +180,43 @@ class TokenPacker:
 
         if not pieces:
             return
-        self._buf.append(np.concatenate(pieces, axis=0))
+        segment_id = int(self._next_segment_id)
+        seg_pieces = [np.full((p.size,), segment_id, dtype=np.int32) for p in pieces]
+        self._token_buf.append(np.concatenate(pieces, axis=0))
+        self._segment_buf.append(np.concatenate(seg_pieces, axis=0))
+        self._next_segment_id += 1
 
     def can_pop(self) -> bool:
-        return self._buf.size >= (self.seq_len + 1)
+        if self._token_buf.size != self._segment_buf.size:
+            raise RuntimeError("token/segment buffers are misaligned")
+        return self._token_buf.size >= (self.seq_len + 1)
 
     def pop_seq_plus_one(self) -> np.ndarray:
         """Return [seq_len+1] tokens."""
 
-        return self._buf.take(self.seq_len + 1)
+        tokens, _segs = self.pop_seq_plus_one_with_segments()
+        return tokens
+
+    def pop_seq_plus_one_with_segments(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return ([seq_len+1] tokens, [seq_len+1] segment_ids)."""
+
+        if self._token_buf.size != self._segment_buf.size:
+            raise RuntimeError("token/segment buffers are misaligned")
+        tokens = self._token_buf.take(self.seq_len + 1)
+        segs = self._segment_buf.take(self.seq_len + 1)
+        return tokens, segs
 
     def get_state(self) -> dict[str, Any]:
         # NOTE: Remaining tokens are at most seq_len in steady state.
-        st = PackerState(remaining_tokens=self._buf.dump_remaining())
+        st = PackerState(
+            remaining_tokens=self._token_buf.dump_remaining(),
+            remaining_segments=self._segment_buf.dump_remaining(),
+            next_segment_id=int(self._next_segment_id),
+        )
         return st.to_dict()
 
     def set_state(self, state: dict[str, Any]) -> None:
         st = PackerState.from_dict(state)
-        self._buf.load_remaining(st.remaining_tokens)
+        self._token_buf.load_remaining(st.remaining_tokens)
+        self._segment_buf.load_remaining(st.remaining_segments)
+        self._next_segment_id = int(st.next_segment_id)

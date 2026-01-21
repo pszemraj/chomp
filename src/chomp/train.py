@@ -163,6 +163,7 @@ def make_train_step(
         input_ids: jax.Array,
         labels: jax.Array,
         attn: jax.Array,
+        segs: jax.Array,
         key: jax.Array | None,
         token_count: jax.Array,
     ):
@@ -170,6 +171,7 @@ def make_train_step(
             input_ids=input_ids,
             labels=labels,
             attention_mask=attn.astype(bool),
+            segment_ids=segs.astype(jnp.int32),
         )
         loss = training_loss(params, static, batch=micro, deterministic=deterministic, key=key)
         return loss * token_count
@@ -188,9 +190,9 @@ def make_train_step(
 
         def body(carry, inputs):
             loss_sum, grad_sum, token_sum = carry
-            in_ids, labs, attn, k = inputs
+            in_ids, labs, attn, segs, k = inputs
             token_count = _count_tokens(labs, attn).astype(jnp.float32)
-            loss, grads = loss_and_grad(state.params, in_ids, labs, attn, k, token_count)
+            loss, grads = loss_and_grad(state.params, in_ids, labs, attn, segs, k, token_count)
             loss_sum = loss_sum + loss.astype(jnp.float32)
             grad_sum = jax.tree_util.tree_map(lambda a, b: a + b, grad_sum, grads)
             token_sum = token_sum + token_count
@@ -199,7 +201,13 @@ def make_train_step(
         (loss_sum, grad_sum, token_sum), _ = jax.lax.scan(
             body,
             (loss0, grad0, token0),
-            (batch.input_ids, batch.labels, batch.attention_mask, micro_keys),
+            (
+                batch.input_ids,
+                batch.labels,
+                batch.attention_mask,
+                batch.segment_ids,
+                micro_keys,
+            ),
         )
 
         token_denom = jnp.maximum(token_sum, 1.0)

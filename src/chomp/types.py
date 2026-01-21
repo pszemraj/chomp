@@ -11,6 +11,7 @@ chomp standardizes on fixed shapes:
   input_ids:      [A, B, T]
   labels:         [A, B, T]
   attention_mask: [A, B, T] boolean
+  segment_ids:    [A, B, T] int32
 where:
   A = grad_accum (microbatches per optimizer update)
   B = batch_size
@@ -35,11 +36,13 @@ class Batch(eqx.Module):
     """A fixed-shape training batch.
 
     All fields are arrays. `attention_mask` is always present.
+    `segment_ids` assigns packed-document IDs per position.
     """
 
     input_ids: jax.Array
     labels: jax.Array
     attention_mask: jax.Array
+    segment_ids: jax.Array
 
 
 class TrainState(eqx.Module):

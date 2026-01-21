@@ -13,7 +13,7 @@ from chomp.data.pipeline import build_train_iterator
 
 
 def _batch_arrays(batch):
-    return batch.input_ids, batch.labels, batch.attention_mask
+    return batch.input_ids, batch.labels, batch.attention_mask, batch.segment_ids
 
 
 def test_packer_alignment_after_restore():

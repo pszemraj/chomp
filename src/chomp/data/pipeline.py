@@ -347,23 +347,26 @@ class TrainBatchIterator:
                 ids = self._tok.encode(text)
                 self._packer.add_document(ids)
 
-            seq = self._packer.pop_seq_plus_one()  # [T+1]
+            seq, segs = self._packer.pop_seq_plus_one_with_segments()  # [T+1]
             # Convert to input/labels [T]
             inp = seq[:-1]
             lab = seq[1:]
-            seqs.append((inp, lab))
+            seg = segs[:-1]
+            seqs.append((inp, lab, seg))
 
         # Stack -> [A*B, T]
         inps = np.stack([x[0] for x in seqs], axis=0).astype(np.int32)
         labs = np.stack([x[1] for x in seqs], axis=0).astype(np.int32)
+        segs = np.stack([x[2] for x in seqs], axis=0).astype(np.int32)
 
         # Reshape -> [A, B, T]
         inps = inps.reshape(self._A, self._B, self._T)
         labs = labs.reshape(self._A, self._B, self._T)
+        segs = segs.reshape(self._A, self._B, self._T)
 
         attn = np.ones((self._A, self._B, self._T), dtype=np.bool_)
 
-        batch = Batch(input_ids=inps, labels=labs, attention_mask=attn)
+        batch = Batch(input_ids=inps, labels=labs, attention_mask=attn, segment_ids=segs)
         if self._device_put:
             import jax  # imported lazily to keep iterator usable in non-JAX contexts
 

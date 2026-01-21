@@ -69,8 +69,8 @@ def test_grad_accum_equivalence_dummy_local_text():
     # --- Reference: average microbatch grads + one update ---
     deterministic = True
 
-    def micro_loss(p, in_ids, labs, attn, k, token_count):
-        micro = Batch(input_ids=in_ids, labels=labs, attention_mask=attn)
+    def micro_loss(p, in_ids, labs, attn, segs, k, token_count):
+        micro = Batch(input_ids=in_ids, labels=labs, attention_mask=attn, segment_ids=segs)
         loss = training_loss(p, static, batch=micro, deterministic=deterministic, key=k)
         return loss * token_count
 
@@ -94,6 +94,7 @@ def test_grad_accum_equivalence_dummy_local_text():
             batch.input_ids[i],
             batch.labels[i],
             batch.attention_mask[i],
+            batch.segment_ids[i],
             micro_keys[i],
             token_count,
         )
