@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import jax
@@ -123,5 +124,5 @@ def test_corrupt_checkpoint_fails_restore(tmp_path: Path):
     corrupt_target.write_text("{not: valid json", encoding="utf-8")
 
     abstract_state = _abstractify(state)
-    with pytest.raises(Exception):
+    with pytest.raises((ValueError, RuntimeError, KeyError, json.JSONDecodeError)):
         restore_at_step(mgr, step=1, abstract_train_state=abstract_state)

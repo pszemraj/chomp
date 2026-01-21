@@ -13,6 +13,7 @@ Phase 3 addendum:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from datetime import datetime
@@ -122,10 +123,8 @@ class MetricsWriter:
 
     def close(self) -> None:
         """Close the file handle."""
-        try:
+        with contextlib.suppress(Exception):
             self._f.close()
-        except Exception:
-            pass
 
     def __enter__(self) -> MetricsWriter:
         return self

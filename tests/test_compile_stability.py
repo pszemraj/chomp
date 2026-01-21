@@ -39,7 +39,7 @@ def test_train_step_compiles_once(tmp_path: Path):
     cmd = [
         sys.executable,
         "-c",
-        "from chomp.scripts.train import main; main(['--config','%s'])" % str(config_src),
+        f"from chomp.scripts.train import main; main(['--config','{config_src}'])",
     ]
 
     p = subprocess.run(cmd, cwd=str(work), env=env, capture_output=True, text=True)

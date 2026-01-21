@@ -10,7 +10,7 @@ If JAX profiling APIs change, this is the only file you should need to touch.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 import jax
@@ -28,11 +28,8 @@ def start_trace(log_dir: str | Path) -> None:
 
 def stop_trace() -> None:
     """Stop a JAX trace (best-effort)."""
-
-    try:
+    with suppress(Exception):
         jax.profiler.stop_trace()
-    except Exception:
-        pass
 
 
 @contextmanager

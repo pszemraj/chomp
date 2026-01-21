@@ -15,6 +15,7 @@ Tokenization + packing happen elsewhere.
 
 from __future__ import annotations
 
+import contextlib
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -95,12 +96,9 @@ class HFStreamingTextStream:
         )
 
         # Keep only the text column (smaller item dicts, less accidental schema drift)
-        try:
+        # Some older datasets versions may not support select_columns in streaming.
+        with contextlib.suppress(Exception):
             ds = ds.select_columns([self._spec.text_key])
-        except Exception:
-            # Some older datasets versions may not support select_columns in streaming.
-            # We'll just read the full dict and index by key.
-            pass
 
         if self._spec.shuffle:
             ds = ds.shuffle(
