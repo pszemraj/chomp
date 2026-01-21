@@ -40,9 +40,12 @@ def device_platform(x: jax.Array) -> str | None:
     :return str | None: Platform name (e.g., "cpu", "gpu") or None if unknown.
     """
 
-    # Newer JAX: x.device() -> Device
+    # JAX 0.8+: x.device is a Device property (callable in older versions).
     try:
-        return x.device().platform  # type: ignore[attr-defined]
+        dev = x.device  # type: ignore[attr-defined]
+        if callable(dev):
+            return dev().platform  # type: ignore[call-arg]
+        return dev.platform  # type: ignore[union-attr]
     except Exception:
         pass
 

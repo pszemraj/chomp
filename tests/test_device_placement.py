@@ -1,7 +1,7 @@
 import jax
 import pytest
 
-from chomp.utils.devices import validate_default_device
+from chomp.utils.devices import device_platform, validate_default_device
 
 
 def test_cpu_fails_when_disallowed():
@@ -15,3 +15,9 @@ def test_cpu_fails_when_disallowed():
 
 def test_cpu_allowed_when_configured():
     validate_default_device(allow_cpu=True)
+
+
+def test_device_platform_detects_array():
+    arr = jax.numpy.zeros((1,))
+    plat = device_platform(arr)
+    assert isinstance(plat, str) and plat
