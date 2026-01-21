@@ -273,6 +273,15 @@ def apply_segment_ids_patch() -> bool:
     ) -> tuple[jax.Array, Any | None, jax.Array]:
         """Patched ChunkedAttention call supporting segment IDs.
 
+        :param jax.Array q: Query tensor [B, L, H, Dh].
+        :param jax.Array k: Key tensor [B, L, H, Dh].
+        :param jax.Array v: Value tensor [B, L, H, Dv].
+        :param cache: Optional attention cache.
+        :param mask: Optional padding mask [B, L].
+        :param bool return_cache: Whether to return cache.
+        :param bool deterministic: If False, apply dropout.
+        :param key: PRNG key when dropout is enabled.
+        :param segment_ids: Optional segment IDs [B, L].
         :return tuple: (output, cache, position) tuple.
         """
         if segment_ids is None:
@@ -319,6 +328,13 @@ def apply_segment_ids_patch() -> bool:
     ) -> tuple[jax.Array, LayerCache | None]:
         """Patched MegalodonAttention call supporting segment IDs.
 
+        :param jax.Array x: Input tensor [B, L, D].
+        :param cache: Optional layer cache.
+        :param mask: Optional padding mask [B, L].
+        :param bool return_cache: Whether to return cache.
+        :param bool deterministic: If False, apply dropout.
+        :param key: PRNG key when dropout is enabled.
+        :param segment_ids: Optional segment IDs [B, L].
         :return tuple: (output, new_cache) tuple.
         """
         if segment_ids is None:
@@ -447,6 +463,11 @@ def apply_segment_ids_patch() -> bool:
     ) -> jax.Array:
         """Checkpointed layer forward with optional segment IDs.
 
+        :param layer: Layer module to call.
+        :param jax.Array x: Input tensor [B, L, D].
+        :param mask: Optional padding mask [B, L].
+        :param key: PRNG key for dropout.
+        :param segment_ids: Optional segment IDs [B, L].
         :return jax.Array: Layer output.
         """
         out, _ = layer(
@@ -474,6 +495,13 @@ def apply_segment_ids_patch() -> bool:
     ) -> tuple[jax.Array, LayerCache | None]:
         """Patched MegalodonBlock call supporting segment IDs.
 
+        :param jax.Array x: Input tensor [B, L, D].
+        :param cache: Optional layer cache.
+        :param mask: Optional padding mask [B, L].
+        :param bool return_cache: Whether to return cache.
+        :param bool deterministic: If False, apply dropout.
+        :param key: PRNG key when dropout is enabled.
+        :param segment_ids: Optional segment IDs [B, L].
         :return tuple: (output, new_cache) tuple.
         """
         if segment_ids is None:
@@ -526,6 +554,13 @@ def apply_segment_ids_patch() -> bool:
     ) -> tuple[jax.Array, ModelCache | None]:
         """Patched MegalodonModel call supporting segment IDs.
 
+        :param jax.Array input_ids: Input token IDs [B, L].
+        :param attention_mask: Optional padding mask [B, L].
+        :param cache: Optional model cache.
+        :param bool return_cache: Whether to return cache.
+        :param bool deterministic: If False, apply dropout.
+        :param key: PRNG key when dropout is enabled.
+        :param segment_ids: Optional segment IDs [B, L].
         :return tuple: (hidden, cache) tuple.
         """
         if segment_ids is None:
@@ -661,6 +696,13 @@ def apply_segment_ids_patch() -> bool:
     ) -> tuple[jax.Array, ModelCache | None]:
         """Patched MegalodonForCausalLM call supporting segment IDs.
 
+        :param jax.Array input_ids: Input token IDs [B, L].
+        :param attention_mask: Optional padding mask [B, L].
+        :param cache: Optional model cache.
+        :param bool return_cache: Whether to return cache.
+        :param bool deterministic: If False, apply dropout.
+        :param key: PRNG key when dropout is enabled.
+        :param segment_ids: Optional segment IDs [B, L].
         :return tuple: (logits, cache) tuple.
         """
         if segment_ids is None:
@@ -734,6 +776,13 @@ def apply_segment_ids_patch() -> bool:
     ) -> jax.Array:
         """Patched loss with optional segment IDs.
 
+        :param jax.Array input_ids: Input token IDs [B, L].
+        :param jax.Array labels: Label token IDs [B, L].
+        :param attention_mask: Optional padding mask [B, L].
+        :param int ignore_index: Label value to ignore in loss.
+        :param bool deterministic: If False, apply dropout.
+        :param key: PRNG key when dropout is enabled.
+        :param segment_ids: Optional segment IDs [B, L].
         :return jax.Array: Scalar loss.
         """
         if segment_ids is None:
