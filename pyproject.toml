@@ -11,29 +11,29 @@ license = "Apache-2.0"
 requires-python = ">=3.11"
 authors = [{ name = "chomp contributors" }]
 classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
 # NOTE:
 # - JAX wheels (jaxlib) are platform/CUDA specific. See README.
 # - We pin Orbax to avoid silent API drift.
 dependencies = [
-    "jax>=0.7.0",
-    "equinox>=0.12.0",
-    "optax>=0.2.0",
-    "megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git",
-    "PyYAML>=6.0",
-    "tqdm>=4.66",
-    # Phase 3: checkpointing
-    "orbax-checkpoint==0.11.31",
-    # Phase 4+: real streaming data
-    "datasets>=2.18.0",
+  "jax>=0.7.0",
+  "equinox>=0.12.0",
+  "optax>=0.2.0",
+  "megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git",
+  "PyYAML>=6.0",
+  "tqdm>=4.66",
+  # Phase 3: checkpointing
+  "orbax-checkpoint==0.11.31",
+  # Phase 4+: real streaming data
+  "datasets>=2.18.0",
 ]
 
 [project.optional-dependencies]
