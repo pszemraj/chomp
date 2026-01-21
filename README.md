@@ -116,6 +116,7 @@ Each run directory includes a tokenizer snapshot under `tokenizer/`.
 - **Training never uses cache**: cache is an inference concern.
 - **Tokenizer compatibility**: tokenizer vocab + special tokens are detected and `model.vocab_size` is aligned.
 - **Fixed eval set**: `data.max_eval_samples` caches validation texts for consistent eval.
+- **W&B logging**: enable with `logging.wandb_enabled=true`.
 
 ## Docs
 

@@ -265,6 +265,12 @@ class LoggingConfig:
     run_dir: str | None = None
     metrics_file: str = "metrics.jsonl"
     level: LogLevel = "INFO"
+    wandb_enabled: bool = False
+    wandb_project: str | None = None
+    wandb_entity: str | None = None
+    wandb_run_name: str | None = None
+    wandb_mode: Literal["online", "offline", "disabled"] = "online"
+    wandb_tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -573,6 +579,13 @@ def validate_config(cfg: Config) -> None:
         _vfail(f"data.grain_prefetch must be >=0, got {cfg.data.grain_prefetch}")
     if cfg.data.max_eval_samples < 0:
         _vfail(f"data.max_eval_samples must be >=0, got {cfg.data.max_eval_samples}")
+
+    # Logging / wandb
+    if cfg.logging.wandb_mode not in ("online", "offline", "disabled"):
+        _vfail(
+            "logging.wandb_mode must be 'online', 'offline', or 'disabled', "
+            f"got {cfg.logging.wandb_mode!r}"
+        )
     # HF streaming robustness knobs
     if cfg.data.max_retries < 0:
         _vfail(f"data.max_retries must be >=0, got {cfg.data.max_retries}")

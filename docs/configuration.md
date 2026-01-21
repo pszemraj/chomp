@@ -82,3 +82,5 @@ Optimizer:
 - `checkpoint.enabled`, `checkpoint.save_every`, `checkpoint.max_to_keep`,
   `checkpoint.async_save`
 - `logging.run_dir`, `logging.metrics_file`, `logging.level`
+- `logging.wandb_enabled`, `logging.wandb_project`, `logging.wandb_entity`
+- `logging.wandb_run_name`, `logging.wandb_mode`, `logging.wandb_tags`

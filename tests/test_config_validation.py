@@ -79,3 +79,11 @@ def test_eval_every_must_be_non_negative():
     bad = replace(cfg, train=bad_train)
     with pytest.raises(ValueError, match="eval_every"):
         validate_config(bad)
+
+
+def test_wandb_mode_must_be_valid():
+    cfg = _base_cfg()
+    bad_logging = replace(cfg.logging, wandb_mode="bogus")
+    bad = replace(cfg, logging=bad_logging)
+    with pytest.raises(ValueError, match="wandb_mode"):
+        validate_config(bad)
