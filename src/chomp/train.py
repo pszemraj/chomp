@@ -43,7 +43,12 @@ from chomp.ckpt import (
     save,
 )
 from chomp.config import Config, derived_deterministic
-from chomp.data import build_train_iterator, data_fingerprint, prepare_tokenizer_and_config
+from chomp.data import (
+    build_train_iterator,
+    data_fingerprint,
+    prepare_tokenizer_and_config,
+    save_tokenizer_snapshot,
+)
 from chomp.model import build_model, training_loss
 from chomp.types import Batch, TrainState
 from chomp.utils.devices import assert_batch_on_device
@@ -216,6 +221,7 @@ def run(
     # Prepare run dir
     run_dir = create_run_dir(cfg, config_path=config_path, allow_existing=allow_existing)
     metrics_path = run_dir / cfg.logging.metrics_file
+    save_tokenizer_snapshot(run_dir, cfg, tokenizer, allow_existing=allow_existing)
 
     # Optional profiling
     if cfg.train.profile:

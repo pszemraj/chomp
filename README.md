@@ -104,6 +104,7 @@ chomp-train --config configs/debug_smoke.yaml --run-dir runs/chomp/debug_run --r
 ```
 
 Resume performs strict config/data compatibility checks and fails fast on mismatches.
+Each run directory includes a tokenizer snapshot under `tokenizer/`.
 
 ## Design principles
 

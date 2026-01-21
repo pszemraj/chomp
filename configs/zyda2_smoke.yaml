@@ -3,7 +3,7 @@
 
 model:
   backend: dummy
-  vocab_size: 256
+  vocab_size: 32128
   d_model: 128
   dropout: 0.0
 
@@ -17,10 +17,12 @@ data:
   shuffle_buffer_size: 10000
   repeat: true
   tokenizer:
-    kind: byte
-    byte_offset: 0
-    add_bos: false
-    add_eos: false
+    kind: hf
+    hf_name_or_path: BEE-spoke-data/bpe-tokenizer-32k-smolNeoX
+    hf_use_fast: true
+    hf_trust_remote_code: false
+    vocab_size_multiple: 128
+    auto_set_special_tokens: true
 
 train:
   seed: 0

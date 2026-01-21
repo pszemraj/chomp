@@ -24,6 +24,7 @@ from .pipeline import (
     build_train_iterator,
     data_fingerprint,
     prepare_tokenizer_and_config,
+    save_tokenizer_snapshot,
 )
 
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     "data_fingerprint",
     "build_tokenizer",
     "prepare_tokenizer_and_config",
+    "save_tokenizer_snapshot",
 ]

@@ -20,8 +20,10 @@ This pipeline keeps debug sources (local_text) but *still* exercises tokenize+pa
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
@@ -110,6 +112,9 @@ class HFTokenizer:
     def pad_token_id(self) -> int | None:
         return self._tok.pad_token_id
 
+    def save_pretrained(self, path: str | Path) -> None:
+        self._tok.save_pretrained(str(path))
+
 
 def build_tokenizer(cfg: Config) -> Tokenizer:
     tok = cfg.data.tokenizer
@@ -195,6 +200,42 @@ def prepare_tokenizer_and_config(cfg: Config) -> tuple[Config, Tokenizer]:
     tok = build_tokenizer(cfg)
     cfg = resolve_tokenizer_config(cfg, tok)
     return cfg, tok
+
+
+def save_tokenizer_snapshot(
+    run_dir: Path, cfg: Config, tok: Tokenizer, *, allow_existing: bool
+) -> None:
+    """Persist the tokenizer to disk for reproducible resumes."""
+
+    tok_dir = Path(run_dir) / "tokenizer"
+    if tok_dir.exists():
+        if allow_existing:
+            return
+        raise RuntimeError(f"Tokenizer snapshot already exists: {tok_dir}")
+
+    tok_dir.mkdir(parents=True, exist_ok=False)
+
+    if hasattr(tok, "save_pretrained"):
+        try:
+            tok.save_pretrained(tok_dir)  # type: ignore[call-arg]
+            return
+        except Exception as exc:
+            raise RuntimeError(f"Failed to save HF tokenizer to {tok_dir}") from exc
+
+    record = {
+        "kind": cfg.data.tokenizer.kind,
+        "vocab_size": int(cfg.model.vocab_size),
+        "byte_offset": cfg.data.tokenizer.byte_offset,
+        "add_bos": cfg.data.tokenizer.add_bos,
+        "add_eos": cfg.data.tokenizer.add_eos,
+        "bos_token_id": int(cfg.model.bos_token_id),
+        "eos_token_id": int(cfg.model.eos_token_id),
+        "pad_token_id": int(cfg.model.pad_token_id),
+    }
+    (tok_dir / "tokenizer.json").write_text(
+        json.dumps(record, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
 
 def data_fingerprint(cfg: Config) -> dict[str, Any]:
