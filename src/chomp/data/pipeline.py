@@ -80,7 +80,7 @@ class ByteTokenizer:
 class HFTokenizer:
     """Hugging Face tokenizer wrapper.
 
-    Requires `transformers` (install chomp[hf]).
+    Requires `transformers` (included in default install).
     """
 
     def __init__(self, name_or_path: str, *, use_fast: bool, trust_remote_code: bool):
@@ -95,7 +95,7 @@ class HFTokenizer:
             from transformers import AutoTokenizer
         except Exception as e:  # pragma: no cover
             raise ImportError(
-                "HFTokenizer requires transformers. Install extras: pip install -e .[hf]"
+                "HFTokenizer requires transformers. Install with: pip install transformers tokenizers"
             ) from e
 
         self._tok = AutoTokenizer.from_pretrained(

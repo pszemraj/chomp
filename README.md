@@ -11,7 +11,7 @@ chomp's philosophy is intentionally boring:
 Implemented so far (this draft):
 - Phases 0–2: config + model integration + compiled train_step with `lax.scan` grad accumulation
 - Phase 3: Orbax checkpointing + resume contract (train_state + data iterator state)
-- Initial Phase 4 chunk: Hugging Face streaming → tokenize + pack → fixed [A,B,T] batches (no Grain yet)
+- Phases 4–5: HF streaming → tokenize → pack → Grain pipeline → fixed [A,B,T] batches
 
 ## Install
 
@@ -25,7 +25,7 @@ JAX wheels are platform- and CUDA-specific. Follow the official instructions:
 pip install -e .
 ```
 
-### 3) Install `megalodon-jax` (optional, for real models)
+### 3) Install `megalodon-jax` (for real models)
 
 ```bash
 pip install -e /path/to/megalodon-jax
@@ -36,15 +36,6 @@ or:
 ```bash
 pip install -e '.[megalodon]'
 ```
-
-### 4) Optional: Hugging Face tokenizer support
-
-If you want to use `data.tokenizer.kind: hf`:
-
-```bash
-pip install -e '.[hf]'
-```
-
 
 ### Tokenizer defaults + vocab rounding
 
@@ -90,6 +81,9 @@ data:
   hf_name: sample-100BT
   hf_split: train
   text_key: text
+  packing_mode: bin
+  packing_buffer_docs: 256
+  grain_prefetch: 2
 ```
 
 ### Resume from checkpoint
@@ -114,8 +108,16 @@ Each run directory includes a tokenizer snapshot under `tokenizer/`.
 - **Segment masking toggle**: set `model.segment_masking` to enable/disable block-diagonal attention for packed sequences.
 - **Boundary-aware loss masking**: `data.mask_boundary_loss` sets labels at segment boundaries to `-100` to avoid cross-document loss; `data.train_on_eos` controls EOS supervision.
 - **Bin packing optional**: set `data.packing_mode: bin` with `data.packing_buffer_docs` to enable FFD packing (pads to fixed length).
-- **Grain pipeline**: tune `data.grain_prefetch` for threaded prefetch.
+- **Grain pipeline**: tune `data.grain_prefetch` for threaded prefetch and log `packing_utilization`.
 - **Arrays-only TrainState**: checkpoint-friendly; no hidden Python objects in the jitted state.
 - **Resume is a contract**: train_state *and* data iterator state are persisted.
 - **Training never uses cache**: cache is an inference concern.
 - **Tokenizer compatibility**: tokenizer vocab + special tokens are detected and `model.vocab_size` is aligned.
+
+## Docs
+
+- `docs/packing.md`: packing modes, segment IDs, and loss masking
+- `docs/data_pipeline.md`: HF streaming → Grain → batch contract
+- `docs/checkpointing.md`: Orbax save/restore + resume compatibility
+- `docs/configuration.md`: config tree and key knobs
+- `docs/training.md`: train loop behavior and metrics
