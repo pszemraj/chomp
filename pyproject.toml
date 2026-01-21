@@ -18,6 +18,7 @@ dependencies = [
   "jax>=0.7.0",
   "equinox>=0.12.0",
   "optax>=0.2.0",
+  "megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git",
   "PyYAML>=6.0",
   "tqdm>=4.66",
 
@@ -29,27 +30,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Install your Megalodon engine separately if you prefer local dev:
-#   pip install -e /path/to/megalodon-jax
-megalodon = [
-  "megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git",
-]
 
 # Optional HF tokenizer support (ByteTokenizer requires no extra deps)
-hf = [
-  "transformers>=4.40.0",
-  "tokenizers>=0.15.0",
-]
+hf = ["transformers>=4.40.0", "tokenizers>=0.15.0"]
 
-dev = [
-  "pytest>=7.4",
-]
+dev = ["pytest>=7.4"]
 
 [project.scripts]
 chomp-train = "chomp.scripts.train:main"
 
 [tool.setuptools]
-package-dir = {"" = "src"}
+package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
