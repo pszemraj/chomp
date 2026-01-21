@@ -56,6 +56,18 @@ from chomp.utils.io import MetricsWriter, create_run_dir
 from chomp.utils.profiling import start_trace, step_annotation, stop_trace
 from chomp.utils.tree import param_count
 
+_IGNORE_INDEX = -100
+
+
+def _count_tokens(labels: jax.Array, attention_mask: jax.Array | None) -> jax.Array:
+    """Count valid tokens after the causal shift (for correct GA normalization)."""
+
+    shift_labels = labels[:, 1:]
+    valid = shift_labels != _IGNORE_INDEX
+    if attention_mask is not None:
+        valid = valid & attention_mask[:, 1:].astype(bool)
+    return jnp.sum(valid, dtype=jnp.int32)
+
 
 def _weight_decay_mask(params: Any) -> Any:
     """Heuristic: apply weight decay to matrices (ndim >= 2), not to biases/scales."""
@@ -137,14 +149,20 @@ def make_train_step(
     grad_accum = int(cfg.train.grad_accum)
 
     def micro_loss(
-        params: Any, input_ids: jax.Array, labels: jax.Array, attn: jax.Array, key: jax.Array | None
+        params: Any,
+        input_ids: jax.Array,
+        labels: jax.Array,
+        attn: jax.Array,
+        key: jax.Array | None,
+        token_count: jax.Array,
     ):
         micro = Batch(
             input_ids=input_ids,
             labels=labels,
             attention_mask=attn.astype(bool),
         )
-        return training_loss(params, static, batch=micro, deterministic=deterministic, key=key)
+        loss = training_loss(params, static, batch=micro, deterministic=deterministic, key=key)
+        return loss * token_count
 
     loss_and_grad = eqx.filter_value_and_grad(micro_loss)
 
@@ -156,23 +174,27 @@ def make_train_step(
         # Init accumulators
         loss0 = jnp.zeros((), dtype=jnp.float32)
         grad0 = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), state.params)
+        token0 = jnp.zeros((), dtype=jnp.float32)
 
         def body(carry, inputs):
-            loss_sum, grad_sum = carry
+            loss_sum, grad_sum, token_sum = carry
             in_ids, labs, attn, k = inputs
-            loss, grads = loss_and_grad(state.params, in_ids, labs, attn, k)
+            token_count = _count_tokens(labs, attn).astype(jnp.float32)
+            loss, grads = loss_and_grad(state.params, in_ids, labs, attn, k, token_count)
             loss_sum = loss_sum + loss.astype(jnp.float32)
             grad_sum = jax.tree_util.tree_map(lambda a, b: a + b, grad_sum, grads)
-            return (loss_sum, grad_sum), None
+            token_sum = token_sum + token_count
+            return (loss_sum, grad_sum, token_sum), None
 
-        (loss_sum, grad_sum), _ = jax.lax.scan(
+        (loss_sum, grad_sum, token_sum), _ = jax.lax.scan(
             body,
-            (loss0, grad0),
+            (loss0, grad0, token0),
             (batch.input_ids, batch.labels, batch.attention_mask, micro_keys),
         )
 
-        loss = loss_sum / grad_accum
-        grads = jax.tree_util.tree_map(lambda g: g / grad_accum, grad_sum)
+        token_denom = jnp.maximum(token_sum, 1.0)
+        loss = loss_sum / token_denom
+        grads = jax.tree_util.tree_map(lambda g: g / token_denom, grad_sum)
 
         grad_norm = optax.global_norm(grads)
         updates, new_opt_state = tx.update(grads, state.opt_state, state.params)

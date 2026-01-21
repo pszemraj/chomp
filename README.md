@@ -109,6 +109,7 @@ Each run directory includes a tokenizer snapshot under `tokenizer/`.
 ## Design principles
 
 - **Compile once**: fixed shapes; no dynamic padding; grad accumulation inside the compiled step.
+- **Token-weighted GA**: gradient accumulation scales by valid token count (correct with masks/padding).
 - **Arrays-only TrainState**: checkpoint-friendly; no hidden Python objects in the jitted state.
 - **Resume is a contract**: train_state *and* data iterator state are persisted.
 - **Training never uses cache**: cache is an inference concern.

@@ -69,32 +69,40 @@ def test_grad_accum_equivalence_dummy_local_text():
     # --- Reference: average microbatch grads + one update ---
     deterministic = True
 
-    def micro_loss(p, in_ids, labs, attn, k):
+    def micro_loss(p, in_ids, labs, attn, k, token_count):
         micro = Batch(input_ids=in_ids, labels=labs, attention_mask=attn)
-        return training_loss(p, static, batch=micro, deterministic=deterministic, key=k)
+        loss = training_loss(p, static, batch=micro, deterministic=deterministic, key=k)
+        return loss * token_count
 
     loss_and_grad = eqx.filter_value_and_grad(micro_loss)
 
     grads_sum = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), state0.params)
     loss_sum = jnp.zeros((), dtype=jnp.float32)
+    token_sum = jnp.zeros((), dtype=jnp.float32)
 
     # Same micro-keys generation as train_step (split once)
     rng, step_key = jax.random.split(state0.rng)
     micro_keys = jax.random.split(step_key, cfg.train.grad_accum)
 
     for i in range(cfg.train.grad_accum):
+        shift_labels = batch.labels[i][:, 1:]
+        valid = shift_labels != -100
+        valid = valid & batch.attention_mask[i][:, 1:].astype(bool)
+        token_count = jnp.sum(valid, dtype=jnp.int32).astype(jnp.float32)
         loss_i, grads_i = loss_and_grad(
             state0.params,
             batch.input_ids[i],
             batch.labels[i],
             batch.attention_mask[i],
             micro_keys[i],
+            token_count,
         )
         loss_sum = loss_sum + loss_i.astype(jnp.float32)
         grads_sum = jax.tree_util.tree_map(lambda a, b: a + b, grads_sum, grads_i)
+        token_sum = token_sum + token_count
 
-    loss_ref = loss_sum / cfg.train.grad_accum
-    grads_ref = jax.tree_util.tree_map(lambda g: g / cfg.train.grad_accum, grads_sum)
+    loss_ref = loss_sum / token_sum
+    grads_ref = jax.tree_util.tree_map(lambda g: g / token_sum, grads_sum)
 
     updates_ref, opt_state_ref = tx.update(grads_ref, state0.opt_state, state0.params)
     params_ref = optax.apply_updates(state0.params, updates_ref)
