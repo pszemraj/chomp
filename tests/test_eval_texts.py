@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, TrainConfig
-from chomp.data import load_or_create_eval_texts
+from chomp.data import build_tokenizer, load_or_create_eval_texts
 
 
 @dataclass
@@ -97,8 +97,9 @@ def test_eval_prefers_validation_split(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
 
     cfg = _base_cfg()
-    texts = load_or_create_eval_texts(cfg, run_dir=tmp_path, allow_existing=False)
-    assert texts == ["val-a", "val-b"]
+    tok = build_tokenizer(cfg)
+    tokens = load_or_create_eval_texts(cfg, run_dir=tmp_path, allow_existing=False, tokenizer=tok)
+    assert tokens == [tok.encode("val-a"), tok.encode("val-b")]
 
 
 def test_eval_falls_back_to_train_split(monkeypatch, tmp_path: Path):
@@ -117,11 +118,13 @@ def test_eval_falls_back_to_train_split(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
 
     cfg = _base_cfg()
-    texts = load_or_create_eval_texts(cfg, run_dir=tmp_path, allow_existing=False)
-    assert texts == ["train-a", "train-b"]
+    tok = build_tokenizer(cfg)
+    tokens = load_or_create_eval_texts(cfg, run_dir=tmp_path, allow_existing=False, tokenizer=tok)
+    assert tokens == [tok.encode("train-a"), tok.encode("train-b")]
 
 
 def test_eval_cache_required_for_resume(tmp_path: Path):
     cfg = _base_cfg()
+    tok = build_tokenizer(cfg)
     with pytest.raises(RuntimeError, match="Eval texts missing"):
-        load_or_create_eval_texts(cfg, run_dir=tmp_path, allow_existing=True)
+        load_or_create_eval_texts(cfg, run_dir=tmp_path, allow_existing=True, tokenizer=tok)

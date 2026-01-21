@@ -40,7 +40,7 @@ Loss masking is handled in the data pipeline:
 
 If `train.eval_every > 0`, chomp runs a full pass over the cached validation
 texts and logs `eval_loss` and `eval_tokens`. The validation set is fixed for
-the entire run.
+the entire run and cached with pre-tokenized docs to avoid re-tokenization.
 
 ## Gradient checkpointing
 

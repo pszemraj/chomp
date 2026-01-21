@@ -405,7 +405,9 @@ def run(
     run_dir = create_run_dir(cfg, config_path=config_path, allow_existing=allow_existing)
     metrics_path = run_dir / cfg.logging.metrics_file
     save_tokenizer_snapshot(run_dir, cfg, tokenizer, allow_existing=allow_existing)
-    eval_texts = load_or_create_eval_texts(cfg, run_dir=run_dir, allow_existing=allow_existing)
+    eval_tokens = load_or_create_eval_texts(
+        cfg, run_dir=run_dir, allow_existing=allow_existing, tokenizer=tokenizer
+    )
 
     # Optional profiling
     if cfg.train.profile:
@@ -465,7 +467,7 @@ def run(
     train_step = make_train_step(cfg, static=static, tx=tx, lr_schedule=schedule)
     eval_every = int(cfg.train.eval_every)
     eval_step = None
-    if eval_texts and eval_every > 0:
+    if eval_tokens and eval_every > 0:
         eval_step = make_eval_step(cfg, static=static)
 
     # Training loop
@@ -484,11 +486,11 @@ def run(
 
     def _run_eval(params: Any) -> dict[str, Any]:
         """Run a full eval pass over the cached eval texts."""
-        if eval_step is None or not eval_texts:
+        if eval_step is None or not eval_tokens:
             return {}
         total_loss = 0.0
         total_tokens = 0.0
-        eval_it = build_eval_iterator(cfg, texts=eval_texts, tokenizer=tokenizer)
+        eval_it = build_eval_iterator(cfg, tokens=eval_tokens, tokenizer=tokenizer)
         while True:
             try:
                 eval_batch = next(eval_it)

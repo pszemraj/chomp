@@ -102,7 +102,8 @@ chomp builds a fixed validation set at startup:
   (shuffled) training split.
 
 The selected texts are cached under `run_dir/eval_texts.json` so resumes use
-the same validation set for the entire run.
+the same validation set for the entire run. The cache also stores pre-tokenized
+docs so eval passes do not re-tokenize each step.
 
 ## Key config knobs
 

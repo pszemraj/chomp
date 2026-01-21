@@ -32,7 +32,7 @@ import numpy as np
 from chomp.config import Config
 from chomp.types import Batch
 
-from .hf import HFStreamingTextStream, HFStreamSpec, ListTextStream, LocalTextStream
+from .hf import HFStreamingTextStream, HFStreamSpec, ListTokenStream, LocalTextStream
 from .pack import BinPacker, TokenPacker
 
 
@@ -46,10 +46,13 @@ class Tokenizer(Protocol):
     def __len__(self) -> int: ...
 
 
+TextItem = str | list[int]
+
+
 class TextStream(Protocol):
     """Protocol for text streams used by the packer."""
 
-    def __next__(self) -> str: ...
+    def __next__(self) -> TextItem: ...
 
     def get_state(self) -> dict[str, Any]: ...
 
@@ -369,8 +372,20 @@ def _collect_texts(stream: TextStream, max_samples: int) -> list[str]:
     return texts
 
 
-def load_or_create_eval_texts(cfg: Config, *, run_dir: Path, allow_existing: bool) -> list[str]:
-    """Load or create a fixed validation text set.
+def _tokenize_eval_texts(texts: list[str], tok: Tokenizer) -> list[list[int]]:
+    """Tokenize eval texts once for reuse across eval runs.
+
+    :param list[str] texts: Raw text samples.
+    :param Tokenizer tok: Tokenizer instance.
+    :return list[list[int]]: Tokenized documents.
+    """
+    return [tok.encode(text) for text in texts]
+
+
+def load_or_create_eval_texts(
+    cfg: Config, *, run_dir: Path, allow_existing: bool, tokenizer: Tokenizer
+) -> list[list[int]]:
+    """Load or create a fixed validation set and cache tokenized docs.
 
     The eval set is cached under the run directory so resumes keep the same
     validation samples across the entire run.
@@ -378,8 +393,9 @@ def load_or_create_eval_texts(cfg: Config, *, run_dir: Path, allow_existing: boo
     :param Config cfg: Training configuration.
     :param Path run_dir: Run directory path.
     :param bool allow_existing: Whether to reuse existing eval cache.
+    :param Tokenizer tokenizer: Tokenizer used to pre-tokenize eval texts.
     :raises RuntimeError: If resume is requested but no eval cache exists.
-    :return list[str]: List of text samples for evaluation.
+    :return list[list[int]]: Tokenized documents for evaluation.
     """
     max_samples = int(cfg.data.max_eval_samples)
     if max_samples <= 0:
@@ -415,7 +431,13 @@ def load_or_create_eval_texts(cfg: Config, *, run_dir: Path, allow_existing: boo
                     f"Eval cache text_key mismatch (cache={stored_text_key!r}, "
                     f"config={cfg.data.text_key!r})"
                 )
-        return list(payload.get("texts") or [])
+        tokens = payload.get("tokens")
+        if tokens is None:
+            texts = list(payload.get("texts") or [])
+            tokens = _tokenize_eval_texts(texts, tokenizer)
+            payload["tokens"] = tokens
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        return [list(map(int, seq)) for seq in tokens]
 
     if allow_existing:
         raise RuntimeError(f"Eval texts missing for resume: {path}")
@@ -448,6 +470,7 @@ def load_or_create_eval_texts(cfg: Config, *, run_dir: Path, allow_existing: boo
     if not texts:
         logger.warning("Eval text set is empty (max_eval_samples=%d).", max_samples)
 
+    tokens = _tokenize_eval_texts(texts, tokenizer)
     payload = {
         "backend": cfg.data.backend,
         "dataset": cfg.data.hf_dataset if cfg.data.backend == "hf" else None,
@@ -456,9 +479,10 @@ def load_or_create_eval_texts(cfg: Config, *, run_dir: Path, allow_existing: boo
         "text_key": cfg.data.text_key,
         "max_eval_samples": max_samples,
         "texts": texts,
+        "tokens": tokens,
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    return texts
+    return tokens
 
 
 def data_fingerprint(cfg: Config) -> dict[str, Any]:
@@ -602,8 +626,13 @@ class TrainBatchIterator:
         while len(seqs) < need:
             # Ensure packer has enough tokens
             while not self._packer.can_pop():
-                text = next(self._text_stream)
-                ids = self._tok.encode(text)
+                item = next(self._text_stream)
+                if isinstance(item, str):
+                    ids = self._tok.encode(item)
+                elif isinstance(item, list):
+                    ids = item
+                else:
+                    ids = list(item)
                 self._packer.add_document(ids)
 
             seq, segs = self._packer.pop_seq_plus_one_with_segments()  # [T+1]
@@ -692,13 +721,13 @@ def build_train_iterator(cfg: Config, *, tokenizer: Tokenizer | None = None) -> 
     return build_grain_iterator(cfg, tokenizer=tokenizer)
 
 
-def build_eval_iterator(cfg: Config, *, texts: list[str], tokenizer: Tokenizer) -> Any:
-    """Build a one-pass evaluation iterator from a fixed text list.
+def build_eval_iterator(cfg: Config, *, tokens: list[list[int]], tokenizer: Tokenizer) -> Any:
+    """Build a one-pass evaluation iterator from tokenized docs.
 
     :param Config cfg: Training configuration.
-    :param list[str] texts: Evaluation text samples.
+    :param list[list[int]] tokens: Tokenized evaluation documents.
     :param Tokenizer tokenizer: Tokenizer instance.
     :return Any: Iterator yielding fixed-shape Batch objects.
     """
-    text_stream = ListTextStream(texts=texts, repeat=False)
+    text_stream = ListTokenStream(tokens=tokens, repeat=False)
     return TrainBatchIterator(cfg, tokenizer=tokenizer, text_stream=text_stream)
