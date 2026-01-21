@@ -20,10 +20,16 @@ Orbax notes:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from chomp.config import Config
+from chomp.data import data_fingerprint
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -224,3 +230,147 @@ def restore_at_step(
     data_state = restored.get("data_state")
     meta = restored.get("meta")
     return step, train_state, data_state, meta
+
+
+def check_resume_compat(cfg: Config, meta: dict[str, Any] | None) -> None:
+    """Validate checkpoint metadata against current config."""
+
+    if meta is None:
+        raise RuntimeError("Checkpoint meta is missing; cannot verify resume compatibility.")
+
+    meta_cfg = meta.get("config")
+    meta_fp = meta.get("data_fingerprint")
+    if not isinstance(meta_cfg, dict) or not isinstance(meta_fp, dict):
+        raise RuntimeError(
+            "Checkpoint meta is missing config/data_fingerprint; cannot verify resume compatibility."
+        )
+
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    def _cmp(path: str, cur: Any, prev: Any, *, severity: str) -> None:
+        if cur != prev:
+            msg = f"{path} mismatch (checkpoint={prev!r}, current={cur!r})"
+            if severity == "error":
+                errors.append(msg)
+            else:
+                warnings.append(msg)
+
+    cur_fp = data_fingerprint(cfg)
+
+    # Data source comparisons.
+    src_prev = meta_fp.get("source") or {}
+    src_cur = cur_fp.get("source") or {}
+    _cmp("data.source.backend", src_cur.get("backend"), src_prev.get("backend"), severity="error")
+
+    if src_cur.get("backend") == "hf":
+        _cmp("data.hf_dataset", src_cur.get("dataset"), src_prev.get("dataset"), severity="error")
+        _cmp("data.hf_name", src_cur.get("name"), src_prev.get("name"), severity="error")
+        _cmp("data.hf_split", src_cur.get("split"), src_prev.get("split"), severity="error")
+        _cmp("data.text_key", src_cur.get("text_key"), src_prev.get("text_key"), severity="error")
+        _cmp("data.shuffle", src_cur.get("shuffle"), src_prev.get("shuffle"), severity="error")
+        _cmp("data.seed", src_cur.get("seed"), src_prev.get("seed"), severity="error")
+        _cmp(
+            "data.shuffle_buffer_size",
+            src_cur.get("shuffle_buffer_size"),
+            src_prev.get("shuffle_buffer_size"),
+            severity="warning",
+        )
+    elif src_cur.get("backend") == "local_text":
+        _cmp(
+            "data.local_text_hash",
+            src_cur.get("local_text_hash"),
+            src_prev.get("local_text_hash"),
+            severity="error",
+        )
+        _cmp("data.repeat", src_cur.get("repeat"), src_prev.get("repeat"), severity="error")
+
+    # Tokenizer comparisons.
+    tok_prev = meta_fp.get("tokenizer") or {}
+    tok_cur = cur_fp.get("tokenizer") or {}
+    _cmp("tokenizer.kind", tok_cur.get("kind"), tok_prev.get("kind"), severity="error")
+
+    if tok_cur.get("kind") == "hf":
+        _cmp(
+            "tokenizer.hf_name_or_path",
+            tok_cur.get("hf_name_or_path"),
+            tok_prev.get("hf_name_or_path"),
+            severity="error",
+        )
+        _cmp(
+            "tokenizer.hf_use_fast",
+            tok_cur.get("hf_use_fast"),
+            tok_prev.get("hf_use_fast"),
+            severity="error",
+        )
+        _cmp(
+            "tokenizer.hf_trust_remote_code",
+            tok_cur.get("hf_trust_remote_code"),
+            tok_prev.get("hf_trust_remote_code"),
+            severity="error",
+        )
+    elif tok_cur.get("kind") == "byte":
+        _cmp(
+            "tokenizer.byte_offset",
+            tok_cur.get("byte_offset"),
+            tok_prev.get("byte_offset"),
+            severity="error",
+        )
+
+    _cmp("tokenizer.add_bos", tok_cur.get("add_bos"), tok_prev.get("add_bos"), severity="error")
+    _cmp("tokenizer.add_eos", tok_cur.get("add_eos"), tok_prev.get("add_eos"), severity="error")
+    _cmp(
+        "tokenizer.max_doc_tokens",
+        tok_cur.get("max_doc_tokens"),
+        tok_prev.get("max_doc_tokens"),
+        severity="error",
+    )
+    _cmp(
+        "tokenizer.vocab_size_multiple",
+        tok_cur.get("vocab_size_multiple"),
+        tok_prev.get("vocab_size_multiple"),
+        severity="error",
+    )
+    _cmp(
+        "tokenizer.auto_set_special_tokens",
+        tok_cur.get("auto_set_special_tokens"),
+        tok_prev.get("auto_set_special_tokens"),
+        severity="error",
+    )
+
+    # Batch shape invariants.
+    _cmp("train.seq_len", cur_fp.get("seq_len"), meta_fp.get("seq_len"), severity="error")
+    _cmp(
+        "train.batch_size",
+        cur_fp.get("batch_size"),
+        meta_fp.get("batch_size"),
+        severity="error",
+    )
+    _cmp(
+        "train.grad_accum",
+        cur_fp.get("grad_accum"),
+        meta_fp.get("grad_accum"),
+        severity="error",
+    )
+
+    # Model/optimizer comparisons.
+    cur_cfg = cfg.to_dict()
+    model_prev = meta_cfg.get("model") or {}
+    model_cur = cur_cfg.get("model") or {}
+    for key in sorted(set(model_prev) | set(model_cur)):
+        _cmp(f"model.{key}", model_cur.get(key), model_prev.get(key), severity="error")
+
+    optim_prev = meta_cfg.get("optim") or {}
+    optim_cur = cur_cfg.get("optim") or {}
+    for key in sorted(set(optim_prev) | set(optim_cur)):
+        _cmp(f"optim.{key}", optim_cur.get(key), optim_prev.get(key), severity="error")
+
+    if warnings:
+        logger.warning(
+            "Resume config warnings:\n%s",
+            "\n".join(f"- {msg}" for msg in warnings),
+        )
+
+    if errors:
+        detail = "\n".join(f"- {msg}" for msg in errors)
+        raise RuntimeError(f"Resume config mismatch:\n{detail}")

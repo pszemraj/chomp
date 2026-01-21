@@ -103,6 +103,8 @@ chomp-train --config configs/debug_smoke.yaml --run-dir runs/chomp/debug_run
 chomp-train --config configs/debug_smoke.yaml --run-dir runs/chomp/debug_run --resume latest
 ```
 
+Resume performs strict config/data compatibility checks and fails fast on mismatches.
+
 ## Design principles
 
 - **Compile once**: fixed shapes; no dynamic padding; grad accumulation inside the compiled step.

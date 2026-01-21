@@ -35,6 +35,7 @@ from tqdm import tqdm
 
 from chomp.ckpt import (
     build_meta,
+    check_resume_compat,
     default_ckpt_dir,
     make_manager,
     restore_at_step,
@@ -267,6 +268,7 @@ def run(
             )
 
         print(f"[chomp] resumed from checkpoint step {step_r}")
+        check_resume_compat(cfg, _meta)
         if data_state is not None:
             data_it.set_state(data_state)
 
