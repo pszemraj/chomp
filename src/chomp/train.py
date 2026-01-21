@@ -46,8 +46,10 @@ from chomp.ckpt import (
 )
 from chomp.config import Config, derived_deterministic
 from chomp.data import (
+    build_eval_iterator,
     build_train_iterator,
     data_fingerprint,
+    load_or_create_eval_texts,
     prepare_tokenizer_and_config,
     save_tokenizer_snapshot,
 )
@@ -317,6 +319,64 @@ def make_train_step(
     return train_step
 
 
+def make_eval_step(
+    cfg: Config, *, static: Any
+) -> Callable[[Any, Batch], tuple[jax.Array, jax.Array]]:
+    """Build a compiled evaluation step.
+
+    :param Config cfg: Training configuration.
+    :param Any static: Static (non-differentiable) model components from eqx.partition.
+    :return Callable: eval_step(params, batch) -> (loss_sum, token_sum).
+    """
+    use_segment_ids = bool(cfg.model.segment_masking)
+
+    def eval_step(params: Any, batch: Batch) -> tuple[jax.Array, jax.Array]:
+        """Compute token-weighted loss sums for a batch.
+
+        :param Any params: Model parameters.
+        :param Batch batch: Input batch of shape [A, B, T].
+        :return tuple: (loss_sum, token_sum) for the batch.
+        """
+        loss0 = jnp.zeros((), dtype=jnp.float32)
+        token0 = jnp.zeros((), dtype=jnp.float32)
+
+        def body(carry: tuple[jax.Array, jax.Array], xs: tuple[jax.Array, ...]):
+            loss_sum, token_sum = carry
+            input_ids, labels, attn, segs = xs
+            micro = Batch(
+                input_ids=input_ids,
+                labels=labels,
+                attention_mask=attn.astype(bool),
+                segment_ids=segs.astype(jnp.int32),
+            )
+            token_count = _count_tokens(labels, attn).astype(jnp.float32)
+            loss = training_loss(
+                params,
+                static,
+                batch=micro,
+                deterministic=True,
+                key=None,
+                use_segment_ids=use_segment_ids,
+            )
+            return (loss_sum + loss * token_count, token_sum + token_count), None
+
+        (loss_sum, token_sum), _ = jax.lax.scan(
+            body,
+            (loss0, token0),
+            (
+                batch.input_ids,
+                batch.labels,
+                batch.attention_mask,
+                batch.segment_ids,
+            ),
+        )
+        return loss_sum, token_sum
+
+    if cfg.train.jit:
+        eval_step = eqx.filter_jit(eval_step)
+    return eval_step
+
+
 def run(
     cfg: Config,
     *,
@@ -345,6 +405,7 @@ def run(
     run_dir = create_run_dir(cfg, config_path=config_path, allow_existing=allow_existing)
     metrics_path = run_dir / cfg.logging.metrics_file
     save_tokenizer_snapshot(run_dir, cfg, tokenizer, allow_existing=allow_existing)
+    eval_texts = load_or_create_eval_texts(cfg, run_dir=run_dir, allow_existing=allow_existing)
 
     # Optional profiling
     if cfg.train.profile:
@@ -402,6 +463,10 @@ def run(
             data_it.set_state(data_state)
 
     train_step = make_train_step(cfg, static=static, tx=tx, lr_schedule=schedule)
+    eval_every = int(cfg.train.eval_every)
+    eval_step = None
+    if eval_texts and eval_every > 0:
+        eval_step = make_eval_step(cfg, static=static)
 
     # Training loop
     t_compile = None
@@ -417,10 +482,45 @@ def run(
 
     tokens_per_step = int(cfg.train.grad_accum) * int(cfg.train.batch_size) * int(cfg.train.seq_len)
 
+    def _run_eval(params: Any) -> dict[str, Any]:
+        """Run a full eval pass over the cached eval texts."""
+        if eval_step is None or not eval_texts:
+            return {}
+        total_loss = 0.0
+        total_tokens = 0.0
+        eval_it = build_eval_iterator(cfg, texts=eval_texts, tokenizer=tokenizer)
+        while True:
+            try:
+                eval_batch = next(eval_it)
+            except StopIteration:
+                break
+            if not cfg.data.device_put:
+                eval_batch = jax.device_put(eval_batch)
+            loss_sum, token_sum = eval_step(params, eval_batch)
+            loss_sum_host, token_sum_host = jax.device_get((loss_sum, token_sum))
+            total_loss += float(loss_sum_host)
+            total_tokens += float(token_sum_host)
+
+        if total_tokens <= 0:
+            return {"eval_loss": None, "eval_tokens": 0}
+        return {"eval_loss": total_loss / total_tokens, "eval_tokens": int(total_tokens)}
+
     with MetricsWriter(metrics_path) as mw:
         for _ in tqdm(range(start_step, cfg.train.steps), desc="train", dynamic_ncols=True):
             # Fetch batch (host) and (optionally) device_put
-            batch = next(data_it)
+            try:
+                batch = next(data_it)
+            except StopIteration:
+                step_i = int(jax.device_get(state.step))
+                row = {
+                    "step": int(step_i),
+                    "data_exhausted": True,
+                    "tokens_seen": int(step_i) * tokens_per_step,
+                    "wall_time_s": time.perf_counter() - t0,
+                }
+                mw.write(row)
+                print("[chomp] data exhausted; stopping early")
+                break
             data_stats = data_it.get_stats()
             if not cfg.data.device_put:
                 batch = jax.device_put(batch)
@@ -461,8 +561,13 @@ def run(
                     meta=meta,
                 )
 
+            eval_row: dict[str, Any] = {}
+            if eval_step is not None and eval_every > 0 and (step_i % eval_every) == 0:
+                eval_row = _run_eval(state.params)
+
             # Log
-            if (step_i % cfg.train.log_every) == 0:
+            should_log = (step_i % cfg.train.log_every) == 0 or bool(eval_row)
+            if should_log:
                 row = {
                     "step": int(step_i),
                     "loss": float(metrics_host["loss"]),
@@ -473,6 +578,8 @@ def run(
                 }
                 if data_stats:
                     row.update(data_stats)
+                if eval_row:
+                    row.update(eval_row)
                 if step_i == (start_step + 1) and t_compile is not None:
                     row["first_step_compile_time_s"] = float(t_compile)
                     # Best-effort memory stats

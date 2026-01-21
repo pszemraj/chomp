@@ -445,6 +445,21 @@ def check_resume_compat(cfg: Config, meta: dict[str, Any] | None) -> None:
         severity="error",
     )
 
+    eval_prev = meta_fp.get("eval") or {}
+    eval_cur = cur_fp.get("eval") or {}
+    _cmp(
+        "data.max_eval_samples",
+        eval_cur.get("max_eval_samples"),
+        eval_prev.get("max_eval_samples"),
+        severity="error",
+    )
+    _cmp(
+        "data.hf_eval_split",
+        eval_cur.get("hf_eval_split"),
+        eval_prev.get("hf_eval_split"),
+        severity="error",
+    )
+
     # Batch shape invariants.
     _cmp("train.seq_len", cur_fp.get("seq_len"), meta_fp.get("seq_len"), severity="error")
     _cmp(

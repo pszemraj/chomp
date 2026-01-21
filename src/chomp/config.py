@@ -150,14 +150,21 @@ class DataConfig:
       attention_mask: [A, B, T]
 
     where A=grad_accum, B=batch_size, T=seq_len.
+
+    Validation behavior:
+    - If an HF validation split exists, we take its first max_eval_samples examples.
+    - Otherwise we take the first max_eval_samples examples from the (shuffled) train split.
     """
 
     backend: DatasetBackend = "hf"
 
     # HF streaming dataset spec
+    # TODO: v0 is single-source only; add multi-source mixing when needed.
     hf_dataset: str = "Zyphra/Zyda-2"
     hf_name: str = "sample-100BT"
     hf_split: str = "train"
+    # Preferred eval split; fallback to train if missing.
+    hf_eval_split: str = "validation"
     text_key: str = "text"
 
     shuffle: bool = True
@@ -190,6 +197,9 @@ class DataConfig:
     # Grain pipeline settings.
     grain_prefetch: int = 0
 
+    # Validation set creation (first N examples from validation or train fallback)
+    max_eval_samples: int = 1000
+
     # Tokenizer
     tokenizer: TokenizerConfig = TokenizerConfig()
 
@@ -213,6 +223,7 @@ class TrainConfig:
 
     allow_cpu: bool = False
     log_every: int = 10
+    eval_every: int = 0
 
     # Simple profiler support (Phase 0): if enabled, write a trace directory.
     profile: bool = False
@@ -459,6 +470,8 @@ def validate_config(cfg: Config) -> None:
         _vfail(f"train.grad_accum must be positive, got {cfg.train.grad_accum}")
     if cfg.train.log_every <= 0:
         _vfail(f"train.log_every must be positive, got {cfg.train.log_every}")
+    if cfg.train.eval_every < 0:
+        _vfail(f"train.eval_every must be >= 0, got {cfg.train.eval_every}")
 
     # Optim
     if cfg.optim.lr <= 0:
@@ -522,6 +535,8 @@ def validate_config(cfg: Config) -> None:
             _vfail("data.hf_name must be non-empty when data.backend='hf' (use named configs)")
         if not cfg.data.hf_split:
             _vfail("data.hf_split must be non-empty when data.backend='hf'")
+        if not cfg.data.hf_eval_split:
+            _vfail("data.hf_eval_split must be non-empty when data.backend='hf'")
         if not cfg.data.text_key:
             _vfail("data.text_key must be non-empty")
         if cfg.data.shuffle and cfg.data.shuffle_buffer_size <= 0:
@@ -556,6 +571,8 @@ def validate_config(cfg: Config) -> None:
 
     if cfg.data.grain_prefetch < 0:
         _vfail(f"data.grain_prefetch must be >=0, got {cfg.data.grain_prefetch}")
+    if cfg.data.max_eval_samples < 0:
+        _vfail(f"data.max_eval_samples must be >=0, got {cfg.data.max_eval_samples}")
     # HF streaming robustness knobs
     if cfg.data.max_retries < 0:
         _vfail(f"data.max_retries must be >=0, got {cfg.data.max_retries}")

@@ -32,7 +32,7 @@ import numpy as np
 from chomp.config import Config
 from chomp.types import Batch
 
-from .hf import HFStreamingTextStream, HFStreamSpec, LocalTextStream
+from .hf import HFStreamingTextStream, HFStreamSpec, ListTextStream, LocalTextStream
 from .pack import BinPacker, TokenPacker
 
 
@@ -44,6 +44,16 @@ class Tokenizer(Protocol):
         ...
 
     def __len__(self) -> int: ...
+
+
+class TextStream(Protocol):
+    """Protocol for text streams used by the packer."""
+
+    def __next__(self) -> str: ...
+
+    def get_state(self) -> dict[str, Any]: ...
+
+    def set_state(self, state: dict[str, Any]) -> None: ...
 
 
 logger = logging.getLogger(__name__)
@@ -314,6 +324,132 @@ def save_tokenizer_snapshot(
     )
 
 
+def _eval_texts_path(run_dir: Path) -> Path:
+    """Return the eval-text cache path within a run directory."""
+    return run_dir / "eval_texts.json"
+
+
+def _collect_texts(stream: TextStream, max_samples: int) -> list[str]:
+    """Collect up to max_samples texts from a stream.
+
+    :param TextStream stream: Text stream to read from.
+    :param int max_samples: Maximum number of samples to collect.
+    :return list[str]: Collected text samples.
+    """
+    texts: list[str] = []
+    for _ in range(int(max_samples)):
+        try:
+            texts.append(next(stream))
+        except StopIteration:
+            break
+    return texts
+
+
+def load_or_create_eval_texts(cfg: Config, *, run_dir: Path, allow_existing: bool) -> list[str]:
+    """Load or create a fixed validation text set.
+
+    The eval set is cached under the run directory so resumes keep the same
+    validation samples across the entire run.
+
+    :param Config cfg: Training configuration.
+    :param Path run_dir: Run directory path.
+    :param bool allow_existing: Whether to reuse existing eval cache.
+    :raises RuntimeError: If resume is requested but no eval cache exists.
+    :return list[str]: List of text samples for evaluation.
+    """
+    max_samples = int(cfg.data.max_eval_samples)
+    if max_samples <= 0:
+        return []
+
+    path = _eval_texts_path(run_dir)
+    if path.exists():
+        if not allow_existing:
+            raise RuntimeError(f"Eval texts already exist: {path}")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        stored_max = int(payload.get("max_eval_samples", 0))
+        if stored_max != max_samples:
+            raise RuntimeError(
+                f"Eval cache max_eval_samples mismatch (cache={stored_max}, config={max_samples})"
+            )
+        stored_backend = payload.get("backend")
+        if stored_backend != cfg.data.backend:
+            raise RuntimeError(
+                f"Eval cache backend mismatch (cache={stored_backend!r}, config={cfg.data.backend!r})"
+            )
+        if cfg.data.backend == "hf":
+            stored_dataset = payload.get("dataset")
+            stored_name = payload.get("name")
+            stored_text_key = payload.get("text_key")
+            if stored_dataset != cfg.data.hf_dataset or stored_name != cfg.data.hf_name:
+                raise RuntimeError(
+                    "Eval cache dataset mismatch "
+                    f"(cache={stored_dataset!r}/{stored_name!r}, "
+                    f"config={cfg.data.hf_dataset!r}/{cfg.data.hf_name!r})"
+                )
+            if stored_text_key != cfg.data.text_key:
+                raise RuntimeError(
+                    f"Eval cache text_key mismatch (cache={stored_text_key!r}, "
+                    f"config={cfg.data.text_key!r})"
+                )
+        return list(payload.get("texts") or [])
+
+    if allow_existing:
+        raise RuntimeError(f"Eval texts missing for resume: {path}")
+
+    texts: list[str] = []
+    split_used = None
+
+    if cfg.data.backend == "hf":
+        eval_split = cfg.data.hf_eval_split
+        split_candidates = [eval_split]
+        if eval_split != cfg.data.hf_split:
+            split_candidates.append(cfg.data.hf_split)
+        for split in split_candidates:
+            try:
+                spec = HFStreamSpec(
+                    dataset=cfg.data.hf_dataset,
+                    name=cfg.data.hf_name,
+                    split=split,
+                    text_key=cfg.data.text_key,
+                    shuffle=cfg.data.shuffle,
+                    shuffle_buffer_size=cfg.data.shuffle_buffer_size,
+                    seed=cfg.data.seed,
+                    repeat=False,
+                    max_retries=cfg.data.max_retries,
+                    retry_delay_sec=cfg.data.retry_delay_sec,
+                    state_update_interval=cfg.data.state_update_interval,
+                )
+                stream = HFStreamingTextStream(spec)
+                texts = _collect_texts(stream, max_samples)
+                split_used = split
+                break
+            except Exception as exc:
+                logger.warning("Eval split %r unavailable: %s", split, exc)
+                continue
+        if split_used is None:
+            raise RuntimeError("Failed to build eval dataset from HF streaming splits.")
+    elif cfg.data.backend == "local_text":
+        texts = [cfg.data.local_text] * max_samples
+        split_used = "local_text"
+    else:
+        raise RuntimeError(f"Unknown data.backend for eval: {cfg.data.backend!r}")
+
+    if not texts:
+        logger.warning("Eval text set is empty (max_eval_samples=%d).", max_samples)
+
+    payload = {
+        "backend": cfg.data.backend,
+        "dataset": cfg.data.hf_dataset if cfg.data.backend == "hf" else None,
+        "name": cfg.data.hf_name if cfg.data.backend == "hf" else None,
+        "split": split_used,
+        "text_key": cfg.data.text_key,
+        "max_eval_samples": max_samples,
+        "texts": texts,
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return texts
+
+
 def data_fingerprint(cfg: Config) -> dict[str, Any]:
     """A small, stable fingerprint that we store in checkpoint meta.
 
@@ -362,11 +498,16 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
         "train_on_eos": d.train_on_eos,
         "grain_prefetch": d.grain_prefetch,
     }
+    eval_cfg = {
+        "max_eval_samples": d.max_eval_samples,
+        "hf_eval_split": d.hf_eval_split,
+    }
 
     return {
         "source": src,
         "tokenizer": tok,
         "packing": packing,
+        "eval": eval_cfg,
         "seq_len": cfg.train.seq_len,
         "batch_size": cfg.train.batch_size,
         "grad_accum": cfg.train.grad_accum,
@@ -382,18 +523,21 @@ class TrainBatchIterator:
     It also implements `get_state`/`set_state` for resume correctness.
     """
 
-    def __init__(self, cfg: Config, *, tokenizer: Tokenizer):
+    def __init__(self, cfg: Config, *, tokenizer: Tokenizer, text_stream: TextStream | None = None):
         """Initialize the training batch iterator.
 
         :param Config cfg: Training configuration.
         :param Tokenizer tokenizer: Tokenizer for encoding text.
+        :param text_stream: Optional text stream override (used for eval datasets).
         :raises ValueError: If data.backend is unknown.
         """
         self._cfg = cfg
         self._tok = tokenizer
 
         # Text stream
-        if cfg.data.backend == "hf":
+        if text_stream is not None:
+            self._text_stream = text_stream
+        elif cfg.data.backend == "hf":
             spec = HFStreamSpec(
                 dataset=cfg.data.hf_dataset,
                 name=cfg.data.hf_name,
@@ -542,6 +686,19 @@ def build_train_iterator(cfg: Config, *, tokenizer: Tokenizer | None = None) -> 
     """
     if tokenizer is None:
         cfg, tokenizer = prepare_tokenizer_and_config(cfg)
+    # TODO: multi-source mixing would be inserted here before packing.
     from chomp.data.grain import build_grain_iterator
 
     return build_grain_iterator(cfg, tokenizer=tokenizer)
+
+
+def build_eval_iterator(cfg: Config, *, texts: list[str], tokenizer: Tokenizer) -> Any:
+    """Build a one-pass evaluation iterator from a fixed text list.
+
+    :param Config cfg: Training configuration.
+    :param list[str] texts: Evaluation text samples.
+    :param Tokenizer tokenizer: Tokenizer instance.
+    :return Any: Iterator yielding fixed-shape Batch objects.
+    """
+    text_stream = ListTextStream(texts=texts, repeat=False)
+    return TrainBatchIterator(cfg, tokenizer=tokenizer, text_stream=text_stream)

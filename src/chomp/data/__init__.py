@@ -20,17 +20,21 @@ Later:
 from __future__ import annotations
 
 from .pipeline import (
+    build_eval_iterator,
     build_tokenizer,
     build_train_iterator,
     data_fingerprint,
+    load_or_create_eval_texts,
     prepare_tokenizer_and_config,
     save_tokenizer_snapshot,
 )
 
 __all__ = [
+    "build_eval_iterator",
     "build_train_iterator",
     "data_fingerprint",
     "build_tokenizer",
+    "load_or_create_eval_texts",
     "prepare_tokenizer_and_config",
     "save_tokenizer_snapshot",
 ]

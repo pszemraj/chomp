@@ -259,3 +259,48 @@ class LocalTextStream:
         :param dict[str, Any] state: State dict from get_state().
         """
         self._i = int(state.get("i", 0))
+
+
+class ListTextStream:
+    """Stream over a fixed list of texts.
+
+    Useful for validation sets derived from streaming datasets.
+    """
+
+    def __init__(self, *, texts: list[str], repeat: bool = True):
+        """Initialize the list-backed text stream.
+
+        :param list[str] texts: Ordered list of text examples.
+        :param bool repeat: Whether to loop when reaching the end.
+        """
+        self._texts = list(texts)
+        self._repeat = bool(repeat)
+        self._i = 0
+
+    def __iter__(self) -> ListTextStream:
+        return self
+
+    def __next__(self) -> str:
+        if not self._texts:
+            raise StopIteration
+        if self._i >= len(self._texts):
+            if not self._repeat:
+                raise StopIteration
+            self._i = 0
+        text = self._texts[self._i]
+        self._i += 1
+        return text
+
+    def get_state(self) -> dict[str, Any]:
+        """Capture stream state for checkpointing.
+
+        :return dict[str, Any]: State dict with current index.
+        """
+        return {"i": int(self._i)}
+
+    def set_state(self, state: dict[str, Any]) -> None:
+        """Restore stream state from a checkpoint.
+
+        :param dict[str, Any] state: State dict from get_state().
+        """
+        self._i = int(state.get("i", 0))

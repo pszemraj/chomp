@@ -63,3 +63,19 @@ def test_invalid_packing_mode():
     bad = replace(cfg, data=bad_data)
     with pytest.raises(ValueError, match="packing_mode"):
         validate_config(bad)
+
+
+def test_max_eval_samples_must_be_non_negative():
+    cfg = _base_cfg()
+    bad_data = replace(cfg.data, max_eval_samples=-1)
+    bad = replace(cfg, data=bad_data)
+    with pytest.raises(ValueError, match="max_eval_samples"):
+        validate_config(bad)
+
+
+def test_eval_every_must_be_non_negative():
+    cfg = _base_cfg()
+    bad_train = replace(cfg.train, eval_every=-1)
+    bad = replace(cfg, train=bad_train)
+    with pytest.raises(ValueError, match="eval_every"):
+        validate_config(bad)
