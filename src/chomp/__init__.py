@@ -15,6 +15,9 @@ Implemented so far:
 
 from __future__ import annotations
 
-__all__ = ["__version__"]
+try:
+    from chomp._version import __version__
+except ImportError:
+    __version__ = "0.0.0+unknown"
 
-__version__ = "0.0.2"
+__all__ = ["__version__"]

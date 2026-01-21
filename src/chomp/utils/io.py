@@ -127,7 +127,7 @@ class MetricsWriter:
         except Exception:
             pass
 
-    def __enter__(self) -> "MetricsWriter":
+    def __enter__(self) -> MetricsWriter:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:

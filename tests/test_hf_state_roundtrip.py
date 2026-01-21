@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any
 
 from chomp.data.hf import HFStreamingTextStream, HFStreamSpec
 
@@ -40,7 +41,7 @@ class _FakeHFIterator:
         self._ds = ds
         self._i = int(ds.index)
 
-    def __iter__(self) -> "_FakeHFIterator":
+    def __iter__(self) -> _FakeHFIterator:
         return self
 
     def __next__(self) -> dict[str, Any]:

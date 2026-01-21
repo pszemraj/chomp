@@ -16,8 +16,9 @@ Tokenization + packing happen elsewhere.
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import datasets
@@ -115,7 +116,7 @@ class HFStreamingTextStream:
         self._n_since_state = 0
         self._last_state = None
 
-    def __iter__(self) -> "HFStreamingTextStream":
+    def __iter__(self) -> HFStreamingTextStream:
         return self
 
     def __next__(self) -> str:
@@ -238,7 +239,7 @@ class LocalTextStream:
         self._repeat = bool(repeat)
         self._i = 0
 
-    def __iter__(self) -> "LocalTextStream":
+    def __iter__(self) -> LocalTextStream:
         return self
 
     def __next__(self) -> str:

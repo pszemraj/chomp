@@ -9,9 +9,9 @@ If JAX profiling APIs change, this is the only file you should need to touch.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 import jax
 

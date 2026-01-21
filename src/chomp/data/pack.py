@@ -18,8 +18,9 @@ Senior dev notes:
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Deque, Iterable, List
+from typing import Any
 
 import numpy as np
 
@@ -29,7 +30,7 @@ class _ChunkedIntBuffer:
 
     def __init__(self) -> None:
         """Initialize an empty chunked buffer."""
-        self._chunks: Deque[np.ndarray] = deque()
+        self._chunks: deque[np.ndarray] = deque()
         self._offset: int = 0
         self._size: int = 0  # tokens available
 
@@ -90,7 +91,7 @@ class _ChunkedIntBuffer:
 
         return out
 
-    def dump_remaining(self) -> List[int]:
+    def dump_remaining(self) -> list[int]:
         """Return remaining tokens as a python list (for small checkpoint state).
 
         :return List[int]: All remaining tokens in the buffer.
@@ -99,7 +100,7 @@ class _ChunkedIntBuffer:
         if self._size == 0:
             return []
 
-        out: List[int] = []
+        out: list[int] = []
         first = True
         for c in self._chunks:
             if first:
@@ -126,8 +127,8 @@ class _ChunkedIntBuffer:
 class PackerState:
     """JSON-serializable packer state."""
 
-    remaining_tokens: List[int]
-    remaining_segments: List[int]
+    remaining_tokens: list[int]
+    remaining_segments: list[int]
     next_segment_id: int
 
     def to_dict(self) -> dict[str, Any]:
@@ -142,7 +143,7 @@ class PackerState:
         }
 
     @staticmethod
-    def from_dict(d: dict[str, Any]) -> "PackerState":
+    def from_dict(d: dict[str, Any]) -> PackerState:
         """Construct PackerState from a dictionary.
 
         :param dict[str, Any] d: State dict from to_dict().

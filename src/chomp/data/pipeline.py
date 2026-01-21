@@ -417,7 +417,7 @@ class TrainBatchIterator:
         self._T = int(cfg.train.seq_len)
         self._device_put = bool(cfg.data.device_put)
 
-    def __iter__(self) -> "TrainBatchIterator":
+    def __iter__(self) -> TrainBatchIterator:
         return self
 
     def __next__(self) -> Batch:

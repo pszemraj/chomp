@@ -204,6 +204,9 @@ cython_debug/
 # Ruff stuff:
 .ruff_cache/
 
+# hatch-vcs generated version file
+src/chomp/_version.py
+
 # PyPI configuration file
 .pypirc
 

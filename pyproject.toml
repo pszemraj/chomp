@@ -1,50 +1,60 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
 
 [project]
 name = "chomp"
-version = "0.0.2"
+dynamic = ["version"]
 description = "Single-GPU-first Megalodon JAX pretraining harness (minimal, production-shaped)."
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
 authors = [{ name = "chomp contributors" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 
 # NOTE:
 # - JAX wheels (jaxlib) are platform/CUDA specific. See README.
 # - We pin Orbax to avoid silent API drift.
 dependencies = [
-  "jax>=0.7.0",
-  "equinox>=0.12.0",
-  "optax>=0.2.0",
-  "megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git",
-  "PyYAML>=6.0",
-  "tqdm>=4.66",
-
-  # Phase 3: checkpointing
-  "orbax-checkpoint==0.11.31",
-
-  # Phase 4+: real streaming data
-  "datasets>=2.18.0",
+    "jax>=0.7.0",
+    "equinox>=0.12.0",
+    "optax>=0.2.0",
+    "megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git",
+    "PyYAML>=6.0",
+    "tqdm>=4.66",
+    # Phase 3: checkpointing
+    "orbax-checkpoint==0.11.31",
+    # Phase 4+: real streaming data
+    "datasets>=2.18.0",
 ]
 
 [project.optional-dependencies]
-
 # Optional HF tokenizer support (ByteTokenizer requires no extra deps)
 hf = ["transformers>=4.40.0", "tokenizers>=0.15.0"]
-
-dev = ["pytest>=7.4"]
+dev = ["pytest>=7.4", "ruff>=0.4.0"]
 
 [project.scripts]
 chomp-train = "chomp.scripts.train:main"
 
-[tool.setuptools]
-package-dir = { "" = "src" }
+[tool.hatch.metadata]
+allow-direct-references = true
 
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["chomp*"]
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/chomp/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chomp"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -52,3 +62,11 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = ["E501", "F722", "SIM108"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["chomp"]
