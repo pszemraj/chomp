@@ -17,11 +17,16 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
+
+if TYPE_CHECKING:
+    import datasets
 
 
 @dataclass(frozen=True)
 class HFStreamSpec:
+    """Specification for a HuggingFace streaming dataset."""
+
     dataset: str
     name: str
     split: str
@@ -52,6 +57,11 @@ class HFStreamingTextStream:
     """
 
     def __init__(self, spec: HFStreamSpec, *, epoch0: int = 0):
+        """Initialize the streaming text stream.
+
+        :param HFStreamSpec spec: Dataset specification.
+        :param int epoch0: Starting epoch number (default 0).
+        """
         self._spec = spec
         self._epoch = int(epoch0)
         self._ds = None
@@ -62,9 +72,18 @@ class HFStreamingTextStream:
 
     @property
     def epoch(self) -> int:
+        """Current epoch number.
+
+        :return int: The current epoch index.
+        """
         return self._epoch
 
-    def _load_ds_for_epoch(self, epoch: int):
+    def _load_ds_for_epoch(self, epoch: int) -> datasets.IterableDataset:
+        """Load and configure the dataset for a given epoch.
+
+        :param int epoch: Epoch number (used to seed shuffle).
+        :return datasets.IterableDataset: Configured streaming dataset.
+        """
         import datasets
 
         ds = datasets.load_dataset(
@@ -90,6 +109,7 @@ class HFStreamingTextStream:
         return ds
 
     def _build(self) -> None:
+        """Build or rebuild the dataset iterator for the current epoch."""
         self._ds = self._load_ds_for_epoch(self._epoch)
         self._it = iter(self._ds)
         self._n_since_state = 0
@@ -154,6 +174,10 @@ class HFStreamingTextStream:
         raise RuntimeError("HFStreamingTextStream retry loop fell through")
 
     def get_state(self) -> dict[str, Any]:
+        """Capture stream state for checkpointing.
+
+        :return dict[str, Any]: State dict with epoch and HF iterator state.
+        """
         if self._ds is None:
             self._build()
         hf_state = None
@@ -169,6 +193,11 @@ class HFStreamingTextStream:
         }
 
     def set_state(self, state: dict[str, Any]) -> None:
+        """Restore stream state from a checkpoint.
+
+        :param dict[str, Any] state: State dict from get_state().
+        :raises Exception: If load_state_dict fails (better to crash than silently reset).
+        """
         epoch = int(state.get("epoch", 0))
         hf_state = state.get("hf_state")
         self._epoch = epoch
@@ -200,6 +229,11 @@ class LocalTextStream:
     """
 
     def __init__(self, *, text: str, repeat: bool = True):
+        """Initialize the local text stream.
+
+        :param str text: Text string to yield.
+        :param bool repeat: Whether to repeat indefinitely (default True).
+        """
         self._text = text
         self._repeat = bool(repeat)
         self._i = 0
@@ -214,7 +248,15 @@ class LocalTextStream:
         return self._text
 
     def get_state(self) -> dict[str, Any]:
+        """Capture stream state for checkpointing.
+
+        :return dict[str, Any]: State dict with iteration count.
+        """
         return {"i": int(self._i)}
 
     def set_state(self, state: dict[str, Any]) -> None:
+        """Restore stream state from a checkpoint.
+
+        :param dict[str, Any] state: State dict from get_state().
+        """
         self._i = int(state.get("i", 0))

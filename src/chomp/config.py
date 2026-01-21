@@ -19,9 +19,12 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import TYPE_CHECKING, Any, Iterable, Literal
 
 import yaml
+
+if TYPE_CHECKING:
+    import jax.numpy as jnp
 
 Backend = Literal["dummy", "megalodon"]
 DatasetBackend = Literal["hf", "local_text"]
@@ -178,6 +181,8 @@ class DataConfig:
 
 @dataclass(frozen=True)
 class TrainConfig:
+    """Training loop configuration including batch sizes, steps, and profiling."""
+
     seed: int = 0
     steps: int = 100
     batch_size: int = 2
@@ -197,6 +202,8 @@ class TrainConfig:
 
 @dataclass(frozen=True)
 class OptimConfig:
+    """Optimizer configuration for AdamW with linear warmup and cosine decay."""
+
     lr: float = 3e-4
     weight_decay: float = 0.01
     grad_clip_norm: float = 1.0
@@ -222,6 +229,8 @@ class CheckpointConfig:
 
 @dataclass(frozen=True)
 class LoggingConfig:
+    """Logging configuration for run directory and metrics output."""
+
     project: str = "chomp"
     run_dir: str | None = None
     metrics_file: str = "metrics.jsonl"
@@ -230,12 +239,16 @@ class LoggingConfig:
 
 @dataclass(frozen=True)
 class DebugConfig:
+    """Debug configuration for NaN checks and device assertions."""
+
     nan_check: bool = True
     check_device_every: int = 100
 
 
 @dataclass(frozen=True)
 class Config:
+    """Top-level configuration combining all sub-configs for a training run."""
+
     model: ModelConfig = ModelConfig()
     data: DataConfig = DataConfig()
     train: TrainConfig = TrainConfig()
@@ -245,6 +258,10 @@ class Config:
     debug: DebugConfig = DebugConfig()
 
     def to_dict(self) -> dict[str, Any]:
+        """Convert the entire config tree to a nested dictionary.
+
+        :return dict[str, Any]: Nested dict representation of all config fields.
+        """
         return asdict(self)
 
 
@@ -257,6 +274,12 @@ def _set_by_dotted_path(obj: Any, path: str, raw_value: str) -> Any:
     Example: path="train.batch_size", raw_value="4"
 
     We do simple type casting based on the current value type.
+
+    :param Any obj: Root dataclass to modify.
+    :param str path: Dot-separated path to the field (e.g., "train.batch_size").
+    :param str raw_value: String value to set, will be cast to the field's type.
+    :raises ValueError: If the path is invalid or contains unknown keys.
+    :return Any: New dataclass with the field updated.
     """
 
     parts = path.split(".")
@@ -287,6 +310,12 @@ def _set_by_dotted_path(obj: Any, path: str, raw_value: str) -> Any:
 
 
 def _replace_dataclass(obj: Any, **kwargs: Any) -> Any:
+    """Create a new dataclass instance with specified fields replaced.
+
+    :param Any obj: Frozen dataclass to copy.
+    :param kwargs: Field names and their new values.
+    :return Any: New dataclass instance with updated fields.
+    """
     from dataclasses import replace
 
     return replace(obj, **kwargs)
@@ -296,6 +325,11 @@ def _cast_like(old: Any, raw: str) -> Any:
     """Cast a string override to the type of `old`.
 
     This is intentionally conservative. If we can't cast cleanly, error.
+
+    :param Any old: Reference value whose type determines the cast.
+    :param str raw: String value to cast.
+    :raises ValueError: If cast fails (e.g., invalid boolean string).
+    :return Any: Value cast to the type of `old`.
     """
 
     if isinstance(old, bool):
@@ -323,6 +357,11 @@ def load_config(path: str | Path, overrides: Iterable[str] | None = None) -> Con
     """Load YAML config file + apply dot-path overrides.
 
     Overrides format: "train.steps=2000".
+
+    :param path: Path to the YAML config file.
+    :param overrides: Optional list of dot-path overrides (e.g., ["train.steps=2000"]).
+    :raises ValueError: If override format is invalid or path does not exist.
+    :return Config: Validated configuration object.
     """
 
     path = Path(path)
@@ -343,7 +382,11 @@ def load_config(path: str | Path, overrides: Iterable[str] | None = None) -> Con
 
 
 def _from_nested_dict(data: dict[str, Any]) -> Config:
-    """Convert nested dict into Config dataclasses."""
+    """Convert nested dict into Config dataclasses.
+
+    :param dict[str, Any] data: Nested dictionary from YAML parsing.
+    :return Config: Fully constructed Config with all sub-configs.
+    """
 
     model = ModelConfig(**(data.get("model") or {}))
     train = TrainConfig(**(data.get("train") or {}))
@@ -375,6 +418,11 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
 
 
 def _vfail(msg: str) -> None:
+    """Raise ValueError with a standardized config validation prefix.
+
+    :param str msg: Validation failure message.
+    :raises ValueError: Always raised with formatted message.
+    """
     raise ValueError(f"Config validation failed: {msg}")
 
 
@@ -528,6 +576,9 @@ def derived_deterministic(cfg: Config) -> bool:
 
     If cfg.train.deterministic is set, it wins.
     Otherwise: deterministic iff all dropout rates are zero.
+
+    :param Config cfg: Configuration to check.
+    :return bool: True if training should be deterministic.
     """
 
     if cfg.train.deterministic is not None:
@@ -542,9 +593,13 @@ def derived_deterministic(cfg: Config) -> bool:
     )
 
 
-def dtype_from_str(name: str):
-    """Map a dtype string to a JAX dtype."""
+def dtype_from_str(name: str) -> jnp.dtype:
+    """Map a dtype string to a JAX dtype.
 
+    :param str name: Dtype name ("float32" or "bfloat16").
+    :raises ValueError: If name is not a supported dtype.
+    :return jnp.dtype: Corresponding JAX dtype.
+    """
     import jax.numpy as jnp
 
     table = {

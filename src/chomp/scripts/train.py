@@ -25,6 +25,12 @@ from chomp.utils.io import setup_python_logging
 
 
 def _parse_resume(raw: str) -> str | int:
+    """Parse the resume CLI argument.
+
+    :param str raw: Raw string from --resume argument.
+    :raises ValueError: If raw is not a valid resume value.
+    :return str | int: "none", "latest", or an integer step number.
+    """
     raw = raw.strip().lower()
     if raw in {"none", "no", "false", "0"}:
         return "none"
@@ -39,6 +45,10 @@ def _parse_resume(raw: str) -> str | int:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """CLI entrypoint for chomp-train.
+
+    :param argv: Optional list of CLI arguments (defaults to sys.argv).
+    """
     parser = argparse.ArgumentParser(prog="chomp-train")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
     parser.add_argument(

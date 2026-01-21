@@ -27,16 +27,25 @@ import numpy as np
 class _ChunkedIntBuffer:
     """A chunked 1D int32 buffer with efficient take()."""
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """Initialize an empty chunked buffer."""
         self._chunks: Deque[np.ndarray] = deque()
         self._offset: int = 0
         self._size: int = 0  # tokens available
 
     @property
     def size(self) -> int:
+        """Number of tokens currently in the buffer.
+
+        :return int: Token count.
+        """
         return self._size
 
     def append(self, tokens: np.ndarray) -> None:
+        """Append tokens to the buffer.
+
+        :param np.ndarray tokens: Array of tokens to append.
+        """
         if tokens.size == 0:
             return
         if tokens.dtype != np.int32:
@@ -45,7 +54,12 @@ class _ChunkedIntBuffer:
         self._size += int(tokens.size)
 
     def take(self, n: int) -> np.ndarray:
-        """Remove and return exactly n tokens."""
+        """Remove and return exactly n tokens.
+
+        :param int n: Number of tokens to take.
+        :raises ValueError: If n < 0 or buffer has fewer than n tokens.
+        :return np.ndarray: Array of n tokens (int32).
+        """
 
         if n < 0:
             raise ValueError(f"n must be >=0, got {n}")
@@ -77,7 +91,10 @@ class _ChunkedIntBuffer:
         return out
 
     def dump_remaining(self) -> List[int]:
-        """Return remaining tokens as a python list (for small checkpoint state)."""
+        """Return remaining tokens as a python list (for small checkpoint state).
+
+        :return List[int]: All remaining tokens in the buffer.
+        """
 
         if self._size == 0:
             return []
@@ -93,6 +110,10 @@ class _ChunkedIntBuffer:
         return out
 
     def load_remaining(self, tokens: Iterable[int]) -> None:
+        """Replace buffer contents with the given tokens.
+
+        :param tokens: Iterable of tokens to load.
+        """
         self._chunks.clear()
         self._offset = 0
         arr = np.asarray(list(tokens), dtype=np.int32)
@@ -110,6 +131,10 @@ class PackerState:
     next_segment_id: int
 
     def to_dict(self) -> dict[str, Any]:
+        """Convert to a JSON-serializable dictionary.
+
+        :return dict[str, Any]: State as a dict.
+        """
         return {
             "remaining_tokens": self.remaining_tokens,
             "remaining_segments": self.remaining_segments,
@@ -118,6 +143,12 @@ class PackerState:
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> "PackerState":
+        """Construct PackerState from a dictionary.
+
+        :param dict[str, Any] d: State dict from to_dict().
+        :raises ValueError: If segments/tokens lengths don't match.
+        :return PackerState: Reconstructed state.
+        """
         toks = d.get("remaining_tokens") or []
         segs = d.get("remaining_segments")
         if segs is None:
@@ -152,6 +183,16 @@ class TokenPacker:
         eos_id: int,
         max_doc_tokens: int | None,
     ):
+        """Initialize the token packer.
+
+        :param int seq_len: Fixed sequence length for output.
+        :param bool add_bos: Whether to prepend BOS token to each document.
+        :param bool add_eos: Whether to append EOS token to each document.
+        :param int bos_id: BOS token ID.
+        :param int eos_id: EOS token ID.
+        :param max_doc_tokens: Optional max tokens per document before truncation.
+        :raises ValueError: If seq_len < 8.
+        """
         if seq_len < 8:
             raise ValueError(f"seq_len must be >=8, got {seq_len}")
         self.seq_len = int(seq_len)
@@ -166,6 +207,10 @@ class TokenPacker:
         self._next_segment_id = 1
 
     def add_document(self, tokens: Iterable[int]) -> None:
+        """Add a tokenized document to the packer buffer.
+
+        :param tokens: Iterable of token IDs for the document.
+        """
         arr = np.asarray(list(tokens), dtype=np.int32)
         if self.max_doc_tokens is not None and arr.size > self.max_doc_tokens:
             arr = arr[: self.max_doc_tokens]
@@ -187,18 +232,29 @@ class TokenPacker:
         self._next_segment_id += 1
 
     def can_pop(self) -> bool:
+        """Check if buffer has enough tokens for one sequence.
+
+        :raises RuntimeError: If token/segment buffers are misaligned.
+        :return bool: True if at least seq_len+1 tokens are available.
+        """
         if self._token_buf.size != self._segment_buf.size:
             raise RuntimeError("token/segment buffers are misaligned")
         return self._token_buf.size >= (self.seq_len + 1)
 
     def pop_seq_plus_one(self) -> np.ndarray:
-        """Return [seq_len+1] tokens."""
+        """Return [seq_len+1] tokens.
 
+        :return np.ndarray: Array of shape [seq_len+1] containing token IDs.
+        """
         tokens, _segs = self.pop_seq_plus_one_with_segments()
         return tokens
 
     def pop_seq_plus_one_with_segments(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return ([seq_len+1] tokens, [seq_len+1] segment_ids)."""
+        """Return ([seq_len+1] tokens, [seq_len+1] segment_ids).
+
+        :raises RuntimeError: If token/segment buffers are misaligned.
+        :return tuple: (tokens, segment_ids) arrays of shape [seq_len+1].
+        """
 
         if self._token_buf.size != self._segment_buf.size:
             raise RuntimeError("token/segment buffers are misaligned")
@@ -207,6 +263,10 @@ class TokenPacker:
         return tokens, segs
 
     def get_state(self) -> dict[str, Any]:
+        """Capture packer state for checkpointing.
+
+        :return dict[str, Any]: Serializable state dict.
+        """
         # NOTE: Remaining tokens are at most seq_len in steady state.
         st = PackerState(
             remaining_tokens=self._token_buf.dump_remaining(),
@@ -216,6 +276,10 @@ class TokenPacker:
         return st.to_dict()
 
     def set_state(self, state: dict[str, Any]) -> None:
+        """Restore packer state from a checkpoint.
+
+        :param dict[str, Any] state: State dict from get_state().
+        """
         st = PackerState.from_dict(state)
         self._token_buf.load_remaining(st.remaining_tokens)
         self._segment_buf.load_remaining(st.remaining_segments)

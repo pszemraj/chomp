@@ -37,7 +37,11 @@ def stop_trace() -> None:
 
 @contextmanager
 def step_annotation(name: str) -> Iterator[None]:
-    """Annotate a region as a step (best-effort)."""
+    """Annotate a region as a step (best-effort).
+
+    :param str name: Name for the step annotation.
+    :return Iterator[None]: Context manager that yields None.
+    """
 
     try:
         ctx = jax.profiler.StepTraceAnnotation(name)

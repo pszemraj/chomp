@@ -23,6 +23,10 @@ from chomp.config import Config
 
 
 def setup_python_logging(level: str) -> None:
+    """Configure Python logging with a standard format.
+
+    :param str level: Log level name (DEBUG, INFO, WARNING, ERROR).
+    """
     logging.basicConfig(
         level=getattr(logging, level, logging.INFO),
         format="%(asctime)s | %(levelname)s | %(message)s",
@@ -46,6 +50,12 @@ def create_run_dir(
     We persist config snapshots:
     - fresh run: config_resolved.json + optional config_original.yaml
     - resume:    config_resume.json (so you can see how you invoked resume)
+
+    :param Config cfg: Training configuration.
+    :param config_path: Optional path to original YAML config.
+    :param bool allow_existing: If True, allow reusing an existing directory.
+    :raises RuntimeError: If directory exists and allow_existing=False, or resume without run_dir.
+    :return Path: Path to the run directory.
     """
 
     if cfg.logging.run_dir is not None:
@@ -94,15 +104,24 @@ class MetricsWriter:
     """Append-only JSONL metrics writer."""
 
     def __init__(self, path: str | Path):
+        """Initialize the metrics writer.
+
+        :param path: Path to the JSONL file.
+        """
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._f = self.path.open("a", buffering=1)
 
     def write(self, row: dict[str, Any]) -> None:
+        """Write a metrics row to the JSONL file.
+
+        :param dict[str, Any] row: Dictionary of metrics to write.
+        """
         self._f.write(json.dumps(row, ensure_ascii=False) + "\n")
         self._f.flush()
 
     def close(self) -> None:
+        """Close the file handle."""
         try:
             self._f.close()
         except Exception:

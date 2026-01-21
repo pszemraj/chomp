@@ -9,7 +9,12 @@ So we fail fast unless explicitly allowed.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import jax
+
+if TYPE_CHECKING:
+    from chomp.types import Batch
 
 
 def validate_default_device(*, allow_cpu: bool) -> None:
@@ -28,8 +33,12 @@ def validate_default_device(*, allow_cpu: bool) -> None:
         )
 
 
-def device_platform(x) -> str | None:
-    """Best-effort: return the device platform for an array."""
+def device_platform(x: jax.Array) -> str | None:
+    """Best-effort: return the device platform for an array.
+
+    :param jax.Array x: JAX array to check.
+    :return str | None: Platform name (e.g., "cpu", "gpu") or None if unknown.
+    """
 
     # Newer JAX: x.device() -> Device
     try:
@@ -44,8 +53,13 @@ def device_platform(x) -> str | None:
         return None
 
 
-def assert_batch_on_device(batch, *, allow_cpu: bool) -> None:
-    """Assert that a Batch's arrays are on GPU unless CPU allowed."""
+def assert_batch_on_device(batch: Batch, *, allow_cpu: bool) -> None:
+    """Assert that a Batch's arrays are on GPU unless CPU allowed.
+
+    :param Batch batch: Batch object to check.
+    :param bool allow_cpu: If True, don't raise on CPU placement.
+    :raises RuntimeError: If batch is on CPU and allow_cpu=False.
+    """
 
     plat = device_platform(batch.input_ids)
     if plat is None:

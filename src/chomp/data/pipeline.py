@@ -36,7 +36,12 @@ from .pack import TokenPacker
 
 
 class Tokenizer(Protocol):
-    def encode(self, text: str) -> list[int]: ...
+    """Protocol for tokenizers that convert text to token ids."""
+
+    def encode(self, text: str) -> list[int]:
+        """Encode text string to a list of token ids."""
+        ...
+
     def __len__(self) -> int: ...
 
 
@@ -58,6 +63,11 @@ class ByteTokenizer:
     byte_offset: int = 0
 
     def encode(self, text: str) -> list[int]:
+        """Encode text to token ids by mapping UTF-8 bytes with offset.
+
+        :param str text: Input text string.
+        :return list[int]: Token ids (byte values + byte_offset).
+        """
         b = text.encode("utf-8", errors="replace")
         off = int(self.byte_offset)
         return [off + int(x) for x in b]
@@ -73,6 +83,13 @@ class HFTokenizer:
     """
 
     def __init__(self, name_or_path: str, *, use_fast: bool, trust_remote_code: bool):
+        """Initialize HuggingFace tokenizer from name or local path.
+
+        :param str name_or_path: HuggingFace model name or local path.
+        :param bool use_fast: Whether to use fast Rust tokenizer.
+        :param bool trust_remote_code: Whether to allow custom tokenizer code.
+        :raises ImportError: If transformers is not installed.
+        """
         try:
             from transformers import AutoTokenizer
         except Exception as e:  # pragma: no cover
@@ -91,6 +108,12 @@ class HFTokenizer:
             self._tok.pad_token = self._tok.eos_token
 
     def encode(self, text: str) -> list[int]:
+        """Encode text to token ids without adding special tokens.
+
+        :param str text: Input text string.
+        :raises RuntimeError: If tokenizer does not return input_ids.
+        :return list[int]: Token ids.
+        """
         out = self._tok(text, add_special_tokens=False)
         ids = out.get("input_ids")
         if ids is None:
@@ -102,21 +125,43 @@ class HFTokenizer:
 
     @property
     def bos_token_id(self) -> int | None:
+        """Beginning-of-sequence token ID, or None if not defined.
+
+        :return int | None: BOS token ID.
+        """
         return self._tok.bos_token_id
 
     @property
     def eos_token_id(self) -> int | None:
+        """End-of-sequence token ID, or None if not defined.
+
+        :return int | None: EOS token ID.
+        """
         return self._tok.eos_token_id
 
     @property
     def pad_token_id(self) -> int | None:
+        """Padding token ID, or None if not defined.
+
+        :return int | None: PAD token ID.
+        """
         return self._tok.pad_token_id
 
     def save_pretrained(self, path: str | Path) -> None:
+        """Save tokenizer files to a directory.
+
+        :param path: Directory path to save tokenizer files.
+        """
         self._tok.save_pretrained(str(path))
 
 
 def build_tokenizer(cfg: Config) -> Tokenizer:
+    """Build a tokenizer instance from config.
+
+    :param Config cfg: Configuration with tokenizer settings.
+    :raises ValueError: If tokenizer kind is unknown.
+    :return Tokenizer: Configured tokenizer instance.
+    """
     tok = cfg.data.tokenizer
     if tok.kind == "byte":
         return ByteTokenizer(byte_offset=tok.byte_offset)
@@ -131,13 +176,26 @@ def build_tokenizer(cfg: Config) -> Tokenizer:
 
 
 def _round_up_to_multiple(value: int, multiple: int) -> int:
+    """Round value up to the nearest multiple for aligned tensor shapes.
+
+    :param int value: Value to round.
+    :param int multiple: Multiple to round to.
+    :return int: Rounded value.
+    """
     if multiple <= 1:
         return value
     return int(((value + multiple - 1) // multiple) * multiple)
 
 
 def resolve_tokenizer_config(cfg: Config, tok: Tokenizer) -> Config:
-    """Resolve tokenizer-derived model fields (vocab size + special token IDs)."""
+    """Resolve tokenizer-derived model fields (vocab size + special token IDs).
+
+    :param Config cfg: Input configuration.
+    :param Tokenizer tok: Tokenizer instance.
+    :raises RuntimeError: If tokenizer doesn't expose vocab size.
+    :raises ValueError: If vocab size is invalid or special tokens missing.
+    :return Config: Updated config with tokenizer-derived fields.
+    """
 
     try:
         tok_vocab = int(len(tok))
@@ -177,6 +235,11 @@ def resolve_tokenizer_config(cfg: Config, tok: Tokenizer) -> Config:
             raise ValueError("HF tokenizer has no eos_token_id but data.tokenizer.add_eos=true")
 
         def _maybe_update(field: str, value: int | None) -> None:
+            """Update model field from tokenizer value if different.
+
+            :param str field: Model config field name.
+            :param value: Tokenizer-provided value, or None to skip.
+            """
             if value is None:
                 return
             cur = getattr(cfg.model, field)
@@ -195,7 +258,11 @@ def resolve_tokenizer_config(cfg: Config, tok: Tokenizer) -> Config:
 
 
 def prepare_tokenizer_and_config(cfg: Config) -> tuple[Config, Tokenizer]:
-    """Build tokenizer and return an updated config with tokenizer-derived fields."""
+    """Build tokenizer and return an updated config with tokenizer-derived fields.
+
+    :param Config cfg: Input configuration.
+    :return tuple: (updated_config, tokenizer) tuple.
+    """
 
     tok = build_tokenizer(cfg)
     cfg = resolve_tokenizer_config(cfg, tok)
@@ -205,7 +272,14 @@ def prepare_tokenizer_and_config(cfg: Config) -> tuple[Config, Tokenizer]:
 def save_tokenizer_snapshot(
     run_dir: Path, cfg: Config, tok: Tokenizer, *, allow_existing: bool
 ) -> None:
-    """Persist the tokenizer to disk for reproducible resumes."""
+    """Persist the tokenizer to disk for reproducible resumes.
+
+    :param Path run_dir: Run directory path.
+    :param Config cfg: Training configuration.
+    :param Tokenizer tok: Tokenizer instance to save.
+    :param bool allow_existing: If True, skip if snapshot already exists.
+    :raises RuntimeError: If snapshot exists and allow_existing=False.
+    """
 
     tok_dir = Path(run_dir) / "tokenizer"
     if tok_dir.exists():
@@ -239,7 +313,11 @@ def save_tokenizer_snapshot(
 
 
 def data_fingerprint(cfg: Config) -> dict[str, Any]:
-    """A small, stable fingerprint that we store in checkpoint meta."""
+    """A small, stable fingerprint that we store in checkpoint meta.
+
+    :param Config cfg: Training configuration.
+    :return dict[str, Any]: Fingerprint dict with source, tokenizer, and batch shape info.
+    """
 
     d = cfg.data
     t = cfg.data.tokenizer
@@ -293,6 +371,12 @@ class TrainBatchIterator:
     """
 
     def __init__(self, cfg: Config, *, tokenizer: Tokenizer):
+        """Initialize the training batch iterator.
+
+        :param Config cfg: Training configuration.
+        :param Tokenizer tokenizer: Tokenizer for encoding text.
+        :raises ValueError: If data.backend is unknown.
+        """
         self._cfg = cfg
         self._tok = tokenizer
 
@@ -376,12 +460,20 @@ class TrainBatchIterator:
     # -------- checkpoint hooks --------
 
     def get_state(self) -> dict[str, Any]:
+        """Capture current iterator state for checkpointing.
+
+        :return dict[str, Any]: State dict with text stream and packer state.
+        """
         return {
             "text": self._text_stream.get_state(),
             "packer": self._packer.get_state(),
         }
 
     def set_state(self, state: dict[str, Any]) -> None:
+        """Restore iterator state from a checkpoint.
+
+        :param dict[str, Any] state: State dict from get_state().
+        """
         if "text" in state:
             self._text_stream.set_state(state["text"])
         if "packer" in state:
@@ -389,6 +481,12 @@ class TrainBatchIterator:
 
 
 def build_train_iterator(cfg: Config, *, tokenizer: Tokenizer | None = None) -> TrainBatchIterator:
+    """Build the training batch iterator.
+
+    :param Config cfg: Training configuration.
+    :param tokenizer: Optional pre-built tokenizer; built from config if None.
+    :return TrainBatchIterator: Iterator yielding fixed-shape Batch objects.
+    """
     if tokenizer is None:
         cfg, tokenizer = prepare_tokenizer_and_config(cfg)
     return TrainBatchIterator(cfg, tokenizer=tokenizer)

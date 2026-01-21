@@ -19,7 +19,11 @@ import jax.numpy as jnp
 
 
 def param_count(params: Any) -> int:
-    """Count total number of scalar parameters in a params pytree."""
+    """Count total number of scalar parameters in a params pytree.
+
+    :param Any params: Parameter pytree.
+    :return int: Total number of scalar parameters.
+    """
 
     leaves = jax.tree_util.tree_leaves(params)
     total = 0
@@ -30,7 +34,14 @@ def param_count(params: Any) -> int:
 
 
 def tree_allclose(a: Any, b: Any, *, rtol: float = 1e-6, atol: float = 1e-6) -> bool:
-    """Tree-wise allclose for arrays."""
+    """Tree-wise allclose for arrays.
+
+    :param Any a: First pytree.
+    :param Any b: Second pytree.
+    :param float rtol: Relative tolerance.
+    :param float atol: Absolute tolerance.
+    :return bool: True if all arrays are element-wise close.
+    """
 
     la = jax.tree_util.tree_leaves(a)
     lb = jax.tree_util.tree_leaves(b)
@@ -51,7 +62,12 @@ def tree_allclose(a: Any, b: Any, *, rtol: float = 1e-6, atol: float = 1e-6) -> 
 
 
 def tree_equal(a: Any, b: Any) -> bool:
-    """Tree-wise exact equality for arrays."""
+    """Tree-wise exact equality for arrays.
+
+    :param Any a: First pytree.
+    :param Any b: Second pytree.
+    :return bool: True if all arrays are exactly equal.
+    """
 
     la = jax.tree_util.tree_leaves(a)
     lb = jax.tree_util.tree_leaves(b)
@@ -71,6 +87,8 @@ def tree_equal(a: Any, b: Any) -> bool:
 
 @dataclass(frozen=True)
 class TensorStats:
+    """Statistics for a single tensor (shape, dtype, mean, std, min, max)."""
+
     shape: tuple[int, ...]
     dtype: str
     mean: float
@@ -83,6 +101,10 @@ def sample_tensor_stats(params: Any, *, max_tensors: int = 8) -> list[TensorStat
     """Sample a few tensors from the params tree and compute simple stats.
 
     This catches obvious broken initialization (all-zeros, NaNs, infs) early.
+
+    :param Any params: Parameter pytree.
+    :param int max_tensors: Maximum number of tensors to sample.
+    :return list[TensorStats]: Statistics for sampled tensors.
     """
 
     leaves = [x for x in jax.tree_util.tree_leaves(params) if hasattr(x, "shape")]

@@ -24,7 +24,10 @@ import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import orbax.checkpoint as ocp
 
 from chomp.config import Config
 from chomp.data import data_fingerprint
@@ -56,10 +59,19 @@ class CheckpointMeta:
     data_fingerprint: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
+        """Convert metadata to a JSON-serializable dictionary.
+
+        :return dict[str, Any]: All fields as a nested dict.
+        """
         return asdict(self)
 
 
 def _safe_version(pkg: str) -> str | None:
+    """Get package version string, returning None if not installed.
+
+    :param str pkg: Package name to look up.
+    :return str | None: Version string or None if unavailable.
+    """
     try:
         import importlib.metadata as im
 
@@ -71,6 +83,13 @@ def _safe_version(pkg: str) -> str | None:
 def build_meta(
     *, step: int, config: dict[str, Any], data_fingerprint: dict[str, Any]
 ) -> CheckpointMeta:
+    """Build checkpoint metadata with version info and config snapshot.
+
+    :param int step: Current training step.
+    :param dict[str, Any] config: Full config dict for reproducibility.
+    :param dict[str, Any] data_fingerprint: Data pipeline fingerprint.
+    :return CheckpointMeta: Populated metadata object.
+    """
     import platform
 
     return CheckpointMeta(
@@ -87,10 +106,20 @@ def build_meta(
 
 
 def default_ckpt_dir(run_dir: Path) -> Path:
+    """Return the default checkpoint directory for a run.
+
+    :param Path run_dir: Run directory path.
+    :return Path: Path to checkpoints subdirectory.
+    """
     return run_dir / "checkpoints"
 
 
 def _dir_size_bytes(path: Path) -> int:
+    """Calculate total size of all files in a directory recursively.
+
+    :param Path path: Directory to measure.
+    :return int: Total size in bytes.
+    """
     total = 0
     for p in path.rglob("*"):
         try:
@@ -102,10 +131,18 @@ def _dir_size_bytes(path: Path) -> int:
     return total
 
 
-def make_manager(ckpt_dir: Path, *, max_to_keep: int, save_every: int, async_save: bool):
+def make_manager(
+    ckpt_dir: Path, *, max_to_keep: int, save_every: int, async_save: bool
+) -> ocp.CheckpointManager:
     """Create an Orbax CheckpointManager.
 
     We keep this wrapper here so Orbax API drift is contained.
+
+    :param Path ckpt_dir: Directory for checkpoint storage.
+    :param int max_to_keep: Maximum number of checkpoints to retain.
+    :param int save_every: Step interval for checkpoint saves.
+    :param bool async_save: Whether to enable asynchronous saving.
+    :return ocp.CheckpointManager: Configured checkpoint manager.
     """
 
     import orbax.checkpoint as ocp
@@ -130,7 +167,7 @@ def make_manager(ckpt_dir: Path, *, max_to_keep: int, save_every: int, async_sav
 
 
 def save(
-    manager,
+    manager: ocp.CheckpointManager,
     *,
     step: int,
     train_state: Any,
@@ -145,6 +182,14 @@ def save(
 
     `enforce_size_gb` is a guardrail to catch saving static graphs or duplicating tensors.
     It's intentionally a blunt instrument.
+
+    :param ocp.CheckpointManager manager: Orbax checkpoint manager.
+    :param int step: Training step number.
+    :param Any train_state: TrainState pytree (arrays only).
+    :param dict[str, Any] data_state: Data iterator state dict.
+    :param CheckpointMeta meta: Checkpoint metadata.
+    :param enforce_size_gb: Optional max size in GB; raises if exceeded.
+    :raises RuntimeError: If checkpoint size exceeds enforce_size_gb.
     """
 
     import orbax.checkpoint as ocp
@@ -173,17 +218,20 @@ def save(
 
 
 def restore_latest(
-    manager,
+    manager: ocp.CheckpointManager,
     *,
     abstract_train_state: Any,
 ) -> tuple[int, Any, dict[str, Any] | None, dict[str, Any] | None]:
     """Restore latest checkpoint.
 
-    Returns: (step, train_state, data_state, meta)
-
     Notes:
     - `abstract_train_state` should be a tree of ShapeDtypeStruct matching TrainState.
     - `data_state` and `meta` are JSON dicts.
+
+    :param ocp.CheckpointManager manager: Orbax checkpoint manager.
+    :param Any abstract_train_state: ShapeDtypeStruct tree for restoration target.
+    :raises FileNotFoundError: If no checkpoints exist.
+    :return tuple: (step, train_state, data_state, meta).
     """
 
     import orbax.checkpoint as ocp
@@ -210,11 +258,18 @@ def restore_latest(
 
 
 def restore_at_step(
-    manager,
+    manager: ocp.CheckpointManager,
     *,
     step: int,
     abstract_train_state: Any,
 ) -> tuple[int, Any, dict[str, Any] | None, dict[str, Any] | None]:
+    """Restore checkpoint at a specific step.
+
+    :param ocp.CheckpointManager manager: Orbax checkpoint manager.
+    :param int step: Step number to restore.
+    :param Any abstract_train_state: ShapeDtypeStruct tree for restoration target.
+    :return tuple: (step, train_state, data_state, meta).
+    """
     import orbax.checkpoint as ocp
 
     step = int(step)
@@ -233,7 +288,12 @@ def restore_at_step(
 
 
 def check_resume_compat(cfg: Config, meta: dict[str, Any] | None) -> None:
-    """Validate checkpoint metadata against current config."""
+    """Validate checkpoint metadata against current config.
+
+    :param Config cfg: Current training configuration.
+    :param meta: Checkpoint metadata dict (or None if missing).
+    :raises RuntimeError: If meta is missing or config mismatches are found.
+    """
 
     if meta is None:
         raise RuntimeError("Checkpoint meta is missing; cannot verify resume compatibility.")
@@ -249,6 +309,13 @@ def check_resume_compat(cfg: Config, meta: dict[str, Any] | None) -> None:
     warnings: list[str] = []
 
     def _cmp(path: str, cur: Any, prev: Any, *, severity: str) -> None:
+        """Compare current and previous values, appending to errors or warnings.
+
+        :param str path: Config path being compared.
+        :param Any cur: Current config value.
+        :param Any prev: Previous (checkpoint) config value.
+        :param str severity: Either "error" or "warning".
+        """
         if cur != prev:
             msg = f"{path} mismatch (checkpoint={prev!r}, current={cur!r})"
             if severity == "error":

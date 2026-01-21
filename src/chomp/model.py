@@ -17,7 +17,7 @@ Backends:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import equinox as eqx
 import jax
@@ -25,6 +25,9 @@ import jax.numpy as jnp
 import optax
 
 from chomp.config import Config, dtype_from_str
+
+if TYPE_CHECKING:
+    from chomp.types import Batch
 
 # ------------------------------ Dummy backend ------------------------------
 
@@ -45,6 +48,13 @@ class DummyLM(eqx.Module):
     vocab_size: int = eqx.field(static=True)
 
     def __init__(self, *, vocab_size: int, d_model: int, dropout: float, key: jax.Array):
+        """Initialize the dummy language model.
+
+        :param int vocab_size: Vocabulary size.
+        :param int d_model: Embedding dimension.
+        :param float dropout: Dropout rate.
+        :param jax.Array key: PRNG key for initialization.
+        """
         k1, k2 = jax.random.split(key)
         self.vocab_size = vocab_size
         self.embed = eqx.nn.Embedding(num_embeddings=vocab_size, embedding_size=d_model, key=k1)
@@ -77,6 +87,16 @@ class DummyLM(eqx.Module):
         deterministic: bool = True,
         key: jax.Array | None = None,
     ) -> jax.Array:
+        """Compute cross-entropy loss with causal shift.
+
+        :param jax.Array input_ids: Input token IDs of shape [B, T].
+        :param jax.Array labels: Label token IDs of shape [B, T].
+        :param attention_mask: Optional mask of shape [B, T].
+        :param int ignore_index: Label value to ignore in loss.
+        :param bool deterministic: If False, apply dropout.
+        :param key: PRNG key required when deterministic=False.
+        :return jax.Array: Scalar mean cross-entropy loss.
+        """
         logits = self(input_ids, attention_mask, deterministic=deterministic, key=key)
 
         # Shift for causal LM
@@ -113,6 +133,12 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
     - We never want to stash full Modules in TrainState
     - It keeps checkpointing straightforward
     - It forces us to be explicit about what is 'learned' vs 'static'
+
+    :param Config cfg: Model configuration.
+    :param jax.Array key: PRNG key for model initialization.
+    :raises ImportError: If megalodon backend requested but not installed.
+    :raises ValueError: If model.backend is unknown.
+    :return tuple: (params, static) pytrees from eqx.partition.
     """
 
     if cfg.model.backend == "dummy":
@@ -183,7 +209,7 @@ def training_loss(
     params: Any,
     static: Any,
     *,
-    batch,
+    batch: Batch,
     deterministic: bool,
     key: jax.Array | None,
 ) -> jax.Array:
@@ -193,6 +219,13 @@ def training_loss(
     Training should never enable cache; it is an inference concern.
 
     For Megalodon, `compute_loss` internally enforces `cache=None`.
+
+    :param Any params: Model parameters from eqx.partition.
+    :param Any static: Static model components from eqx.partition.
+    :param Batch batch: Batch with input_ids, labels, attention_mask.
+    :param bool deterministic: If False, apply dropout.
+    :param key: PRNG key required when deterministic=False.
+    :return jax.Array: Scalar loss value.
     """
 
     model = eqx.combine(params, static)

@@ -61,7 +61,12 @@ _IGNORE_INDEX = -100
 
 
 def _count_tokens(labels: jax.Array, attention_mask: jax.Array | None) -> jax.Array:
-    """Count valid tokens after the causal shift (for correct GA normalization)."""
+    """Count valid tokens after the causal shift (for correct GA normalization).
+
+    :param jax.Array labels: Label tensor of shape [B, T].
+    :param attention_mask: Optional mask tensor of shape [B, T].
+    :return jax.Array: Scalar count of valid (non-ignored, non-masked) tokens.
+    """
 
     shift_labels = labels[:, 1:]
     valid = shift_labels != _IGNORE_INDEX
@@ -71,7 +76,12 @@ def _count_tokens(labels: jax.Array, attention_mask: jax.Array | None) -> jax.Ar
 
 
 def _check_finite_metrics(metrics: dict[str, Any], *, step: int) -> None:
-    """Fail fast if loss/grad_norm are non-finite."""
+    """Fail fast if loss/grad_norm are non-finite.
+
+    :param dict[str, Any] metrics: Dictionary containing 'loss' and 'grad_norm' values.
+    :param int step: Current training step (for error messages).
+    :raises RuntimeError: If loss or grad_norm is NaN or Inf.
+    """
 
     for name in ("loss", "grad_norm"):
         value = float(metrics[name])
@@ -80,9 +90,18 @@ def _check_finite_metrics(metrics: dict[str, Any], *, step: int) -> None:
 
 
 def _weight_decay_mask(params: Any) -> Any:
-    """Heuristic: apply weight decay to matrices (ndim >= 2), not to biases/scales."""
+    """Heuristic: apply weight decay to matrices (ndim >= 2), not to biases/scales.
 
-    def mask_one(x):
+    :param Any params: Parameter pytree.
+    :return Any: Boolean mask pytree with True for parameters that should have weight decay.
+    """
+
+    def mask_one(x: Any) -> bool:
+        """Return True if x is a tensor with ndim >= 2.
+
+        :param Any x: Leaf value from parameter pytree.
+        :return bool: True if weight decay should apply.
+        """
         if not hasattr(x, "ndim"):
             return False
         return x.ndim >= 2
@@ -93,7 +112,12 @@ def _weight_decay_mask(params: Any) -> Any:
 def build_optimizer(
     cfg: Config, params: Any
 ) -> tuple[optax.GradientTransformation, Callable[[jax.Array], jax.Array]]:
-    """Create Optax optimizer + schedule function (for logging)."""
+    """Create Optax optimizer + schedule function (for logging).
+
+    :param Config cfg: Training configuration.
+    :param Any params: Model parameters (used to build weight decay mask).
+    :return tuple: (optimizer, lr_schedule) where lr_schedule maps step to learning rate.
+    """
 
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
@@ -122,6 +146,14 @@ def build_optimizer(
 def init_train_state(
     cfg: Config, *, params: Any, tx: optax.GradientTransformation, key: jax.Array
 ) -> TrainState:
+    """Initialize a fresh TrainState at step 0.
+
+    :param Config cfg: Training configuration (unused but kept for API consistency).
+    :param Any params: Model parameters.
+    :param optax.GradientTransformation tx: Optimizer transform.
+    :param jax.Array key: PRNG key for dropout.
+    :return TrainState: Initialized training state.
+    """
     opt_state = tx.init(params)
     return TrainState(
         step=jnp.array(0, dtype=jnp.int32), params=params, opt_state=opt_state, rng=key
@@ -129,9 +161,18 @@ def init_train_state(
 
 
 def _abstractify_tree(tree: Any) -> Any:
-    """Convert a pytree of arrays to ShapeDtypeStruct for Orbax restore."""
+    """Convert a pytree of arrays to ShapeDtypeStruct for Orbax restore.
 
-    def to_struct(x):
+    :param Any tree: Pytree of JAX arrays.
+    :return Any: Pytree of ShapeDtypeStruct with same structure.
+    """
+
+    def to_struct(x: jax.Array) -> jax.ShapeDtypeStruct:
+        """Convert a single array to its abstract shape/dtype specification.
+
+        :param jax.Array x: Concrete array.
+        :return jax.ShapeDtypeStruct: Abstract specification.
+        """
         return jax.ShapeDtypeStruct(x.shape, x.dtype)
 
     return jax.tree_util.tree_map(to_struct, tree)
@@ -153,6 +194,12 @@ def make_train_step(
 
     NOTE: We close over `static`, `tx`, and small config constants. This is fine.
     Do not close over dynamic shapes or python objects.
+
+    :param Config cfg: Training configuration.
+    :param Any static: Static (non-differentiable) model components from eqx.partition.
+    :param optax.GradientTransformation tx: Optimizer transform.
+    :param lr_schedule: Function mapping step number to learning rate.
+    :return Callable: Compiled train_step(state, batch) -> (new_state, metrics).
     """
 
     deterministic = derived_deterministic(cfg)
@@ -166,7 +213,18 @@ def make_train_step(
         segs: jax.Array,
         key: jax.Array | None,
         token_count: jax.Array,
-    ):
+    ) -> jax.Array:
+        """Compute token-weighted loss for a single micro-batch.
+
+        :param Any params: Model parameters.
+        :param jax.Array input_ids: Input token IDs [B, T].
+        :param jax.Array labels: Label token IDs [B, T].
+        :param jax.Array attn: Attention mask [B, T].
+        :param jax.Array segs: Segment IDs [B, T].
+        :param key: PRNG key for dropout, or None if deterministic.
+        :param jax.Array token_count: Number of valid tokens for weighting.
+        :return jax.Array: Weighted loss scalar.
+        """
         micro = Batch(
             input_ids=input_ids,
             labels=labels,
@@ -179,6 +237,12 @@ def make_train_step(
     loss_and_grad = eqx.filter_value_and_grad(micro_loss)
 
     def train_step(state: TrainState, batch: Batch) -> tuple[TrainState, dict[str, jax.Array]]:
+        """Execute one training step with scan-based gradient accumulation.
+
+        :param TrainState state: Current training state.
+        :param Batch batch: Input batch of shape [A, B, T].
+        :return tuple: (new_state, metrics_dict).
+        """
         # Split RNG: one for next state, one to generate per-micro dropout keys
         rng, step_key = jax.random.split(state.rng)
         micro_keys = jax.random.split(step_key, grad_accum)
@@ -188,7 +252,16 @@ def make_train_step(
         grad0 = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), state.params)
         token0 = jnp.zeros((), dtype=jnp.float32)
 
-        def body(carry, inputs):
+        def body(
+            carry: tuple[jax.Array, Any, jax.Array],
+            inputs: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
+        ) -> tuple[tuple[jax.Array, Any, jax.Array], None]:
+            """Scan body: accumulate loss and gradients for one micro-batch.
+
+            :param tuple carry: (loss_sum, grad_sum, token_sum) accumulators.
+            :param tuple inputs: (input_ids, labels, attn, segs, key) for one micro-batch.
+            :return tuple: (updated_carry, None).
+            """
             loss_sum, grad_sum, token_sum = carry
             in_ids, labs, attn, segs, k = inputs
             token_count = _count_tokens(labs, attn).astype(jnp.float32)
@@ -247,10 +320,11 @@ def run(
     - resume requires logging.run_dir to be set (existing run directory)
     - we restore both train_state and data iterator state when present
 
-    `resume`:
-      - "none": start fresh
-      - "latest": restore latest checkpoint
-      - int: restore specific checkpoint step
+    :param Config cfg: Fully validated training configuration.
+    :param config_path: Optional path to the source YAML config file.
+    :param resume: Resume mode - "none" (fresh), "latest", or specific step number.
+    :raises RuntimeError: If resume requested but checkpointing is disabled.
+    :return Path: Path to the run directory.
     """
 
     allow_existing = resume != "none"
