@@ -11,7 +11,10 @@ from typing import Any
 
 
 def apply_segment_ids_patch() -> bool:
-    """Monkeypatch megalodon_jax to accept segment_ids for block-diagonal attention."""
+    """Monkeypatch megalodon_jax to accept segment_ids for block-diagonal attention.
+
+    :return bool: True if the patch is applied or already present, False if unavailable.
+    """
 
     try:
         import inspect
@@ -35,6 +38,12 @@ def apply_segment_ids_patch() -> bool:
         return True
 
     def _apply_segment_mask(scores: jax.Array, segment_ids: jax.Array) -> jax.Array:
+        """Apply a block-diagonal mask based on segment IDs.
+
+        :param jax.Array scores: Attention scores of shape [B, H, L, L].
+        :param jax.Array segment_ids: Segment IDs of shape [B, L].
+        :return jax.Array: Masked scores.
+        """
         seg = segment_ids.astype(jnp.int32)
         valid = seg > 0
         same = seg[:, :, None] == seg[:, None, :]
@@ -54,6 +63,20 @@ def apply_segment_ids_patch() -> bool:
         key: jax.Array | None = None,
         segment_ids: jax.Array | None = None,
     ) -> jax.Array:
+        """Single-chunk attention with optional segment mask.
+
+        :param jax.Array q: Query tensor [B, L, H, Dh].
+        :param jax.Array k: Key tensor [B, L, H, Dh].
+        :param jax.Array v: Value tensor [B, L, H, Dv].
+        :param kv_mask: Optional key/value mask [B, L].
+        :param jnp.dtype accum_dtype: Accumulation dtype for matmul.
+        :param bool causal: Whether to apply causal masking.
+        :param float dropout_rate: Dropout rate for attention weights.
+        :param bool deterministic: If False, apply dropout.
+        :param key: PRNG key when dropout is enabled.
+        :param segment_ids: Optional segment IDs [B, L].
+        :return jax.Array: Output tensor [B, L, H, Dv].
+        """
         if segment_ids is None:
             return _orig_single(
                 q,
@@ -134,6 +157,22 @@ def apply_segment_ids_patch() -> bool:
         key: jax.Array | None = None,
         segment_ids: jax.Array | None = None,
     ) -> jax.Array:
+        """Chunked attention with optional segment mask.
+
+        :param jax.Array q: Query tensor [B, L, H, Dh].
+        :param jax.Array k: Key tensor [B, L, H, Dh].
+        :param jax.Array v: Value tensor [B, L, H, Dv].
+        :param int chunk_size: Chunk length for attention.
+        :param jax.Array start_index: Rotary start index.
+        :param rotary: Rotary embedding callable.
+        :param mask: Optional padding mask [B, L].
+        :param jnp.dtype accum_dtype: Accumulation dtype for matmul.
+        :param float dropout_rate: Dropout rate for attention weights.
+        :param bool deterministic: If False, apply dropout.
+        :param key: PRNG key when dropout is enabled.
+        :param segment_ids: Optional segment IDs [B, L].
+        :return jax.Array: Output tensor [B, L, H, Dv].
+        """
         if segment_ids is None:
             return _orig_multi(
                 q,
@@ -231,7 +270,11 @@ def apply_segment_ids_patch() -> bool:
         deterministic: bool = True,
         key: jax.Array | None = None,
         segment_ids: jax.Array | None = None,
-    ):
+    ) -> tuple[jax.Array, Any | None, jax.Array]:
+        """Patched ChunkedAttention call supporting segment IDs.
+
+        :return tuple: (output, cache, position) tuple.
+        """
         if segment_ids is None:
             return orig_chunked_call(
                 self,
@@ -273,7 +316,11 @@ def apply_segment_ids_patch() -> bool:
         deterministic: bool = True,
         key: jax.Array | None = None,
         segment_ids: jax.Array | None = None,
-    ):
+    ) -> tuple[jax.Array, LayerCache | None]:
+        """Patched MegalodonAttention call supporting segment IDs.
+
+        :return tuple: (output, new_cache) tuple.
+        """
         if segment_ids is None:
             return orig_attn_call(
                 self,
@@ -398,6 +445,10 @@ def apply_segment_ids_patch() -> bool:
         key: jax.Array | None,
         segment_ids: jax.Array | None = None,
     ) -> jax.Array:
+        """Checkpointed layer forward with optional segment IDs.
+
+        :return jax.Array: Layer output.
+        """
         out, _ = layer(
             x,
             cache=None,
@@ -420,7 +471,11 @@ def apply_segment_ids_patch() -> bool:
         deterministic: bool = True,
         key: jax.Array | None = None,
         segment_ids: jax.Array | None = None,
-    ):
+    ) -> tuple[jax.Array, LayerCache | None]:
+        """Patched MegalodonBlock call supporting segment IDs.
+
+        :return tuple: (output, new_cache) tuple.
+        """
         if segment_ids is None:
             return orig_block_call(
                 self,
@@ -468,7 +523,11 @@ def apply_segment_ids_patch() -> bool:
         deterministic: bool = True,
         key: jax.Array | None = None,
         segment_ids: jax.Array | None = None,
-    ):
+    ) -> tuple[jax.Array, ModelCache | None]:
+        """Patched MegalodonModel call supporting segment IDs.
+
+        :return tuple: (hidden, cache) tuple.
+        """
         if segment_ids is None:
             return orig_model_call(
                 self,
@@ -599,7 +658,11 @@ def apply_segment_ids_patch() -> bool:
         deterministic: bool = True,
         key: jax.Array | None = None,
         segment_ids: jax.Array | None = None,
-    ):
+    ) -> tuple[jax.Array, ModelCache | None]:
+        """Patched MegalodonForCausalLM call supporting segment IDs.
+
+        :return tuple: (logits, cache) tuple.
+        """
         if segment_ids is None:
             return orig_lm_call(
                 self,
@@ -668,7 +731,11 @@ def apply_segment_ids_patch() -> bool:
         deterministic: bool = True,
         key: jax.Array | None = None,
         segment_ids: jax.Array | None = None,
-    ):
+    ) -> jax.Array:
+        """Patched loss with optional segment IDs.
+
+        :return jax.Array: Scalar loss.
+        """
         if segment_ids is None:
             return orig_compute_loss(
                 self,

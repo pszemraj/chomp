@@ -331,6 +331,8 @@ class BinPackerState:
 
 @dataclass
 class _Bin:
+    """A single bin used during FFD packing."""
+
     capacity: int
     max_docs: int | None
     segments: list[np.ndarray] = field(default_factory=list)
@@ -340,6 +342,11 @@ class _Bin:
         self.remaining = int(self.capacity)
 
     def can_fit(self, seg: np.ndarray) -> bool:
+        """Return True if the segment can fit in this bin.
+
+        :param np.ndarray seg: Token segment to place in the bin.
+        :return bool: True if segment fits.
+        """
         if seg.size > self.remaining:
             return False
         if self.max_docs is not None:
@@ -347,6 +354,11 @@ class _Bin:
         return True
 
     def add(self, seg: np.ndarray) -> None:
+        """Add a segment to the bin.
+
+        :param np.ndarray seg: Token segment to add.
+        :raises ValueError: If the segment does not fit.
+        """
         if not self.can_fit(seg):
             raise ValueError("segment does not fit in bin")
         self.segments.append(seg)
@@ -525,6 +537,11 @@ class BinPacker:
             self._ready.append((tokens, segs))
 
     def _render_bin(self, b: _Bin) -> tuple[np.ndarray, np.ndarray]:
+        """Render a bin into (tokens, segment_ids) arrays.
+
+        :param _Bin b: Bin with packed segments.
+        :return tuple[np.ndarray, np.ndarray]: Token and segment arrays of length seq_len+1.
+        """
         tokens = np.full((self._capacity,), self._pad_id, dtype=np.int32)
         segs = np.zeros((self._capacity,), dtype=np.int32)
 
