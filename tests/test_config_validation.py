@@ -103,3 +103,8 @@ def test_log_file_must_be_non_empty():
     bad = replace(cfg, logging=bad_logging)
     with pytest.raises(ValueError, match="log_file"):
         validate_config(bad)
+
+
+def test_default_init_mode_is_he():
+    cfg = Config()
+    assert cfg.model.init_mode == "he"

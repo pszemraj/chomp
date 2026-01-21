@@ -79,7 +79,7 @@ class ModelConfig:
     bos_token_id: int = 1
     eos_token_id: int = 2
     max_positions: int = 1_000_000
-    init_mode: Literal["gaussian", "xavier", "he", "bert", "none"] = "gaussian"
+    init_mode: Literal["gaussian", "xavier", "he", "bert", "none"] = "he"
     use_checkpoint: bool = False
     output_size: int = -1
 

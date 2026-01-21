@@ -32,6 +32,7 @@ Key fields (megalodon backend):
 - `model.model_dim`, `model.num_layers`, `model.num_heads`
 - `model.chunk_size` (must divide `train.seq_len`)
 - `model.segment_masking` (block-diagonal attention on packed segments)
+- `model.init_mode` (default: `he`)
 
 Dtypes are configured as strings and validated:
 
