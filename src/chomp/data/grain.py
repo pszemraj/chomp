@@ -68,19 +68,13 @@ def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchItera
 
     :param Config cfg: Training configuration.
     :param tokenizer: Tokenizer instance for encoding text.
-    :raises RuntimeError: If grain is not installed.
-    :raises ValueError: If packing_mode is not 'bin'.
-    :return GrainTrainBatchIterator: Iterator yielding Batch objects.
+        :raises RuntimeError: If grain is not installed.
+        :return GrainTrainBatchIterator: Iterator yielding Batch objects.
     """
     try:
         import grain.python as grain
     except Exception as exc:  # pragma: no cover - optional dependency
-        raise RuntimeError(
-            "Grain is not installed. Install with `pip install grain` or disable data.use_grain."
-        ) from exc
-
-    if cfg.data.packing_mode != "bin":
-        raise ValueError("data.use_grain requires data.packing_mode='bin'")
+        raise RuntimeError("Grain is not installed. Install with `pip install grain`.") from exc
 
     class _TrainBatchDatasetIterator(grain.DatasetIterator):  # type: ignore[misc]
         """DatasetIterator that delegates to TrainBatchIterator."""

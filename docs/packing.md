@@ -5,8 +5,8 @@ training sequences and how boundary-related loss masking works.
 
 ## Packing modes
 
-chomp supports two packing strategies, both emitting fixed-length windows of
-`seq_len + 1`:
+chomp uses a Grain-backed input pipeline and supports two packing strategies,
+both emitting fixed-length windows of `seq_len + 1`:
 
 1) **Sequential packer** (`data.packing_mode: sequential`, default)
    - Appends tokenized documents into a rolling buffer and emits windows in

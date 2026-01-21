@@ -187,8 +187,7 @@ class DataConfig:
     mask_boundary_loss: bool = True
     train_on_eos: bool = True
 
-    # Grain pipeline toggles (optional).
-    use_grain: bool = False
+    # Grain pipeline settings.
     grain_prefetch: int = 0
 
     # Tokenizer
@@ -557,9 +556,6 @@ def validate_config(cfg: Config) -> None:
 
     if cfg.data.grain_prefetch < 0:
         _vfail(f"data.grain_prefetch must be >=0, got {cfg.data.grain_prefetch}")
-    if cfg.data.use_grain and cfg.data.packing_mode != "bin":
-        _vfail("data.use_grain requires data.packing_mode='bin'")
-
     # HF streaming robustness knobs
     if cfg.data.max_retries < 0:
         _vfail(f"data.max_retries must be >=0, got {cfg.data.max_retries}")

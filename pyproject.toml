@@ -30,6 +30,7 @@ dependencies = [
   "megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git",
   "PyYAML>=6.0",
   "tqdm>=4.66",
+  "grain>=0.2.15",
   # Phase 3: checkpointing
   "orbax-checkpoint==0.11.31",
   # Phase 4+: real streaming data
@@ -39,7 +40,6 @@ dependencies = [
 [project.optional-dependencies]
 # Optional HF tokenizer support (ByteTokenizer requires no extra deps)
 hf = ["transformers>=4.40.0", "tokenizers>=0.15.0"]
-grain = ["grain>=0.2.15"]
 dev = ["pytest>=7.4", "ruff>=0.4.0"]
 
 [project.scripts]

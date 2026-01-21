@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, TrainConfig
 from chomp.data.pipeline import build_train_iterator
 
 
 def test_grain_iterator_state_roundtrip():
-    pytest.importorskip("grain")
-
     cfg = Config(
         model=ModelConfig(
             backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=True
@@ -25,7 +22,6 @@ def test_grain_iterator_state_roundtrip():
             packing_max_docs_per_bin=None,
             mask_boundary_loss=True,
             train_on_eos=True,
-            use_grain=True,
             grain_prefetch=2,
             tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
         ),
