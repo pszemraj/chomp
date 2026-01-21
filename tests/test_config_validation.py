@@ -63,3 +63,11 @@ def test_invalid_packing_mode():
     bad = replace(cfg, data=bad_data)
     with pytest.raises(ValueError, match="packing_mode"):
         validate_config(bad)
+
+
+def test_use_grain_requires_bin_packing():
+    cfg = _base_cfg()
+    bad_data = replace(cfg.data, use_grain=True, packing_mode="sequential")
+    bad = replace(cfg, data=bad_data)
+    with pytest.raises(ValueError, match="use_grain"):
+        validate_config(bad)

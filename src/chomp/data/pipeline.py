@@ -359,6 +359,8 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
         "max_docs_per_bin": d.packing_max_docs_per_bin,
         "mask_boundary_loss": d.mask_boundary_loss,
         "train_on_eos": d.train_on_eos,
+        "use_grain": d.use_grain,
+        "grain_prefetch": d.grain_prefetch,
     }
 
     return {
@@ -531,13 +533,17 @@ class TrainBatchIterator:
             self._packer.set_state(state["packer"])
 
 
-def build_train_iterator(cfg: Config, *, tokenizer: Tokenizer | None = None) -> TrainBatchIterator:
+def build_train_iterator(cfg: Config, *, tokenizer: Tokenizer | None = None) -> Any:
     """Build the training batch iterator.
 
     :param Config cfg: Training configuration.
     :param tokenizer: Optional pre-built tokenizer; built from config if None.
-    :return TrainBatchIterator: Iterator yielding fixed-shape Batch objects.
+    :return Any: Iterator yielding fixed-shape Batch objects.
     """
     if tokenizer is None:
         cfg, tokenizer = prepare_tokenizer_and_config(cfg)
+    if cfg.data.use_grain:
+        from chomp.data.grain import build_grain_iterator
+
+        return build_grain_iterator(cfg, tokenizer=tokenizer)
     return TrainBatchIterator(cfg, tokenizer=tokenizer)

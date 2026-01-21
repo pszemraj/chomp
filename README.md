@@ -45,6 +45,12 @@ If you want to use `data.tokenizer.kind: hf`:
 pip install -e '.[hf]'
 ```
 
+### 5) Optional: Grain pipeline support
+
+```bash
+pip install -e '.[grain]'
+```
+
 ### Tokenizer defaults + vocab rounding
 
 - Default HF tokenizer: `BEE-spoke-data/bpe-tokenizer-32k-smolNeoX`
@@ -113,6 +119,7 @@ Each run directory includes a tokenizer snapshot under `tokenizer/`.
 - **Segment masking toggle**: set `model.segment_masking` to enable/disable block-diagonal attention for packed sequences.
 - **Boundary-aware loss masking**: `data.mask_boundary_loss` sets labels at segment boundaries to `-100` to avoid cross-document loss; `data.train_on_eos` controls EOS supervision.
 - **Bin packing optional**: set `data.packing_mode: bin` with `data.packing_buffer_docs` to enable FFD packing (pads to fixed length).
+- **Grain pipeline optional**: set `data.use_grain: true` and tune `data.grain_prefetch` for threaded prefetch.
 - **Arrays-only TrainState**: checkpoint-friendly; no hidden Python objects in the jitted state.
 - **Resume is a contract**: train_state *and* data iterator state are persisted.
 - **Training never uses cache**: cache is an inference concern.

@@ -39,6 +39,7 @@ dependencies = [
 [project.optional-dependencies]
 # Optional HF tokenizer support (ByteTokenizer requires no extra deps)
 hf = ["transformers>=4.40.0", "tokenizers>=0.15.0"]
+grain = ["grain>=0.2.15"]
 dev = ["pytest>=7.4", "ruff>=0.4.0"]
 
 [project.scripts]
