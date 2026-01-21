@@ -20,12 +20,10 @@ Orbax notes:
 
 from __future__ import annotations
 
-import json
-import os
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -64,7 +62,9 @@ def _safe_version(pkg: str) -> str | None:
         return None
 
 
-def build_meta(*, step: int, config: dict[str, Any], data_fingerprint: dict[str, Any]) -> CheckpointMeta:
+def build_meta(
+    *, step: int, config: dict[str, Any], data_fingerprint: dict[str, Any]
+) -> CheckpointMeta:
     import platform
 
     return CheckpointMeta(

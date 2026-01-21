@@ -33,7 +33,14 @@ import jax.numpy as jnp
 import optax
 from tqdm import tqdm
 
-from chomp.ckpt import build_meta, default_ckpt_dir, make_manager, restore_at_step, restore_latest, save
+from chomp.ckpt import (
+    build_meta,
+    default_ckpt_dir,
+    make_manager,
+    restore_at_step,
+    restore_latest,
+    save,
+)
 from chomp.config import Config, derived_deterministic
 from chomp.data import build_train_iterator, data_fingerprint
 from chomp.model import build_model, training_loss
@@ -55,7 +62,9 @@ def _weight_decay_mask(params: Any) -> Any:
     return jax.tree_util.tree_map(mask_one, params)
 
 
-def build_optimizer(cfg: Config, params: Any) -> tuple[optax.GradientTransformation, Callable[[jax.Array], jax.Array]]:
+def build_optimizer(
+    cfg: Config, params: Any
+) -> tuple[optax.GradientTransformation, Callable[[jax.Array], jax.Array]]:
     """Create Optax optimizer + schedule function (for logging)."""
 
     schedule = optax.warmup_cosine_decay_schedule(
@@ -82,9 +91,13 @@ def build_optimizer(cfg: Config, params: Any) -> tuple[optax.GradientTransformat
     return tx, schedule
 
 
-def init_train_state(cfg: Config, *, params: Any, tx: optax.GradientTransformation, key: jax.Array) -> TrainState:
+def init_train_state(
+    cfg: Config, *, params: Any, tx: optax.GradientTransformation, key: jax.Array
+) -> TrainState:
     opt_state = tx.init(params)
-    return TrainState(step=jnp.array(0, dtype=jnp.int32), params=params, opt_state=opt_state, rng=key)
+    return TrainState(
+        step=jnp.array(0, dtype=jnp.int32), params=params, opt_state=opt_state, rng=key
+    )
 
 
 def _abstractify_tree(tree: Any) -> Any:
@@ -117,7 +130,9 @@ def make_train_step(
     deterministic = derived_deterministic(cfg)
     grad_accum = int(cfg.train.grad_accum)
 
-    def micro_loss(params: Any, input_ids: jax.Array, labels: jax.Array, attn: jax.Array, key: jax.Array | None):
+    def micro_loss(
+        params: Any, input_ids: jax.Array, labels: jax.Array, attn: jax.Array, key: jax.Array | None
+    ):
         micro = Batch(
             input_ids=input_ids,
             labels=labels,
@@ -157,7 +172,9 @@ def make_train_step(
         updates, new_opt_state = tx.update(grads, state.opt_state, state.params)
         new_params = optax.apply_updates(state.params, updates)
 
-        new_state = TrainState(step=state.step + 1, params=new_params, opt_state=new_opt_state, rng=rng)
+        new_state = TrainState(
+            step=state.step + 1, params=new_params, opt_state=new_opt_state, rng=rng
+        )
 
         lr = lr_schedule(state.step)
         metrics = {
@@ -222,7 +239,9 @@ def run(
     # Checkpoint manager
     manager = None
     if cfg.checkpoint.enabled:
-        ckpt_dir = Path(cfg.checkpoint.root_dir) if cfg.checkpoint.root_dir else default_ckpt_dir(run_dir)
+        ckpt_dir = (
+            Path(cfg.checkpoint.root_dir) if cfg.checkpoint.root_dir else default_ckpt_dir(run_dir)
+        )
         manager = make_manager(
             ckpt_dir,
             max_to_keep=cfg.checkpoint.max_to_keep,
@@ -236,9 +255,13 @@ def run(
         if manager is None:
             raise RuntimeError("resume requested but checkpointing is disabled")
         if resume == "latest":
-            step_r, state, data_state, _meta = restore_latest(manager, abstract_train_state=abstract_state)
+            step_r, state, data_state, _meta = restore_latest(
+                manager, abstract_train_state=abstract_state
+            )
         else:
-            step_r, state, data_state, _meta = restore_at_step(manager, step=int(resume), abstract_train_state=abstract_state)
+            step_r, state, data_state, _meta = restore_at_step(
+                manager, step=int(resume), abstract_train_state=abstract_state
+            )
 
         print(f"[chomp] resumed from checkpoint step {step_r}")
         if data_state is not None:
@@ -253,7 +276,9 @@ def run(
     # Determine starting step from TrainState
     start_step = int(jax.device_get(state.step))
     if start_step >= cfg.train.steps:
-        print(f"[chomp] start_step ({start_step}) >= train.steps ({cfg.train.steps}); nothing to do")
+        print(
+            f"[chomp] start_step ({start_step}) >= train.steps ({cfg.train.steps}); nothing to do"
+        )
         return run_dir
 
     tokens_per_step = int(cfg.train.grad_accum) * int(cfg.train.batch_size) * int(cfg.train.seq_len)
@@ -266,7 +291,9 @@ def run(
                 batch = jax.device_put(batch)
 
             # Batch placement validation (real check)
-            if cfg.debug.check_device_every > 0 and (int(jax.device_get(state.step)) % cfg.debug.check_device_every == 0):
+            if cfg.debug.check_device_every > 0 and (
+                int(jax.device_get(state.step)) % cfg.debug.check_device_every == 0
+            ):
                 assert_batch_on_device(batch, allow_cpu=cfg.train.allow_cpu)
 
             # Step (compile happens on first call)
@@ -290,7 +317,9 @@ def run(
 
             # Checkpoint save (after state updated)
             if manager is not None and (step_i % int(cfg.checkpoint.save_every) == 0):
-                meta = build_meta(step=step_i, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg))
+                meta = build_meta(
+                    step=step_i, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg)
+                )
                 save(
                     manager,
                     step=step_i,

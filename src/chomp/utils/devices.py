@@ -9,9 +9,6 @@ So we fail fast unless explicitly allowed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable
-
 import jax
 
 
@@ -27,7 +24,7 @@ def validate_default_device(*, allow_cpu: bool) -> None:
         raise RuntimeError(
             "JAX is using CPU backend but train.allow_cpu=false. "
             "Install a CUDA-enabled jaxlib and ensure CUDA is visible. "
-            "Set train.allow_cpu=true only for debugging." 
+            "Set train.allow_cpu=true only for debugging."
         )
 
 
@@ -62,5 +59,5 @@ def assert_batch_on_device(batch, *, allow_cpu: bool) -> None:
     if plat == "cpu" and not allow_cpu:
         raise RuntimeError(
             "Batch appears to be on CPU but train.allow_cpu=false. "
-            "This usually means you don't have CUDA-enabled jaxlib installed." 
+            "This usually means you don't have CUDA-enabled jaxlib installed."
         )

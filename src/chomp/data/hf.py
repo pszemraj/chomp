@@ -134,7 +134,7 @@ class HFStreamingTextStream:
                 self._build()
                 continue
 
-            except Exception as e:
+            except Exception:
                 if attempt >= self._spec.max_retries:
                     raise
 

@@ -29,7 +29,9 @@ def setup_python_logging(level: str) -> None:
     )
 
 
-def create_run_dir(cfg: Config, *, config_path: str | Path | None, allow_existing: bool = False) -> Path:
+def create_run_dir(
+    cfg: Config, *, config_path: str | Path | None, allow_existing: bool = False
+) -> Path:
     """Create (or reuse) a run directory.
 
     - If cfg.logging.run_dir is None: always create a fresh timestamped run dir.

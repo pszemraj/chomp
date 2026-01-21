@@ -1,6 +1,5 @@
-import pytest
-
 import jax
+import pytest
 
 from chomp.utils.devices import validate_default_device
 

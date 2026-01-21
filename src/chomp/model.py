@@ -17,7 +17,6 @@ Backends:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 import equinox as eqx
@@ -26,7 +25,6 @@ import jax.numpy as jnp
 import optax
 
 from chomp.config import Config, dtype_from_str
-
 
 # ------------------------------ Dummy backend ------------------------------
 

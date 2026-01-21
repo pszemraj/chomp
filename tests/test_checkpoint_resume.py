@@ -21,7 +21,17 @@ from pathlib import Path
 import jax
 
 from chomp.ckpt import default_ckpt_dir, make_manager, restore_at_step
-from chomp.config import CheckpointConfig, Config, DataConfig, DebugConfig, LoggingConfig, ModelConfig, OptimConfig, TokenizerConfig, TrainConfig
+from chomp.config import (
+    CheckpointConfig,
+    Config,
+    DataConfig,
+    DebugConfig,
+    LoggingConfig,
+    ModelConfig,
+    OptimConfig,
+    TokenizerConfig,
+    TrainConfig,
+)
 from chomp.model import build_model
 from chomp.train import build_optimizer, init_train_state, run
 from chomp.utils.tree import tree_allclose
@@ -45,7 +55,9 @@ def _restore_state(run_dir: Path, cfg: Config, step: int):
 
     ckpt_dir = default_ckpt_dir(run_dir)
     mgr = make_manager(ckpt_dir, max_to_keep=5, save_every=1, async_save=False)
-    _, state, _data_state, _meta = restore_at_step(mgr, step=step, abstract_train_state=abstract_state)
+    _, state, _data_state, _meta = restore_at_step(
+        mgr, step=step, abstract_train_state=abstract_state
+    )
     return state
 
 
@@ -69,10 +81,14 @@ def test_resume_matches_continuous(tmp_path: Path):
             allow_cpu=True,
             log_every=1000,
         ),
-        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0, total_steps=10),
+        optim=OptimConfig(
+            lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0, total_steps=10
+        ),
         checkpoint=CheckpointConfig(enabled=True, save_every=1, max_to_keep=5, async_save=False),
         debug=DebugConfig(nan_check=True, check_device_every=0),
-        logging=LoggingConfig(project="chomp", run_dir=None, metrics_file="metrics.jsonl", level="INFO"),
+        logging=LoggingConfig(
+            project="chomp", run_dir=None, metrics_file="metrics.jsonl", level="INFO"
+        ),
     )
 
     K = 4
@@ -80,17 +96,23 @@ def test_resume_matches_continuous(tmp_path: Path):
 
     # --- Interrupted + resume run ---
     run_a = tmp_path / "run_a"
-    cfg_a1 = replace(base, logging=replace(base.logging, run_dir=str(run_a)), train=replace(base.train, steps=K))
+    cfg_a1 = replace(
+        base, logging=replace(base.logging, run_dir=str(run_a)), train=replace(base.train, steps=K)
+    )
     run(cfg_a1, config_path=None, resume="none")
 
-    cfg_a2 = replace(base, logging=replace(base.logging, run_dir=str(run_a)), train=replace(base.train, steps=N))
+    cfg_a2 = replace(
+        base, logging=replace(base.logging, run_dir=str(run_a)), train=replace(base.train, steps=N)
+    )
     run(cfg_a2, config_path=None, resume="latest")
 
     state_a = _restore_state(run_a, cfg_a2, step=N)
 
     # --- Continuous run ---
     run_b = tmp_path / "run_b"
-    cfg_b = replace(base, logging=replace(base.logging, run_dir=str(run_b)), train=replace(base.train, steps=N))
+    cfg_b = replace(
+        base, logging=replace(base.logging, run_dir=str(run_b)), train=replace(base.train, steps=N)
+    )
     run(cfg_b, config_path=None, resume="none")
 
     state_b = _restore_state(run_b, cfg_b, step=N)

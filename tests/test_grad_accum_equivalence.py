@@ -45,7 +45,9 @@ def test_grad_accum_equivalence_dummy_local_text():
             allow_cpu=True,
             deterministic=True,
         ),
-        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0, total_steps=10),
+        optim=OptimConfig(
+            lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0, total_steps=10
+        ),
     )
 
     key = jax.random.PRNGKey(cfg.train.seed)

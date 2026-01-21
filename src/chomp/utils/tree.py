@@ -12,7 +12,7 @@ Keep it minimal: this is not a generic library.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 import jax
 import jax.numpy as jnp

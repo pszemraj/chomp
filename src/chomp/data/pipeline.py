@@ -19,16 +19,16 @@ This pipeline keeps debug sources (local_text) but *still* exercises tokenize+pa
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Iterable, Iterator, Protocol
 import hashlib
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 import numpy as np
 
 from chomp.config import Config
 from chomp.types import Batch
 
-from .hf import HFStreamSpec, HFStreamingTextStream, LocalTextStream
+from .hf import HFStreamingTextStream, HFStreamSpec, LocalTextStream
 from .pack import TokenPacker
 
 
@@ -193,7 +193,6 @@ class TrainBatchIterator:
         self._T = int(cfg.train.seq_len)
         self._device_put = bool(cfg.data.device_put)
 
-
     def __iter__(self) -> "TrainBatchIterator":
         return self
 
@@ -230,7 +229,6 @@ class TrainBatchIterator:
 
             batch = jax.device_put(batch)
         return batch
-
 
     # -------- checkpoint hooks --------
 

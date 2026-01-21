@@ -17,12 +17,11 @@ Design stance (hard-earned):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
 import yaml
-
 
 Backend = Literal["dummy", "megalodon"]
 DatasetBackend = Literal["hf", "local_text"]
@@ -326,9 +325,7 @@ def load_config(path: str | Path, overrides: Iterable[str] | None = None) -> Con
     if overrides:
         for o in overrides:
             if "=" not in o:
-                raise ValueError(
-                    f"Invalid override {o!r}. Expected format like train.steps=123"
-                )
+                raise ValueError(f"Invalid override {o!r}. Expected format like train.steps=123")
             k, v = o.split("=", 1)
             cfg = _set_by_dotted_path(cfg, k.strip(), v.strip())
 
@@ -452,7 +449,6 @@ def validate_config(cfg: Config) -> None:
         _vfail(f"data.retry_delay_sec must be >=0, got {cfg.data.retry_delay_sec}")
     if cfg.data.state_update_interval <= 0:
         _vfail(f"data.state_update_interval must be >0, got {cfg.data.state_update_interval}")
-
 
     # Tokenizer
     tok = cfg.data.tokenizer

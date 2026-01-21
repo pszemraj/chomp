@@ -19,6 +19,6 @@ Later:
 
 from __future__ import annotations
 
-from .pipeline import build_train_iterator, data_fingerprint, build_tokenizer
+from .pipeline import build_tokenizer, build_train_iterator, data_fingerprint
 
 __all__ = ["build_train_iterator", "data_fingerprint", "build_tokenizer"]
