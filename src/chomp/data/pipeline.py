@@ -46,6 +46,7 @@ class Tokenizer(Protocol):
 
 
 logger = logging.getLogger(__name__)
+_IGNORE_INDEX = -100
 
 
 @dataclass
@@ -416,6 +417,7 @@ class TrainBatchIterator:
         self._B = int(cfg.train.batch_size)
         self._T = int(cfg.train.seq_len)
         self._device_put = bool(cfg.data.device_put)
+        self._segment_masking = bool(cfg.model.segment_masking)
 
     def __iter__(self) -> TrainBatchIterator:
         return self
@@ -436,6 +438,9 @@ class TrainBatchIterator:
             inp = seq[:-1]
             lab = seq[1:]
             seg = segs[:-1]
+            if self._segment_masking:
+                same = (segs[1:] == segs[:-1]) & (segs[1:] > 0) & (segs[:-1] > 0)
+                lab = np.where(same, lab, _IGNORE_INDEX).astype(np.int32)
             seqs.append((inp, lab, seg))
 
         # Stack -> [A*B, T]

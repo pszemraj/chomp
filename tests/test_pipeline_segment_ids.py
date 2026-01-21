@@ -10,7 +10,9 @@ from chomp.data.pipeline import build_train_iterator
 
 def test_pipeline_segment_ids_multiple_docs():
     cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
+        model=ModelConfig(
+            backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=True
+        ),
         data=DataConfig(
             backend="local_text",
             repeat=True,
@@ -34,3 +36,8 @@ def test_pipeline_segment_ids_multiple_docs():
     unique = np.unique(segs)
     assert unique.size >= 2
     assert np.all(unique > 0)
+
+    boundary = segs[1:] != segs[:-1]
+    assert boundary.any()
+    masked_labels = batch.labels[0, 0][:-1][boundary]
+    assert np.all(masked_labels == -100)

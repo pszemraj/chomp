@@ -111,6 +111,7 @@ Each run directory includes a tokenizer snapshot under `tokenizer/`.
 - **Compile once**: fixed shapes; no dynamic padding; grad accumulation inside the compiled step.
 - **Token-weighted GA**: gradient accumulation scales by valid token count (correct with masks/padding).
 - **Segment masking toggle**: set `model.segment_masking` to enable/disable block-diagonal attention for packed sequences.
+- **Boundary-aware loss masking**: when `model.segment_masking=true`, labels at segment boundaries are set to `-100` to avoid cross-document loss.
 - **Arrays-only TrainState**: checkpoint-friendly; no hidden Python objects in the jitted state.
 - **Resume is a contract**: train_state *and* data iterator state are persisted.
 - **Training never uses cache**: cache is an inference concern.

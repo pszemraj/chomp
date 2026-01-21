@@ -36,7 +36,8 @@ class Batch(eqx.Module):
     """A fixed-shape training batch.
 
     All fields are arrays. `attention_mask` is always present.
-    `segment_ids` assigns packed-document IDs per position.
+    `segment_ids` assigns packed-document IDs per position. `labels` may include
+    ignore_index (-100) at packed-document boundaries.
     """
 
     input_ids: jax.Array
