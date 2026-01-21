@@ -59,7 +59,7 @@ class DummyLM(eqx.Module):
         deterministic: bool = True,
         key: jax.Array | None = None,
     ) -> jax.Array:
-        x = self.embed(input_ids)  # [B, T, D]
+        x = self.embed.weight[input_ids]  # [B, T, D]
         if not deterministic:
             if key is None:
                 raise ValueError("DummyLM requires a PRNG key when deterministic=False")

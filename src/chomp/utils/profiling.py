@@ -40,7 +40,13 @@ def step_annotation(name: str) -> Iterator[None]:
     """Annotate a region as a step (best-effort)."""
 
     try:
-        with jax.profiler.StepTraceAnnotation(name):
-            yield
+        ctx = jax.profiler.StepTraceAnnotation(name)
     except Exception:
+        ctx = None
+
+    if ctx is None:
+        yield
+        return
+
+    with ctx:
         yield

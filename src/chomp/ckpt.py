@@ -104,7 +104,7 @@ def make_manager(ckpt_dir: Path, *, max_to_keep: int, save_every: int, async_sav
 
     import orbax.checkpoint as ocp
 
-    ckpt_dir = Path(ckpt_dir)
+    ckpt_dir = Path(ckpt_dir).resolve()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     options = ocp.CheckpointManagerOptions(
