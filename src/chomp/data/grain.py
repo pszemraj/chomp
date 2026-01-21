@@ -23,13 +23,15 @@ class _IteratorProtocol(Protocol):
 class GrainTrainBatchIterator:
     """Iterator wrapper that runs the pipeline through Grain."""
 
-    def __init__(self, *, ds: Any) -> None:
+    def __init__(self, *, ds: Any, packing_mode: str) -> None:
         """Initialize the Grain-backed iterator.
 
         :param ds: Grain IterDataset yielding Batch objects.
+        :param str packing_mode: Packing mode name for metrics.
         """
         self._ds = ds
         self._it: _IteratorProtocol = iter(ds)
+        self._packing_mode = str(packing_mode)
         self._last_stats: dict[str, float | int | str] = {}
 
     def __iter__(self) -> GrainTrainBatchIterator:
@@ -42,7 +44,7 @@ class GrainTrainBatchIterator:
         capacity = int(attn.size)
         utilization = float(tokens_used / capacity) if capacity > 0 else 0.0
         self._last_stats = {
-            "packing_mode": "bin",
+            "packing_mode": self._packing_mode,
             "packing_tokens": tokens_used,
             "packing_capacity": capacity,
             "packing_utilization": utilization,
@@ -124,4 +126,4 @@ def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchItera
             ds, prefetch_buffer_size=int(cfg.data.grain_prefetch)
         )
 
-    return GrainTrainBatchIterator(ds=ds)
+    return GrainTrainBatchIterator(ds=ds, packing_mode=cfg.data.packing_mode)

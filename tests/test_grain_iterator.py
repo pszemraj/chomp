@@ -38,6 +38,8 @@ def test_grain_iterator_state_roundtrip():
 
     it = build_train_iterator(cfg)
     _ = next(it)
+    stats = it.get_stats()
+    assert stats.get("packing_mode") == cfg.data.packing_mode
     state = it.get_state()
 
     next_a = next(it)

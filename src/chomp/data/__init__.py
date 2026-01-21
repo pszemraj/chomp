@@ -8,13 +8,10 @@ trainer works without exercising streaming/tokenization/packing.
 
 From this point forward, training should use *real* data through this module.
 
-v0 (this draft):
+v0:
 - HF streaming or local_text (offline)
 - Tokenize + pack to fixed [A,B,T]
-
-Later:
-- Grain pipeline + iterator checkpointing lives here, but we keep the public
-  contract the same: `build_train_iterator(cfg)` yields `Batch` objects.
+- Grain-backed iterator with checkpointable state
 """
 
 from __future__ import annotations

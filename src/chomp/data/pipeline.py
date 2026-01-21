@@ -187,6 +187,30 @@ def build_tokenizer(cfg: Config) -> Tokenizer:
     raise ValueError(f"Unknown tokenizer.kind: {tok.kind!r}")
 
 
+def _build_hf_stream(cfg: Config, *, split: str, repeat: bool) -> HFStreamingTextStream:
+    """Build an HF streaming text stream from config.
+
+    :param Config cfg: Training configuration.
+    :param str split: Dataset split name.
+    :param bool repeat: Whether to repeat the stream when exhausted.
+    :return HFStreamingTextStream: Streaming text stream wrapper.
+    """
+    spec = HFStreamSpec(
+        dataset=cfg.data.hf_dataset,
+        name=cfg.data.hf_name,
+        split=split,
+        text_key=cfg.data.text_key,
+        shuffle=cfg.data.shuffle,
+        shuffle_buffer_size=cfg.data.shuffle_buffer_size,
+        seed=cfg.data.seed,
+        repeat=repeat,
+        max_retries=cfg.data.max_retries,
+        retry_delay_sec=cfg.data.retry_delay_sec,
+        state_update_interval=cfg.data.state_update_interval,
+    )
+    return HFStreamingTextStream(spec)
+
+
 def _round_up_to_multiple(value: int, multiple: int) -> int:
     """Round value up to the nearest multiple for aligned tensor shapes.
 
@@ -406,20 +430,7 @@ def load_or_create_eval_texts(cfg: Config, *, run_dir: Path, allow_existing: boo
             split_candidates.append(cfg.data.hf_split)
         for split in split_candidates:
             try:
-                spec = HFStreamSpec(
-                    dataset=cfg.data.hf_dataset,
-                    name=cfg.data.hf_name,
-                    split=split,
-                    text_key=cfg.data.text_key,
-                    shuffle=cfg.data.shuffle,
-                    shuffle_buffer_size=cfg.data.shuffle_buffer_size,
-                    seed=cfg.data.seed,
-                    repeat=False,
-                    max_retries=cfg.data.max_retries,
-                    retry_delay_sec=cfg.data.retry_delay_sec,
-                    state_update_interval=cfg.data.state_update_interval,
-                )
-                stream = HFStreamingTextStream(spec)
+                stream = _build_hf_stream(cfg, split=split, repeat=False)
                 texts = _collect_texts(stream, max_samples)
                 split_used = split
                 break
@@ -538,20 +549,9 @@ class TrainBatchIterator:
         if text_stream is not None:
             self._text_stream = text_stream
         elif cfg.data.backend == "hf":
-            spec = HFStreamSpec(
-                dataset=cfg.data.hf_dataset,
-                name=cfg.data.hf_name,
-                split=cfg.data.hf_split,
-                text_key=cfg.data.text_key,
-                shuffle=cfg.data.shuffle,
-                shuffle_buffer_size=cfg.data.shuffle_buffer_size,
-                seed=cfg.data.seed,
-                repeat=cfg.data.repeat,
-                max_retries=cfg.data.max_retries,
-                retry_delay_sec=cfg.data.retry_delay_sec,
-                state_update_interval=cfg.data.state_update_interval,
+            self._text_stream = _build_hf_stream(
+                cfg, split=cfg.data.hf_split, repeat=cfg.data.repeat
             )
-            self._text_stream = HFStreamingTextStream(spec)
         elif cfg.data.backend == "local_text":
             self._text_stream = LocalTextStream(text=cfg.data.local_text, repeat=cfg.data.repeat)
         else:
