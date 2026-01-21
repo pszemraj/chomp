@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 
-def apply_segment_ids_patch() -> None:
+def apply_segment_ids_patch() -> bool:
     """Monkeypatch megalodon_jax to accept segment_ids for block-diagonal attention."""
 
     try:
@@ -26,13 +26,13 @@ def apply_segment_ids_patch() -> None:
         from megalodon_jax.ops import matmul_3d_weight
         from megalodon_jax.types import EMAState, LayerCache, ModelCache
     except Exception:  # pragma: no cover - optional dependency
-        return
+        return False
 
     if "segment_ids" in inspect.signature(model_mod.MegalodonForCausalLM.compute_loss).parameters:
-        return
+        return True
 
     if getattr(attn_mod, "_CHOMP_SEGMENT_IDS_PATCHED", False):
-        return
+        return True
 
     def _apply_segment_mask(scores: jax.Array, segment_ids: jax.Array) -> jax.Array:
         seg = segment_ids.astype(jnp.int32)
@@ -715,21 +715,31 @@ def apply_segment_ids_patch() -> None:
             shift_attn_mask = attention_mask[:, 1:]
             valid_mask = valid_mask & shift_attn_mask
 
-        vocab_size = self.config.vocab_size
-        valid_mask = valid_mask & ((shift_labels >= 0) & (shift_labels < vocab_size))
+        vocab_size = shift_logits.shape[-1]
+        has_invalid_labels = jnp.any(
+            valid_mask & ((shift_labels < 0) | (shift_labels >= vocab_size))
+        )
+        shift_labels = eqx.error_if(
+            shift_labels,
+            has_invalid_labels,
+            f"labels contain out-of-bounds values. Valid range: [0, {vocab_size})",
+        )
 
         safe_labels = jnp.where(valid_mask, shift_labels, 0)
 
-        log_probs = jax.nn.log_softmax(shift_logits, axis=-1, dtype=softmax_dtype)
-        target_log_probs = jnp.take_along_axis(log_probs, safe_labels[..., None], axis=-1).squeeze(
-            axis=-1
-        )
+        shift_logits_softmax = shift_logits.astype(softmax_dtype)
+        log_probs = jax.nn.log_softmax(shift_logits_softmax, axis=-1)
+        batch_idx = jnp.arange(log_probs.shape[0])[:, None]
+        seq_idx = jnp.arange(log_probs.shape[1])[None, :]
+        target_log_probs = log_probs[batch_idx, seq_idx, safe_labels]
 
-        masked_log_probs = jnp.where(
+        target_log_probs = jnp.where(
             valid_mask, target_log_probs, jnp.zeros((), dtype=softmax_dtype)
         )
         num_valid = valid_mask.sum().astype(softmax_dtype)
-        return jnp.sum(masked_log_probs) / jnp.maximum(num_valid, 1.0)
+        num_valid = jnp.maximum(num_valid, jnp.array(1.0, dtype=softmax_dtype))
+        loss = -target_log_probs.sum() / num_valid
+        return loss
 
     attn_mod.attention_single_chunk = attention_single_chunk
     attn_mod.attention_multi_chunk = attention_multi_chunk
@@ -742,3 +752,4 @@ def apply_segment_ids_patch() -> None:
     model_mod.MegalodonForCausalLM.compute_loss = compute_loss
 
     attn_mod._CHOMP_SEGMENT_IDS_PATCHED = True
+    return True

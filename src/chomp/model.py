@@ -162,7 +162,10 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
                 "Install it (e.g., pip install -e /path/to/megalodon-jax)."
             ) from e
 
-        apply_segment_ids_patch()
+        if cfg.model.segment_masking and not apply_segment_ids_patch():
+            raise RuntimeError(
+                "model.segment_masking=true but segment-id patch could not be applied."
+            )
 
         mcfg = MegalodonConfig(
             vocab_size=cfg.model.vocab_size,
@@ -218,6 +221,7 @@ def training_loss(
     batch: Batch,
     deterministic: bool,
     key: jax.Array | None,
+    use_segment_ids: bool = True,
 ) -> jax.Array:
     """Compute training loss.
 
@@ -231,6 +235,7 @@ def training_loss(
     :param Batch batch: Batch with input_ids, labels, attention_mask.
     :param bool deterministic: If False, apply dropout.
     :param key: PRNG key required when deterministic=False.
+    :param bool use_segment_ids: Whether to pass segment_ids to the model.
     :return jax.Array: Scalar loss value.
     """
 
@@ -238,11 +243,12 @@ def training_loss(
 
     # Batch tensors come in as [A, B, T]. We compute loss per microbatch and average.
     # The compiled train_step calls this on each microbatch slice (shape [B, T]).
+    segment_ids = batch.segment_ids if use_segment_ids else None
     return model.compute_loss(  # type: ignore[attr-defined]
         batch.input_ids,
         batch.labels,
         attention_mask=batch.attention_mask,
         deterministic=deterministic,
         key=key,
-        segment_ids=batch.segment_ids,
+        segment_ids=segment_ids,
     )

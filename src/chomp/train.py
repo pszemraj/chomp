@@ -205,6 +205,7 @@ def make_train_step(
 
     deterministic = derived_deterministic(cfg)
     grad_accum = int(cfg.train.grad_accum)
+    use_segment_ids = bool(cfg.model.segment_masking)
 
     def micro_loss(
         params: Any,
@@ -232,7 +233,14 @@ def make_train_step(
             attention_mask=attn.astype(bool),
             segment_ids=segs.astype(jnp.int32),
         )
-        loss = training_loss(params, static, batch=micro, deterministic=deterministic, key=key)
+        loss = training_loss(
+            params,
+            static,
+            batch=micro,
+            deterministic=deterministic,
+            key=key,
+            use_segment_ids=use_segment_ids,
+        )
         return loss * token_count
 
     loss_and_grad = eqx.filter_value_and_grad(micro_loss)

@@ -71,7 +71,14 @@ def test_grad_accum_equivalence_dummy_local_text():
 
     def micro_loss(p, in_ids, labs, attn, segs, k, token_count):
         micro = Batch(input_ids=in_ids, labels=labs, attention_mask=attn, segment_ids=segs)
-        loss = training_loss(p, static, batch=micro, deterministic=deterministic, key=k)
+        loss = training_loss(
+            p,
+            static,
+            batch=micro,
+            deterministic=deterministic,
+            key=k,
+            use_segment_ids=cfg.model.segment_masking,
+        )
         return loss * token_count
 
     loss_and_grad = eqx.filter_value_and_grad(micro_loss)
