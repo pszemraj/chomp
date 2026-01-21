@@ -1,6 +1,8 @@
 import jax
 import pytest
 
+from chomp.types import Batch
+from chomp.utils import devices
 from chomp.utils.devices import device_platform, validate_default_device
 
 
@@ -67,3 +69,43 @@ def test_device_platform_returns_none_when_unknown():
         pass
 
     assert device_platform(_Arr()) is None  # type: ignore[arg-type]
+
+
+def _make_batch() -> Batch:
+    arr = jax.numpy.zeros((1, 1, 1), dtype=jax.numpy.int32)
+    return Batch(
+        input_ids=arr,
+        labels=arr,
+        attention_mask=arr.astype(bool),
+        segment_ids=arr,
+    )
+
+
+def test_assert_batch_on_device_accepts_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    batch = _make_batch()
+    monkeypatch.setattr(devices, "device_platform", lambda _: "gpu")
+    devices.assert_batch_on_device(batch, allow_cpu=False)
+
+
+def test_assert_batch_on_device_rejects_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    batch = _make_batch()
+    monkeypatch.setattr(devices, "device_platform", lambda _: "cpu")
+    with pytest.raises(RuntimeError):
+        devices.assert_batch_on_device(batch, allow_cpu=False)
+
+
+def test_assert_batch_on_device_allows_unknown_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batch = _make_batch()
+    monkeypatch.setattr(devices, "device_platform", lambda _: None)
+    devices.assert_batch_on_device(batch, allow_cpu=True)
+
+
+def test_assert_batch_on_device_rejects_unknown_when_disallowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batch = _make_batch()
+    monkeypatch.setattr(devices, "device_platform", lambda _: None)
+    with pytest.raises(RuntimeError):
+        devices.assert_batch_on_device(batch, allow_cpu=False)
