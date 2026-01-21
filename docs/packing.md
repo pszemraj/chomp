@@ -68,6 +68,8 @@ flag and will preserve the fixed-shape batch contract.
 
 ## Future work
 
-If/when we move to Grain-based pipelines, we will preserve the same external
-`Batch` contract (`[A,B,T]` tensors with `segment_ids`) and keep loss masking in
-the data pipeline so training remains compile-stable.
+Near-term packing work focuses on:
+
+- position ID resets at segment boundaries (if/when Megalodon exposes this)
+- upstreaming the segment mask patch to megalodon-jax
+- improving utilization stats and diagnostics

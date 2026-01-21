@@ -7,8 +7,9 @@ Goal for v0:
 - Tokenize + pack into fixed-shape microbatches [A, B, T]
 - Provide get_state/set_state hooks so checkpoint+resume is real
 
-We are **not** using Grain yet in this initial draft. That will come in Phases 5–6.
-For now, this pipeline is a single iterator object.
+This module implements the core iterator used by the Grain wrapper in
+`chomp.data.grain`. The Grain layer handles prefetching, but the packing and
+state semantics live here.
 
 Why remove synthetic batches?
 Because synthetic batches turn into a crutch: people think the trainer works

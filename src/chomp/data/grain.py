@@ -73,7 +73,7 @@ def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchItera
     """
     try:
         import grain.python as grain
-    except Exception as exc:  # pragma: no cover - optional dependency
+    except Exception as exc:  # pragma: no cover - missing dependency
         raise RuntimeError("Grain is not installed. Install with `pip install grain`.") from exc
 
     class _TrainBatchDatasetIterator(grain.DatasetIterator):  # type: ignore[misc]

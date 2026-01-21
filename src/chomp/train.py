@@ -17,8 +17,8 @@ Phases 0–2:
 Phase 3:
 - Orbax checkpointing + resume contract
 
-Initial Phase 4 chunk:
-- Minimal HF streaming + tokenize + pack iterator (no Grain yet)
+Phases 4–5:
+- HF streaming + tokenize + pack iterator wrapped in Grain
 """
 
 from __future__ import annotations
