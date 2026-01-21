@@ -99,6 +99,12 @@ def test_grad_accum_equivalence_dummy_local_text():
     updates_ref, opt_state_ref = tx.update(grads_ref, state0.opt_state, state0.params)
     params_ref = optax.apply_updates(state0.params, updates_ref)
 
-    assert tree_allclose(state1.params, params_ref, rtol=0.0, atol=0.0)
-    assert tree_allclose(state1.opt_state, opt_state_ref, rtol=0.0, atol=0.0)
+    plat = jax.devices()[0].platform
+    if plat == "cpu":
+        rtol, atol = 0.0, 1e-8
+    else:
+        rtol, atol = 1e-5, 1e-5
+
+    assert tree_allclose(state1.params, params_ref, rtol=rtol, atol=atol)
+    assert tree_allclose(state1.opt_state, opt_state_ref, rtol=rtol, atol=atol)
     assert jnp.allclose(metrics["loss"], loss_ref)

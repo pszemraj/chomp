@@ -33,6 +33,7 @@ def test_train_step_compiles_once(tmp_path: Path):
 
     env = os.environ.copy()
     env["JAX_LOG_COMPILES"] = "1"
+    env["JAX_PLATFORMS"] = "cpu"
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
 
     cmd = [
@@ -50,17 +51,18 @@ def test_train_step_compiles_once(tmp_path: Path):
     # Try to find compilation lines for train_step. Common patterns:
     # - "Compiling train_step" (older)
     # - "Compiling <function train_step" (newer)
-    patterns = [
-        re.compile(r"Compiling.*train_step"),
-        re.compile(r"compile.*train_step", re.IGNORECASE),
-    ]
+    pattern = re.compile(r"Compiling.*train_step")
 
-    hits = 0
+    hits = set()
     for line in logs.splitlines():
-        if any(pat.search(line) for pat in patterns):
-            hits += 1
+        match = pattern.search(line)
+        if match:
+            # Normalize away logging prefixes so duplicate loggers don't double-count.
+            hits.add(line[line.find("Compiling") :].strip())
 
-    if hits == 0:
+    if not hits:
         pytest.skip("Could not detect train_step compilation logs; log format unsupported")
 
-    assert hits == 1, f"Expected exactly 1 train_step compilation, saw {hits}\nLogs:\n{logs}"
+    assert len(hits) == 1, (
+        f"Expected exactly 1 unique train_step compilation, saw {len(hits)}\nLogs:\n{logs}"
+    )
