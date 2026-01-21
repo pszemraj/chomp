@@ -1,0 +1,91 @@
+model:
+  backend: megalodon
+  vocab_size: 32128
+  model_dim: 768
+  num_layers: 12
+  num_heads: 12
+  z_dim: 384
+  value_dim: 768
+  ffn_hidden_dim: 3072
+  cema_ndim: 16
+  chunk_size: 512
+  dropout: 0.0
+  attention_dropout: 0.0
+  hidden_dropout: 0.0
+  pad_token_id: 0
+  bos_token_id: 1
+  eos_token_id: 2
+  use_checkpoint: true
+  segment_masking: true
+  param_dtype: float32
+  compute_dtype: bfloat16
+  accum_dtype: float32
+  softmax_dtype: float32
+
+data:
+  backend: hf
+  hf_dataset: Zyphra/Zyda-2
+  hf_name: sample-100BT
+  hf_split: train
+  hf_eval_split: validation
+  text_key: text
+  packing_mode: bin
+  packing_buffer_docs: 256
+  packing_max_docs_per_bin: null
+  grain_prefetch: 2
+  mask_boundary_loss: true
+  train_on_eos: true
+  max_eval_samples: 1000
+  shuffle: true
+  shuffle_buffer_size: 10000
+  repeat: true
+  tokenizer:
+    kind: hf
+    hf_name_or_path: BEE-spoke-data/bpe-tokenizer-32k-smolNeoX
+    hf_use_fast: true
+    hf_trust_remote_code: false
+    vocab_size_multiple: 128
+    auto_set_special_tokens: true
+    add_bos: false
+    add_eos: true
+
+train:
+  seed: 0
+  steps: 2000
+  batch_size: 1
+  seq_len: 2048
+  grad_accum: 8
+  jit: true
+  deterministic: true
+  allow_cpu: false
+  log_every: 5
+  eval_every: 50
+
+optim:
+  lr: 3.0e-4
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+  warmup_steps: 100
+  total_steps: 2000
+
+checkpoint:
+  enabled: true
+  save_every: 100
+  max_to_keep: 2
+  async_save: true
+
+logging:
+  project: chomp
+  run_dir: null
+  metrics_file: metrics.jsonl
+  level: INFO
+  wandb_enabled: true
+  wandb_project: chomp
+  wandb_entity: null
+  wandb_run_name: null
+  wandb_mode: online
+  wandb_tags: ["zyda2", "100m", "seq2048", "chunk512"]
+
+debug:
+  nan_check: true
+  check_device_every: 10
