@@ -110,3 +110,10 @@ def test_pipeline_bin_packing_segment_ids():
     segs = batch.segment_ids[0, 0]
     unique = np.unique(segs[segs > 0])
     assert unique.size >= 2
+    assert np.array_equal(batch.attention_mask, batch.segment_ids > 0)
+
+    stats = it.get_stats()
+    assert stats["packing_mode"] == "bin"
+    assert stats["packing_capacity"] == batch.segment_ids.size
+    expected_util = float(np.count_nonzero(batch.attention_mask) / batch.attention_mask.size)
+    assert stats["packing_utilization"] == expected_util

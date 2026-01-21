@@ -443,6 +443,8 @@ class TrainBatchIterator:
         self._mask_boundary_loss = bool(cfg.data.mask_boundary_loss)
         self._train_on_eos = bool(cfg.data.train_on_eos)
         self._eos_id = int(cfg.model.eos_token_id)
+        self._packing_mode = str(cfg.data.packing_mode)
+        self._last_stats: dict[str, float | int | str] = {}
 
     def __iter__(self) -> TrainBatchIterator:
         return self
@@ -480,7 +482,17 @@ class TrainBatchIterator:
         labs = labs.reshape(self._A, self._B, self._T)
         segs = segs.reshape(self._A, self._B, self._T)
 
-        attn = np.ones((self._A, self._B, self._T), dtype=np.bool_)
+        attn = segs > 0
+
+        tokens_used = int(np.count_nonzero(attn))
+        capacity = int(attn.size)
+        utilization = float(tokens_used / capacity) if capacity > 0 else 0.0
+        self._last_stats = {
+            "packing_mode": self._packing_mode,
+            "packing_tokens": tokens_used,
+            "packing_capacity": capacity,
+            "packing_utilization": utilization,
+        }
 
         batch = Batch(input_ids=inps, labels=labs, attention_mask=attn, segment_ids=segs)
         if self._device_put:
@@ -488,6 +500,13 @@ class TrainBatchIterator:
 
             batch = jax.device_put(batch)
         return batch
+
+    def get_stats(self) -> dict[str, float | int | str]:
+        """Return latest packing stats from the iterator.
+
+        :return dict[str, float | int | str]: Stats dict with utilization fields.
+        """
+        return dict(self._last_stats)
 
     # -------- checkpoint hooks --------
 

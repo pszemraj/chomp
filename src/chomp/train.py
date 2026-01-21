@@ -421,6 +421,7 @@ def run(
         for _ in tqdm(range(start_step, cfg.train.steps), desc="train", dynamic_ncols=True):
             # Fetch batch (host) and (optionally) device_put
             batch = next(data_it)
+            data_stats = data_it.get_stats()
             if not cfg.data.device_put:
                 batch = jax.device_put(batch)
 
@@ -470,6 +471,8 @@ def run(
                     "tokens_seen": int(step_i) * tokens_per_step,
                     "wall_time_s": time.perf_counter() - t0,
                 }
+                if data_stats:
+                    row.update(data_stats)
                 if step_i == (start_step + 1) and t_compile is not None:
                     row["first_step_compile_time_s"] = float(t_compile)
                     # Best-effort memory stats
