@@ -45,6 +45,22 @@ If you want to use `data.tokenizer.kind: hf`:
 pip install -e '.[hf]'
 ```
 
+### Tokenizer defaults + vocab rounding
+
+- Default HF tokenizer: `BEE-spoke-data/bpe-tokenizer-32k-smolNeoX`
+- When `tokenizer.kind: hf`, chomp reads tokenizer metadata and:
+  - rounds `model.vocab_size` up to `data.tokenizer.vocab_size_multiple` (default: 128)
+  - auto-sets `model.{bos,eos,pad}_token_id` from the tokenizer unless disabled
+
+Example (round to multiple of 64 instead of 128):
+
+```yaml
+data:
+  tokenizer:
+    kind: hf
+    vocab_size_multiple: 64
+```
+
 ## Run
 
 ### Smoke test (offline)
@@ -93,4 +109,4 @@ chomp-train --config configs/debug_smoke.yaml --run-dir runs/chomp/debug_run --r
 - **Arrays-only TrainState**: checkpoint-friendly; no hidden Python objects in the jitted state.
 - **Resume is a contract**: train_state *and* data iterator state are persisted.
 - **Training never uses cache**: cache is an inference concern.
-- **Tokenizer compatibility**: HF tokenizer vocab size + special token IDs must match `model.*` (fail-fast).
+- **Tokenizer compatibility**: tokenizer vocab + special tokens are detected and `model.vocab_size` is aligned.

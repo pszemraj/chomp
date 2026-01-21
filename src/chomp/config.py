@@ -99,14 +99,23 @@ class TokenizerConfig:
     NOTE: In real pretraining you almost certainly want kind='hf'.
     Byte mode exists so you can bootstrap data/packing without downloading
     a tokenizer first.
+
+    We also support vocab alignment via `vocab_size_multiple` to round model
+    embeddings up to a GPU-friendly multiple (default: 128).
     """
 
     kind: TokenizerKind = "byte"
 
     # HF tokenizer
-    hf_name_or_path: str | None = None
+    hf_name_or_path: str | None = "BEE-spoke-data/bpe-tokenizer-32k-smolNeoX"
     hf_use_fast: bool = True
     hf_trust_remote_code: bool = False
+
+    # Round vocab size up to a multiple for aligned embeddings (e.g. 128).
+    vocab_size_multiple: int = 128
+
+    # If True, use tokenizer-provided special token IDs to update model config.
+    auto_set_special_tokens: bool = True
 
     # Byte tokenizer
     # If byte_offset>0, we reserve IDs [0..byte_offset-1] for specials and map
@@ -482,6 +491,11 @@ def validate_config(cfg: Config) -> None:
                 )
     else:
         _vfail(f"data.tokenizer.kind must be 'byte' or 'hf', got {tok.kind!r}")
+
+    if tok.vocab_size_multiple <= 0:
+        _vfail(
+            f"data.tokenizer.vocab_size_multiple must be positive, got {tok.vocab_size_multiple}"
+        )
 
     if tok.max_doc_tokens is not None and tok.max_doc_tokens <= 0:
         _vfail(f"data.tokenizer.max_doc_tokens must be positive when set, got {tok.max_doc_tokens}")

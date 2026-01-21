@@ -20,7 +20,8 @@ This pipeline keeps debug sources (local_text) but *still* exercises tokenize+pa
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 import numpy as np
@@ -35,6 +36,9 @@ from .pack import TokenPacker
 class Tokenizer(Protocol):
     def encode(self, text: str) -> list[int]: ...
     def __len__(self) -> int: ...
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -121,50 +125,76 @@ def build_tokenizer(cfg: Config) -> Tokenizer:
     raise ValueError(f"Unknown tokenizer.kind: {tok.kind!r}")
 
 
-def validate_tokenizer_compat(cfg: Config, tok: Tokenizer) -> None:
-    """Fail fast if the tokenizer and model config are incompatible."""
+def _round_up_to_multiple(value: int, multiple: int) -> int:
+    if multiple <= 1:
+        return value
+    return int(((value + multiple - 1) // multiple) * multiple)
 
-    if cfg.data.tokenizer.kind != "hf":
-        return
+
+def resolve_tokenizer_config(cfg: Config, tok: Tokenizer) -> Config:
+    """Resolve tokenizer-derived model fields (vocab size + special token IDs)."""
 
     try:
-        vocab_size = int(len(tok))
+        tok_vocab = int(len(tok))
     except Exception as exc:
-        raise RuntimeError("HF tokenizer must expose vocab size via __len__") from exc
+        raise RuntimeError("Tokenizer must expose vocab size via __len__") from exc
 
-    if vocab_size <= 0:
-        raise ValueError(f"HF tokenizer vocab size must be positive, got {vocab_size}")
+    if tok_vocab <= 0:
+        raise ValueError(f"Tokenizer vocab size must be positive, got {tok_vocab}")
 
-    if cfg.model.vocab_size != vocab_size:
-        raise ValueError(
-            f"model.vocab_size ({cfg.model.vocab_size}) must match HF tokenizer vocab size "
-            f"({vocab_size})"
+    multiple = int(cfg.data.tokenizer.vocab_size_multiple)
+    if multiple <= 0:
+        raise ValueError(f"data.tokenizer.vocab_size_multiple must be positive, got {multiple}")
+
+    requested_vocab = int(cfg.model.vocab_size)
+    base_vocab = max(requested_vocab, tok_vocab)
+    rounded_vocab = _round_up_to_multiple(base_vocab, multiple)
+
+    model_updates: dict[str, int] = {}
+    if rounded_vocab != cfg.model.vocab_size:
+        logger.info(
+            "Adjusting model.vocab_size from %d to %d (tokenizer=%d, multiple=%d).",
+            cfg.model.vocab_size,
+            rounded_vocab,
+            tok_vocab,
+            multiple,
         )
+        model_updates["vocab_size"] = rounded_vocab
 
-    tok_bos = getattr(tok, "bos_token_id", None)
-    tok_eos = getattr(tok, "eos_token_id", None)
-    tok_pad = getattr(tok, "pad_token_id", None)
+    if cfg.data.tokenizer.kind == "hf" and cfg.data.tokenizer.auto_set_special_tokens:
+        tok_bos = getattr(tok, "bos_token_id", None)
+        tok_eos = getattr(tok, "eos_token_id", None)
+        tok_pad = getattr(tok, "pad_token_id", None)
 
-    if cfg.data.tokenizer.add_bos and tok_bos is None:
-        raise ValueError("HF tokenizer has no bos_token_id but data.tokenizer.add_bos=true")
-    if cfg.data.tokenizer.add_eos and tok_eos is None:
-        raise ValueError("HF tokenizer has no eos_token_id but data.tokenizer.add_eos=true")
+        if cfg.data.tokenizer.add_bos and tok_bos is None:
+            raise ValueError("HF tokenizer has no bos_token_id but data.tokenizer.add_bos=true")
+        if cfg.data.tokenizer.add_eos and tok_eos is None:
+            raise ValueError("HF tokenizer has no eos_token_id but data.tokenizer.add_eos=true")
 
-    if tok_bos is not None and cfg.model.bos_token_id != tok_bos:
-        raise ValueError(
-            f"model.bos_token_id ({cfg.model.bos_token_id}) must match HF tokenizer bos_token_id "
-            f"({tok_bos})"
-        )
-    if tok_eos is not None and cfg.model.eos_token_id != tok_eos:
-        raise ValueError(
-            f"model.eos_token_id ({cfg.model.eos_token_id}) must match HF tokenizer eos_token_id "
-            f"({tok_eos})"
-        )
-    if tok_pad is not None and cfg.model.pad_token_id != tok_pad:
-        raise ValueError(
-            f"model.pad_token_id ({cfg.model.pad_token_id}) must match HF tokenizer pad_token_id "
-            f"({tok_pad})"
-        )
+        def _maybe_update(field: str, value: int | None) -> None:
+            if value is None:
+                return
+            cur = getattr(cfg.model, field)
+            if cur != value:
+                logger.info("Using tokenizer %s=%d (config had %d).", field, value, cur)
+                model_updates[field] = int(value)
+
+        _maybe_update("bos_token_id", tok_bos)
+        _maybe_update("eos_token_id", tok_eos)
+        _maybe_update("pad_token_id", tok_pad)
+
+    if not model_updates:
+        return cfg
+
+    return replace(cfg, model=replace(cfg.model, **model_updates))
+
+
+def prepare_tokenizer_and_config(cfg: Config) -> tuple[Config, Tokenizer]:
+    """Build tokenizer and return an updated config with tokenizer-derived fields."""
+
+    tok = build_tokenizer(cfg)
+    cfg = resolve_tokenizer_config(cfg, tok)
+    return cfg, tok
 
 
 def data_fingerprint(cfg: Config) -> dict[str, Any]:
@@ -193,10 +223,14 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
     tok = {
         "kind": t.kind,
         "hf_name_or_path": t.hf_name_or_path,
+        "hf_use_fast": t.hf_use_fast,
+        "hf_trust_remote_code": t.hf_trust_remote_code,
         "byte_offset": t.byte_offset,
         "add_bos": t.add_bos,
         "add_eos": t.add_eos,
         "max_doc_tokens": t.max_doc_tokens,
+        "vocab_size_multiple": t.vocab_size_multiple,
+        "auto_set_special_tokens": t.auto_set_special_tokens,
     }
 
     return {
@@ -310,7 +344,7 @@ class TrainBatchIterator:
             self._packer.set_state(state["packer"])
 
 
-def build_train_iterator(cfg: Config) -> TrainBatchIterator:
-    tok = build_tokenizer(cfg)
-    validate_tokenizer_compat(cfg, tok)
-    return TrainBatchIterator(cfg, tokenizer=tok)
+def build_train_iterator(cfg: Config, *, tokenizer: Tokenizer | None = None) -> TrainBatchIterator:
+    if tokenizer is None:
+        cfg, tokenizer = prepare_tokenizer_and_config(cfg)
+    return TrainBatchIterator(cfg, tokenizer=tokenizer)

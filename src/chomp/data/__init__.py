@@ -19,6 +19,16 @@ Later:
 
 from __future__ import annotations
 
-from .pipeline import build_tokenizer, build_train_iterator, data_fingerprint
+from .pipeline import (
+    build_tokenizer,
+    build_train_iterator,
+    data_fingerprint,
+    prepare_tokenizer_and_config,
+)
 
-__all__ = ["build_train_iterator", "data_fingerprint", "build_tokenizer"]
+__all__ = [
+    "build_train_iterator",
+    "data_fingerprint",
+    "build_tokenizer",
+    "prepare_tokenizer_and_config",
+]
