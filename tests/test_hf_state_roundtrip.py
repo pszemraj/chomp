@@ -12,6 +12,8 @@ from chomp.data.hf import HFStreamSpec, HFStreamingTextStream
 class _FakeHFIterable:
     items: list[dict[str, Any]]
     index: int = 0
+    fail_at: int | None = None
+    record: dict[str, Any] | None = None
 
     def select_columns(self, _columns: list[str]):
         return self
@@ -25,6 +27,9 @@ class _FakeHFIterable:
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         self.index = int(state["index"])
+        if self.record is not None:
+            self.record["load_calls"] = self.record.get("load_calls", 0) + 1
+            self.record["last_loaded"] = dict(state)
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
         return _FakeHFIterator(self)
@@ -39,6 +44,12 @@ class _FakeHFIterator:
         return self
 
     def __next__(self) -> dict[str, Any]:
+        if self._ds.fail_at is not None and self._i == self._ds.fail_at:
+            rec = self._ds.record
+            if rec is None or not rec.get("fail_consumed", False):
+                if rec is not None:
+                    rec["fail_consumed"] = True
+                raise RuntimeError("transient failure")
         if self._i >= len(self._ds.items):
             raise StopIteration
         item = self._ds.items[self._i]
@@ -81,3 +92,39 @@ def test_hf_state_roundtrip(monkeypatch):
     resumed = HFStreamingTextStream(spec)
     resumed.set_state(state)
     assert next(resumed) == expected
+
+
+def test_hf_retry_rebuild_roundtrip(monkeypatch):
+    items = [{"text": "alpha"}, {"text": "bravo"}, {"text": "charlie"}]
+    record: dict[str, Any] = {"builds": 0, "fail_consumed": False}
+
+    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool):
+        _ = (dataset, name, split, streaming)
+        record["builds"] += 1
+        return _FakeHFIterable(items=items, fail_at=1, record=record)
+
+    import datasets
+
+    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
+
+    spec = HFStreamSpec(
+        dataset="dummy",
+        name="dummy",
+        split="train",
+        text_key="text",
+        shuffle=False,
+        shuffle_buffer_size=8,
+        seed=0,
+        repeat=False,
+        max_retries=1,
+        retry_delay_sec=0.0,
+        state_update_interval=1,
+    )
+
+    stream = HFStreamingTextStream(spec)
+    assert next(stream) == "alpha"
+    assert next(stream) == "bravo"
+
+    assert record["builds"] >= 2
+    assert record.get("load_calls", 0) >= 1
+    assert record.get("last_loaded") == {"index": 1}
