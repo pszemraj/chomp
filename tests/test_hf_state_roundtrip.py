@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterator
 
-from chomp.data.hf import HFStreamSpec, HFStreamingTextStream
+from chomp.data.hf import HFStreamingTextStream, HFStreamSpec
 
 
 @dataclass
