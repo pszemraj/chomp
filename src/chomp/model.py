@@ -25,6 +25,7 @@ import jax.numpy as jnp
 import optax
 
 from chomp.config import Config, dtype_from_str
+from chomp.patches.megalodon_segment_ids import apply_segment_ids_patch
 
 if TYPE_CHECKING:
     from chomp.types import Batch
@@ -86,6 +87,7 @@ class DummyLM(eqx.Module):
         ignore_index: int = -100,
         deterministic: bool = True,
         key: jax.Array | None = None,
+        segment_ids: jax.Array | None = None,
     ) -> jax.Array:
         """Compute cross-entropy loss with causal shift.
 
@@ -95,8 +97,10 @@ class DummyLM(eqx.Module):
         :param int ignore_index: Label value to ignore in loss.
         :param bool deterministic: If False, apply dropout.
         :param key: PRNG key required when deterministic=False.
+        :param segment_ids: Optional packed-segment IDs (ignored by DummyLM).
         :return jax.Array: Scalar mean cross-entropy loss.
         """
+        _ = segment_ids
         logits = self(input_ids, attention_mask, deterministic=deterministic, key=key)
 
         # Shift for causal LM
@@ -157,6 +161,8 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
                 "model.backend='megalodon' requires the `megalodon_jax` package. "
                 "Install it (e.g., pip install -e /path/to/megalodon-jax)."
             ) from e
+
+        apply_segment_ids_patch()
 
         mcfg = MegalodonConfig(
             vocab_size=cfg.model.vocab_size,
@@ -238,4 +244,5 @@ def training_loss(
         attention_mask=batch.attention_mask,
         deterministic=deterministic,
         key=key,
+        segment_ids=batch.segment_ids,
     )
