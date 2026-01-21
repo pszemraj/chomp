@@ -265,6 +265,9 @@ class LoggingConfig:
     run_dir: str | None = None
     metrics_file: str = "metrics.jsonl"
     level: LogLevel = "INFO"
+    console_every: int = 50
+    console_use_rich: bool = True
+    log_file: str | None = "train.log"
     wandb_enabled: bool = False
     wandb_project: str | None = None
     wandb_entity: str | None = None
@@ -581,6 +584,10 @@ def validate_config(cfg: Config) -> None:
         _vfail(f"data.max_eval_samples must be >=0, got {cfg.data.max_eval_samples}")
 
     # Logging / wandb
+    if cfg.logging.console_every <= 0:
+        _vfail(f"logging.console_every must be positive, got {cfg.logging.console_every}")
+    if cfg.logging.log_file is not None and not str(cfg.logging.log_file).strip():
+        _vfail("logging.log_file must be a non-empty string or null")
     if cfg.logging.wandb_mode not in ("online", "offline", "disabled"):
         _vfail(
             "logging.wandb_mode must be 'online', 'offline', or 'disabled', "

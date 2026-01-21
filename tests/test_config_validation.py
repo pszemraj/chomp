@@ -87,3 +87,19 @@ def test_wandb_mode_must_be_valid():
     bad = replace(cfg, logging=bad_logging)
     with pytest.raises(ValueError, match="wandb_mode"):
         validate_config(bad)
+
+
+def test_console_every_must_be_positive():
+    cfg = _base_cfg()
+    bad_logging = replace(cfg.logging, console_every=0)
+    bad = replace(cfg, logging=bad_logging)
+    with pytest.raises(ValueError, match="console_every"):
+        validate_config(bad)
+
+
+def test_log_file_must_be_non_empty():
+    cfg = _base_cfg()
+    bad_logging = replace(cfg.logging, log_file=" ")
+    bad = replace(cfg, logging=bad_logging)
+    with pytest.raises(ValueError, match="log_file"):
+        validate_config(bad)

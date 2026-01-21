@@ -117,6 +117,7 @@ Each run directory includes a tokenizer snapshot under `tokenizer/`.
 - **Tokenizer compatibility**: tokenizer vocab + special tokens are detected and `model.vocab_size` is aligned.
 - **Fixed eval set**: `data.max_eval_samples` caches validation texts for consistent eval.
 - **W&B logging**: enable with `logging.wandb_enabled=true`.
+- **Console metrics**: rate-limited summaries via `logging.console_every`; full logs in `logging.log_file`.
 
 ## Docs
 

@@ -79,6 +79,9 @@ logging:
   run_dir: null
   metrics_file: metrics.jsonl
   level: INFO
+  console_every: 25
+  console_use_rich: true
+  log_file: train.log
   wandb_enabled: true
   wandb_project: chomp
   wandb_entity: null

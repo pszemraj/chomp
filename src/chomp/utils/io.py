@@ -22,16 +22,77 @@ from typing import Any
 
 from chomp.config import Config
 
+_NOISY_CONSOLE_PREFIXES = ("orbax", "jax", "jaxlib", "absl")
 
-def setup_python_logging(level: str) -> None:
-    """Configure Python logging with a standard format.
+
+class _ConsoleNoiseFilter(logging.Filter):
+    """Filter that hides noisy third-party INFO logs from the console."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        for prefix in _NOISY_CONSOLE_PREFIXES:
+            if record.name.startswith(prefix):
+                return record.levelno >= logging.WARNING
+        return True
+
+
+def _console_handler(level: int, *, use_rich: bool) -> logging.Handler:
+    """Build a console handler with optional Rich formatting."""
+
+    if use_rich:
+        try:
+            from rich.logging import RichHandler
+
+            handler: logging.Handler = RichHandler(
+                show_time=True,
+                show_level=True,
+                show_path=False,
+                markup=True,
+                rich_tracebacks=False,
+            )
+            handler.setFormatter(logging.Formatter("%(message)s"))
+        except Exception:
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+    else:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+
+    handler.setLevel(level)
+    handler.addFilter(_ConsoleNoiseFilter())
+    return handler
+
+
+def setup_python_logging(level: str, *, use_rich: bool = True) -> None:
+    """Configure Python logging with a console handler.
 
     :param str level: Log level name (DEBUG, INFO, WARNING, ERROR).
+    :param bool use_rich: If True, use Rich for nicer console logs when available.
     """
-    logging.basicConfig(
-        level=getattr(logging, level, logging.INFO),
-        format="%(asctime)s | %(levelname)s | %(message)s",
+    numeric_level = getattr(logging, level, logging.INFO)
+    root = logging.getLogger()
+    root.setLevel(numeric_level)
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+    root.addHandler(_console_handler(numeric_level, use_rich=use_rich))
+
+
+def add_file_logging(path: Path, *, level: str) -> None:
+    """Attach a file handler that captures all logs.
+
+    :param Path path: Log file path.
+    :param str level: Log level name (DEBUG, INFO, WARNING, ERROR).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    root = logging.getLogger()
+    for handler in root.handlers:
+        if isinstance(handler, logging.FileHandler) and handler.baseFilename == str(path):
+            return
+    file_handler = logging.FileHandler(path)
+    file_handler.setLevel(getattr(logging, level, logging.INFO))
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
     )
+    root.addHandler(file_handler)
 
 
 def create_run_dir(

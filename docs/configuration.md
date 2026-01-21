@@ -82,5 +82,10 @@ Optimizer:
 - `checkpoint.enabled`, `checkpoint.save_every`, `checkpoint.max_to_keep`,
   `checkpoint.async_save`
 - `logging.run_dir`, `logging.metrics_file`, `logging.level`
+- `logging.console_every`, `logging.console_use_rich`, `logging.log_file`
 - `logging.wandb_enabled`, `logging.wandb_project`, `logging.wandb_entity`
 - `logging.wandb_run_name`, `logging.wandb_mode`, `logging.wandb_tags`
+
+Console output is rate-limited by `logging.console_every`. Noisy third-party INFO
+logs are suppressed on the console but still captured in the run log file
+(`logging.log_file`, created under the run directory).

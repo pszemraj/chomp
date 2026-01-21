@@ -56,7 +56,7 @@ from chomp.data import (
 from chomp.model import build_model, training_loss
 from chomp.types import Batch, TrainState
 from chomp.utils.devices import assert_batch_on_device
-from chomp.utils.io import MetricsWriter, create_run_dir
+from chomp.utils.io import MetricsWriter, add_file_logging, create_run_dir
 from chomp.utils.profiling import start_trace, step_annotation, stop_trace
 from chomp.utils.tree import param_count
 
@@ -90,6 +90,56 @@ def _check_finite_metrics(metrics: dict[str, Any], *, step: int) -> None:
         value = float(metrics[name])
         if not math.isfinite(value):
             raise RuntimeError(f"Non-finite {name} at step {step}: {value}")
+
+
+def _device_memory_stats_gb() -> dict[str, float]:
+    """Best-effort device memory stats in GB (if available)."""
+
+    try:
+        ms = jax.local_devices()[0].memory_stats()
+    except Exception:
+        return {}
+
+    stats: dict[str, float] = {}
+    if "bytes_in_use" in ms:
+        stats["device_memory_gb"] = float(ms["bytes_in_use"]) / 1e9
+    if "peak_bytes_in_use" in ms:
+        stats["peak_memory_gb"] = float(ms["peak_bytes_in_use"]) / 1e9
+    return stats
+
+
+def _format_console_row(
+    *,
+    step: int,
+    loss: float,
+    grad_norm: float,
+    lr: float,
+    step_time_s: float,
+    tokens_per_sec: float,
+    eval_loss: float | None,
+    packing_util: float | None,
+    device_mem_gb: float | None,
+    peak_mem_gb: float | None,
+) -> str:
+    """Format a concise console line with key training metrics."""
+
+    parts = [
+        f"step {step}",
+        f"loss {loss:.4f}",
+        f"grad {grad_norm:.2e}",
+        f"lr {lr:.2e}",
+        f"time {step_time_s:.3f}s",
+        f"tok/s {tokens_per_sec:.0f}",
+    ]
+    if eval_loss is not None:
+        parts.append(f"eval {eval_loss:.4f}")
+    if packing_util is not None:
+        parts.append(f"pack {packing_util:.3f}")
+    if device_mem_gb is not None:
+        parts.append(f"mem {device_mem_gb:.1f}GB")
+    if peak_mem_gb is not None:
+        parts.append(f"peak {peak_mem_gb:.1f}GB")
+    return " | ".join(parts)
 
 
 def _weight_decay_mask(params: Any) -> Any:
@@ -403,6 +453,8 @@ def run(
 
     # Prepare run dir
     run_dir = create_run_dir(cfg, config_path=config_path, allow_existing=allow_existing)
+    if cfg.logging.log_file is not None:
+        add_file_logging(run_dir / cfg.logging.log_file, level=cfg.logging.level)
     metrics_path = run_dir / cfg.logging.metrics_file
     save_tokenizer_snapshot(run_dir, cfg, tokenizer, allow_existing=allow_existing)
     eval_tokens = load_or_create_eval_texts(
@@ -503,6 +555,7 @@ def run(
         return run_dir
 
     tokens_per_step = int(cfg.train.grad_accum) * int(cfg.train.batch_size) * int(cfg.train.seq_len)
+    console_every = int(cfg.logging.console_every)
 
     def _run_eval(params: Any) -> dict[str, Any]:
         """Run a full eval pass over the cached eval texts."""
@@ -563,6 +616,8 @@ def run(
                     # Synchronize for accurate timing
                     metrics_host = jax.device_get(metrics)
                     t2 = time.perf_counter()
+                step_time_s = t2 - t1
+                tokens_per_sec = float(tokens_per_step) / step_time_s if step_time_s > 0 else 0.0
 
                 if t_compile is None:
                     t_compile = t2 - t1
@@ -592,12 +647,16 @@ def run(
 
                 # Log
                 should_log = (step_i % cfg.train.log_every) == 0 or bool(eval_row)
+                should_console = (step_i % console_every) == 0 or bool(eval_row)
+                mem_stats = _device_memory_stats_gb() if (should_log or should_console) else {}
                 if should_log:
                     row = {
                         "step": int(step_i),
                         "loss": float(metrics_host["loss"]),
                         "grad_norm": float(metrics_host["grad_norm"]),
                         "lr": float(metrics_host["lr"]),
+                        "step_time_s": float(step_time_s),
+                        "tokens_per_sec": float(tokens_per_sec),
                         "tokens_seen": int(step_i) * tokens_per_step,
                         "wall_time_s": time.perf_counter() - t0,
                     }
@@ -605,19 +664,38 @@ def run(
                         row.update(data_stats)
                     if eval_row:
                         row.update(eval_row)
+                    if mem_stats:
+                        row.update(mem_stats)
                     if step_i == (start_step + 1) and t_compile is not None:
                         row["first_step_compile_time_s"] = float(t_compile)
-                        # Best-effort memory stats
-                        try:
-                            ms = jax.local_devices()[0].memory_stats()
-                            if "peak_bytes_in_use" in ms:
-                                row["peak_memory_gb"] = float(ms["peak_bytes_in_use"]) / 1e9
-                        except Exception:
-                            pass
 
                     mw.write(row)
                     if wandb_run is not None:
                         wandb_run.log(row, step=step_i)
+                if should_console:
+                    eval_loss = eval_row.get("eval_loss") if eval_row else None
+                    packing_util = None
+                    if data_stats and "packing_utilization" in data_stats:
+                        packing_util = float(data_stats["packing_utilization"])
+                    device_mem = None
+                    peak_mem = None
+                    if "device_memory_gb" in mem_stats:
+                        device_mem = float(mem_stats["device_memory_gb"])
+                    if "peak_memory_gb" in mem_stats:
+                        peak_mem = float(mem_stats["peak_memory_gb"])
+                    console_line = _format_console_row(
+                        step=step_i,
+                        loss=float(metrics_host["loss"]),
+                        grad_norm=float(metrics_host["grad_norm"]),
+                        lr=float(metrics_host["lr"]),
+                        step_time_s=float(step_time_s),
+                        tokens_per_sec=float(tokens_per_sec),
+                        eval_loss=float(eval_loss) if eval_loss is not None else None,
+                        packing_util=packing_util,
+                        device_mem_gb=device_mem,
+                        peak_mem_gb=peak_mem,
+                    )
+                    tqdm.write(console_line)
     finally:
         if wandb_run is not None:
             wandb_run.finish()

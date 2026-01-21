@@ -81,7 +81,7 @@ def main(argv: list[str] | None = None) -> None:
     resume = _parse_resume(args.resume)
 
     # Logging first so subsequent errors are readable
-    setup_python_logging(cfg.logging.level)
+    setup_python_logging(cfg.logging.level, use_rich=cfg.logging.console_use_rich)
 
     # Fail fast on CPU unless explicitly allowed
     validate_default_device(allow_cpu=cfg.train.allow_cpu)

@@ -70,3 +70,8 @@ Metrics are written per step to `logging.metrics_file` and include:
 - `eval_loss`, `eval_tokens` (only when eval runs)
 
 If `logging.wandb_enabled=true`, the same rows are also logged to Weights & Biases.
+
+Console output is throttled by `logging.console_every` and prints a compact
+one-line summary (loss, grad norm, LR, step time, throughput, optional eval
+loss, packing utilization, and best-effort device memory). Full logs from
+third-party libraries are written to `logging.log_file` under the run directory.
