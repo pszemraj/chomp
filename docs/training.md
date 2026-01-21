@@ -75,3 +75,14 @@ Console output is throttled by `logging.console_every` and prints a compact
 one-line summary (loss, grad norm, LR, step time, throughput, optional eval
 loss, packing utilization, and best-effort device memory). Full logs from
 third-party libraries are written to `logging.log_file` under the run directory.
+
+## Diagnostics
+
+Use `scripts/diagnose_highloss.py` to inspect batch masking, segment stats, and
+optionally compute a step-0 loss/logit summary without starting a full run:
+
+```bash
+python scripts/diagnose_highloss.py --config configs/zyda2_100m_2048.yaml --batches 2
+python scripts/diagnose_highloss.py --config configs/zyda2_100m_2048.yaml --batches 1 \
+  --force-init-mode he
+```
