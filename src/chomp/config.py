@@ -464,8 +464,27 @@ def validate_config(cfg: Config) -> None:
                 f"model.vocab_size ({cfg.model.vocab_size}) must be >= byte_offset+256 ({min_vocab}) "
                 "when using byte tokenizer"
             )
+        if tok.add_bos or tok.add_eos:
+            if tok.byte_offset <= 0:
+                _vfail(
+                    "byte tokenizer with add_bos/add_eos requires data.tokenizer.byte_offset > 0 "
+                    "to reserve special-token IDs"
+                )
+            if tok.add_bos and not (0 <= cfg.model.bos_token_id < tok.byte_offset):
+                _vfail(
+                    "model.bos_token_id must be within [0, byte_offset) when using byte tokenizer "
+                    "with add_bos=true"
+                )
+            if tok.add_eos and not (0 <= cfg.model.eos_token_id < tok.byte_offset):
+                _vfail(
+                    "model.eos_token_id must be within [0, byte_offset) when using byte tokenizer "
+                    "with add_eos=true"
+                )
     else:
         _vfail(f"data.tokenizer.kind must be 'byte' or 'hf', got {tok.kind!r}")
+
+    if tok.max_doc_tokens is not None and tok.max_doc_tokens <= 0:
+        _vfail(f"data.tokenizer.max_doc_tokens must be positive when set, got {tok.max_doc_tokens}")
 
     # Special token ids must be in range if enabled
     if tok.add_bos and not (0 <= cfg.model.bos_token_id < cfg.model.vocab_size):

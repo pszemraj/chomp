@@ -34,6 +34,7 @@ from .pack import TokenPacker
 
 class Tokenizer(Protocol):
     def encode(self, text: str) -> list[int]: ...
+    def __len__(self) -> int: ...
 
 
 @dataclass
@@ -54,6 +55,9 @@ class ByteTokenizer:
         b = text.encode("utf-8", errors="replace")
         off = int(self.byte_offset)
         return [off + int(x) for x in b]
+
+    def __len__(self) -> int:
+        return int(self.byte_offset) + 256
 
 
 class HFTokenizer:
@@ -87,6 +91,21 @@ class HFTokenizer:
             raise RuntimeError("Tokenizer did not return input_ids")
         return list(ids)
 
+    def __len__(self) -> int:
+        return int(len(self._tok))
+
+    @property
+    def bos_token_id(self) -> int | None:
+        return self._tok.bos_token_id
+
+    @property
+    def eos_token_id(self) -> int | None:
+        return self._tok.eos_token_id
+
+    @property
+    def pad_token_id(self) -> int | None:
+        return self._tok.pad_token_id
+
 
 def build_tokenizer(cfg: Config) -> Tokenizer:
     tok = cfg.data.tokenizer
@@ -100,6 +119,52 @@ def build_tokenizer(cfg: Config) -> Tokenizer:
             trust_remote_code=tok.hf_trust_remote_code,
         )
     raise ValueError(f"Unknown tokenizer.kind: {tok.kind!r}")
+
+
+def validate_tokenizer_compat(cfg: Config, tok: Tokenizer) -> None:
+    """Fail fast if the tokenizer and model config are incompatible."""
+
+    if cfg.data.tokenizer.kind != "hf":
+        return
+
+    try:
+        vocab_size = int(len(tok))
+    except Exception as exc:
+        raise RuntimeError("HF tokenizer must expose vocab size via __len__") from exc
+
+    if vocab_size <= 0:
+        raise ValueError(f"HF tokenizer vocab size must be positive, got {vocab_size}")
+
+    if cfg.model.vocab_size != vocab_size:
+        raise ValueError(
+            f"model.vocab_size ({cfg.model.vocab_size}) must match HF tokenizer vocab size "
+            f"({vocab_size})"
+        )
+
+    tok_bos = getattr(tok, "bos_token_id", None)
+    tok_eos = getattr(tok, "eos_token_id", None)
+    tok_pad = getattr(tok, "pad_token_id", None)
+
+    if cfg.data.tokenizer.add_bos and tok_bos is None:
+        raise ValueError("HF tokenizer has no bos_token_id but data.tokenizer.add_bos=true")
+    if cfg.data.tokenizer.add_eos and tok_eos is None:
+        raise ValueError("HF tokenizer has no eos_token_id but data.tokenizer.add_eos=true")
+
+    if tok_bos is not None and cfg.model.bos_token_id != tok_bos:
+        raise ValueError(
+            f"model.bos_token_id ({cfg.model.bos_token_id}) must match HF tokenizer bos_token_id "
+            f"({tok_bos})"
+        )
+    if tok_eos is not None and cfg.model.eos_token_id != tok_eos:
+        raise ValueError(
+            f"model.eos_token_id ({cfg.model.eos_token_id}) must match HF tokenizer eos_token_id "
+            f"({tok_eos})"
+        )
+    if tok_pad is not None and cfg.model.pad_token_id != tok_pad:
+        raise ValueError(
+            f"model.pad_token_id ({cfg.model.pad_token_id}) must match HF tokenizer pad_token_id "
+            f"({tok_pad})"
+        )
 
 
 def data_fingerprint(cfg: Config) -> dict[str, Any]:
@@ -247,4 +312,5 @@ class TrainBatchIterator:
 
 def build_train_iterator(cfg: Config) -> TrainBatchIterator:
     tok = build_tokenizer(cfg)
+    validate_tokenizer_compat(cfg, tok)
     return TrainBatchIterator(cfg, tokenizer=tok)

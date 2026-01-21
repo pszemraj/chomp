@@ -93,3 +93,4 @@ chomp-train --config configs/debug_smoke.yaml --run-dir runs/chomp/debug_run --r
 - **Arrays-only TrainState**: checkpoint-friendly; no hidden Python objects in the jitted state.
 - **Resume is a contract**: train_state *and* data iterator state are persisted.
 - **Training never uses cache**: cache is an inference concern.
+- **Tokenizer compatibility**: HF tokenizer vocab size + special token IDs must match `model.*` (fail-fast).
