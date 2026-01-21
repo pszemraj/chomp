@@ -409,6 +409,24 @@ def check_resume_compat(cfg: Config, meta: dict[str, Any] | None) -> None:
     pack_prev = meta_fp.get("packing") or {}
     pack_cur = cur_fp.get("packing") or {}
     _cmp(
+        "data.packing_mode",
+        pack_cur.get("mode"),
+        pack_prev.get("mode"),
+        severity="error",
+    )
+    _cmp(
+        "data.packing_buffer_docs",
+        pack_cur.get("buffer_docs"),
+        pack_prev.get("buffer_docs"),
+        severity="error",
+    )
+    _cmp(
+        "data.packing_max_docs_per_bin",
+        pack_cur.get("max_docs_per_bin"),
+        pack_prev.get("max_docs_per_bin"),
+        severity="error",
+    )
+    _cmp(
         "data.mask_boundary_loss",
         pack_cur.get("mask_boundary_loss"),
         pack_prev.get("mask_boundary_loss"),

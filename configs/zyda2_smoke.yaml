@@ -14,6 +14,9 @@ data:
   hf_name: sample-100BT
   hf_split: train
   text_key: text
+  packing_mode: bin
+  packing_buffer_docs: 256
+  packing_max_docs_per_bin: null
   mask_boundary_loss: true
   train_on_eos: true
   shuffle: true

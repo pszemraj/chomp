@@ -3,24 +3,39 @@
 This document describes how chomp packs variable-length documents into fixed
 training sequences and how boundary-related loss masking works.
 
-## Current packing model
+## Packing modes
 
-chomp uses a simple streaming packer (`TokenPacker`) that appends tokenized
-documents into a rolling buffer and emits fixed-length windows of `seq_len + 1`.
+chomp supports two packing strategies, both emitting fixed-length windows of
+`seq_len + 1`:
+
+1) **Sequential packer** (`data.packing_mode: sequential`, default)
+   - Appends tokenized documents into a rolling buffer and emits windows in
+     stream order.
+
+2) **Bin packer** (`data.packing_mode: bin`)
+   - Buffers multiple documents and uses a First-Fit-Decreasing heuristic to
+     pack documents into bins of size `seq_len + 1`.
+   - Useful for higher utilization when documents are short or variable length.
+
 From each window we derive:
 
 - `input_ids`: tokens `[0..T-1]`
 - `labels`: tokens `[1..T]` (causal shift)
 - `segment_ids`: packed document IDs for each token
-- `attention_mask`: all `True` (padding not used today)
+- `attention_mask`: `True` for real tokens, `False` for padding
 
-The packing strategy is **sequential**, not bin-packing: documents are streamed
-in order and packed until enough tokens exist for the next window. This keeps
-the pipeline deterministic and streaming-friendly.
+The bin packer pads to fixed length; pad positions use `model.pad_token_id` and
+`segment_id=0`.
+
+Key bin-packing knobs:
+
+- `data.packing_buffer_docs`: number of documents to buffer before packing.
+- `data.packing_max_docs_per_bin`: optional cap on documents per bin.
 
 ## Segment IDs and attention
 
-Each document gets a monotonically increasing `segment_id`. When
+Each document (or document segment) gets a monotonically increasing
+`segment_id` **within a bin**. When
 `model.segment_masking=true`, the Megalodon patch uses these IDs to form a
 block-diagonal attention mask so tokens only attend within their document.
 
@@ -53,6 +68,6 @@ flag and will preserve the fixed-shape batch contract.
 
 ## Future work
 
-If we adopt bin-packing or Grain-based pipelines, we will preserve the same
-external `Batch` contract (`[A,B,T]` tensors with `segment_ids`) and keep loss
-masking in the data pipeline so training remains compile-stable.
+If/when we move to Grain-based pipelines, we will preserve the same external
+`Batch` contract (`[A,B,T]` tensors with `segment_ids`) and keep loss masking in
+the data pipeline so training remains compile-stable.

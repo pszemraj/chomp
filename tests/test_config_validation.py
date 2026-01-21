@@ -47,3 +47,19 @@ def test_model_dim_divisible_by_num_heads():
     bad = replace(cfg, model=replace(cfg.model, model_dim=130, num_heads=8))
     with pytest.raises(ValueError, match="model_dim"):
         validate_config(bad)
+
+
+def test_bin_packing_buffer_requires_min_docs():
+    cfg = _base_cfg()
+    bad_data = replace(cfg.data, packing_mode="bin", packing_buffer_docs=1)
+    bad = replace(cfg, data=bad_data)
+    with pytest.raises(ValueError, match="packing_buffer_docs"):
+        validate_config(bad)
+
+
+def test_invalid_packing_mode():
+    cfg = _base_cfg()
+    bad_data = replace(cfg.data, packing_mode="unknown")
+    bad = replace(cfg, data=bad_data)
+    with pytest.raises(ValueError, match="packing_mode"):
+        validate_config(bad)

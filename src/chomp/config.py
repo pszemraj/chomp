@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 Backend = Literal["dummy", "megalodon"]
 DatasetBackend = Literal["hf", "local_text"]
 TokenizerKind = Literal["byte", "hf"]
+PackingMode = Literal["sequential", "bin"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 
 
@@ -174,6 +175,13 @@ class DataConfig:
 
     # Debug-only local text source (exercises tokenize+pack path, not synthetic ids)
     local_text: str = "Hello from chomp.\n"
+
+    # Packing mode: sequential stream packer or bin-packing (FFD).
+    packing_mode: PackingMode = "sequential"
+    # Bin-packing buffer size (documents). Must be >= batch_size * grad_accum.
+    packing_buffer_docs: int = 128
+    # Optional cap on how many documents may be packed into a single bin.
+    packing_max_docs_per_bin: int | None = None
 
     # Packed-doc loss behavior
     mask_boundary_loss: bool = True
@@ -522,6 +530,26 @@ def validate_config(cfg: Config) -> None:
             _vfail("data.local_text must be non-empty when data.backend='local_text'")
     else:
         _vfail(f"data.backend must be 'hf' or 'local_text', got {cfg.data.backend!r}")
+
+    if cfg.data.packing_mode not in ("sequential", "bin"):
+        _vfail(f"data.packing_mode must be 'sequential' or 'bin', got {cfg.data.packing_mode!r}")
+    if cfg.data.packing_mode == "bin":
+        if cfg.data.packing_buffer_docs <= 0:
+            _vfail(
+                "data.packing_buffer_docs must be positive when packing_mode='bin', "
+                f"got {cfg.data.packing_buffer_docs}"
+            )
+        min_docs = cfg.train.batch_size * cfg.train.grad_accum
+        if cfg.data.packing_buffer_docs < min_docs:
+            _vfail(
+                "data.packing_buffer_docs must be >= train.batch_size * train.grad_accum "
+                f"({min_docs}), got {cfg.data.packing_buffer_docs}"
+            )
+        if cfg.data.packing_max_docs_per_bin is not None and cfg.data.packing_max_docs_per_bin <= 0:
+            _vfail(
+                "data.packing_max_docs_per_bin must be positive when set, "
+                f"got {cfg.data.packing_max_docs_per_bin}"
+            )
 
     # HF streaming robustness knobs
     if cfg.data.max_retries < 0:

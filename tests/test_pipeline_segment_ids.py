@@ -76,3 +76,37 @@ def test_boundary_loss_mask_toggle():
     assert boundary.any()
     labels_at_boundary = batch.labels[0, 0][:-1][boundary]
     assert np.all(labels_at_boundary != -100)
+
+
+def test_pipeline_bin_packing_segment_ids():
+    cfg = Config(
+        model=ModelConfig(
+            backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=True
+        ),
+        data=DataConfig(
+            backend="local_text",
+            repeat=True,
+            local_text="hi",
+            packing_mode="bin",
+            packing_buffer_docs=4,
+            packing_max_docs_per_bin=None,
+            mask_boundary_loss=True,
+            train_on_eos=True,
+            tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
+        ),
+        train=TrainConfig(
+            steps=1,
+            batch_size=1,
+            seq_len=8,
+            grad_accum=1,
+            jit=False,
+            deterministic=True,
+            allow_cpu=True,
+        ),
+    )
+
+    it = build_train_iterator(cfg)
+    batch = next(it)
+    segs = batch.segment_ids[0, 0]
+    unique = np.unique(segs[segs > 0])
+    assert unique.size >= 2

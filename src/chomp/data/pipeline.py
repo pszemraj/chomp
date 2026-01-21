@@ -32,7 +32,7 @@ from chomp.config import Config
 from chomp.types import Batch
 
 from .hf import HFStreamingTextStream, HFStreamSpec, LocalTextStream
-from .pack import TokenPacker
+from .pack import BinPacker, TokenPacker
 
 
 class Tokenizer(Protocol):
@@ -354,6 +354,9 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
     }
 
     packing = {
+        "mode": d.packing_mode,
+        "buffer_docs": d.packing_buffer_docs,
+        "max_docs_per_bin": d.packing_max_docs_per_bin,
         "mask_boundary_loss": d.mask_boundary_loss,
         "train_on_eos": d.train_on_eos,
     }
@@ -409,14 +412,28 @@ class TrainBatchIterator:
             raise ValueError(f"Unknown data.backend: {cfg.data.backend!r}")
 
         # Packer
-        self._packer = TokenPacker(
-            seq_len=cfg.train.seq_len,
-            add_bos=cfg.data.tokenizer.add_bos,
-            add_eos=cfg.data.tokenizer.add_eos,
-            bos_id=cfg.model.bos_token_id,
-            eos_id=cfg.model.eos_token_id,
-            max_doc_tokens=cfg.data.tokenizer.max_doc_tokens,
-        )
+        if cfg.data.packing_mode == "bin":
+            self._packer = BinPacker(
+                seq_len=cfg.train.seq_len,
+                add_bos=cfg.data.tokenizer.add_bos,
+                add_eos=cfg.data.tokenizer.add_eos,
+                bos_id=cfg.model.bos_token_id,
+                eos_id=cfg.model.eos_token_id,
+                max_doc_tokens=cfg.data.tokenizer.max_doc_tokens,
+                bins_per_pack=int(cfg.train.grad_accum) * int(cfg.train.batch_size),
+                buffer_docs=cfg.data.packing_buffer_docs,
+                max_docs_per_bin=cfg.data.packing_max_docs_per_bin,
+                pad_id=cfg.model.pad_token_id,
+            )
+        else:
+            self._packer = TokenPacker(
+                seq_len=cfg.train.seq_len,
+                add_bos=cfg.data.tokenizer.add_bos,
+                add_eos=cfg.data.tokenizer.add_eos,
+                bos_id=cfg.model.bos_token_id,
+                eos_id=cfg.model.eos_token_id,
+                max_doc_tokens=cfg.data.tokenizer.max_doc_tokens,
+            )
 
         # Batch shape
         self._A = int(cfg.train.grad_accum)
