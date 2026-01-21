@@ -17,6 +17,7 @@ data:
   packing_mode: bin
   packing_buffer_docs: 256
   packing_max_docs_per_bin: null
+  grain_prefetch: 2
   mask_boundary_loss: true
   train_on_eos: true
   shuffle: true
