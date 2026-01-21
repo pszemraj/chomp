@@ -39,6 +39,7 @@ def apply_segment_ids_patch() -> bool:
         valid = seg > 0
         same = seg[:, :, None] == seg[:, None, :]
         same = same & valid[:, :, None] & valid[:, None, :]
+        same = same[:, None, :, :]
         return jnp.where(same, scores, -jnp.inf)
 
     def attention_single_chunk(
