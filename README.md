@@ -80,10 +80,12 @@ data:
   hf_dataset: Zyphra/Zyda-2
   hf_name: sample-100BT
   hf_split: train
+  hf_eval_split: validation
   text_key: text
   packing_mode: bin
   packing_buffer_docs: 256
   grain_prefetch: 2
+  max_eval_samples: 1000
 ```
 
 ### Resume from checkpoint
@@ -113,6 +115,7 @@ Each run directory includes a tokenizer snapshot under `tokenizer/`.
 - **Resume is a contract**: train_state *and* data iterator state are persisted.
 - **Training never uses cache**: cache is an inference concern.
 - **Tokenizer compatibility**: tokenizer vocab + special tokens are detected and `model.vocab_size` is aligned.
+- **Fixed eval set**: `data.max_eval_samples` caches validation texts for consistent eval.
 
 ## Docs
 
@@ -120,4 +123,5 @@ Each run directory includes a tokenizer snapshot under `tokenizer/`.
 - `docs/data_pipeline.md`: HF streaming → Grain → batch contract
 - `docs/checkpointing.md`: Orbax save/restore + resume compatibility
 - `docs/configuration.md`: config tree and key knobs
+- `docs/dev.md`: dev log + deferred scope
 - `docs/training.md`: train loop behavior and metrics

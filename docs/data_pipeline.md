@@ -29,7 +29,7 @@ Where:
 
 - `A = train.grad_accum`
 - `B = train.batch_size`
-- `T = train.seq_len`
+- `T = train.seq_len` (single source of truth)
 
 Inside the compiled train step, the batch is sliced along the microbatch axis
 to `[B, T]` views.
@@ -92,10 +92,23 @@ The iterator exposes a JSON-serializable state dict containing:
 This is checkpointed alongside the model so resume does not rely on `.skip()`
 or re-streaming.
 
+## Validation set
+
+chomp builds a fixed validation set at startup:
+
+- If the HF dataset has a `validation` split, it takes the first
+  `data.max_eval_samples` examples from that split.
+- Otherwise it takes the first `data.max_eval_samples` examples from the
+  (shuffled) training split.
+
+The selected texts are cached under `run_dir/eval_texts.json` so resumes use
+the same validation set for the entire run.
+
 ## Key config knobs
 
 - `data.backend`: `hf` or `local_text`
 - `data.hf_dataset`, `data.hf_name`, `data.hf_split`, `data.text_key`
+- `data.hf_eval_split`, `data.max_eval_samples`
 - `data.shuffle`, `data.shuffle_buffer_size`, `data.seed`, `data.repeat`
 - `data.state_update_interval`, `data.max_retries`, `data.retry_delay_sec`
 - `data.tokenizer.*`

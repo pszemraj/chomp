@@ -36,6 +36,12 @@ Loss masking is handled in the data pipeline:
 - `data.mask_boundary_loss`: mask labels at segment boundaries
 - `data.train_on_eos`: mask EOS labels if desired
 
+## Evaluation
+
+If `train.eval_every > 0`, chomp runs a full pass over the cached validation
+texts and logs `eval_loss` and `eval_tokens`. The validation set is fixed for
+the entire run.
+
 ## Gradient checkpointing
 
 Megalodon supports activation checkpointing via `model.use_checkpoint`. This is
@@ -53,3 +59,4 @@ Metrics are written per step to `logging.metrics_file` and include:
 - `packing_mode`, `packing_tokens`, `packing_capacity`, `packing_utilization`
 - `first_step_compile_time_s` (step 0 only)
 - `peak_memory_gb` (best-effort, device-dependent)
+- `eval_loss`, `eval_tokens` (only when eval runs)

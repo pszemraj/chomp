@@ -43,6 +43,7 @@ Data source:
 
 - `data.backend`: `hf` or `local_text`
 - `data.hf_dataset`, `data.hf_name`, `data.hf_split`, `data.text_key`
+- `data.hf_eval_split`, `data.max_eval_samples`
 - `data.shuffle`, `data.shuffle_buffer_size`, `data.seed`, `data.repeat`
 
 Tokenizer:
@@ -68,6 +69,7 @@ Train:
 - `train.batch_size`, `train.grad_accum`, `train.seq_len`
 - `train.allow_cpu` (fail fast if CPU)
 - `train.deterministic` (optional override)
+- `train.eval_every` (0 disables periodic eval)
 
 Optimizer:
 
