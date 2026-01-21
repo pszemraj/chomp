@@ -428,6 +428,22 @@ def validate_config(cfg: Config) -> None:
             _vfail(f"model.num_layers must be positive, got {cfg.model.num_layers}")
         if cfg.model.num_heads <= 0:
             _vfail(f"model.num_heads must be positive, got {cfg.model.num_heads}")
+        if cfg.model.model_dim % cfg.model.num_heads != 0:
+            _vfail(
+                f"model.model_dim ({cfg.model.model_dim}) must be divisible by "
+                f"model.num_heads ({cfg.model.num_heads})"
+            )
+        if cfg.model.chunk_size <= 0:
+            _vfail(f"model.chunk_size must be positive, got {cfg.model.chunk_size}")
+        if cfg.model.chunk_size > cfg.train.seq_len:
+            _vfail(
+                f"model.chunk_size ({cfg.model.chunk_size}) must be <= train.seq_len ({cfg.train.seq_len})"
+            )
+        if cfg.train.seq_len % cfg.model.chunk_size != 0:
+            _vfail(
+                f"train.seq_len ({cfg.train.seq_len}) must be divisible by "
+                f"model.chunk_size ({cfg.model.chunk_size})"
+            )
     else:
         _vfail(f"model.backend must be 'dummy' or 'megalodon', got {cfg.model.backend!r}")
 

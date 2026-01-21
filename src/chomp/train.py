@@ -23,6 +23,7 @@ Initial Phase 4 chunk:
 
 from __future__ import annotations
 
+import math
 import time
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -67,6 +68,15 @@ def _count_tokens(labels: jax.Array, attention_mask: jax.Array | None) -> jax.Ar
     if attention_mask is not None:
         valid = valid & attention_mask[:, 1:].astype(bool)
     return jnp.sum(valid, dtype=jnp.int32)
+
+
+def _check_finite_metrics(metrics: dict[str, Any], *, step: int) -> None:
+    """Fail fast if loss/grad_norm are non-finite."""
+
+    for name in ("loss", "grad_norm"):
+        value = float(metrics[name])
+        if not math.isfinite(value):
+            raise RuntimeError(f"Non-finite {name} at step {step}: {value}")
 
 
 def _weight_decay_mask(params: Any) -> Any:
@@ -344,9 +354,7 @@ def run(
 
             # Debug NaN check
             if cfg.debug.nan_check:
-                loss_f = float(metrics_host["loss"])
-                if not (loss_f == loss_f) or loss_f in (float("inf"), float("-inf")):
-                    raise RuntimeError(f"Non-finite loss at step {step_i}: {loss_f}")
+                _check_finite_metrics(metrics_host, step=step_i)
 
             # Checkpoint save (after state updated)
             if manager is not None and (step_i % int(cfg.checkpoint.save_every) == 0):
