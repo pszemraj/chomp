@@ -25,6 +25,14 @@ boundary masks.
 
 Deterministic runs are recommended for resume and regression tests.
 
+## GPU environment notes
+
+Two environment flags are helpful on newer GPUs:
+
+- `XLA_PYTHON_CLIENT_PREALLOCATE=false` to avoid pre-allocating all GPU memory.
+- `XLA_FLAGS=--xla_gpu_enable_triton_gemm=false` if Triton GEMM causes
+  `CUDA_ERROR_OUT_OF_MEMORY` on RTX 5090 with `jax/jaxlib 0.8.2`.
+
 ## Segment masking
 
 When `model.segment_masking=true`, the Megalodon patch builds a block-diagonal
