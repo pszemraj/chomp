@@ -1,0 +1,57 @@
+# Minimal config that actually hits Zyphra/Zyda-2 streaming.
+# Intended for validating the HF streaming path end-to-end.
+
+model:
+  backend: dummy
+  vocab_size: 256
+  d_model: 128
+  dropout: 0.0
+
+data:
+  backend: hf
+  hf_dataset: Zyphra/Zyda-2
+  hf_name: sample-100BT
+  hf_split: train
+  text_key: text
+  shuffle: true
+  shuffle_buffer_size: 10000
+  repeat: true
+  tokenizer:
+    kind: byte
+    byte_offset: 0
+    add_bos: false
+    add_eos: false
+
+train:
+  seed: 0
+  steps: 20
+  batch_size: 2
+  seq_len: 128
+  grad_accum: 2
+  jit: true
+  deterministic: true
+  allow_cpu: false
+  log_every: 1
+
+optim:
+  lr: 3.0e-4
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+  warmup_steps: 2
+  total_steps: 20
+
+checkpoint:
+  enabled: true
+  save_every: 10
+  max_to_keep: 2
+  async_save: true
+
+logging:
+  project: chomp
+  run_dir: null
+  metrics_file: metrics.jsonl
+  level: INFO
+
+debug:
+  nan_check: true
+  check_device_every: 10

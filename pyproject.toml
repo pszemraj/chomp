@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chomp"
+version = "0.0.2"
+description = "Single-GPU-first Megalodon JAX pretraining harness (minimal, production-shaped)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "chomp contributors" }]
+
+# NOTE:
+# - JAX wheels (jaxlib) are platform/CUDA specific. See README.
+# - We pin Orbax to avoid silent API drift.
+dependencies = [
+  "jax>=0.7.0",
+  "equinox>=0.12.0",
+  "optax>=0.2.0",
+  "PyYAML>=6.0",
+  "tqdm>=4.66",
+
+  # Phase 3: checkpointing
+  "orbax-checkpoint==0.11.31",
+
+  # Phase 4+: real streaming data
+  "datasets>=2.18.0",
+]
+
+[project.optional-dependencies]
+# Install your Megalodon engine separately if you prefer local dev:
+#   pip install -e /path/to/megalodon-jax
+megalodon = [
+  "megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git",
+]
+
+# Optional HF tokenizer support (ByteTokenizer requires no extra deps)
+hf = [
+  "transformers>=4.40.0",
+  "tokenizers>=0.15.0",
+]
+
+dev = [
+  "pytest>=7.4",
+]
+
+[project.scripts]
+chomp-train = "chomp.scripts.train:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["chomp*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
