@@ -1,4 +1,4 @@
-"""Train-on-EOS toggle should mask EOS labels when disabled."""
+"""Labels should align with input_ids (model shifts internally)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, Train
 from chomp.data.pipeline import build_train_iterator
 
 
-def test_train_on_eos_false_masks_eos_labels():
+def test_labels_align_with_inputs_except_masked():
     cfg = Config(
         model=ModelConfig(
             backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=True
@@ -17,7 +17,7 @@ def test_train_on_eos_false_masks_eos_labels():
             backend="local_text",
             repeat=True,
             local_text="hi",
-            mask_boundary_loss=False,
+            mask_boundary_loss=True,
             train_on_eos=False,
             tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
         ),
@@ -25,7 +25,7 @@ def test_train_on_eos_false_masks_eos_labels():
             steps=1,
             batch_size=1,
             seq_len=8,
-            grad_accum=1,
+            grad_accum=2,
             jit=False,
             deterministic=True,
             allow_cpu=True,
@@ -35,11 +35,9 @@ def test_train_on_eos_false_masks_eos_labels():
     it = build_train_iterator(cfg)
     batch = next(it)
 
-    input_ids = batch.input_ids[0, 0]
-    labels = batch.labels[0, 0]
+    labels = np.asarray(batch.labels)
+    inputs = np.asarray(batch.input_ids)
+    mask = labels != -100
 
-    eos_id = int(cfg.model.eos_token_id)
-    eos_positions = input_ids[1:] == eos_id
-    assert eos_positions.any()
-    masked = labels[1:][eos_positions]
-    assert np.all(masked == -100)
+    assert mask.any()
+    assert np.all(labels[mask] == inputs[mask])

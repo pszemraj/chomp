@@ -20,7 +20,7 @@ both emitting fixed-length windows of `seq_len + 1`:
 From each window we derive:
 
 - `input_ids`: tokens `[0..T-1]`
-- `labels`: tokens `[1..T]` (causal shift)
+- `labels`: tokens `[0..T-1]` (model shifts internally)
 - `segment_ids`: packed document IDs for each token
 - `attention_mask`: `True` for real tokens, `False` for padding
 

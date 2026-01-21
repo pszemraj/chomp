@@ -95,5 +95,5 @@ def test_hf_pipeline_segment_ids_and_label_mask(monkeypatch):
 
     boundary = segs[1:] != segs[:-1]
     assert boundary.any()
-    masked_labels = batch.labels[0, 0][:-1][boundary]
+    masked_labels = batch.labels[0, 0][1:][boundary]
     assert np.all(masked_labels == -100)

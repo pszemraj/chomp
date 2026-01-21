@@ -636,13 +636,14 @@ class TrainBatchIterator:
                 self._packer.add_document(ids)
 
             seq, segs = self._packer.pop_seq_plus_one_with_segments()  # [T+1]
-            # Convert to input/labels [T]
-            inp = seq[:-1]
-            lab = seq[1:]
-            seg = segs[:-1]
+            # Convert to input/labels [T]. Labels align with input_ids; model shifts internally.
+            inp = np.asarray(seq[:-1], dtype=np.int32)
+            lab = inp.copy()
+            seg = np.asarray(segs[:-1], dtype=np.int32)
             if self._mask_boundary_loss:
                 same = (segs[1:] == segs[:-1]) & (segs[1:] > 0) & (segs[:-1] > 0)
-                lab = np.where(same, lab, _IGNORE_INDEX).astype(np.int32)
+                if lab.size > 1:
+                    lab[1:] = np.where(same[:-1], lab[1:], _IGNORE_INDEX).astype(np.int32)
             if not self._train_on_eos:
                 lab = np.where(lab == self._eos_id, _IGNORE_INDEX, lab).astype(np.int32)
             seqs.append((inp, lab, seg))

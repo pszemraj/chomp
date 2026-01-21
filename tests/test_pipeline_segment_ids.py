@@ -41,7 +41,7 @@ def test_pipeline_segment_ids_multiple_docs():
 
     boundary = segs[1:] != segs[:-1]
     assert boundary.any()
-    masked_labels = batch.labels[0, 0][:-1][boundary]
+    masked_labels = batch.labels[0, 0][1:][boundary]
     assert np.all(masked_labels == -100)
 
 
@@ -74,7 +74,7 @@ def test_boundary_loss_mask_toggle():
     segs = batch.segment_ids[0, 0]
     boundary = segs[1:] != segs[:-1]
     assert boundary.any()
-    labels_at_boundary = batch.labels[0, 0][:-1][boundary]
+    labels_at_boundary = batch.labels[0, 0][1:][boundary]
     assert np.all(labels_at_boundary != -100)
 
 

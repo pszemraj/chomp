@@ -21,7 +21,7 @@ sequences.
 All batches have **fixed shapes**:
 
 - `input_ids`: `[A, B, T]` int32
-- `labels`: `[A, B, T]` int32 (causal shift)
+- `labels`: `[A, B, T]` int32 (aligned with `input_ids`)
 - `attention_mask`: `[A, B, T]` bool
 - `segment_ids`: `[A, B, T]` int32
 
@@ -62,7 +62,7 @@ Packer modes:
 Both packers emit fixed windows of length `seq_len + 1`, then split into:
 
 - `input_ids = tokens[0..T-1]`
-- `labels = tokens[1..T]`
+- `labels = tokens[0..T-1]` (the model shifts internally)
 
 Segment IDs are emitted for each token to support block-diagonal attention.
 
