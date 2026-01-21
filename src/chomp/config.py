@@ -175,6 +175,10 @@ class DataConfig:
     # Debug-only local text source (exercises tokenize+pack path, not synthetic ids)
     local_text: str = "Hello from chomp.\n"
 
+    # Packed-doc loss behavior
+    mask_boundary_loss: bool = True
+    train_on_eos: bool = True
+
     # Tokenizer
     tokenizer: TokenizerConfig = TokenizerConfig()
 

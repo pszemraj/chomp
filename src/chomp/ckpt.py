@@ -405,6 +405,22 @@ def check_resume_compat(cfg: Config, meta: dict[str, Any] | None) -> None:
         severity="error",
     )
 
+    # Packing/loss behavior comparisons.
+    pack_prev = meta_fp.get("packing") or {}
+    pack_cur = cur_fp.get("packing") or {}
+    _cmp(
+        "data.mask_boundary_loss",
+        pack_cur.get("mask_boundary_loss"),
+        pack_prev.get("mask_boundary_loss"),
+        severity="error",
+    )
+    _cmp(
+        "data.train_on_eos",
+        pack_cur.get("train_on_eos"),
+        pack_prev.get("train_on_eos"),
+        severity="error",
+    )
+
     # Batch shape invariants.
     _cmp("train.seq_len", cur_fp.get("seq_len"), meta_fp.get("seq_len"), severity="error")
     _cmp(

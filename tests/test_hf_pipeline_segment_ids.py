@@ -70,6 +70,8 @@ def test_hf_pipeline_segment_ids_and_label_mask(monkeypatch):
             shuffle_buffer_size=8,
             seed=0,
             repeat=False,
+            mask_boundary_loss=True,
+            train_on_eos=True,
             tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=True, add_eos=True),
         ),
         train=TrainConfig(

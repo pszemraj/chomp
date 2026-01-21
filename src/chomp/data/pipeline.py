@@ -353,9 +353,15 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
         "auto_set_special_tokens": t.auto_set_special_tokens,
     }
 
+    packing = {
+        "mask_boundary_loss": d.mask_boundary_loss,
+        "train_on_eos": d.train_on_eos,
+    }
+
     return {
         "source": src,
         "tokenizer": tok,
+        "packing": packing,
         "seq_len": cfg.train.seq_len,
         "batch_size": cfg.train.batch_size,
         "grad_accum": cfg.train.grad_accum,
@@ -417,7 +423,9 @@ class TrainBatchIterator:
         self._B = int(cfg.train.batch_size)
         self._T = int(cfg.train.seq_len)
         self._device_put = bool(cfg.data.device_put)
-        self._segment_masking = bool(cfg.model.segment_masking)
+        self._mask_boundary_loss = bool(cfg.data.mask_boundary_loss)
+        self._train_on_eos = bool(cfg.data.train_on_eos)
+        self._eos_id = int(cfg.model.eos_token_id)
 
     def __iter__(self) -> TrainBatchIterator:
         return self
@@ -438,9 +446,11 @@ class TrainBatchIterator:
             inp = seq[:-1]
             lab = seq[1:]
             seg = segs[:-1]
-            if self._segment_masking:
+            if self._mask_boundary_loss:
                 same = (segs[1:] == segs[:-1]) & (segs[1:] > 0) & (segs[:-1] > 0)
                 lab = np.where(same, lab, _IGNORE_INDEX).astype(np.int32)
+            if not self._train_on_eos:
+                lab = np.where(lab == self._eos_id, _IGNORE_INDEX, lab).astype(np.int32)
             seqs.append((inp, lab, seg))
 
         # Stack -> [A*B, T]
