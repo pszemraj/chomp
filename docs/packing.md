@@ -66,6 +66,10 @@ does not accept explicit position IDs in its public API. If/when we add support
 for position ID reset at segment boundaries, it will be gated by a new config
 flag and will preserve the fixed-shape batch contract.
 
+> [!NOTE]
+> Packing quality today refers to segment IDs + boundary masking. Position ID
+> resets remain deferred until Megalodon exposes a stable API for them.
+
 ## Future work
 
 Near-term packing work focuses on:

@@ -10,7 +10,7 @@ that keeps the rest of the codebase boring.
 
 We save three logical things:
 - train_state: arrays-only pytree (TrainState)
-- data_state: JSON dict (stream position + packer buffer), small but essential
+- data_state: iterator state via Grain checkpoint handler
 - meta: JSON dict with versions/config fingerprint
 
 Orbax notes:
@@ -166,19 +166,31 @@ def make_manager(
     return mgr
 
 
+def _checkpoint_target(data_iter: Any) -> Any:
+    """Return the iterator object to pass to Grain's checkpoint handler.
+
+    :param Any data_iter: Training data iterator.
+    :return Any: Iterator object compatible with Grain checkpointing.
+    """
+    if hasattr(data_iter, "checkpoint_target"):
+        return data_iter.checkpoint_target()
+    return data_iter
+
+
 def save(
     manager: ocp.CheckpointManager,
     *,
     step: int,
     train_state: Any,
-    data_state: dict[str, Any],
+    data_iter: Any,
     meta: CheckpointMeta,
     enforce_size_gb: float | None = None,
 ) -> None:
     """Save a checkpoint.
 
     - `train_state` is saved via StandardSave (PyTree)
-    - `data_state` and `meta` via JsonSave
+    - `data_state` via Grain's checkpoint handler
+    - `meta` via JsonSave
 
     `enforce_size_gb` is a guardrail to catch saving static graphs or duplicating tensors.
     It's intentionally a blunt instrument.
@@ -186,12 +198,13 @@ def save(
     :param ocp.CheckpointManager manager: Orbax checkpoint manager.
     :param int step: Training step number.
     :param Any train_state: TrainState pytree (arrays only).
-    :param dict[str, Any] data_state: Data iterator state dict.
+    :param Any data_iter: Data iterator to checkpoint via Grain's handler.
     :param CheckpointMeta meta: Checkpoint metadata.
     :param enforce_size_gb: Optional max size in GB; raises if exceeded.
     :raises RuntimeError: If checkpoint size exceeds enforce_size_gb.
     """
 
+    import grain.checkpoint as gcp
     import orbax.checkpoint as ocp
 
     step = int(step)
@@ -200,7 +213,7 @@ def save(
         step,
         args=ocp.args.Composite(
             train_state=ocp.args.StandardSave(train_state),
-            data_state=ocp.args.JsonSave(data_state),
+            data_state=gcp.CheckpointSave(_checkpoint_target(data_iter)),
             meta=ocp.args.JsonSave(meta.to_dict()),
         ),
     )
@@ -221,19 +234,22 @@ def restore_latest(
     manager: ocp.CheckpointManager,
     *,
     abstract_train_state: Any,
-) -> tuple[int, Any, dict[str, Any] | None, dict[str, Any] | None]:
+    data_iter: Any,
+) -> tuple[int, Any, dict[str, Any] | None]:
     """Restore latest checkpoint.
 
     Notes:
     - `abstract_train_state` should be a tree of ShapeDtypeStruct matching TrainState.
-    - `data_state` and `meta` are JSON dicts.
+    - `data_state` is restored via Grain's checkpoint handler.
 
     :param ocp.CheckpointManager manager: Orbax checkpoint manager.
     :param Any abstract_train_state: ShapeDtypeStruct tree for restoration target.
+    :param Any data_iter: Data iterator to restore via Grain's handler.
     :raises FileNotFoundError: If no checkpoints exist.
-    :return tuple: (step, train_state, data_state, meta).
+    :return tuple: (step, train_state, meta).
     """
 
+    import grain.checkpoint as gcp
     import orbax.checkpoint as ocp
 
     latest = manager.latest_step()
@@ -244,17 +260,16 @@ def restore_latest(
         latest,
         args=ocp.args.Composite(
             train_state=ocp.args.StandardRestore(abstract_train_state),
-            data_state=ocp.args.JsonRestore(),
+            data_state=gcp.CheckpointRestore(_checkpoint_target(data_iter)),
             meta=ocp.args.JsonRestore(),
         ),
     )
 
     # Orbax returns a dict-like mapping for Composite.
     train_state = restored["train_state"]
-    data_state = restored.get("data_state")
     meta = restored.get("meta")
 
-    return int(latest), train_state, data_state, meta
+    return int(latest), train_state, meta
 
 
 def restore_at_step(
@@ -262,14 +277,17 @@ def restore_at_step(
     *,
     step: int,
     abstract_train_state: Any,
-) -> tuple[int, Any, dict[str, Any] | None, dict[str, Any] | None]:
+    data_iter: Any,
+) -> tuple[int, Any, dict[str, Any] | None]:
     """Restore checkpoint at a specific step.
 
     :param ocp.CheckpointManager manager: Orbax checkpoint manager.
     :param int step: Step number to restore.
     :param Any abstract_train_state: ShapeDtypeStruct tree for restoration target.
-    :return tuple: (step, train_state, data_state, meta).
+    :param Any data_iter: Data iterator to restore via Grain's handler.
+    :return tuple: (step, train_state, meta).
     """
+    import grain.checkpoint as gcp
     import orbax.checkpoint as ocp
 
     step = int(step)
@@ -277,14 +295,13 @@ def restore_at_step(
         step,
         args=ocp.args.Composite(
             train_state=ocp.args.StandardRestore(abstract_train_state),
-            data_state=ocp.args.JsonRestore(),
+            data_state=gcp.CheckpointRestore(_checkpoint_target(data_iter)),
             meta=ocp.args.JsonRestore(),
         ),
     )
     train_state = restored["train_state"]
-    data_state = restored.get("data_state")
     meta = restored.get("meta")
-    return step, train_state, data_state, meta
+    return step, train_state, meta
 
 
 def check_resume_compat(cfg: Config, meta: dict[str, Any] | None) -> None:

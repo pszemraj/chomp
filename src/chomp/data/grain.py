@@ -72,6 +72,10 @@ class GrainTrainBatchIterator:
         self._it.set_state(state)
         self._last_stats = {}
 
+    def checkpoint_target(self) -> Any:
+        """Return the Grain iterator used for Orbax checkpointing."""
+        return self._it
+
     def get_stats(self) -> dict[str, float | int | str]:
         """Return latest packing stats from the iterator.
 

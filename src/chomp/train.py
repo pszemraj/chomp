@@ -566,18 +566,16 @@ def run(
         if manager is None:
             raise RuntimeError("resume requested but checkpointing is disabled")
         if resume == "latest":
-            step_r, state, data_state, _meta = restore_latest(
-                manager, abstract_train_state=abstract_state
+            step_r, state, _meta = restore_latest(
+                manager, abstract_train_state=abstract_state, data_iter=data_it
             )
         else:
-            step_r, state, data_state, _meta = restore_at_step(
-                manager, step=int(resume), abstract_train_state=abstract_state
+            step_r, state, _meta = restore_at_step(
+                manager, step=int(resume), abstract_train_state=abstract_state, data_iter=data_it
             )
 
         print(f"[chomp] resumed from checkpoint step {step_r}")
         check_resume_compat(cfg, _meta)
-        if data_state is not None:
-            data_it.set_state(data_state)
 
     train_step = make_train_step(cfg, static=static, tx=tx, lr_schedule=schedule)
     eval_every = int(cfg.train.eval_every)
@@ -744,7 +742,7 @@ def run(
                         manager,
                         step=step_i,
                         train_state=state,
-                        data_state=data_it.get_state(),
+                        data_iter=data_it,
                         meta=meta,
                     )
 

@@ -26,7 +26,7 @@ from chomp.config import (
     TokenizerConfig,
     TrainConfig,
 )
-from chomp.data import data_fingerprint
+from chomp.data import build_train_iterator, data_fingerprint
 from chomp.types import TrainState
 from chomp.utils.tree import tree_allclose
 
@@ -74,17 +74,20 @@ def test_async_checkpoint_roundtrip(tmp_path: Path):
     run_dir = tmp_path / "run_async"
     cfg = _base_cfg(run_dir)
     state = _make_state()
+    data_it = build_train_iterator(cfg)
     ckpt_dir = default_ckpt_dir(run_dir)
     mgr = make_manager(ckpt_dir, max_to_keep=2, save_every=1, async_save=True)
 
     meta = build_meta(step=1, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg))
-    save(mgr, step=1, train_state=state, data_state={"i": 0}, meta=meta)
+    save(mgr, step=1, train_state=state, data_iter=data_it, meta=meta)
     mgr.wait_until_finished()
 
     abstract_state = _abstractify(state)
-    step, restored, data_state, _meta = restore_latest(mgr, abstract_train_state=abstract_state)
+    data_it_restore = build_train_iterator(cfg)
+    step, restored, _meta = restore_latest(
+        mgr, abstract_train_state=abstract_state, data_iter=data_it_restore
+    )
     assert step == 1
-    assert data_state == {"i": 0}
     assert tree_allclose(restored.params, state.params, rtol=0.0, atol=0.0)
     assert tree_allclose(restored.opt_state, state.opt_state, rtol=0.0, atol=0.0)
 
@@ -93,11 +96,12 @@ def test_latest_step_ignores_incomplete(tmp_path: Path):
     run_dir = tmp_path / "run_latest"
     cfg = _base_cfg(run_dir)
     state = _make_state()
+    data_it = build_train_iterator(cfg)
     ckpt_dir = default_ckpt_dir(run_dir)
     mgr = make_manager(ckpt_dir, max_to_keep=2, save_every=1, async_save=False)
 
     meta = build_meta(step=1, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg))
-    save(mgr, step=1, train_state=state, data_state={"i": 0}, meta=meta)
+    save(mgr, step=1, train_state=state, data_iter=data_it, meta=meta)
     mgr.wait_until_finished()
 
     (ckpt_dir / "2").mkdir()
@@ -108,11 +112,12 @@ def test_corrupt_checkpoint_fails_restore(tmp_path: Path):
     run_dir = tmp_path / "run_corrupt"
     cfg = _base_cfg(run_dir)
     state = _make_state()
+    data_it = build_train_iterator(cfg)
     ckpt_dir = default_ckpt_dir(run_dir)
     mgr = make_manager(ckpt_dir, max_to_keep=2, save_every=1, async_save=False)
 
     meta = build_meta(step=1, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg))
-    save(mgr, step=1, train_state=state, data_state={"i": 0}, meta=meta)
+    save(mgr, step=1, train_state=state, data_iter=data_it, meta=meta)
     mgr.wait_until_finished()
 
     corrupt_target = None
@@ -125,13 +130,15 @@ def test_corrupt_checkpoint_fails_restore(tmp_path: Path):
 
     abstract_state = _abstractify(state)
     with pytest.raises((ValueError, RuntimeError, KeyError, json.JSONDecodeError)):
-        restore_at_step(mgr, step=1, abstract_train_state=abstract_state)
+        data_it_restore = build_train_iterator(cfg)
+        restore_at_step(mgr, step=1, abstract_train_state=abstract_state, data_iter=data_it_restore)
 
 
 def test_max_to_keep_prunes_checkpoints(tmp_path: Path):
     run_dir = tmp_path / "run_prune"
     cfg = _base_cfg(run_dir)
     state = _make_state()
+    data_it = build_train_iterator(cfg)
     ckpt_dir = default_ckpt_dir(run_dir)
     mgr = make_manager(ckpt_dir, max_to_keep=2, save_every=1, async_save=False)
 
@@ -141,7 +148,7 @@ def test_max_to_keep_prunes_checkpoints(tmp_path: Path):
             mgr,
             step=step,
             train_state=state,
-            data_state={"i": step},
+            data_iter=data_it,
             meta=meta,
         )
         mgr.wait_until_finished()
@@ -151,7 +158,7 @@ def test_max_to_keep_prunes_checkpoints(tmp_path: Path):
         mgr,
         step=4,
         train_state=state,
-        data_state={"i": 4},
+        data_iter=data_it,
         meta=meta,
     )
     mgr.wait_until_finished()

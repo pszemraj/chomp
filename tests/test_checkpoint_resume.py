@@ -32,6 +32,7 @@ from chomp.config import (
     TokenizerConfig,
     TrainConfig,
 )
+from chomp.data.pipeline import build_train_iterator
 from chomp.model import build_model
 from chomp.train import build_optimizer, init_train_state, run
 from chomp.utils.tree import tree_allclose
@@ -55,8 +56,9 @@ def _restore_state(run_dir: Path, cfg: Config, step: int):
 
     ckpt_dir = default_ckpt_dir(run_dir)
     mgr = make_manager(ckpt_dir, max_to_keep=5, save_every=1, async_save=False)
-    _, state, _data_state, _meta = restore_at_step(
-        mgr, step=step, abstract_train_state=abstract_state
+    data_it = build_train_iterator(cfg)
+    _, state, _meta = restore_at_step(
+        mgr, step=step, abstract_train_state=abstract_state, data_iter=data_it
     )
     return state
 

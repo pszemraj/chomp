@@ -8,7 +8,8 @@ Resume is treated as a contract, not a best-effort feature.
 Each checkpoint stores three items:
 
 1) `train_state`: model parameters, optimizer state, step, RNG
-2) `data_state`: iterator state (HF cursor + packer buffer)
+2) `data_state`: iterator state (HF cursor + packer buffer) via Grain's
+   checkpoint handler
 3) `meta`: JSON metadata (config snapshot + data fingerprint + versions)
 
 The run directory also includes a tokenizer snapshot under `tokenizer/`.
