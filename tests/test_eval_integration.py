@@ -1,4 +1,4 @@
-"""Integration test for eval caching + eval logging."""
+"""Integration test for eval logging."""
 
 from __future__ import annotations
 
@@ -51,12 +51,6 @@ def test_eval_logging_writes_metrics(tmp_path: Path):
     )
 
     run(cfg, config_path=None, resume="none")
-
-    eval_cache = run_dir / "eval_texts.json"
-    payload = json.loads(eval_cache.read_text(encoding="utf-8"))
-    assert payload["max_eval_samples"] == 3
-    assert len(payload["texts"]) == 3
-    assert len(payload.get("tokens", [])) == 3
 
     metrics_path = run_dir / cfg.logging.metrics_file
     rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]

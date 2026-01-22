@@ -358,11 +358,6 @@ def save_tokenizer_snapshot(
     )
 
 
-def _eval_texts_path(run_dir: Path) -> Path:
-    """Return the eval-text cache path within a run directory."""
-    return run_dir / "eval_texts.json"
-
-
 def _collect_texts(stream: TextStream, max_samples: int) -> list[str]:
     """Collect up to max_samples texts from a stream.
 
@@ -389,65 +384,16 @@ def _tokenize_eval_texts(texts: list[str], tok: Tokenizer) -> list[list[int]]:
     return [tok.encode(text) for text in texts]
 
 
-def load_or_create_eval_texts(
-    cfg: Config, *, run_dir: Path, allow_existing: bool, tokenizer: Tokenizer
-) -> list[list[int]]:
-    """Load or create a fixed validation set and cache tokenized docs.
-
-    The eval set is cached under the run directory so resumes keep the same
-    validation samples across the entire run.
+def load_or_create_eval_texts(cfg: Config, *, tokenizer: Tokenizer) -> list[list[int]]:
+    """Create an evaluation set without on-disk caching.
 
     :param Config cfg: Training configuration.
-    :param Path run_dir: Run directory path.
-    :param bool allow_existing: Whether to reuse existing eval cache.
     :param Tokenizer tokenizer: Tokenizer used to pre-tokenize eval texts.
-    :raises RuntimeError: If resume is requested but no eval cache exists.
     :return list[list[int]]: Tokenized documents for evaluation.
     """
     max_samples = int(cfg.data.max_eval_samples)
     if max_samples <= 0:
         return []
-
-    path = _eval_texts_path(run_dir)
-    if path.exists():
-        if not allow_existing:
-            raise RuntimeError(f"Eval texts already exist: {path}")
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        stored_max = int(payload.get("max_eval_samples", 0))
-        if stored_max != max_samples:
-            raise RuntimeError(
-                f"Eval cache max_eval_samples mismatch (cache={stored_max}, config={max_samples})"
-            )
-        stored_backend = payload.get("backend")
-        if stored_backend != cfg.data.backend:
-            raise RuntimeError(
-                f"Eval cache backend mismatch (cache={stored_backend!r}, config={cfg.data.backend!r})"
-            )
-        if cfg.data.backend == "hf":
-            stored_dataset = payload.get("dataset")
-            stored_name = payload.get("name")
-            stored_text_key = payload.get("text_key")
-            if stored_dataset != cfg.data.hf_dataset or stored_name != cfg.data.hf_name:
-                raise RuntimeError(
-                    "Eval cache dataset mismatch "
-                    f"(cache={stored_dataset!r}/{stored_name!r}, "
-                    f"config={cfg.data.hf_dataset!r}/{cfg.data.hf_name!r})"
-                )
-            if stored_text_key != cfg.data.text_key:
-                raise RuntimeError(
-                    f"Eval cache text_key mismatch (cache={stored_text_key!r}, "
-                    f"config={cfg.data.text_key!r})"
-                )
-        tokens = payload.get("tokens")
-        if tokens is None:
-            texts = list(payload.get("texts") or [])
-            tokens = _tokenize_eval_texts(texts, tokenizer)
-            payload["tokens"] = tokens
-            path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        return [list(map(int, seq)) for seq in tokens]
-
-    if allow_existing:
-        raise RuntimeError(f"Eval texts missing for resume: {path}")
 
     texts: list[str] = []
     split_used = None
@@ -477,19 +423,7 @@ def load_or_create_eval_texts(
     if not texts:
         logger.warning("Eval text set is empty (max_eval_samples=%d).", max_samples)
 
-    tokens = _tokenize_eval_texts(texts, tokenizer)
-    payload = {
-        "backend": cfg.data.backend,
-        "dataset": cfg.data.hf_dataset if cfg.data.backend == "hf" else None,
-        "name": cfg.data.hf_name if cfg.data.backend == "hf" else None,
-        "split": split_used,
-        "text_key": cfg.data.text_key,
-        "max_eval_samples": max_samples,
-        "texts": texts,
-        "tokens": tokens,
-    }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    return tokens
+    return _tokenize_eval_texts(texts, tokenizer)
 
 
 def data_fingerprint(cfg: Config) -> dict[str, Any]:

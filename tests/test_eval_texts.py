@@ -1,12 +1,9 @@
-"""Eval text caching should prefer validation split and fall back to train."""
+"""Eval text selection should prefer validation split and fall back to train."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, replace
 from typing import Any
-
-import pytest
 
 from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, TrainConfig
 from chomp.data import build_tokenizer, load_or_create_eval_texts
@@ -80,7 +77,7 @@ def _base_cfg() -> Config:
     )
 
 
-def test_eval_prefers_validation_split(monkeypatch, tmp_path: Path):
+def test_eval_prefers_validation_split(monkeypatch):
     val_items = [{"text": "val-a"}, {"text": "val-b"}]
     train_items = [{"text": "train-a"}, {"text": "train-b"}]
 
@@ -98,11 +95,11 @@ def test_eval_prefers_validation_split(monkeypatch, tmp_path: Path):
 
     cfg = _base_cfg()
     tok = build_tokenizer(cfg)
-    tokens = load_or_create_eval_texts(cfg, run_dir=tmp_path, allow_existing=False, tokenizer=tok)
+    tokens = load_or_create_eval_texts(cfg, tokenizer=tok)
     assert tokens == [tok.encode("val-a"), tok.encode("val-b")]
 
 
-def test_eval_falls_back_to_train_split(monkeypatch, tmp_path: Path):
+def test_eval_falls_back_to_train_split(monkeypatch):
     train_items = [{"text": "train-a"}, {"text": "train-b"}]
 
     def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool):
@@ -119,12 +116,12 @@ def test_eval_falls_back_to_train_split(monkeypatch, tmp_path: Path):
 
     cfg = _base_cfg()
     tok = build_tokenizer(cfg)
-    tokens = load_or_create_eval_texts(cfg, run_dir=tmp_path, allow_existing=False, tokenizer=tok)
+    tokens = load_or_create_eval_texts(cfg, tokenizer=tok)
     assert tokens == [tok.encode("train-a"), tok.encode("train-b")]
 
 
-def test_eval_cache_required_for_resume(tmp_path: Path):
+def test_eval_empty_when_disabled():
     cfg = _base_cfg()
+    cfg = replace(cfg, data=replace(cfg.data, max_eval_samples=0))
     tok = build_tokenizer(cfg)
-    with pytest.raises(RuntimeError, match="Eval texts missing"):
-        load_or_create_eval_texts(cfg, run_dir=tmp_path, allow_existing=True, tokenizer=tok)
+    assert load_or_create_eval_texts(cfg, tokenizer=tok) == []

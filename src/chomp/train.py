@@ -457,9 +457,7 @@ def run(
         add_file_logging(run_dir / cfg.logging.log_file, level=cfg.logging.level)
     metrics_path = run_dir / cfg.logging.metrics_file
     save_tokenizer_snapshot(run_dir, cfg, tokenizer, allow_existing=allow_existing)
-    eval_tokens = load_or_create_eval_texts(
-        cfg, run_dir=run_dir, allow_existing=allow_existing, tokenizer=tokenizer
-    )
+    eval_tokens = load_or_create_eval_texts(cfg, tokenizer=tokenizer)
 
     wandb_run = None
     if cfg.logging.wandb_enabled and cfg.logging.wandb_mode != "disabled":
