@@ -23,6 +23,7 @@ Phases 4–5:
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Callable
@@ -475,9 +476,17 @@ def run(
             name=cfg.logging.wandb_run_name or run_dir.name,
             mode=cfg.logging.wandb_mode,
             config=cfg.to_dict(),
-            dir=str(run_dir),
             tags=tags,
         )
+        cfg_path = run_dir / "config_original.yaml"
+        if cfg_path.exists():
+            artifact = wandb.Artifact(f"{run_dir.name}-config", type="config")
+            artifact.add_file(str(cfg_path), name="config_original.yaml")
+            wandb_run.log_artifact(artifact)
+        else:
+            logging.getLogger(__name__).info(
+                "config_original.yaml not found; skipping W&B artifact."
+            )
 
     # Optional profiling
     if cfg.train.profile:

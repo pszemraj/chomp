@@ -68,6 +68,8 @@ Metrics are written per step to `logging.metrics_file` and include:
 - `eval_loss` (only when eval runs)
 
 If `logging.wandb_enabled=true`, the same rows are also logged to Weights & Biases.
+chomp also uploads `config_original.yaml` as a W&B artifact at run start, and W&B
+logs go to the default `./wandb` directory (or `WANDB_DIR` if set).
 
 Console output is throttled by `logging.console_every` and prints a compact
 one-line summary (loss, grad norm, LR, step time, throughput, optional eval

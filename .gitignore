@@ -217,3 +217,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Chomp runs + W&B logs
+runs/
+wandb/
