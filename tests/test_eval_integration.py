@@ -61,4 +61,13 @@ def test_eval_logging_writes_metrics(tmp_path: Path):
     metrics_path = run_dir / cfg.logging.metrics_file
     rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
     assert any(row.get("eval_loss") not in (None, "") for row in rows)
-    assert any(row.get("eval_tokens", 0) > 0 for row in rows)
+    assert any("step" in row for row in rows)
+    for row in rows:
+        for key in (
+            "eval_tokens",
+            "wall_time_s",
+            "packing_tokens",
+            "packing_capacity",
+            "device_memory_gb",
+        ):
+            assert key not in row

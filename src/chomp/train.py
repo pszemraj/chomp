@@ -669,9 +669,27 @@ def run(
                     if step_i == (start_step + 1) and t_compile is not None:
                         row["first_step_compile_time_s"] = float(t_compile)
 
-                    mw.write(row)
+                    local_drop = {
+                        "wall_time_s",
+                        "packing_tokens",
+                        "packing_capacity",
+                        "eval_tokens",
+                        "device_memory_gb",
+                    }
+                    row_local = {k: v for k, v in row.items() if k not in local_drop}
+                    mw.write(row_local)
                     if wandb_run is not None:
-                        wandb_run.log(row, step=step_i)
+                        wandb_drop = {
+                            "wall_time_s",
+                            "step",
+                            "peak_memory_gb",
+                            "packing_tokens",
+                            "packing_capacity",
+                            "eval_tokens",
+                            "device_memory_gb",
+                        }
+                        row_wandb = {k: v for k, v in row.items() if k not in wandb_drop}
+                        wandb_run.log(row_wandb, step=step_i)
                 if should_console:
                     eval_loss = eval_row.get("eval_loss") if eval_row else None
                     packing_util = None

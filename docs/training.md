@@ -63,11 +63,10 @@ Metrics are written per step to `logging.metrics_file` and include:
 - `grad_norm`
 - `lr`
 - `tokens_seen`
-- `wall_time_s`
-- `packing_mode`, `packing_tokens`, `packing_capacity`, `packing_utilization`
+- `packing_mode`, `packing_utilization`
 - `first_step_compile_time_s` (step 0 only)
 - `peak_memory_gb` (best-effort, device-dependent)
-- `eval_loss`, `eval_tokens` (only when eval runs)
+- `eval_loss` (only when eval runs)
 
 If `logging.wandb_enabled=true`, the same rows are also logged to Weights & Biases.
 
