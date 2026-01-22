@@ -430,7 +430,7 @@ def check_resume_compat(cfg: Config, meta: dict[str, Any] | None) -> None:
         "data.grain_prefetch",
         pack_cur.get("grain_prefetch"),
         pack_prev.get("grain_prefetch"),
-        severity="error",
+        severity="warning",
     )
     _cmp(
         "data.mask_boundary_loss",
