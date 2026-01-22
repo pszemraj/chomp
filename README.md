@@ -1,23 +1,27 @@
 # chomp
 
 A **minimal**, single-GPU-first JAX/Equinox pretraining harness designed to train
-**Megalodon-JAX** models.
+**[Megalodon-JAX](https://github.com/pszemraj/megalodon-jax)** models.
 
 chomp's philosophy is intentionally boring:
-- fixed shapes → compile once
-- arrays-only TrainState → checkpointing is straightforward
-- real streaming data → no synthetic crutches
+
+- fixed shapes compile once
+- arrays-only TrainState checkpointing is straightforward
+- real streaming data no synthetic crutches
 
 Implemented so far (this draft):
-- Phases 0–2: config + model integration + compiled train_step with `lax.scan` grad accumulation
+
+- Phases 0-2: config + model integration + compiled train_step with `lax.scan` grad accumulation
 - Phase 3: Orbax checkpointing + resume contract (train_state + data iterator state)
-- Phases 4–5: HF streaming → tokenize → pack → Grain pipeline → fixed [A,B,T] batches
+- Phases 4-5: HF streaming tokenize pack Grain pipeline fixed [A,B,T] batches
 
 ## Install
 
 ### 1) Install JAX + jaxlib
+
 JAX wheels are platform- and CUDA-specific. Follow the official instructions:
-- https://docs.jax.dev/en/latest/installation.html
+
+- <https://docs.jax.dev/en/latest/installation.html>
 
 ### 2) Install `chomp`
 
@@ -122,7 +126,7 @@ Each run directory includes a tokenizer snapshot under `tokenizer/`.
 ## Docs
 
 - `docs/packing.md`: packing modes, segment IDs, and loss masking
-- `docs/data_pipeline.md`: HF streaming → Grain → batch contract
+- `docs/data_pipeline.md`: HF streaming Grain batch contract
 - `docs/checkpointing.md`: Orbax save/restore + resume compatibility
 - `docs/configuration.md`: config tree and key knobs
 - `docs/dev.md`: dev log + deferred scope
