@@ -94,7 +94,10 @@ def _check_finite_metrics(metrics: dict[str, Any], *, step: int) -> None:
 
 
 def _device_memory_stats_gb() -> dict[str, float]:
-    """Best-effort device memory stats in GB (if available)."""
+    """Best-effort device memory stats in GB (if available).
+
+    :return dict[str, float]: Keys include device_memory_gb and peak_memory_gb when present.
+    """
 
     try:
         ms = jax.local_devices()[0].memory_stats()
@@ -124,7 +127,20 @@ def _format_console_row(
     device_mem_gb: float | None,
     peak_mem_gb: float | None,
 ) -> str:
-    """Format a concise console line with key training metrics."""
+    """Format a concise console line with key training metrics.
+
+    :param int step: Training step number.
+    :param float loss: Training loss value.
+    :param float grad_norm: Gradient norm value.
+    :param float lr: Learning rate value.
+    :param float step_time_s: Step wall time in seconds.
+    :param float tokens_per_sec: Throughput in tokens per second.
+    :param float | None eval_loss: Optional eval loss.
+    :param float | None packing_util: Optional packing utilization.
+    :param float | None device_mem_gb: Optional device memory usage.
+    :param float | None peak_mem_gb: Optional peak memory usage.
+    :return str: Formatted console line.
+    """
 
     parts = [
         f"step {step}",
@@ -393,7 +409,15 @@ def make_eval_step(
         loss0 = jnp.zeros((), dtype=jnp.float32)
         token0 = jnp.zeros((), dtype=jnp.float32)
 
-        def body(carry: tuple[jax.Array, jax.Array], xs: tuple[jax.Array, ...]):
+        def body(
+            carry: tuple[jax.Array, jax.Array], xs: tuple[jax.Array, ...]
+        ) -> tuple[tuple[jax.Array, jax.Array], None]:
+            """Scan body that accumulates loss and token counts for eval.
+
+            :param tuple carry: (loss_sum, token_sum) accumulators.
+            :param tuple xs: (input_ids, labels, attn, segs) microbatch inputs.
+            :return tuple: (updated_carry, None).
+            """
             loss_sum, token_sum = carry
             input_ids, labels, attn, segs = xs
             micro = Batch(
@@ -637,7 +661,11 @@ def run(
     console_every = int(cfg.train.log_every)
 
     def _run_eval(params: Any) -> dict[str, Any]:
-        """Run a full eval pass over the cached eval texts."""
+        """Run a full eval pass over the cached eval texts.
+
+        :param Any params: Model parameters.
+        :return dict[str, Any]: Eval metrics row with eval_loss and eval_tokens.
+        """
         if eval_step is None or not eval_tokens:
             return {}
         total_loss = 0.0

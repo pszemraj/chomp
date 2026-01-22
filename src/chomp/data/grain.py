@@ -15,9 +15,13 @@ class _IteratorProtocol(Protocol):
 
     def __next__(self) -> Batch: ...
 
-    def get_state(self) -> dict[str, Any]: ...
+    def get_state(self) -> dict[str, Any]:
+        """Return iterator state for checkpointing."""
+        ...
 
-    def set_state(self, state: dict[str, Any]) -> None: ...
+    def set_state(self, state: dict[str, Any]) -> None:
+        """Restore iterator state from a checkpoint."""
+        ...
 
 
 class GrainTrainBatchIterator:
@@ -57,7 +61,10 @@ class GrainTrainBatchIterator:
         return batch
 
     def get_state(self) -> dict[str, Any]:
-        """Return iterator state for checkpointing."""
+        """Return iterator state for checkpointing.
+
+        :return dict[str, Any]: Serializable iterator state.
+        """
         return self._it.get_state()
 
     def set_state(self, state: dict[str, Any]) -> None:
@@ -66,7 +73,10 @@ class GrainTrainBatchIterator:
         self._last_stats = {}
 
     def get_stats(self) -> dict[str, float | int | str]:
-        """Return latest packing stats from the iterator."""
+        """Return latest packing stats from the iterator.
+
+        :return dict[str, float | int | str]: Utilization stats for the last batch.
+        """
         return dict(self._last_stats)
 
 
@@ -101,7 +111,10 @@ def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchItera
             return next(self._it)
 
         def get_state(self) -> dict[str, Any]:
-            """Return iterator state for checkpointing."""
+            """Return iterator state for checkpointing.
+
+            :return dict[str, Any]: Serializable iterator state.
+            """
             return self._it.get_state()
 
         def set_state(self, state: dict[str, Any]) -> None:

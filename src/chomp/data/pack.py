@@ -34,7 +34,16 @@ def _prepare_doc_tokens(
     eos_id: int,
     max_doc_tokens: int | None,
 ) -> np.ndarray:
-    """Build a document token array with optional BOS/EOS and truncation."""
+    """Build a document token array with optional BOS/EOS and truncation.
+
+    :param tokens: Iterable of token IDs for the document.
+    :param bool add_bos: Whether to prepend the BOS token.
+    :param bool add_eos: Whether to append the EOS token.
+    :param int bos_id: BOS token ID.
+    :param int eos_id: EOS token ID.
+    :param max_doc_tokens: Optional cap on document length before special tokens.
+    :return np.ndarray: Token array for the document (int32).
+    """
     arr = np.asarray(list(tokens), dtype=np.int32)
     if max_doc_tokens is not None and arr.size > max_doc_tokens:
         arr = arr[:max_doc_tokens]

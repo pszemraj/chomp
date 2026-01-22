@@ -29,6 +29,11 @@ class _ConsoleNoiseFilter(logging.Filter):
     """Filter that hides noisy third-party INFO logs from the console."""
 
     def filter(self, record: logging.LogRecord) -> bool:
+        """Filter a log record based on module prefix and level.
+
+        :param logging.LogRecord record: Log record to evaluate.
+        :return bool: True if record should be shown on console.
+        """
         for prefix in _NOISY_CONSOLE_PREFIXES:
             if record.name.startswith(prefix):
                 return record.levelno >= logging.WARNING
@@ -36,7 +41,12 @@ class _ConsoleNoiseFilter(logging.Filter):
 
 
 def _console_handler(level: int, *, use_rich: bool) -> logging.Handler:
-    """Build a console handler with optional Rich formatting."""
+    """Build a console handler with optional Rich formatting.
+
+    :param int level: Logging level to set on the handler.
+    :param bool use_rich: If True, use RichHandler when available.
+    :return logging.Handler: Configured console handler.
+    """
 
     if use_rich:
         try:
