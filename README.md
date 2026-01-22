@@ -39,7 +39,7 @@ pip install -e '.[megalodon]'
 
 ### Tokenizer defaults + vocab rounding
 
-- Default HF tokenizer: `pszemraj/sail-slimpajama-6B-32768-BPE-tokenizer`
+- Default HF tokenizer: `pszemraj/bytebpe-tokenizer-32k-mlm`
 - When `tokenizer.kind: hf`, chomp reads tokenizer metadata and:
   - rounds `model.vocab_size` up to `data.tokenizer.vocab_size_multiple` (default: 128)
   - auto-sets `model.{bos,eos,pad}_token_id` from the tokenizer unless disabled

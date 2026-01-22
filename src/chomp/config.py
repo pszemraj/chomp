@@ -115,7 +115,7 @@ class TokenizerConfig:
     kind: TokenizerKind = "byte"
 
     # HF tokenizer
-    hf_name_or_path: str | None = "pszemraj/sail-slimpajama-6B-32768-BPE-tokenizer"
+    hf_name_or_path: str | None = "pszemraj/bytebpe-tokenizer-32k-mlm"
     hf_use_fast: bool = True
     hf_trust_remote_code: bool = False
 
