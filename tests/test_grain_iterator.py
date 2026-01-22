@@ -11,7 +11,7 @@ from chomp.data.pipeline import build_train_iterator
 def test_grain_iterator_state_roundtrip():
     cfg = Config(
         model=ModelConfig(
-            backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=True
+            backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=False
         ),
         data=DataConfig(
             backend="local_text",
@@ -57,7 +57,7 @@ def test_grain_iterator_state_roundtrip():
 def test_grain_iterator_stats_disabled_with_device_put():
     cfg = Config(
         model=ModelConfig(
-            backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=True
+            backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=False
         ),
         data=DataConfig(
             backend="local_text",

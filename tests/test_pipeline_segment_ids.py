@@ -11,7 +11,7 @@ from chomp.data.pipeline import build_train_iterator
 def test_pipeline_segment_ids_multiple_docs():
     cfg = Config(
         model=ModelConfig(
-            backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=True
+            backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=False
         ),
         data=DataConfig(
             backend="local_text",
@@ -48,7 +48,7 @@ def test_pipeline_segment_ids_multiple_docs():
 def test_boundary_loss_mask_toggle():
     cfg = Config(
         model=ModelConfig(
-            backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=True
+            backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=False
         ),
         data=DataConfig(
             backend="local_text",
@@ -81,7 +81,7 @@ def test_boundary_loss_mask_toggle():
 def test_pipeline_bin_packing_segment_ids():
     cfg = Config(
         model=ModelConfig(
-            backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=True
+            backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=False
         ),
         data=DataConfig(
             backend="local_text",
