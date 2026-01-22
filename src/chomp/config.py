@@ -115,7 +115,7 @@ class TokenizerConfig:
     kind: TokenizerKind = "byte"
 
     # HF tokenizer
-    hf_name_or_path: str | None = "BEE-spoke-data/bpe-tokenizer-32k-smolNeoX"
+    hf_name_or_path: str | None = "pszemraj/sail-slimpajama-6B-32768-BPE-tokenizer"
     hf_use_fast: bool = True
     hf_trust_remote_code: bool = False
 
@@ -535,6 +535,12 @@ def validate_config(cfg: Config) -> None:
             )
     else:
         _vfail(f"model.backend must be 'dummy' or 'megalodon', got {cfg.model.backend!r}")
+
+    if cfg.model.pad_token_id == cfg.model.eos_token_id:
+        _vfail(
+            "model.pad_token_id must differ from model.eos_token_id. "
+            "Choose a tokenizer with a distinct pad token or set model.pad_token_id explicitly."
+        )
 
     # Data
     if cfg.data.backend == "hf":

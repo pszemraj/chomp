@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, TrainConfig
 from chomp.data.pipeline import resolve_tokenizer_config
 
@@ -65,3 +67,24 @@ def test_auto_sets_special_token_ids():
     assert updated.model.bos_token_id == 10
     assert updated.model.eos_token_id == 11
     assert updated.model.pad_token_id == 12
+
+
+def test_tokenizer_pad_equals_eos_raises():
+    cfg = Config(
+        model=ModelConfig(vocab_size=512, bos_token_id=0, eos_token_id=1, pad_token_id=2),
+        data=DataConfig(
+            backend="local_text",
+            local_text="tokenizer config text\n",
+            tokenizer=TokenizerConfig(
+                kind="hf",
+                hf_name_or_path="dummy",
+                auto_set_special_tokens=True,
+                add_bos=False,
+                add_eos=False,
+            ),
+        ),
+        train=TrainConfig(steps=1, batch_size=1, seq_len=8, grad_accum=1, allow_cpu=True),
+    )
+    tok = _DummyTokenizer(size=512, bos=0, eos=0, pad=0)
+    with pytest.raises(ValueError, match="pad_token_id"):
+        resolve_tokenizer_config(cfg, tok)

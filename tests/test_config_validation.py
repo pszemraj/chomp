@@ -108,3 +108,11 @@ def test_log_file_must_be_non_empty():
 def test_default_init_mode_is_he():
     cfg = Config()
     assert cfg.model.init_mode == "he"
+
+
+def test_pad_token_id_must_differ_from_eos():
+    cfg = _base_cfg()
+    bad_model = replace(cfg.model, pad_token_id=2, eos_token_id=2)
+    bad = replace(cfg, model=bad_model)
+    with pytest.raises(ValueError, match="pad_token_id"):
+        validate_config(bad)

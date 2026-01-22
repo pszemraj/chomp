@@ -290,10 +290,17 @@ def resolve_tokenizer_config(cfg: Config, tok: Tokenizer) -> Config:
         _maybe_update("eos_token_id", tok_eos)
         _maybe_update("pad_token_id", tok_pad)
 
-    if not model_updates:
-        return cfg
+    updated_cfg = (
+        cfg if not model_updates else replace(cfg, model=replace(cfg.model, **model_updates))
+    )
 
-    return replace(cfg, model=replace(cfg.model, **model_updates))
+    if updated_cfg.model.pad_token_id == updated_cfg.model.eos_token_id:
+        raise ValueError(
+            "pad_token_id must differ from eos_token_id after tokenizer resolution. "
+            "Choose a tokenizer with a distinct pad token or override model.pad_token_id."
+        )
+
+    return updated_cfg
 
 
 def prepare_tokenizer_and_config(cfg: Config) -> tuple[Config, Tokenizer]:

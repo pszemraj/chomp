@@ -33,6 +33,7 @@ Key fields (megalodon backend):
 - `model.chunk_size` (must divide `train.seq_len`)
 - `model.segment_masking` (block-diagonal attention on packed segments)
 - `model.init_mode` (default: `he`)
+- `model.pad_token_id` must differ from `model.eos_token_id` (enforced)
 
 Dtypes are configured as strings and validated:
 
