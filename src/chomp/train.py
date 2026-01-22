@@ -433,6 +433,7 @@ def run(
     *,
     config_path: str | None = None,
     resume: Literal["none", "latest"] | int = "none",
+    dry_run: bool = False,
 ) -> Path:
     """Run a training job and return the run directory.
 
@@ -443,9 +444,13 @@ def run(
     :param Config cfg: Fully validated training configuration.
     :param config_path: Optional path to the source YAML config file.
     :param resume: Resume mode - "none" (fresh), "latest", or specific step number.
+    :param bool dry_run: If True, compile and run a single step, then exit early.
     :raises RuntimeError: If resume requested but checkpointing is disabled.
     :return Path: Path to the run directory.
     """
+
+    if dry_run and resume != "none":
+        raise RuntimeError("dry_run does not support resume; use a fresh run.")
 
     allow_existing = resume != "none"
 
@@ -458,10 +463,10 @@ def run(
         add_file_logging(run_dir / cfg.logging.log_file, level=cfg.logging.level)
     metrics_path = run_dir / cfg.logging.metrics_file
     save_tokenizer_snapshot(run_dir, cfg, tokenizer, allow_existing=allow_existing)
-    eval_tokens = load_or_create_eval_texts(cfg, tokenizer=tokenizer)
+    eval_tokens = [] if dry_run else load_or_create_eval_texts(cfg, tokenizer=tokenizer)
 
     wandb_run = None
-    if cfg.logging.wandb_enabled and cfg.logging.wandb_mode != "disabled":
+    if cfg.logging.wandb_enabled and cfg.logging.wandb_mode != "disabled" and not dry_run:
         try:
             import wandb
         except Exception as exc:  # pragma: no cover - optional runtime dependency
@@ -487,6 +492,8 @@ def run(
             logging.getLogger(__name__).info(
                 "config_original.yaml not found; skipping W&B artifact."
             )
+    elif dry_run and cfg.logging.wandb_enabled:
+        logging.getLogger(__name__).info("dry_run: skipping W&B initialization.")
 
     # Optional profiling
     if cfg.train.profile:
@@ -548,6 +555,62 @@ def run(
     eval_step = None
     if eval_tokens and eval_every > 0:
         eval_step = make_eval_step(cfg, static=static)
+
+    if dry_run:
+        try:
+            batch = next(data_it)
+        except StopIteration as exc:
+            raise RuntimeError("dry_run: data iterator exhausted before first batch") from exc
+        data_stats = data_it.get_stats()
+        if not cfg.data.device_put:
+            batch = jax.device_put(batch)
+        if cfg.debug.check_device_every > 0:
+            assert_batch_on_device(batch, allow_cpu=cfg.train.allow_cpu)
+
+        t1 = time.perf_counter()
+        state, metrics = train_step(state, batch)
+        metrics_host = jax.device_get(metrics)
+        t2 = time.perf_counter()
+        step_time_s = t2 - t1
+
+        step_i = int(jax.device_get(state.step))
+        if cfg.debug.nan_check:
+            _check_finite_metrics(metrics_host, step=step_i)
+
+        tokens_per_step = (
+            int(cfg.train.grad_accum) * int(cfg.train.batch_size) * int(cfg.train.seq_len)
+        )
+        tokens_per_sec = float(tokens_per_step) / step_time_s if step_time_s > 0 else 0.0
+        mem_stats = _device_memory_stats_gb()
+        packing_util = (
+            float(data_stats["packing_utilization"])
+            if data_stats and "packing_utilization" in data_stats
+            else None
+        )
+        device_mem = float(mem_stats.get("device_memory_gb")) if mem_stats else None
+        peak_mem = float(mem_stats.get("peak_memory_gb")) if mem_stats else None
+        console_line = _format_console_row(
+            step=step_i,
+            loss=float(metrics_host["loss"]),
+            grad_norm=float(metrics_host["grad_norm"]),
+            lr=float(metrics_host["lr"]),
+            step_time_s=float(step_time_s),
+            tokens_per_sec=float(tokens_per_sec),
+            eval_loss=None,
+            packing_util=packing_util,
+            device_mem_gb=device_mem,
+            peak_mem_gb=peak_mem,
+        )
+        print("[chomp] dry-run complete")
+        print(console_line)
+
+        if wandb_run is not None:
+            wandb_run.finish()
+        if manager is not None:
+            manager.wait_until_finished()
+        if cfg.train.profile:
+            stop_trace()
+        return run_dir
 
     # Training loop
     t_compile = None

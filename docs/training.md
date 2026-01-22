@@ -49,6 +49,12 @@ Loss masking is handled in the data pipeline:
 If `train.eval_every > 0`, chomp runs a full pass over the validation texts
 selected at run start and logs `eval_loss`.
 
+## Dry run
+
+Use `chomp-train --dry-run` to validate config, build the tokenizer/model/data
+pipeline, and compile one step before exiting. W&B logging is skipped in dry-run
+mode to avoid creating noisy runs.
+
 ## Gradient checkpointing
 
 Megalodon supports activation checkpointing via `model.use_checkpoint`. This is

@@ -67,6 +67,14 @@ This uses `data.backend: local_text`, which still exercises tokenize+pack but av
 chomp-train --config configs/debug_smoke.yaml
 ```
 
+### Dry run (single compiled step)
+
+This validates config + tokenizer + model + data path and compiles one step, then exits.
+
+```bash
+chomp-train --config configs/debug_smoke.yaml --dry-run
+```
+
 ### Real streaming dataset: Zyphra/Zyda-2 (sample-100BT)
 
 The default `DataConfig` points at Zyda-2 sample-100BT streaming:
@@ -119,7 +127,7 @@ Each run directory includes a tokenizer snapshot under `tokenizer/`.
 - **Resume is a contract**: train_state *and* data iterator state are persisted.
 - **Training never uses cache**: cache is an inference concern.
 - **Tokenizer compatibility**: tokenizer vocab + special tokens are detected and `model.vocab_size` is aligned.
-- **Fixed eval set**: `data.max_eval_samples` caches validation texts for consistent eval.
+- **Fixed eval set**: `data.max_eval_samples` selects validation texts at run start for consistent eval.
 - **W&B logging**: enable with `logging.wandb_enabled=true`.
 - **Console metrics**: rate-limited summaries via `logging.console_every`; full logs in `logging.log_file`.
 

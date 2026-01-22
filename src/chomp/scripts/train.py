@@ -70,6 +70,11 @@ def main(argv: list[str] | None = None) -> None:
         default="none",
         help="Resume from checkpoint: 'none' (default), 'latest', or an integer step.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate config, build model/data, compile one step, then exit.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -86,7 +91,7 @@ def main(argv: list[str] | None = None) -> None:
     # Fail fast on CPU unless explicitly allowed
     validate_default_device(allow_cpu=cfg.train.allow_cpu)
 
-    run_dir = run(cfg, config_path=args.config, resume=resume)  # type: ignore[arg-type]
+    run_dir = run(cfg, config_path=args.config, resume=resume, dry_run=args.dry_run)  # type: ignore[arg-type]
     print(f"[chomp] run_dir: {run_dir}")
 
 
