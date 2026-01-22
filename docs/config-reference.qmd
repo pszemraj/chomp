@@ -1901,6 +1901,18 @@ debug:
 
 ---
 
+## Sync Checklist {#sync-checklist}
+
+When config schema changes, update this reference alongside code:
+
+- Defaults and valid values in `src/chomp/config.py`
+- Cross-field validation rules in `src/chomp/config.py`
+- Tokenizer resolution and vocab rounding behavior in `src/chomp/data/pipeline.py`
+- Example configs in `configs/` (if defaults/semantics changed)
+- Field counts in section headers and the field index
+
+If any of these diverge, update the doc in the same commit as the code change.
+
 ## Field Index {#index}
 
 All configuration fields by section:
