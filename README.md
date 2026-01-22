@@ -64,7 +64,7 @@ data:
 This uses `data.backend: local_text`, which still exercises tokenize+pack but avoids network.
 
 ```bash
-chomp-train --config configs/debug_smoke.yaml
+chomp-train configs/debug_smoke.yaml
 ```
 
 ### Dry run (single compiled step)
@@ -72,7 +72,7 @@ chomp-train --config configs/debug_smoke.yaml
 This validates config + tokenizer + model + data path and compiles one step, then exits.
 
 ```bash
-chomp-train --config configs/debug_smoke.yaml --dry-run
+chomp-train configs/debug_smoke.yaml --dry-run
 ```
 
 ### Real streaming dataset: Zyphra/Zyda-2 (sample-100BT)
@@ -106,10 +106,10 @@ Resume requires setting `logging.run_dir` (either in YAML or via CLI) to an exis
 
 ```bash
 # 1) Start a run and save checkpoints
-chomp-train --config configs/debug_smoke.yaml --run-dir runs/chomp/debug_run
+chomp-train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run
 
 # 2) Resume from the latest checkpoint
-chomp-train --config configs/debug_smoke.yaml --run-dir runs/chomp/debug_run --resume latest
+chomp-train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run --resume latest
 ```
 
 Resume performs strict config/data compatibility checks and fails fast on mismatches.
@@ -128,8 +128,8 @@ Each run directory includes a tokenizer snapshot under `tokenizer/`.
 - **Training never uses cache**: cache is an inference concern.
 - **Tokenizer compatibility**: tokenizer vocab + special tokens are detected and `model.vocab_size` is aligned.
 - **Fixed eval set**: `data.max_eval_samples` selects validation texts at run start for consistent eval.
-- **W&B logging**: enable with `logging.wandb_enabled=true`.
-- **Console metrics**: rate-limited summaries via `logging.console_every`; full logs in `logging.log_file`.
+- **W&B logging**: enable with `logging.wandb.enabled=true`.
+- **Console metrics**: rate-limited summaries via `train.log_every`; full logs in `logging.log_file`.
 
 ## Docs
 

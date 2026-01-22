@@ -20,13 +20,10 @@ Checkpoint frequency is controlled by:
 - `checkpoint.enabled`
 - `checkpoint.save_every`
 - `checkpoint.max_to_keep`
-- `checkpoint.max_save_checkpoints`
 - `checkpoint.async_save`
 
 If async saving is enabled, the manager waits on exit to avoid partial writes.
-
-Before saving a new checkpoint, chomp prunes the oldest checkpoint if the
-directory already contains `checkpoint.max_save_checkpoints` entries.
+Orbax enforces `checkpoint.max_to_keep` for retained checkpoints.
 
 ## Resume compatibility checks
 
@@ -46,10 +43,10 @@ so you can make an informed decision.
 
 ```bash
 # Start a run
-chomp-train --config configs/debug_smoke.yaml --run-dir runs/chomp/debug_run
+chomp-train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run
 
 # Resume latest
-chomp-train --config configs/debug_smoke.yaml --run-dir runs/chomp/debug_run --resume latest
+chomp-train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run --resume latest
 ```
 
 If a mismatch is detected, resume fails fast with a detailed error.

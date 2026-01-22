@@ -51,7 +51,7 @@ selected at run start and logs `eval_loss`.
 
 ## Dry run
 
-Use `chomp-train --dry-run` to validate config, build the tokenizer/model/data
+Use `chomp-train <config.yaml> --dry-run` to validate config, build the tokenizer/model/data
 pipeline, and compile one step before exiting. W&B logging is skipped in dry-run
 mode to avoid creating noisy runs.
 
@@ -73,11 +73,11 @@ Metrics are written per step to `logging.metrics_file` and include:
 - `peak_memory_gb` (best-effort, device-dependent)
 - `eval_loss` (only when eval runs)
 
-If `logging.wandb_enabled=true`, the same rows are also logged to Weights & Biases.
+If `logging.wandb.enabled=true`, the same rows are also logged to Weights & Biases.
 chomp also uploads `config_original.yaml` as a W&B artifact at run start, and W&B
 logs go to the default `./wandb` directory (or `WANDB_DIR` if set).
 
-Console output is throttled by `logging.console_every` and prints a compact
+Console output is throttled by `train.log_every` and prints a compact
 one-line summary (loss, grad norm, LR, step time, throughput, optional eval
 loss, packing utilization, and best-effort device memory). Full logs from
 third-party libraries are written to `logging.log_file` under the run directory.
