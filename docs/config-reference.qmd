@@ -630,7 +630,7 @@ GEMM backend selection. Currently only `"default"` is supported.
 #### `model.segment_masking` {#model.segment_masking}
 
 ```yaml
-segment_masking: bool = true
+segment_masking: bool = false
 ```
 
 Apply block-diagonal segment masking in attention for packed sequences.
@@ -638,11 +638,15 @@ Apply block-diagonal segment masking in attention for packed sequences.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Recommended | `true` when using packing |
+| Recommended | `false` (stream semantics) |
 
 ::: {.callout-note}
-When enabled, attention is restricted within document boundaries in packed sequences,
-preventing cross-contamination between documents.
+**Default: stream semantics.** The corpus is treated as a continuous token stream.
+Segment IDs are still emitted for boundary loss masking.
+
+Set to `true` for block-diagonal attention isolation across packed documents. Note
+that Megalodon's ComplexEMA and TimestepNorm still leak across boundaries even with
+segment masking enabled.
 :::
 
 ---
@@ -1756,7 +1760,6 @@ model:
   vocab_size: 256
   d_model: 128
   dropout: 0.0
-  segment_masking: true
 
 data:
   backend: local_text
@@ -1825,7 +1828,6 @@ model:
   eos_token_id: 2
   init_mode: he
   use_checkpoint: true           # Gradient checkpointing
-  segment_masking: true
   # Precision policy (NEVER use fp16)
   param_dtype: float32
   compute_dtype: bfloat16
