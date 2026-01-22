@@ -126,3 +126,37 @@ def test_corrupt_checkpoint_fails_restore(tmp_path: Path):
     abstract_state = _abstractify(state)
     with pytest.raises((ValueError, RuntimeError, KeyError, json.JSONDecodeError)):
         restore_at_step(mgr, step=1, abstract_train_state=abstract_state)
+
+
+def test_prune_oldest_before_save(tmp_path: Path):
+    run_dir = tmp_path / "run_prune"
+    cfg = _base_cfg(run_dir)
+    state = _make_state()
+    ckpt_dir = default_ckpt_dir(run_dir)
+    mgr = make_manager(ckpt_dir, max_to_keep=10, save_every=1, async_save=False)
+
+    for step in (1, 2, 3):
+        meta = build_meta(step=step, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg))
+        save(
+            mgr,
+            step=step,
+            train_state=state,
+            data_state={"i": step},
+            meta=meta,
+            max_save_checkpoints=3,
+        )
+        mgr.wait_until_finished()
+
+    meta = build_meta(step=4, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg))
+    save(
+        mgr,
+        step=4,
+        train_state=state,
+        data_state={"i": 4},
+        meta=meta,
+        max_save_checkpoints=3,
+    )
+    mgr.wait_until_finished()
+
+    steps = sorted(int(p.name) for p in ckpt_dir.iterdir() if p.is_dir() and p.name.isdigit())
+    assert steps == [2, 3, 4]

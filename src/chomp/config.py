@@ -253,7 +253,8 @@ class CheckpointConfig:
     root_dir: str | None = None
 
     save_every: int = 100
-    max_to_keep: int = 2
+    max_to_keep: int = 3
+    max_save_checkpoints: int = 3
     async_save: bool = True
 
 
@@ -503,6 +504,16 @@ def validate_config(cfg: Config) -> None:
             _vfail(f"checkpoint.save_every must be positive, got {cfg.checkpoint.save_every}")
         if cfg.checkpoint.max_to_keep <= 0:
             _vfail(f"checkpoint.max_to_keep must be positive, got {cfg.checkpoint.max_to_keep}")
+        if cfg.checkpoint.max_save_checkpoints <= 0:
+            _vfail(
+                "checkpoint.max_save_checkpoints must be positive, "
+                f"got {cfg.checkpoint.max_save_checkpoints}"
+            )
+        if cfg.checkpoint.max_to_keep > cfg.checkpoint.max_save_checkpoints:
+            _vfail(
+                "checkpoint.max_to_keep must be <= checkpoint.max_save_checkpoints "
+                f"({cfg.checkpoint.max_to_keep} > {cfg.checkpoint.max_save_checkpoints})"
+            )
 
     # Model
     if cfg.model.vocab_size <= 0:

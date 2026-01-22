@@ -20,9 +20,13 @@ Checkpoint frequency is controlled by:
 - `checkpoint.enabled`
 - `checkpoint.save_every`
 - `checkpoint.max_to_keep`
+- `checkpoint.max_save_checkpoints`
 - `checkpoint.async_save`
 
 If async saving is enabled, the manager waits on exit to avoid partial writes.
+
+Before saving a new checkpoint, chomp prunes the oldest checkpoint if the
+directory already contains `checkpoint.max_save_checkpoints` entries.
 
 ## Resume compatibility checks
 

@@ -637,6 +637,7 @@ def run(
                         train_state=state,
                         data_state=data_it.get_state(),
                         meta=meta,
+                        max_save_checkpoints=cfg.checkpoint.max_save_checkpoints,
                     )
 
                 eval_row: dict[str, Any] = {}

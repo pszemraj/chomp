@@ -50,7 +50,8 @@ checkpoint:
   enabled: true
   root_dir: null
   save_every: 5
-  max_to_keep: 2
+  max_to_keep: 3
+  max_save_checkpoints: 3
   async_save: false
 
 logging:

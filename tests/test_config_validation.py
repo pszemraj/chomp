@@ -116,3 +116,19 @@ def test_pad_token_id_must_differ_from_eos():
     bad = replace(cfg, model=bad_model)
     with pytest.raises(ValueError, match="pad_token_id"):
         validate_config(bad)
+
+
+def test_max_save_checkpoints_must_be_positive():
+    cfg = _base_cfg()
+    bad_checkpoint = replace(cfg.checkpoint, max_save_checkpoints=0)
+    bad = replace(cfg, checkpoint=bad_checkpoint)
+    with pytest.raises(ValueError, match="max_save_checkpoints"):
+        validate_config(bad)
+
+
+def test_max_to_keep_must_not_exceed_max_save_checkpoints():
+    cfg = _base_cfg()
+    bad_checkpoint = replace(cfg.checkpoint, max_to_keep=5, max_save_checkpoints=3)
+    bad = replace(cfg, checkpoint=bad_checkpoint)
+    with pytest.raises(ValueError, match="max_save_checkpoints"):
+        validate_config(bad)
