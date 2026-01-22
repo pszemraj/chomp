@@ -119,7 +119,7 @@ Each run directory includes a tokenizer snapshot under `tokenizer/`.
 
 - **Compile once**: fixed shapes; no dynamic padding; grad accumulation inside the compiled step.
 - **Token-weighted GA**: gradient accumulation scales by valid token count (correct with masks/padding).
-- **Segment masking toggle**: set `model.segment_masking` to enable/disable block-diagonal attention for packed sequences.
+- **Stream semantics by default**: corpus treated as a continuous token stream (`model.segment_masking: false`). Segment IDs are still emitted for boundary loss masking. Set `segment_masking: true` for block-diagonal attention if needed.
 - **Boundary-aware loss masking**: `data.mask_boundary_loss` sets labels at segment boundaries to `-100` to avoid cross-document loss; `data.train_on_eos` controls EOS supervision.
 - **Bin packing optional**: set `data.packing_mode: bin` with `data.packing_buffer_docs` to enable FFD packing (pads to fixed length).
 - **Grain pipeline**: tune `data.grain_prefetch` for threaded prefetch and log `packing_utilization`.
