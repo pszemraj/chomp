@@ -243,12 +243,17 @@ def training_loss(
 
     # Batch tensors come in as [A, B, T]. We compute loss per microbatch and average.
     # The compiled train_step calls this on each microbatch slice (shape [B, T]).
-    segment_ids = batch.segment_ids if use_segment_ids else None
+    kwargs: dict[str, Any] = {
+        "attention_mask": batch.attention_mask,
+        "deterministic": deterministic,
+        "key": key,
+    }
+    # Only pass segment_ids when patch is applied (segment_masking=True).
+    # Unpatched Megalodon doesn't accept this argument.
+    if use_segment_ids:
+        kwargs["segment_ids"] = batch.segment_ids
     return model.compute_loss(  # type: ignore[attr-defined]
         batch.input_ids,
         batch.labels,
-        attention_mask=batch.attention_mask,
-        deterministic=deterministic,
-        key=key,
-        segment_ids=segment_ids,
+        **kwargs,
     )
