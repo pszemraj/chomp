@@ -41,9 +41,7 @@ def test_train_repeat_false_exits_cleanly(tmp_path: Path):
             log_every=1,
             eval_every=0,
         ),
-        optim=OptimConfig(
-            lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0, total_steps=5
-        ),
+        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
         checkpoint=CheckpointConfig(enabled=False),
         debug=DebugConfig(nan_check=True, check_device_every=0),
         logging=LoggingConfig(project="chomp", run_dir=str(tmp_path / "run")),

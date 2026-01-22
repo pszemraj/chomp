@@ -10,8 +10,10 @@ from chomp.config import (
     DataConfig,
     LoggingConfig,
     ModelConfig,
+    OptimConfig,
     TokenizerConfig,
     TrainConfig,
+    WandbConfig,
 )
 from chomp.train import run
 
@@ -38,9 +40,13 @@ def test_dry_run_compiles_single_step(tmp_path: Path) -> None:
             log_every=1000,
             eval_every=0,
         ),
+        optim=OptimConfig(warmup_steps=0),
         checkpoint=CheckpointConfig(enabled=False),
         logging=LoggingConfig(
-            project="chomp", run_dir=str(run_dir), metrics_file="metrics.jsonl", wandb_enabled=True
+            project="chomp",
+            run_dir=str(run_dir),
+            metrics_file="metrics.jsonl",
+            wandb=WandbConfig(enabled=True),
         ),
     )
 

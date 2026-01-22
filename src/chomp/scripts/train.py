@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None) -> None:
     :param argv: Optional list of CLI arguments (defaults to sys.argv).
     """
     parser = argparse.ArgumentParser(prog="chomp-train")
-    parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
+    parser.add_argument("config", type=str, help="Path to YAML config")
     parser.add_argument(
         "--override",
         type=str,

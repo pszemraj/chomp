@@ -10,6 +10,7 @@ from chomp.config import (
     Config,
     DataConfig,
     ModelConfig,
+    OptimConfig,
     TokenizerConfig,
     TrainConfig,
     validate_config,
@@ -25,6 +26,7 @@ def _base_cfg() -> Config:
             tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
         ),
         train=TrainConfig(steps=1, batch_size=2, seq_len=16, grad_accum=1, allow_cpu=True),
+        optim=OptimConfig(warmup_steps=0),
     )
 
 
@@ -83,17 +85,17 @@ def test_eval_every_must_be_non_negative():
 
 def test_wandb_mode_must_be_valid():
     cfg = _base_cfg()
-    bad_logging = replace(cfg.logging, wandb_mode="bogus")
+    bad_logging = replace(cfg.logging, wandb=replace(cfg.logging.wandb, mode="bogus"))
     bad = replace(cfg, logging=bad_logging)
-    with pytest.raises(ValueError, match="wandb_mode"):
+    with pytest.raises(ValueError, match="wandb.mode"):
         validate_config(bad)
 
 
-def test_console_every_must_be_positive():
+def test_min_lr_ratio_must_be_in_range():
     cfg = _base_cfg()
-    bad_logging = replace(cfg.logging, console_every=0)
-    bad = replace(cfg, logging=bad_logging)
-    with pytest.raises(ValueError, match="console_every"):
+    bad_optim = replace(cfg.optim, min_lr_ratio=1.5)
+    bad = replace(cfg, optim=bad_optim)
+    with pytest.raises(ValueError, match="min_lr_ratio"):
         validate_config(bad)
 
 
@@ -118,17 +120,9 @@ def test_pad_token_id_must_differ_from_eos():
         validate_config(bad)
 
 
-def test_max_save_checkpoints_must_be_positive():
+def test_warmup_steps_must_not_exceed_train_steps():
     cfg = _base_cfg()
-    bad_checkpoint = replace(cfg.checkpoint, max_save_checkpoints=0)
-    bad = replace(cfg, checkpoint=bad_checkpoint)
-    with pytest.raises(ValueError, match="max_save_checkpoints"):
-        validate_config(bad)
-
-
-def test_max_to_keep_must_not_exceed_max_save_checkpoints():
-    cfg = _base_cfg()
-    bad_checkpoint = replace(cfg.checkpoint, max_to_keep=5, max_save_checkpoints=3)
-    bad = replace(cfg, checkpoint=bad_checkpoint)
-    with pytest.raises(ValueError, match="max_save_checkpoints"):
+    bad_optim = replace(cfg.optim, warmup_steps=10)
+    bad = replace(cfg, optim=bad_optim, train=replace(cfg.train, steps=5))
+    with pytest.raises(ValueError, match="warmup_steps"):
         validate_config(bad)

@@ -42,9 +42,7 @@ def test_eval_logging_writes_metrics(tmp_path: Path):
             log_every=1000,
             eval_every=1,
         ),
-        optim=OptimConfig(
-            lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0, total_steps=2
-        ),
+        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
         checkpoint=CheckpointConfig(enabled=False),
         debug=DebugConfig(nan_check=True, check_device_every=0),
         logging=LoggingConfig(project="chomp", run_dir=str(run_dir)),

@@ -10,6 +10,7 @@ from chomp.config import (
     DataConfig,
     LoggingConfig,
     ModelConfig,
+    OptimConfig,
     TokenizerConfig,
     TrainConfig,
 )
@@ -36,6 +37,7 @@ def test_tokenizer_snapshot_saved(tmp_path: Path):
             allow_cpu=True,
             log_every=1000,
         ),
+        optim=OptimConfig(warmup_steps=0),
         checkpoint=CheckpointConfig(enabled=False),
         logging=LoggingConfig(
             project="chomp", run_dir=None, metrics_file="metrics.jsonl", level="INFO"

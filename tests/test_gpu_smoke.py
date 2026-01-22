@@ -59,13 +59,13 @@ def test_gpu_train_smoke(tmp_path: Path, device_put: bool) -> None:
             cfg.optim,
             lr=1e-3,
             warmup_steps=0,
-            total_steps=1,
+            min_lr_ratio=0.0,
         ),
         checkpoint=replace(cfg.checkpoint, enabled=False),
         logging=replace(
             cfg.logging,
             run_dir=str(tmp_path / f"run_{int(device_put)}"),
-            wandb_enabled=False,
+            wandb=replace(cfg.logging.wandb, enabled=False),
         ),
         debug=replace(cfg.debug, check_device_every=1),
     )

@@ -20,9 +20,7 @@ Orbax notes:
 
 from __future__ import annotations
 
-import contextlib
 import logging
-import shutil
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -133,42 +131,6 @@ def _dir_size_bytes(path: Path) -> int:
     return total
 
 
-def _list_checkpoint_steps(ckpt_dir: Path) -> list[int]:
-    """List numeric checkpoint step directories under ckpt_dir."""
-    if not ckpt_dir.exists():
-        return []
-    steps: list[int] = []
-    for child in ckpt_dir.iterdir():
-        if not child.is_dir():
-            continue
-        try:
-            steps.append(int(child.name))
-        except ValueError:
-            continue
-    return sorted(steps)
-
-
-def prune_oldest_checkpoints(ckpt_dir: Path, *, max_keep: int) -> list[int]:
-    """Delete oldest checkpoints so the directory has < max_keep entries.
-
-    :param Path ckpt_dir: Checkpoint directory.
-    :param int max_keep: Maximum number of checkpoints to retain.
-    :return list[int]: Steps that were removed.
-    """
-    if max_keep <= 0:
-        return []
-    steps = _list_checkpoint_steps(ckpt_dir)
-    removed: list[int] = []
-    while len(steps) >= max_keep:
-        step = steps.pop(0)
-        path = ckpt_dir / str(step)
-        with contextlib.suppress(FileNotFoundError):
-            shutil.rmtree(path)
-        removed.append(step)
-        logger.info("Pruned checkpoint step %d before saving new checkpoint.", step)
-    return removed
-
-
 def make_manager(
     ckpt_dir: Path, *, max_to_keep: int, save_every: int, async_save: bool
 ) -> ocp.CheckpointManager:
@@ -211,7 +173,6 @@ def save(
     train_state: Any,
     data_state: dict[str, Any],
     meta: CheckpointMeta,
-    max_save_checkpoints: int | None = None,
     enforce_size_gb: float | None = None,
 ) -> None:
     """Save a checkpoint.
@@ -227,7 +188,6 @@ def save(
     :param Any train_state: TrainState pytree (arrays only).
     :param dict[str, Any] data_state: Data iterator state dict.
     :param CheckpointMeta meta: Checkpoint metadata.
-    :param max_save_checkpoints: If set, prune oldest checkpoints before saving.
     :param enforce_size_gb: Optional max size in GB; raises if exceeded.
     :raises RuntimeError: If checkpoint size exceeds enforce_size_gb.
     """
@@ -235,8 +195,6 @@ def save(
     import orbax.checkpoint as ocp
 
     step = int(step)
-    if max_save_checkpoints is not None:
-        prune_oldest_checkpoints(Path(manager.directory), max_keep=int(max_save_checkpoints))
 
     manager.save(
         step,

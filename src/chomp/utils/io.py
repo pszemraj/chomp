@@ -4,7 +4,7 @@ chomp uses deliberately boring IO:
 - a run directory containing config + metrics.jsonl
 - JSONL is append-only and resilient (works even if the process crashes)
 
-W&B integration is optional and configured via logging.wandb_*.
+W&B integration is optional and configured via logging.wandb.*.
 
 Phase 3 addendum:
 - If you resume into an existing run_dir, we do not clobber the original

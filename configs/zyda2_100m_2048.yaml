@@ -59,21 +59,20 @@ train:
   jit: true
   deterministic: true
   allow_cpu: false
-  log_every: 5
-  eval_every: 500
+  log_every: 25
+  eval_every: 2500
 
 optim:
   lr: 3.0e-4
   weight_decay: 0.01
   grad_clip_norm: 1.0
   warmup_steps: 100
-  total_steps: 2000
+  min_lr_ratio: 0.0
 
 checkpoint:
   enabled: true
-  save_every: 100
+  save_every: 5000
   max_to_keep: 3
-  max_save_checkpoints: 3
   async_save: true
 
 logging:
@@ -81,15 +80,15 @@ logging:
   run_dir: null
   metrics_file: metrics.jsonl
   level: INFO
-  console_every: 25
   console_use_rich: true
   log_file: train.log
-  wandb_enabled: true
-  wandb_project: chomp
-  wandb_entity: null
-  wandb_run_name: null
-  wandb_mode: online
-  wandb_tags: ["zyda2", "100m", "seq2048", "chunk512"]
+  wandb:
+    enabled: true
+    project: chomp
+    entity: null
+    run_name: null
+    mode: online
+    tags: ["zyda2", "100m", "seq2048", "chunk512"]
 
 debug:
   nan_check: true

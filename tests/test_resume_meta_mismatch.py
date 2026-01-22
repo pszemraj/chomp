@@ -39,9 +39,7 @@ def test_resume_rejects_seq_len_mismatch(tmp_path: Path):
             allow_cpu=True,
             log_every=1000,
         ),
-        optim=OptimConfig(
-            lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0, total_steps=10
-        ),
+        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
         checkpoint=CheckpointConfig(enabled=True, save_every=1, max_to_keep=2, async_save=False),
         debug=DebugConfig(nan_check=True, check_device_every=0),
         logging=LoggingConfig(

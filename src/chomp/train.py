@@ -100,6 +100,8 @@ def _device_memory_stats_gb() -> dict[str, float]:
         ms = jax.local_devices()[0].memory_stats()
     except Exception:
         return {}
+    if not ms:
+        return {}
 
     stats: dict[str, float] = {}
     if "bytes_in_use" in ms:
@@ -177,8 +179,8 @@ def build_optimizer(
         init_value=0.0,
         peak_value=cfg.optim.lr,
         warmup_steps=cfg.optim.warmup_steps,
-        decay_steps=cfg.optim.total_steps,
-        end_value=0.0,
+        decay_steps=cfg.train.steps,
+        end_value=cfg.optim.lr * cfg.optim.min_lr_ratio,
     )
 
     transforms = []
@@ -434,6 +436,7 @@ def run(
     config_path: str | None = None,
     resume: Literal["none", "latest"] | int = "none",
     dry_run: bool = False,
+    max_steps: int | None = None,
 ) -> Path:
     """Run a training job and return the run directory.
 
@@ -445,6 +448,7 @@ def run(
     :param config_path: Optional path to the source YAML config file.
     :param resume: Resume mode - "none" (fresh), "latest", or specific step number.
     :param bool dry_run: If True, compile and run a single step, then exit early.
+    :param max_steps: Optional cap on steps for this invocation (<= train.steps).
     :raises RuntimeError: If resume requested but checkpointing is disabled.
     :return Path: Path to the run directory.
     """
@@ -466,7 +470,8 @@ def run(
     eval_tokens = [] if dry_run else load_or_create_eval_texts(cfg, tokenizer=tokenizer)
 
     wandb_run = None
-    if cfg.logging.wandb_enabled and cfg.logging.wandb_mode != "disabled" and not dry_run:
+    wandb_cfg = cfg.logging.wandb
+    if wandb_cfg.enabled and wandb_cfg.mode != "disabled" and not dry_run:
         try:
             import wandb
         except Exception as exc:  # pragma: no cover - optional runtime dependency
@@ -474,12 +479,12 @@ def run(
                 "wandb is enabled but not installed. Install with `pip install wandb`."
             ) from exc
 
-        tags = list(cfg.logging.wandb_tags) if cfg.logging.wandb_tags else None
+        tags = list(wandb_cfg.tags) if wandb_cfg.tags else None
         wandb_run = wandb.init(
-            project=cfg.logging.wandb_project or cfg.logging.project,
-            entity=cfg.logging.wandb_entity,
-            name=cfg.logging.wandb_run_name or run_dir.name,
-            mode=cfg.logging.wandb_mode,
+            project=wandb_cfg.project or cfg.logging.project,
+            entity=wandb_cfg.entity,
+            name=wandb_cfg.run_name or run_dir.name,
+            mode=wandb_cfg.mode,
             config=cfg.to_dict(),
             tags=tags,
         )
@@ -492,7 +497,7 @@ def run(
             logging.getLogger(__name__).info(
                 "config_original.yaml not found; skipping W&B artifact."
             )
-    elif dry_run and cfg.logging.wandb_enabled:
+    elif dry_run and wandb_cfg.enabled:
         logging.getLogger(__name__).info("dry_run: skipping W&B initialization.")
 
     # Optional profiling
@@ -618,14 +623,18 @@ def run(
 
     # Determine starting step from TrainState
     start_step = int(jax.device_get(state.step))
-    if start_step >= cfg.train.steps:
-        print(
-            f"[chomp] start_step ({start_step}) >= train.steps ({cfg.train.steps}); nothing to do"
-        )
+    target_steps = cfg.train.steps
+    if max_steps is not None:
+        if max_steps <= 0:
+            raise ValueError(f"max_steps must be positive, got {max_steps}")
+        target_steps = min(target_steps, int(max_steps))
+
+    if start_step >= target_steps:
+        print(f"[chomp] start_step ({start_step}) >= target steps ({target_steps}); nothing to do")
         return run_dir
 
     tokens_per_step = int(cfg.train.grad_accum) * int(cfg.train.batch_size) * int(cfg.train.seq_len)
-    console_every = int(cfg.logging.console_every)
+    console_every = int(cfg.train.log_every)
 
     def _run_eval(params: Any) -> dict[str, Any]:
         """Run a full eval pass over the cached eval texts."""
@@ -652,7 +661,7 @@ def run(
 
     try:
         with MetricsWriter(metrics_path) as mw:
-            for _ in tqdm(range(start_step, cfg.train.steps), desc="train", dynamic_ncols=True):
+            for _ in tqdm(range(start_step, target_steps), desc="train", dynamic_ncols=True):
                 # Fetch batch (host) and (optionally) device_put
                 try:
                     batch = next(data_it)
@@ -709,7 +718,6 @@ def run(
                         train_state=state,
                         data_state=data_it.get_state(),
                         meta=meta,
-                        max_save_checkpoints=cfg.checkpoint.max_save_checkpoints,
                     )
 
                 eval_row: dict[str, Any] = {}

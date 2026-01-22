@@ -62,6 +62,9 @@ def _restore_state(run_dir: Path, cfg: Config, step: int):
 
 
 def test_resume_matches_continuous(tmp_path: Path):
+    K = 4
+    N = 6
+
     base = Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
         data=DataConfig(
@@ -72,7 +75,7 @@ def test_resume_matches_continuous(tmp_path: Path):
         ),
         train=TrainConfig(
             seed=0,
-            steps=0,  # set per run
+            steps=N,
             batch_size=2,
             seq_len=16,
             grad_accum=2,
@@ -81,9 +84,7 @@ def test_resume_matches_continuous(tmp_path: Path):
             allow_cpu=True,
             log_every=1000,
         ),
-        optim=OptimConfig(
-            lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0, total_steps=10
-        ),
+        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
         checkpoint=CheckpointConfig(enabled=True, save_every=1, max_to_keep=5, async_save=False),
         debug=DebugConfig(nan_check=True, check_device_every=0),
         logging=LoggingConfig(
@@ -91,28 +92,17 @@ def test_resume_matches_continuous(tmp_path: Path):
         ),
     )
 
-    K = 4
-    N = 6
-
     # --- Interrupted + resume run ---
     run_a = tmp_path / "run_a"
-    cfg_a1 = replace(
-        base, logging=replace(base.logging, run_dir=str(run_a)), train=replace(base.train, steps=K)
-    )
-    run(cfg_a1, config_path=None, resume="none")
+    cfg_a = replace(base, logging=replace(base.logging, run_dir=str(run_a)))
+    run(cfg_a, config_path=None, resume="none", max_steps=K)
+    run(cfg_a, config_path=None, resume="latest")
 
-    cfg_a2 = replace(
-        base, logging=replace(base.logging, run_dir=str(run_a)), train=replace(base.train, steps=N)
-    )
-    run(cfg_a2, config_path=None, resume="latest")
-
-    state_a = _restore_state(run_a, cfg_a2, step=N)
+    state_a = _restore_state(run_a, cfg_a, step=N)
 
     # --- Continuous run ---
     run_b = tmp_path / "run_b"
-    cfg_b = replace(
-        base, logging=replace(base.logging, run_dir=str(run_b)), train=replace(base.train, steps=N)
-    )
+    cfg_b = replace(base, logging=replace(base.logging, run_dir=str(run_b)))
     run(cfg_b, config_path=None, resume="none")
 
     state_b = _restore_state(run_b, cfg_b, step=N)

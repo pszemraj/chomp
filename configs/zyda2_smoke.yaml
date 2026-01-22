@@ -50,13 +50,12 @@ optim:
   weight_decay: 0.01
   grad_clip_norm: 1.0
   warmup_steps: 2
-  total_steps: 20
+  min_lr_ratio: 0.0
 
 checkpoint:
   enabled: true
   save_every: 10
   max_to_keep: 3
-  max_save_checkpoints: 3
   async_save: true
 
 logging:
@@ -64,7 +63,6 @@ logging:
   run_dir: null
   metrics_file: metrics.jsonl
   level: INFO
-  console_every: 25
   console_use_rich: true
   log_file: train.log
 

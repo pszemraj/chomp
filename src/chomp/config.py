@@ -222,8 +222,8 @@ class TrainConfig:
     deterministic: bool | None = None  # None => derive from dropout
 
     allow_cpu: bool = False
-    log_every: int = 10
-    eval_every: int = 0
+    log_every: int = 25
+    eval_every: int = 2500
 
     # Simple profiler support (Phase 0): if enabled, write a trace directory.
     profile: bool = False
@@ -237,8 +237,8 @@ class OptimConfig:
     lr: float = 3e-4
     weight_decay: float = 0.01
     grad_clip_norm: float = 1.0
-    warmup_steps: int = 100
-    total_steps: int = 1000
+    warmup_steps: int = 10
+    min_lr_ratio: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -252,10 +252,21 @@ class CheckpointConfig:
     # If None, checkpoints live under <run_dir>/checkpoints
     root_dir: str | None = None
 
-    save_every: int = 100
+    save_every: int = 5000
     max_to_keep: int = 3
-    max_save_checkpoints: int = 3
     async_save: bool = True
+
+
+@dataclass(frozen=True)
+class WandbConfig:
+    """Weights & Biases configuration."""
+
+    enabled: bool = False
+    project: str | None = None
+    entity: str | None = None
+    run_name: str | None = None
+    mode: Literal["online", "offline", "disabled"] = "online"
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -266,15 +277,9 @@ class LoggingConfig:
     run_dir: str | None = None
     metrics_file: str = "metrics.jsonl"
     level: LogLevel = "INFO"
-    console_every: int = 50
     console_use_rich: bool = True
     log_file: str | None = "train.log"
-    wandb_enabled: bool = False
-    wandb_project: str | None = None
-    wandb_entity: str | None = None
-    wandb_run_name: str | None = None
-    wandb_mode: Literal["online", "offline", "disabled"] = "online"
-    wandb_tags: tuple[str, ...] = ()
+    wandb: WandbConfig = WandbConfig()
 
 
 @dataclass(frozen=True)
@@ -431,7 +436,11 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
     model = ModelConfig(**(data.get("model") or {}))
     train = TrainConfig(**(data.get("train") or {}))
     optim = OptimConfig(**(data.get("optim") or {}))
-    logging = LoggingConfig(**(data.get("logging") or {}))
+    logging_d = data.get("logging") or {}
+    wandb_d = logging_d.get("wandb") or {}
+    wandb = WandbConfig(**wandb_d)
+    logging_d = {k: v for k, v in logging_d.items() if k != "wandb"}
+    logging = LoggingConfig(wandb=wandb, **logging_d)
     debug = DebugConfig(**(data.get("debug") or {}))
     checkpoint = CheckpointConfig(**(data.get("checkpoint") or {}))
 
@@ -490,12 +499,12 @@ def validate_config(cfg: Config) -> None:
         _vfail(f"optim.grad_clip_norm must be >= 0, got {cfg.optim.grad_clip_norm}")
     if cfg.optim.warmup_steps < 0:
         _vfail(f"optim.warmup_steps must be >= 0, got {cfg.optim.warmup_steps}")
-    if cfg.optim.total_steps <= 0:
-        _vfail(f"optim.total_steps must be positive, got {cfg.optim.total_steps}")
-    if cfg.optim.warmup_steps > cfg.optim.total_steps:
+    if cfg.optim.min_lr_ratio < 0 or cfg.optim.min_lr_ratio > 1:
+        _vfail(f"optim.min_lr_ratio must be in [0, 1], got {cfg.optim.min_lr_ratio}")
+    if cfg.optim.warmup_steps >= cfg.train.steps:
         _vfail(
-            f"optim.warmup_steps ({cfg.optim.warmup_steps}) must be <= optim.total_steps "
-            f"({cfg.optim.total_steps})"
+            f"optim.warmup_steps ({cfg.optim.warmup_steps}) must be < train.steps "
+            f"({cfg.train.steps})"
         )
 
     # Checkpoint
@@ -504,16 +513,6 @@ def validate_config(cfg: Config) -> None:
             _vfail(f"checkpoint.save_every must be positive, got {cfg.checkpoint.save_every}")
         if cfg.checkpoint.max_to_keep <= 0:
             _vfail(f"checkpoint.max_to_keep must be positive, got {cfg.checkpoint.max_to_keep}")
-        if cfg.checkpoint.max_save_checkpoints <= 0:
-            _vfail(
-                "checkpoint.max_save_checkpoints must be positive, "
-                f"got {cfg.checkpoint.max_save_checkpoints}"
-            )
-        if cfg.checkpoint.max_to_keep > cfg.checkpoint.max_save_checkpoints:
-            _vfail(
-                "checkpoint.max_to_keep must be <= checkpoint.max_save_checkpoints "
-                f"({cfg.checkpoint.max_to_keep} > {cfg.checkpoint.max_save_checkpoints})"
-            )
 
     # Model
     if cfg.model.vocab_size <= 0:
@@ -601,14 +600,12 @@ def validate_config(cfg: Config) -> None:
         _vfail(f"data.max_eval_samples must be >=0, got {cfg.data.max_eval_samples}")
 
     # Logging / wandb
-    if cfg.logging.console_every <= 0:
-        _vfail(f"logging.console_every must be positive, got {cfg.logging.console_every}")
     if cfg.logging.log_file is not None and not str(cfg.logging.log_file).strip():
         _vfail("logging.log_file must be a non-empty string or null")
-    if cfg.logging.wandb_mode not in ("online", "offline", "disabled"):
+    if cfg.logging.wandb.mode not in ("online", "offline", "disabled"):
         _vfail(
-            "logging.wandb_mode must be 'online', 'offline', or 'disabled', "
-            f"got {cfg.logging.wandb_mode!r}"
+            "logging.wandb.mode must be 'online', 'offline', or 'disabled', "
+            f"got {cfg.logging.wandb.mode!r}"
         )
     # HF streaming robustness knobs
     if cfg.data.max_retries < 0:

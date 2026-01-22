@@ -39,7 +39,7 @@ def test_train_step_compiles_once(tmp_path: Path):
     cmd = [
         sys.executable,
         "-c",
-        f"from chomp.scripts.train import main; main(['--config','{config_src}'])",
+        f"from chomp.scripts.train import main; main(['{config_src}'])",
     ]
 
     p = subprocess.run(cmd, cwd=str(work), env=env, capture_output=True, text=True)
@@ -57,8 +57,10 @@ def test_train_step_compiles_once(tmp_path: Path):
     for line in logs.splitlines():
         match = pattern.search(line)
         if match:
-            # Normalize away logging prefixes so duplicate loggers don't double-count.
-            hits.add(line[line.find("Compiling") :].strip())
+            # Normalize away logging prefixes and line-wrap variants.
+            token = line[line.find("Compiling") :].strip()
+            token = token.split("with", 1)[0].strip()
+            hits.add(token)
 
     if not hits:
         pytest.skip("Could not detect train_step compilation logs; log format unsupported")
