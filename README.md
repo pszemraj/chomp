@@ -137,5 +137,6 @@ Each run directory includes a tokenizer snapshot under `tokenizer/`.
 - `docs/data_pipeline.md`: HF streaming Grain batch contract
 - `docs/checkpointing.md`: Orbax save/restore + resume compatibility
 - `docs/configuration.md`: config tree and key knobs
+- `docs/config-reference.qmd`: full field-by-field config reference
 - `docs/dev.md`: dev log + deferred scope
 - `docs/training.md`: train loop behavior and metrics

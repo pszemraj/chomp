@@ -3,6 +3,9 @@
 chomp uses frozen dataclasses for configuration. YAML files map directly to the
 config tree, and dot-path overrides are supported from the CLI.
 
+For the full field-by-field reference (types, defaults, constraints, examples),
+see `docs/config-reference.qmd`.
+
 ## Loading and overrides
 
 ```bash
