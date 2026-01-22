@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, TrainConfig
+from chomp.config import Config, DataConfig, ModelConfig, OptimConfig, TokenizerConfig, TrainConfig
 from chomp.model import build_model
 from chomp.train import build_optimizer, init_train_state, make_train_step
 from chomp.types import Batch
@@ -52,6 +52,7 @@ def test_train_step_segment_masking_with_checkpointing():
             deterministic=False,
             allow_cpu=True,
         ),
+        optim=OptimConfig(warmup_steps=0),
     )
 
     key = jax.random.PRNGKey(0)

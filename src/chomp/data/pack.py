@@ -25,6 +25,35 @@ from typing import Any
 import numpy as np
 
 
+def _prepare_doc_tokens(
+    tokens: Iterable[int],
+    *,
+    add_bos: bool,
+    add_eos: bool,
+    bos_id: int,
+    eos_id: int,
+    max_doc_tokens: int | None,
+) -> np.ndarray:
+    """Build a document token array with optional BOS/EOS and truncation."""
+    arr = np.asarray(list(tokens), dtype=np.int32)
+    if max_doc_tokens is not None and arr.size > max_doc_tokens:
+        arr = arr[:max_doc_tokens]
+
+    pieces = []
+    if add_bos:
+        pieces.append(np.asarray([bos_id], dtype=np.int32))
+    if arr.size:
+        pieces.append(arr)
+    if add_eos:
+        pieces.append(np.asarray([eos_id], dtype=np.int32))
+
+    if not pieces:
+        return np.empty((0,), dtype=np.int32)
+    if len(pieces) == 1:
+        return pieces[0]
+    return np.concatenate(pieces, axis=0)
+
+
 class _ChunkedIntBuffer:
     """A chunked 1D int32 buffer with efficient take()."""
 
@@ -212,24 +241,19 @@ class TokenPacker:
 
         :param tokens: Iterable of token IDs for the document.
         """
-        arr = np.asarray(list(tokens), dtype=np.int32)
-        if self.max_doc_tokens is not None and arr.size > self.max_doc_tokens:
-            arr = arr[: self.max_doc_tokens]
-
-        pieces = []
-        if self.add_bos:
-            pieces.append(np.asarray([self.bos_id], dtype=np.int32))
-        if arr.size:
-            pieces.append(arr)
-        if self.add_eos:
-            pieces.append(np.asarray([self.eos_id], dtype=np.int32))
-
-        if not pieces:
+        doc = _prepare_doc_tokens(
+            tokens,
+            add_bos=self.add_bos,
+            add_eos=self.add_eos,
+            bos_id=self.bos_id,
+            eos_id=self.eos_id,
+            max_doc_tokens=self.max_doc_tokens,
+        )
+        if doc.size == 0:
             return
         segment_id = int(self._next_segment_id)
-        seg_pieces = [np.full((p.size,), segment_id, dtype=np.int32) for p in pieces]
-        self._token_buf.append(np.concatenate(pieces, axis=0))
-        self._segment_buf.append(np.concatenate(seg_pieces, axis=0))
+        self._token_buf.append(doc)
+        self._segment_buf.append(np.full((doc.size,), segment_id, dtype=np.int32))
         self._next_segment_id += 1
 
     def can_pop(self) -> bool:
@@ -423,22 +447,14 @@ class BinPacker:
 
         :param tokens: Iterable of token IDs for the document.
         """
-        arr = np.asarray(list(tokens), dtype=np.int32)
-        if self.max_doc_tokens is not None and arr.size > self.max_doc_tokens:
-            arr = arr[: self.max_doc_tokens]
-
-        pieces = []
-        if self.add_bos:
-            pieces.append(np.asarray([self.bos_id], dtype=np.int32))
-        if arr.size:
-            pieces.append(arr)
-        if self.add_eos:
-            pieces.append(np.asarray([self.eos_id], dtype=np.int32))
-
-        if not pieces:
-            return
-
-        doc = np.concatenate(pieces, axis=0)
+        doc = _prepare_doc_tokens(
+            tokens,
+            add_bos=self.add_bos,
+            add_eos=self.add_eos,
+            bos_id=self.bos_id,
+            eos_id=self.eos_id,
+            max_doc_tokens=self.max_doc_tokens,
+        )
         if doc.size == 0:
             return
 
