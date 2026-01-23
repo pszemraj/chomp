@@ -22,16 +22,28 @@ class _FakeHFIterable:
     index: int = 0
 
     def select_columns(self, _columns: list[str]) -> _FakeHFIterable:
-        """Return self (columns not used in tests)."""
+        """Return self (columns not used in tests).
+
+        :param list[str] _columns: Column names to select.
+        :return _FakeHFIterable: Self for chaining.
+        """
         return self
 
     def shuffle(self, *, seed: int, buffer_size: int) -> _FakeHFIterable:
-        """Return self (shuffle not used in tests)."""
+        """Return self (shuffle not used in tests).
+
+        :param int seed: Shuffle seed.
+        :param int buffer_size: Shuffle buffer size.
+        :return _FakeHFIterable: Self for chaining.
+        """
         _ = (seed, buffer_size)
         return self
 
     def state_dict(self) -> dict[str, Any]:
-        """Return iterator state."""
+        """Return iterator state.
+
+        :return dict[str, Any]: State dictionary.
+        """
         return {"index": int(self.index)}
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -63,7 +75,10 @@ class _FakeHFIterator:
 
 
 def _base_cfg() -> Config:
-    """Create a base config for eval text tests."""
+    """Create a base config for eval text tests.
+
+    :return Config: Base configuration for eval tests.
+    """
     return Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=16, dropout=0.0),
         data=DataConfig(
@@ -98,7 +113,14 @@ def test_eval_prefers_validation_split(monkeypatch: pytest.MonkeyPatch) -> None:
     train_items = [{"text": "train-a"}, {"text": "train-b"}]
 
     def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> _FakeHFIterable:
-        """Mock load_dataset returning fake iterables."""
+        """Mock load_dataset returning fake iterables.
+
+        :param str dataset: Dataset name.
+        :param str name: Config name.
+        :param str split: Dataset split.
+        :param bool streaming: Streaming flag.
+        :return _FakeHFIterable: Fake dataset iterable.
+        """
         _ = (dataset, name, streaming)
         if split == "validation":
             return _FakeHFIterable(items=val_items)
@@ -121,7 +143,14 @@ def test_eval_falls_back_to_train_split(monkeypatch: pytest.MonkeyPatch) -> None
     train_items = [{"text": "train-a"}, {"text": "train-b"}]
 
     def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> _FakeHFIterable:
-        """Mock load_dataset raising for validation."""
+        """Mock load_dataset raising for validation.
+
+        :param str dataset: Dataset name.
+        :param str name: Config name.
+        :param str split: Dataset split.
+        :param bool streaming: Streaming flag.
+        :return _FakeHFIterable: Fake dataset iterable.
+        """
         _ = (dataset, name, streaming)
         if split == "validation":
             raise FileNotFoundError("no validation split")

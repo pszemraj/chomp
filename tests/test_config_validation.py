@@ -18,7 +18,10 @@ from chomp.config import (
 
 
 def _base_cfg() -> Config:
-    """Create a base config for validation tests."""
+    """Create a base config for validation tests.
+
+    :return Config: Base configuration for validation tests.
+    """
     return Config(
         model=ModelConfig(backend="megalodon", model_dim=128, num_heads=8, chunk_size=16),
         data=DataConfig(

@@ -14,7 +14,10 @@ from chomp.utils.devices import device_platform, validate_default_device
 
 
 def _has_gpu() -> bool:
-    """Check if a GPU device is available."""
+    """Check if a GPU device is available.
+
+    :return bool: True if a GPU is present.
+    """
     return any(dev.platform == "gpu" for dev in jax.devices())
 
 
@@ -28,7 +31,11 @@ def test_device_platform_reports_gpu() -> None:
 @pytest.mark.skipif(not _has_gpu(), reason="GPU not available")
 @pytest.mark.parametrize("device_put", [False, True])
 def test_gpu_train_smoke(tmp_path: Path, device_put: bool) -> None:
-    """Single training step should succeed on GPU."""
+    """Single training step should succeed on GPU.
+
+    :param Path tmp_path: Temporary directory for run output.
+    :param bool device_put: Whether iterator device_put is enabled.
+    """
     cfg = Config()
     cfg = replace(
         cfg,

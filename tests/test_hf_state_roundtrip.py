@@ -21,16 +21,28 @@ class _FakeHFIterable:
     record: dict[str, Any] | None = None
 
     def select_columns(self, _columns: list[str]) -> _FakeHFIterable:
-        """Return self (columns not used in tests)."""
+        """Return self (columns not used in tests).
+
+        :param list[str] _columns: Column names to select.
+        :return _FakeHFIterable: Self for chaining.
+        """
         return self
 
     def shuffle(self, *, seed: int, buffer_size: int) -> _FakeHFIterable:
-        """Return self (shuffle not used in tests)."""
+        """Return self (shuffle not used in tests).
+
+        :param int seed: Shuffle seed.
+        :param int buffer_size: Shuffle buffer size.
+        :return _FakeHFIterable: Self for chaining.
+        """
         _ = (seed, buffer_size)
         return self
 
     def state_dict(self) -> dict[str, Any]:
-        """Return iterator state."""
+        """Return iterator state.
+
+        :return dict[str, Any]: State dictionary.
+        """
         return {"index": int(self.index)}
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -75,7 +87,14 @@ def test_hf_state_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
     items = [{"text": "alpha"}, {"text": "bravo"}, {"text": "charlie"}]
 
     def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> _FakeHFIterable:
-        """Mock load_dataset returning fake iterable."""
+        """Mock load_dataset returning fake iterable.
+
+        :param str dataset: Dataset name.
+        :param str name: Config name.
+        :param str split: Split name.
+        :param bool streaming: Streaming flag.
+        :return _FakeHFIterable: Fake dataset iterable.
+        """
         _ = (dataset, name, split, streaming)
         return _FakeHFIterable(items=items)
 
@@ -114,7 +133,14 @@ def test_hf_retry_rebuild_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
     record: dict[str, Any] = {"builds": 0, "fail_consumed": False}
 
     def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> _FakeHFIterable:
-        """Mock load_dataset with failure injection."""
+        """Mock load_dataset with failure injection.
+
+        :param str dataset: Dataset name.
+        :param str name: Config name.
+        :param str split: Split name.
+        :param bool streaming: Streaming flag.
+        :return _FakeHFIterable: Fake dataset iterable.
+        """
         _ = (dataset, name, split, streaming)
         record["builds"] += 1
         return _FakeHFIterable(items=items, fail_at=1, record=record)

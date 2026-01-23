@@ -43,17 +43,31 @@ if TYPE_CHECKING:
 
 
 def _abstractify(tree: jax.Array) -> jax.ShapeDtypeStruct:
-    """Convert a pytree of arrays to ShapeDtypeStruct leaves."""
+    """Convert a pytree of arrays to ShapeDtypeStruct leaves.
+
+    :param jax.Array tree: Pytree of arrays.
+    :return jax.ShapeDtypeStruct: Pytree of abstract arrays.
+    """
 
     def to_struct(x: jax.Array) -> jax.ShapeDtypeStruct:
-        """Convert single array to ShapeDtypeStruct."""
+        """Convert single array to ShapeDtypeStruct.
+
+        :param jax.Array x: Array leaf.
+        :return jax.ShapeDtypeStruct: Abstract spec.
+        """
         return jax.ShapeDtypeStruct(x.shape, x.dtype)
 
     return jax.tree_util.tree_map(to_struct, tree)
 
 
 def _restore_state(run_dir: Path, cfg: Config, step: int) -> TrainState:
-    """Restore train state from checkpoint at given step."""
+    """Restore train state from checkpoint at given step.
+
+    :param Path run_dir: Run directory containing checkpoints.
+    :param Config cfg: Configuration used to build model/state.
+    :param int step: Checkpoint step to restore.
+    :return TrainState: Restored training state.
+    """
     # Build skeleton state
     key = jax.random.PRNGKey(cfg.train.seed)
     key, k_model = jax.random.split(key)

@@ -76,6 +76,18 @@ def test_training_loss_default_omits_extra_kwargs(monkeypatch: pytest.MonkeyPatc
         key: jax.Array | None = None,
         **kwargs: object,
     ) -> jax.Array:
+        """Spy on compute_loss kwargs.
+
+        :param DummyLM self: Dummy model instance.
+        :param jax.Array input_ids: Input token ids.
+        :param jax.Array labels: Label token ids.
+        :param jax.Array | None attention_mask: Optional attention mask.
+        :param int ignore_index: Ignore index for labels.
+        :param bool deterministic: Whether dropout is disabled.
+        :param jax.Array | None key: PRNG key for dropout.
+        :param kwargs: Extra keyword arguments.
+        :return jax.Array: Dummy scalar loss.
+        """
         _ = (input_ids, labels, attention_mask, ignore_index, deterministic, key)
         seen["kwargs"] = dict(kwargs)
         return jnp.zeros((), dtype=jnp.float32)

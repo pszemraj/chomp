@@ -64,7 +64,10 @@ def test_device_platform_handles_device_method() -> None:
         """Mock array with device method."""
 
         def device(self) -> _Dev:
-            """Return mock device."""
+            """Return mock device.
+
+            :return _Dev: Mock device.
+            """
             return _Dev("cpu")
 
     assert device_platform(_Arr()) == "cpu"  # type: ignore[arg-type]
@@ -84,7 +87,10 @@ def test_device_platform_handles_device_buffer() -> None:
         """Mock buffer with device method."""
 
         def device(self) -> _Dev:
-            """Return mock device."""
+            """Return mock device.
+
+            :return _Dev: Mock device.
+            """
             return _Dev("gpu")
 
     class _Arr:
@@ -105,7 +111,10 @@ def test_device_platform_returns_none_when_unknown() -> None:
 
 
 def _make_batch() -> Batch:
-    """Create a minimal Batch for testing."""
+    """Create a minimal Batch for testing.
+
+    :return Batch: Batch with minimal shapes.
+    """
     arr = jax.numpy.zeros((1, 1, 1), dtype=jax.numpy.int32)
     return Batch(
         input_ids=arr,

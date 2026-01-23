@@ -8,7 +8,12 @@ from chomp.data.pack import BinPacker
 
 
 def _doc(token: int, length: int) -> list[int]:
-    """Create a document of repeated tokens."""
+    """Create a document of repeated tokens.
+
+    :param int token: Token value to repeat.
+    :param int length: Number of repetitions.
+    :return list[int]: Token list of length ``length``.
+    """
     return [token] * length
 
 

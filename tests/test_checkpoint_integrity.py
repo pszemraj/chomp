@@ -32,7 +32,11 @@ from chomp.utils.tree import tree_allclose
 
 
 def _base_cfg(run_dir: Path) -> Config:
-    """Create a base config for checkpoint tests."""
+    """Create a base config for checkpoint tests.
+
+    :param Path run_dir: Run directory path.
+    :return Config: Config configured for checkpoint tests.
+    """
     return Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=16, dropout=0.0),
         data=DataConfig(
@@ -56,7 +60,10 @@ def _base_cfg(run_dir: Path) -> Config:
 
 
 def _make_state() -> TrainState:
-    """Create a minimal TrainState for testing."""
+    """Create a minimal TrainState for testing.
+
+    :return TrainState: Minimal training state.
+    """
     return TrainState(
         step=jnp.array(1, dtype=jnp.int32),
         params={"w": jnp.array([1.0, 2.0], dtype=jnp.float32)},
@@ -66,10 +73,18 @@ def _make_state() -> TrainState:
 
 
 def _abstractify(tree: jax.Array) -> jax.ShapeDtypeStruct:
-    """Convert a pytree of arrays to ShapeDtypeStruct leaves."""
+    """Convert a pytree of arrays to ShapeDtypeStruct leaves.
+
+    :param jax.Array tree: Pytree of arrays.
+    :return jax.ShapeDtypeStruct: Pytree of abstract arrays.
+    """
 
     def to_struct(x: jax.Array) -> jax.ShapeDtypeStruct:
-        """Convert single array to ShapeDtypeStruct."""
+        """Convert single array to ShapeDtypeStruct.
+
+        :param jax.Array x: Array leaf.
+        :return jax.ShapeDtypeStruct: Abstract spec.
+        """
         return jax.ShapeDtypeStruct(x.shape, x.dtype)
 
     return jax.tree_util.tree_map(to_struct, tree)

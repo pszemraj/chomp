@@ -77,7 +77,17 @@ def test_grad_accum_equivalence_dummy_local_text() -> None:
         k: jax.Array,
         token_count: jax.Array,
     ) -> jax.Array:
-        """Compute loss for a single microbatch scaled by token count."""
+        """Compute loss for a single microbatch scaled by token count.
+
+        :param jax.Array p: Model parameters.
+        :param jax.Array in_ids: Input token ids.
+        :param jax.Array labs: Label token ids.
+        :param jax.Array attn: Attention mask.
+        :param jax.Array segs: Segment ids.
+        :param jax.Array k: PRNG key.
+        :param jax.Array token_count: Token count for scaling.
+        :return jax.Array: Scaled microbatch loss.
+        """
         micro = Batch(input_ids=in_ids, labels=labs, attention_mask=attn, segment_ids=segs)
         loss = training_loss(
             p,

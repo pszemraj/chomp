@@ -18,7 +18,11 @@ if TYPE_CHECKING:
 
 
 def _batch_arrays(batch: Batch) -> tuple:
-    """Extract arrays from batch for comparison."""
+    """Extract arrays from batch for comparison.
+
+    :param Batch batch: Batch to extract from.
+    :return tuple: Tuple of (input_ids, labels, attention_mask, segment_ids).
+    """
     return batch.input_ids, batch.labels, batch.attention_mask, batch.segment_ids
 
 

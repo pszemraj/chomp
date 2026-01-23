@@ -12,7 +12,13 @@ class _DummyTokenizer:
     """Mock tokenizer with configurable special tokens."""
 
     def __init__(self, size: int, *, bos: int | None, eos: int | None, pad: int | None) -> None:
-        """Initialize mock tokenizer."""
+        """Initialize mock tokenizer.
+
+        :param int size: Tokenizer vocab size.
+        :param int | None bos: BOS token id.
+        :param int | None eos: EOS token id.
+        :param int | None pad: PAD token id.
+        """
         self._size = int(size)
         self._bos = bos
         self._eos = eos
@@ -23,17 +29,26 @@ class _DummyTokenizer:
 
     @property
     def bos_token_id(self) -> int | None:
-        """Return BOS token ID."""
+        """Return BOS token ID.
+
+        :return int | None: BOS token id.
+        """
         return self._bos
 
     @property
     def eos_token_id(self) -> int | None:
-        """Return EOS token ID."""
+        """Return EOS token ID.
+
+        :return int | None: EOS token id.
+        """
         return self._eos
 
     @property
     def pad_token_id(self) -> int | None:
-        """Return pad token ID."""
+        """Return pad token ID.
+
+        :return int | None: PAD token id.
+        """
         return self._pad
 
 

@@ -132,7 +132,11 @@ class GenerationSettings:
 
 
 def _resolve_generation_settings(cfg: Config) -> GenerationSettings | None:
-    """Resolve generation defaults from config and model settings."""
+    """Resolve generation defaults from config and model settings.
+
+    :param Config cfg: Training configuration.
+    :return GenerationSettings | None: Resolved settings or None if disabled.
+    """
     every = int(cfg.train.generate_every)
     if every <= 0:
         return None
@@ -153,7 +157,12 @@ def _resolve_generation_settings(cfg: Config) -> GenerationSettings | None:
 
 
 def _trim_trailing_token(tokens: list[int], token_id: int | None) -> list[int]:
-    """Trim trailing token_id values from a token list."""
+    """Trim trailing token_id values from a token list.
+
+    :param list[int] tokens: Token list to trim.
+    :param int | None token_id: Token id to remove from the tail.
+    :return list[int]: Trimmed token list.
+    """
     if token_id is None:
         return tokens
     end = len(tokens)
@@ -169,7 +178,14 @@ def _select_prompt_tokens(
     eos_token_id: int | None,
     rng: random.Random,
 ) -> list[int]:
-    """Select a prompt slice from tokenized text."""
+    """Select a prompt slice from tokenized text.
+
+    :param list[int] tokens: Tokenized text.
+    :param int input_len: Target prompt length.
+    :param int | None eos_token_id: EOS token id for trimming, if any.
+    :param random.Random rng: RNG used to choose prefix/suffix.
+    :return list[int]: Prompt token slice.
+    """
     tokens = _trim_trailing_token(tokens, eos_token_id)
     if not tokens:
         return []
@@ -181,7 +197,13 @@ def _select_prompt_tokens(
 
 
 def _safe_decode(tokenizer: Any, tokens: list[int], *, label: str) -> str:
-    """Decode tokens with best-effort logging."""
+    """Decode tokens with best-effort logging.
+
+    :param Any tokenizer: Tokenizer with a decode method.
+    :param list[int] tokens: Tokens to decode.
+    :param str label: Label for error logging context.
+    :return str: Decoded text or placeholder on failure.
+    """
     try:
         return tokenizer.decode(tokens, skip_special_tokens=True)
     except Exception as exc:
@@ -196,7 +218,13 @@ def _emit_generation_output(
     generated_text: str,
     use_rich: bool,
 ) -> None:
-    """Print a generation sample to the console."""
+    """Print a generation sample to the console.
+
+    :param int step: Training step number.
+    :param str prompt_text: Prompt text to display.
+    :param str generated_text: Generated continuation text.
+    :param bool use_rich: Whether to render Rich panels.
+    """
     if use_rich:
         try:
             from rich.console import Console
@@ -806,7 +834,11 @@ def run(
         return {"eval_loss": total_loss / total_tokens, "eval_tokens": int(total_tokens)}
 
     def _run_generation_sample(step: int, params: Any) -> None:
-        """Sample a prompt and run generation."""
+        """Sample a prompt and run generation.
+
+        :param int step: Current training step.
+        :param Any params: Model parameters.
+        """
         nonlocal gen_key, gen_rng, gen_settings, gen_stream
         if gen_settings is None or gen_stream is None or gen_rng is None:
             return

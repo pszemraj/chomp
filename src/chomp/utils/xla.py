@@ -15,7 +15,10 @@ _LAST_RESULT: bool | None = None
 
 
 def _query_nvidia_gpu_names() -> list[str]:
-    """Best-effort GPU name query via nvidia-smi."""
+    """Best-effort GPU name query via nvidia-smi.
+
+    :return list[str]: GPU names, or an empty list on failure.
+    """
     try:
         output = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
@@ -29,7 +32,11 @@ def _query_nvidia_gpu_names() -> list[str]:
 
 
 def _is_rtx_50xx(name: str) -> bool:
-    """Return True if a GPU name looks like an RTX 50xx (Blackwell) GeForce card."""
+    """Return True if a GPU name looks like an RTX 50xx (Blackwell) GeForce card.
+
+    :param str name: GPU name string.
+    :return bool: True if the name indicates an RTX 50xx GeForce GPU.
+    """
     match = _RTX_RE.search(name)
     if not match:
         return False
@@ -43,7 +50,11 @@ def _is_rtx_50xx(name: str) -> bool:
 
 
 def _update_xla_flags(existing: str) -> tuple[str, bool]:
-    """Ensure the Triton GEMM flag is present and conflicting entries are removed."""
+    """Ensure the Triton GEMM flag is present and conflicting entries are removed.
+
+    :param str existing: Existing XLA_FLAGS value.
+    :return tuple[str, bool]: (updated_flags, changed)
+    """
     tokens = [tok for tok in existing.split() if tok]
     filtered = [tok for tok in tokens if not tok.startswith("--xla_gpu_enable_triton_gemm=")]
     changed = len(filtered) != len(tokens)
@@ -62,6 +73,7 @@ def configure_blackwell_xla_env(
 
     :param logger: Optional logger override.
     :param bool force: If True, re-run even if already configured.
+    :return bool: True if an RTX 50xx GPU was detected.
     """
     global _CONFIG_DONE, _LAST_RESULT
     if _CONFIG_DONE and not force:

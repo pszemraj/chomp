@@ -44,7 +44,12 @@ class Tokenizer(Protocol):
         ...
 
     def decode(self, tokens: list[int], *, skip_special_tokens: bool = True) -> str:
-        """Decode token ids back into a text string."""
+        """Decode token ids back into a text string.
+
+        :param list[int] tokens: Token ids to decode.
+        :param bool skip_special_tokens: If True, drop special tokens.
+        :return str: Decoded text.
+        """
         ...
 
     def __len__(self) -> int: ...
