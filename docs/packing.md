@@ -32,40 +32,21 @@ Key bin-packing knobs:
 - `data.packing_buffer_docs`: number of documents to buffer before packing.
 - `data.packing_max_docs_per_bin`: optional cap on documents per bin.
 
-## Default: Stream Semantics
+## Stream Semantics
 
-chomp defaults to **stream semantics** (`model.segment_masking: false`), treating
-the corpus as a continuous token stream. This is standard practice for simple
-pretraining and is the recommended default.
+chomp treats the corpus as a continuous token stream. This is the only supported
+attention behavior and matches common pretraining setups.
 
 **Rationale:**
 
-- The segment mask only isolates attention; Megalodon's ComplexEMA and
-  TimestepNorm still leak information across document boundaries ("expensive
-  partial correctness").
+- Attention-only segment masking would still leak across documents via
+  Megalodon's ComplexEMA and TimestepNorm ("expensive partial correctness").
 - Boundary loss masking (via `data.mask_boundary_loss`) handles the most
   important document-boundary concern by preventing cross-document loss.
-- Stream semantics matches common pretraining setups.
+- Stream semantics keeps the system minimal and predictable.
 
-Segment IDs are still emitted by the data pipeline for boundary loss masking
-even when `segment_masking=false`.
-
-## Optional: Segment Masking
-
-For users who want to experiment with document-level attention isolation, set
-`model.segment_masking: true`. Each document (or document segment) gets a
-monotonically increasing `segment_id` **within a bin**, and the Megalodon patch
-uses these IDs to form a block-diagonal attention mask so tokens only attend
-within their document.
-
-```yaml
-model:
-  segment_masking: true  # Enable block-diagonal attention
-```
-
-> [!NOTE]
-> With `segment_masking=false` (the default), segment IDs are still emitted
-> but only used for boundary loss masking (see below).
+Segment IDs are still emitted by the data pipeline for boundary loss masking,
+but they are not used to alter attention.
 
 ## Boundary-aware loss masking
 

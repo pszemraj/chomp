@@ -11,9 +11,7 @@ from chomp.data.pipeline import build_train_iterator
 def test_pipeline_segment_ids_multiple_docs() -> None:
     """Pipeline should emit multiple segment IDs and mask boundaries."""
     cfg = Config(
-        model=ModelConfig(
-            backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=False
-        ),
+        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
         data=DataConfig(
             backend="local_text",
             repeat=True,
@@ -49,9 +47,7 @@ def test_pipeline_segment_ids_multiple_docs() -> None:
 def test_boundary_loss_mask_toggle() -> None:
     """With mask_boundary_loss=False, boundary labels should not be masked."""
     cfg = Config(
-        model=ModelConfig(
-            backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=False
-        ),
+        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
         data=DataConfig(
             backend="local_text",
             repeat=True,
@@ -83,9 +79,7 @@ def test_boundary_loss_mask_toggle() -> None:
 def test_pipeline_bin_packing_segment_ids() -> None:
     """Bin packing should produce multiple segments with packing stats."""
     cfg = Config(
-        model=ModelConfig(
-            backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=False
-        ),
+        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
         data=DataConfig(
             backend="local_text",
             repeat=True,

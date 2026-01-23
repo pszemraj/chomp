@@ -85,7 +85,6 @@ def test_grad_accum_equivalence_dummy_local_text() -> None:
             batch=micro,
             deterministic=deterministic,
             key=k,
-            use_segment_ids=cfg.model.segment_masking,
         )
         return loss * token_count
 

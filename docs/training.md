@@ -35,15 +35,11 @@ Two environment flags are helpful on newer GPUs:
 
 ## Attention and loss masking
 
-By default, chomp uses **stream semantics** (`model.segment_masking=false`),
-treating the corpus as a continuous token stream. This is standard for simple
-pretraining. Segment IDs are still emitted for boundary loss masking.
+chomp uses **stream semantics**, treating the corpus as a continuous token
+stream. This is standard for simple pretraining. Segment IDs are still emitted
+for boundary loss masking but are not used to alter attention.
 
-For users who want block-diagonal attention across packed documents, set
-`model.segment_masking=true`. The Megalodon patch will use `segment_ids` to
-build an attention mask so tokens only attend within their document.
-
-Loss masking is handled in the data pipeline (independent of `segment_masking`):
+Loss masking is handled in the data pipeline:
 
 - `data.mask_boundary_loss`: mask labels at segment boundaries
 - `data.train_on_eos`: mask EOS labels if desired

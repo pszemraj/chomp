@@ -68,9 +68,7 @@ def test_hf_pipeline_segment_ids_and_label_mask(
     monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
 
     cfg = Config(
-        model=ModelConfig(
-            backend="dummy", vocab_size=256, d_model=32, dropout=0.0, segment_masking=False
-        ),
+        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
         data=DataConfig(
             backend="hf",
             hf_dataset="dummy",

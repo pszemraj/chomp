@@ -627,30 +627,6 @@ GEMM backend selection. Currently only `"default"` is supported.
 | Required | No |
 | Valid values | `"default"` |
 
-#### `model.segment_masking` {#model.segment_masking}
-
-```yaml
-segment_masking: bool = false
-```
-
-Apply block-diagonal segment masking in attention for packed sequences.
-
-| Property | Value |
-|----------|-------|
-| Required | No |
-| Recommended | `false` (stream semantics) |
-
-::: {.callout-note}
-**Default: stream semantics.** The corpus is treated as a continuous token stream.
-Segment IDs are still emitted for boundary loss masking.
-
-Set to `true` for block-diagonal attention isolation across packed documents. Note
-that Megalodon's ComplexEMA and TimestepNorm still leak across boundaries even with
-segment masking enabled.
-:::
-
----
-
 ## data (DataConfig) {#data}
 
 Dataset, tokenizer, and packing configuration. Contains 23 fields.
@@ -1919,7 +1895,7 @@ If any of these diverge, update the doc in the same commit as the code change.
 
 All configuration fields by section:
 
-**model** (36 fields): [`backend`](#model.backend), [`vocab_size`](#model.vocab_size), [`d_model`](#model.d_model), [`dropout`](#model.dropout), [`model_dim`](#model.model_dim), [`num_layers`](#model.num_layers), [`num_heads`](#model.num_heads), [`z_dim`](#model.z_dim), [`value_dim`](#model.value_dim), [`ffn_hidden_dim`](#model.ffn_hidden_dim), [`cema_ndim`](#model.cema_ndim), [`chunk_size`](#model.chunk_size), [`max_cache_len`](#model.max_cache_len), [`cache_unbounded`](#model.cache_unbounded), [`norm_num_groups`](#model.norm_num_groups), [`norm_eps`](#model.norm_eps), [`rope_base`](#model.rope_base), [`swiglu`](#model.swiglu), [`rescale_nffn`](#model.rescale_nffn), [`scale_emb`](#model.scale_emb), [`norm_affine`](#model.norm_affine), [`attention_dropout`](#model.attention_dropout), [`hidden_dropout`](#model.hidden_dropout), [`pad_token_id`](#model.pad_token_id), [`bos_token_id`](#model.bos_token_id), [`eos_token_id`](#model.eos_token_id), [`max_positions`](#model.max_positions), [`init_mode`](#model.init_mode), [`use_checkpoint`](#model.use_checkpoint), [`output_size`](#model.output_size), [`param_dtype`](#model.param_dtype), [`compute_dtype`](#model.compute_dtype), [`accum_dtype`](#model.accum_dtype), [`softmax_dtype`](#model.softmax_dtype), [`gemm_backend`](#model.gemm_backend), [`segment_masking`](#model.segment_masking)
+**model** (35 fields): [`backend`](#model.backend), [`vocab_size`](#model.vocab_size), [`d_model`](#model.d_model), [`dropout`](#model.dropout), [`model_dim`](#model.model_dim), [`num_layers`](#model.num_layers), [`num_heads`](#model.num_heads), [`z_dim`](#model.z_dim), [`value_dim`](#model.value_dim), [`ffn_hidden_dim`](#model.ffn_hidden_dim), [`cema_ndim`](#model.cema_ndim), [`chunk_size`](#model.chunk_size), [`max_cache_len`](#model.max_cache_len), [`cache_unbounded`](#model.cache_unbounded), [`norm_num_groups`](#model.norm_num_groups), [`norm_eps`](#model.norm_eps), [`rope_base`](#model.rope_base), [`swiglu`](#model.swiglu), [`rescale_nffn`](#model.rescale_nffn), [`scale_emb`](#model.scale_emb), [`norm_affine`](#model.norm_affine), [`attention_dropout`](#model.attention_dropout), [`hidden_dropout`](#model.hidden_dropout), [`pad_token_id`](#model.pad_token_id), [`bos_token_id`](#model.bos_token_id), [`eos_token_id`](#model.eos_token_id), [`max_positions`](#model.max_positions), [`init_mode`](#model.init_mode), [`use_checkpoint`](#model.use_checkpoint), [`output_size`](#model.output_size), [`param_dtype`](#model.param_dtype), [`compute_dtype`](#model.compute_dtype), [`accum_dtype`](#model.accum_dtype), [`softmax_dtype`](#model.softmax_dtype), [`gemm_backend`](#model.gemm_backend)
 
 **data** (23 fields): [`backend`](#data.backend), [`hf_dataset`](#data.hf_dataset), [`hf_name`](#data.hf_name), [`hf_split`](#data.hf_split), [`hf_eval_split`](#data.hf_eval_split), [`text_key`](#data.text_key), [`shuffle`](#data.shuffle), [`shuffle_buffer_size`](#data.shuffle_buffer_size), [`seed`](#data.seed), [`repeat`](#data.repeat), [`max_retries`](#data.max_retries), [`retry_delay_sec`](#data.retry_delay_sec), [`state_update_interval`](#data.state_update_interval), [`local_text`](#data.local_text), [`packing_mode`](#data.packing_mode), [`packing_buffer_docs`](#data.packing_buffer_docs), [`packing_max_docs_per_bin`](#data.packing_max_docs_per_bin), [`mask_boundary_loss`](#data.mask_boundary_loss), [`train_on_eos`](#data.train_on_eos), [`grain_prefetch`](#data.grain_prefetch), [`max_eval_samples`](#data.max_eval_samples), [`tokenizer`](#data.tokenizer), [`device_put`](#data.device_put)
 

@@ -25,7 +25,6 @@ import jax.numpy as jnp
 import optax
 
 from chomp.config import Config, dtype_from_str
-from chomp.patches.megalodon_segment_ids import apply_segment_ids_patch
 
 if TYPE_CHECKING:
     from chomp.types import Batch
@@ -87,7 +86,6 @@ class DummyLM(eqx.Module):
         ignore_index: int = -100,
         deterministic: bool = True,
         key: jax.Array | None = None,
-        segment_ids: jax.Array | None = None,
     ) -> jax.Array:
         """Compute cross-entropy loss with causal shift.
 
@@ -97,10 +95,8 @@ class DummyLM(eqx.Module):
         :param int ignore_index: Label value to ignore in loss.
         :param bool deterministic: If False, apply dropout.
         :param key: PRNG key required when deterministic=False.
-        :param segment_ids: Optional packed-segment IDs (ignored by DummyLM).
         :return jax.Array: Scalar mean cross-entropy loss.
         """
-        _ = segment_ids
         logits = self(input_ids, attention_mask, deterministic=deterministic, key=key)
 
         # Shift for causal LM
@@ -162,11 +158,6 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
                 "Install it (e.g., pip install -e /path/to/megalodon-jax)."
             ) from e
 
-        if cfg.model.segment_masking and not apply_segment_ids_patch():
-            raise RuntimeError(
-                "model.segment_masking=true but segment-id patch could not be applied."
-            )
-
         mcfg = MegalodonConfig(
             vocab_size=cfg.model.vocab_size,
             model_dim=cfg.model.model_dim,
@@ -221,7 +212,6 @@ def training_loss(
     batch: Batch,
     deterministic: bool,
     key: jax.Array | None,
-    use_segment_ids: bool = False,
 ) -> jax.Array:
     """Compute training loss.
 
@@ -235,8 +225,6 @@ def training_loss(
     :param Batch batch: Batch with input_ids, labels, attention_mask.
     :param bool deterministic: If False, apply dropout.
     :param key: PRNG key required when deterministic=False.
-    :param bool use_segment_ids: Whether to pass segment_ids to the model.
-        Default is False (stream semantics). Enable only when segment masking is on.
     :return jax.Array: Scalar loss value.
     """
 
@@ -249,10 +237,6 @@ def training_loss(
         "deterministic": deterministic,
         "key": key,
     }
-    # Only pass segment_ids when patch is applied (segment_masking=True).
-    # Unpatched Megalodon doesn't accept this argument.
-    if use_segment_ids:
-        kwargs["segment_ids"] = batch.segment_ids
     return model.compute_loss(  # type: ignore[attr-defined]
         batch.input_ids,
         batch.labels,

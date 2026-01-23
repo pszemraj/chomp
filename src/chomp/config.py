@@ -92,11 +92,6 @@ class ModelConfig:
     # Megalodon-jax currently only supports "default"
     gemm_backend: Literal["default"] = "default"
 
-    # Packed training: apply block-diagonal segment masking in attention.
-    # Default is False (stream semantics); segment_ids are still emitted for
-    # boundary loss masking. Set True to enable block-diagonal attention.
-    segment_masking: bool = False
-
 
 @dataclass(frozen=True)
 class TokenizerConfig:

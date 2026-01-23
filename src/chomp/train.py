@@ -276,7 +276,6 @@ def make_train_step(
 
     deterministic = derived_deterministic(cfg)
     grad_accum = int(cfg.train.grad_accum)
-    use_segment_ids = bool(cfg.model.segment_masking)
 
     def micro_loss(
         params: Any,
@@ -310,7 +309,6 @@ def make_train_step(
             batch=micro,
             deterministic=deterministic,
             key=key,
-            use_segment_ids=use_segment_ids,
         )
         return loss * token_count
 
@@ -397,7 +395,6 @@ def make_eval_step(
     :param Any static: Static (non-differentiable) model components from eqx.partition.
     :return Callable: eval_step(params, batch) -> (loss_sum, token_sum).
     """
-    use_segment_ids = bool(cfg.model.segment_masking)
 
     def eval_step(params: Any, batch: Batch) -> tuple[jax.Array, jax.Array]:
         """Compute token-weighted loss sums for a batch.
@@ -433,7 +430,6 @@ def make_eval_step(
                 batch=micro,
                 deterministic=True,
                 key=None,
-                use_segment_ids=use_segment_ids,
             )
             return (loss_sum + loss * token_count, token_sum + token_count), None
 

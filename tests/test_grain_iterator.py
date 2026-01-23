@@ -11,9 +11,7 @@ from chomp.data.pipeline import build_train_iterator
 def test_grain_iterator_state_roundtrip() -> None:
     """Grain iterator should produce same batches after state restore."""
     cfg = Config(
-        model=ModelConfig(
-            backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=False
-        ),
+        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
         data=DataConfig(
             backend="local_text",
             repeat=True,
@@ -58,9 +56,7 @@ def test_grain_iterator_state_roundtrip() -> None:
 def test_grain_iterator_stats_disabled_with_device_put() -> None:
     """Packing stats should be empty when device_put=True."""
     cfg = Config(
-        model=ModelConfig(
-            backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=False
-        ),
+        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
         data=DataConfig(
             backend="local_text",
             repeat=True,
