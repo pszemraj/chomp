@@ -1,3 +1,5 @@
+"""GPU-specific smoke tests requiring a real GPU."""
+
 from __future__ import annotations
 
 from dataclasses import replace
@@ -12,11 +14,13 @@ from chomp.utils.devices import device_platform, validate_default_device
 
 
 def _has_gpu() -> bool:
+    """Check if a GPU device is available."""
     return any(dev.platform == "gpu" for dev in jax.devices())
 
 
 @pytest.mark.skipif(not _has_gpu(), reason="GPU not available")
 def test_device_platform_reports_gpu() -> None:
+    """device_platform should report 'gpu' for GPU arrays."""
     arr = jax.device_put(jax.numpy.zeros((1,)))
     assert device_platform(arr) == "gpu"
 
@@ -24,6 +28,7 @@ def test_device_platform_reports_gpu() -> None:
 @pytest.mark.skipif(not _has_gpu(), reason="GPU not available")
 @pytest.mark.parametrize("device_put", [False, True])
 def test_gpu_train_smoke(tmp_path: Path, device_put: bool) -> None:
+    """Single training step should succeed on GPU."""
     cfg = Config()
     cfg = replace(
         cfg,

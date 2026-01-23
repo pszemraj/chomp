@@ -73,7 +73,10 @@ class GrainTrainBatchIterator:
         self._last_stats = {}
 
     def checkpoint_target(self) -> Any:
-        """Return the Grain iterator used for Orbax checkpointing."""
+        """Return the Grain iterator used for Orbax checkpointing.
+
+        :return Any: The underlying Grain DatasetIterator.
+        """
         return self._it
 
     def get_stats(self) -> dict[str, float | int | str]:

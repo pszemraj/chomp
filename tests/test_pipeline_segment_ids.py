@@ -8,7 +8,8 @@ from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, Train
 from chomp.data.pipeline import build_train_iterator
 
 
-def test_pipeline_segment_ids_multiple_docs():
+def test_pipeline_segment_ids_multiple_docs() -> None:
+    """Pipeline should emit multiple segment IDs and mask boundaries."""
     cfg = Config(
         model=ModelConfig(
             backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=False
@@ -45,7 +46,8 @@ def test_pipeline_segment_ids_multiple_docs():
     assert np.all(masked_labels == -100)
 
 
-def test_boundary_loss_mask_toggle():
+def test_boundary_loss_mask_toggle() -> None:
+    """With mask_boundary_loss=False, boundary labels should not be masked."""
     cfg = Config(
         model=ModelConfig(
             backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=False
@@ -78,7 +80,8 @@ def test_boundary_loss_mask_toggle():
     assert np.all(labels_at_boundary != -100)
 
 
-def test_pipeline_bin_packing_segment_ids():
+def test_pipeline_bin_packing_segment_ids() -> None:
+    """Bin packing should produce multiple segments with packing stats."""
     cfg = Config(
         model=ModelConfig(
             backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=False

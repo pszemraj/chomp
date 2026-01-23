@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import pytest
 
 from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, TrainConfig
 from chomp.data.pipeline import build_train_iterator
@@ -13,20 +14,26 @@ from chomp.data.pipeline import build_train_iterator
 
 @dataclass
 class _FakeHFIterable:
+    """Mock HF iterable dataset for testing."""
+
     items: list[dict[str, Any]]
     index: int = 0
 
-    def select_columns(self, _columns: list[str]):
+    def select_columns(self, _columns: list[str]) -> _FakeHFIterable:
+        """Return self (columns not used in tests)."""
         return self
 
-    def shuffle(self, *, seed: int, buffer_size: int):
+    def shuffle(self, *, seed: int, buffer_size: int) -> _FakeHFIterable:
+        """Return self (shuffle not used in tests)."""
         _ = (seed, buffer_size)
         return self
 
     def state_dict(self) -> dict[str, Any]:
+        """Return iterator state."""
         return {"index": int(self.index)}
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore iterator state."""
         self.index = int(state["index"])
 
     def __iter__(self) -> _FakeHFIterable:
@@ -40,7 +47,10 @@ class _FakeHFIterable:
         return item
 
 
-def test_hf_pipeline_segment_ids_and_label_mask(monkeypatch):
+def test_hf_pipeline_segment_ids_and_label_mask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HF pipeline should emit segment IDs and mask labels at boundaries."""
     items = [
         {"text": "hi"},
         {"text": "ok"},
@@ -48,7 +58,8 @@ def test_hf_pipeline_segment_ids_and_label_mask(monkeypatch):
         {"text": "sup"},
     ]
 
-    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool):
+    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> _FakeHFIterable:
+        """Mock load_dataset returning fake iterable."""
         _ = (dataset, name, split, streaming)
         return _FakeHFIterable(items=items)
 

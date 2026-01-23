@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import jax
 
@@ -37,15 +38,22 @@ from chomp.model import build_model
 from chomp.train import build_optimizer, init_train_state, run
 from chomp.utils.tree import tree_allclose
 
+if TYPE_CHECKING:
+    from chomp.types import TrainState
 
-def _abstractify(tree):
-    def to_struct(x):
+
+def _abstractify(tree: jax.Array) -> jax.ShapeDtypeStruct:
+    """Convert a pytree of arrays to ShapeDtypeStruct leaves."""
+
+    def to_struct(x: jax.Array) -> jax.ShapeDtypeStruct:
+        """Convert single array to ShapeDtypeStruct."""
         return jax.ShapeDtypeStruct(x.shape, x.dtype)
 
     return jax.tree_util.tree_map(to_struct, tree)
 
 
-def _restore_state(run_dir: Path, cfg: Config, step: int):
+def _restore_state(run_dir: Path, cfg: Config, step: int) -> TrainState:
+    """Restore train state from checkpoint at given step."""
     # Build skeleton state
     key = jax.random.PRNGKey(cfg.train.seed)
     key, k_model = jax.random.split(key)
@@ -63,7 +71,8 @@ def _restore_state(run_dir: Path, cfg: Config, step: int):
     return state
 
 
-def test_resume_matches_continuous(tmp_path: Path):
+def test_resume_matches_continuous(tmp_path: Path) -> None:
+    """Resumed run must match continuous run exactly (deterministic dropout)."""
     K = 4
     N = 6
 

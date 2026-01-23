@@ -23,7 +23,8 @@ import pytest
 
 
 @pytest.mark.skipif(os.name == "nt", reason="subprocess env parsing differs on Windows")
-def test_train_step_compiles_once(tmp_path: Path):
+def test_train_step_compiles_once(tmp_path: Path) -> None:
+    """Train step must compile exactly once with fixed shapes."""
     config_src = Path(__file__).resolve().parents[1] / "configs" / "debug_smoke.yaml"
     assert config_src.exists(), "debug_smoke.yaml missing"
 

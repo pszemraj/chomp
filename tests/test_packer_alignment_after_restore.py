@@ -6,17 +6,24 @@ that restoring into a fresh iterator yields the exact same token stream.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 
 from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, TrainConfig
 from chomp.data.pipeline import build_train_iterator
 
+if TYPE_CHECKING:
+    from chomp.types import Batch
 
-def _batch_arrays(batch):
+
+def _batch_arrays(batch: Batch) -> tuple:
+    """Extract arrays from batch for comparison."""
     return batch.input_ids, batch.labels, batch.attention_mask, batch.segment_ids
 
 
-def test_packer_alignment_after_restore():
+def test_packer_alignment_after_restore() -> None:
+    """Restored iterator should produce same batches as continued iterator."""
     cfg = Config(
         model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
         data=DataConfig(

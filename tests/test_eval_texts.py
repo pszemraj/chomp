@@ -3,36 +3,50 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+import pytest
 
 from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, TrainConfig
 from chomp.data import build_tokenizer, load_or_create_eval_texts
 
+if TYPE_CHECKING:
+    pass
+
 
 @dataclass
 class _FakeHFIterable:
+    """Mock HF iterable dataset for testing."""
+
     items: list[dict[str, Any]]
     index: int = 0
 
-    def select_columns(self, _columns: list[str]):
+    def select_columns(self, _columns: list[str]) -> _FakeHFIterable:
+        """Return self (columns not used in tests)."""
         return self
 
-    def shuffle(self, *, seed: int, buffer_size: int):
+    def shuffle(self, *, seed: int, buffer_size: int) -> _FakeHFIterable:
+        """Return self (shuffle not used in tests)."""
         _ = (seed, buffer_size)
         return self
 
     def state_dict(self) -> dict[str, Any]:
+        """Return iterator state."""
         return {"index": int(self.index)}
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore iterator state."""
         self.index = int(state.get("index", 0))
 
-    def __iter__(self):
+    def __iter__(self) -> _FakeHFIterator:
         return _FakeHFIterator(self)
 
 
 class _FakeHFIterator:
-    def __init__(self, ds: _FakeHFIterable):
+    """Mock HF iterator for testing."""
+
+    def __init__(self, ds: _FakeHFIterable) -> None:
+        """Initialize iterator from dataset."""
         self._ds = ds
         self._i = int(ds.index)
 
@@ -49,6 +63,7 @@ class _FakeHFIterator:
 
 
 def _base_cfg() -> Config:
+    """Create a base config for eval text tests."""
     return Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=16, dropout=0.0),
         data=DataConfig(
@@ -77,11 +92,13 @@ def _base_cfg() -> Config:
     )
 
 
-def test_eval_prefers_validation_split(monkeypatch):
+def test_eval_prefers_validation_split(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Eval should prefer validation split when available."""
     val_items = [{"text": "val-a"}, {"text": "val-b"}]
     train_items = [{"text": "train-a"}, {"text": "train-b"}]
 
-    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool):
+    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> _FakeHFIterable:
+        """Mock load_dataset returning fake iterables."""
         _ = (dataset, name, streaming)
         if split == "validation":
             return _FakeHFIterable(items=val_items)
@@ -99,10 +116,12 @@ def test_eval_prefers_validation_split(monkeypatch):
     assert tokens == [tok.encode("val-a"), tok.encode("val-b")]
 
 
-def test_eval_falls_back_to_train_split(monkeypatch):
+def test_eval_falls_back_to_train_split(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Eval should fall back to train split when validation unavailable."""
     train_items = [{"text": "train-a"}, {"text": "train-b"}]
 
-    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool):
+    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> _FakeHFIterable:
+        """Mock load_dataset raising for validation."""
         _ = (dataset, name, streaming)
         if split == "validation":
             raise FileNotFoundError("no validation split")
@@ -120,7 +139,8 @@ def test_eval_falls_back_to_train_split(monkeypatch):
     assert tokens == [tok.encode("train-a"), tok.encode("train-b")]
 
 
-def test_eval_empty_when_disabled():
+def test_eval_empty_when_disabled() -> None:
+    """Eval should return empty list when max_eval_samples=0."""
     cfg = _base_cfg()
     cfg = replace(cfg, data=replace(cfg.data, max_eval_samples=0))
     tok = build_tokenizer(cfg)

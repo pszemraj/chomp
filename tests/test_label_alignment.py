@@ -8,7 +8,8 @@ from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, Train
 from chomp.data.pipeline import build_train_iterator
 
 
-def test_labels_align_with_inputs_except_masked():
+def test_labels_align_with_inputs_except_masked() -> None:
+    """Labels should match inputs except where masked with -100."""
     cfg = Config(
         model=ModelConfig(
             backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=False

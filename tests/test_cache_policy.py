@@ -14,6 +14,7 @@ from chomp.types import Batch
 
 
 def test_training_loss_rejects_cache_kwarg() -> None:
+    """Training_loss signature must not include cache arguments."""
     sig = inspect.signature(training_loss)
     assert "cache" not in sig.parameters
     assert "return_cache" not in sig.parameters

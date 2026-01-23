@@ -19,6 +19,7 @@ from chomp.train import run
 
 
 def test_dry_run_compiles_single_step(tmp_path: Path) -> None:
+    """Dry run should compile one step, write config, but not metrics."""
     run_dir = tmp_path / "dry_run"
     cfg = Config(
         model=ModelConfig(backend="dummy", vocab_size=128, d_model=32, dropout=0.0),

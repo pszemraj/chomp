@@ -8,7 +8,8 @@ from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, Train
 from chomp.data.pipeline import build_train_iterator
 
 
-def test_train_on_eos_false_masks_eos_labels():
+def test_train_on_eos_false_masks_eos_labels() -> None:
+    """With train_on_eos=False, EOS token labels should be masked to -100."""
     cfg = Config(
         model=ModelConfig(
             backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=False

@@ -12,7 +12,8 @@ from chomp.patches.megalodon_segment_ids import apply_segment_ids_patch
 from chomp.types import Batch
 
 
-def test_megalodon_segment_mask_changes_loss():
+def test_megalodon_segment_mask_changes_loss() -> None:
+    """Enabling segment masking should produce different loss values."""
     pytest.importorskip("megalodon_jax")
     assert apply_segment_ids_patch()
 

@@ -12,7 +12,8 @@ from chomp.train import build_optimizer, init_train_state, make_train_step
 from chomp.types import Batch
 
 
-def test_train_step_segment_masking_with_checkpointing():
+def test_train_step_segment_masking_with_checkpointing() -> None:
+    """Train step with segment masking and gradient checkpointing should work."""
     pytest.importorskip("megalodon_jax")
 
     cfg = Config(

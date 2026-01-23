@@ -8,7 +8,8 @@ from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, Train
 from chomp.data.pipeline import build_train_iterator
 
 
-def test_grain_iterator_state_roundtrip():
+def test_grain_iterator_state_roundtrip() -> None:
+    """Grain iterator should produce same batches after state restore."""
     cfg = Config(
         model=ModelConfig(
             backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=False
@@ -54,7 +55,8 @@ def test_grain_iterator_state_roundtrip():
     np.testing.assert_array_equal(next_a.segment_ids, next_b.segment_ids)
 
 
-def test_grain_iterator_stats_disabled_with_device_put():
+def test_grain_iterator_stats_disabled_with_device_put() -> None:
+    """Packing stats should be empty when device_put=True."""
     cfg = Config(
         model=ModelConfig(
             backend="dummy", vocab_size=512, d_model=32, dropout=0.0, segment_masking=False

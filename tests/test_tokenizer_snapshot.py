@@ -1,3 +1,5 @@
+"""Tokenizer config should be saved as snapshot in run directory."""
+
 from __future__ import annotations
 
 import json
@@ -17,7 +19,8 @@ from chomp.config import (
 from chomp.train import run
 
 
-def test_tokenizer_snapshot_saved(tmp_path: Path):
+def test_tokenizer_snapshot_saved(tmp_path: Path) -> None:
+    """Training should save tokenizer.json with kind metadata."""
     base = Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
         data=DataConfig(
