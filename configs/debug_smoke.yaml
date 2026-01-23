@@ -1,20 +1,19 @@
+# Minimal offline smoke test config (local_text backend).
+# Keeps everything small and CPU-friendly for quick validation.
+
 model:
   backend: dummy
   vocab_size: 256
   d_model: 128
   dropout: 0.0
 
-# Offline debug source: still exercises tokenize+pack.
 data:
   backend: local_text
   repeat: true
   packing_mode: bin
   packing_buffer_docs: 32
-  packing_max_docs_per_bin: null
-  grain_prefetch: 2
   mask_boundary_loss: true
   train_on_eos: true
-  max_eval_samples: 1000
   local_text: |
     Hello from chomp. This is a local_text debug stream.
     It exists so tests and smoke runs don't depend on network.
@@ -35,30 +34,15 @@ train:
   allow_cpu: true
   log_every: 1
   eval_every: 0
-  profile: false
-  profile_dir: null
 
 optim:
   lr: 3.0e-4
-  weight_decay: 0.01
-  grad_clip_norm: 1.0
   warmup_steps: 2
-  min_lr_ratio: 0.0
 
 checkpoint:
   enabled: true
-  root_dir: null
   save_every: 5
-  max_to_keep: 3
   async_save: false
-
-logging:
-  project: chomp
-  run_dir: null
-  metrics_file: metrics.jsonl
-  level: INFO
-  console_use_rich: true
-  log_file: train.log
 
 debug:
   nan_check: true

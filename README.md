@@ -29,20 +29,21 @@ JAX wheels are platform- and CUDA-specific. Follow the official instructions:
 pip install -e .
 ```
 
-### 3) Install `megalodon-jax` (for real models)
+### 3) (Optional) Use a local `megalodon-jax` checkout
+
+`chomp` depends on `megalodon-jax` by default, so `pip install -e .` will
+install it from the GitHub source declared in `pyproject.toml`.
+
+If you want to develop against a local checkout instead:
 
 ```bash
 pip install -e /path/to/megalodon-jax
-```
-
-or:
-
-```bash
-pip install -e '.[megalodon]'
+pip install -e . --no-deps
 ```
 
 ### Tokenizer defaults + vocab rounding
 
+- Default tokenizer kind: `byte` (no external files)
 - Default HF tokenizer: `pszemraj/bytebpe-tokenizer-32k-mlm`
 - When `tokenizer.kind: hf`, chomp reads tokenizer metadata and:
   - rounds `model.vocab_size` up to `data.tokenizer.vocab_size_multiple` (default: 128)
@@ -61,7 +62,8 @@ data:
 
 ### Smoke test (offline)
 
-This uses `data.backend: local_text`, which still exercises tokenize+pack but avoids network.
+This uses `data.backend: local_text` (and `train.allow_cpu: true`), which still
+exercises tokenize+pack but avoids network/GPU requirements.
 
 ```bash
 chomp-train configs/debug_smoke.yaml

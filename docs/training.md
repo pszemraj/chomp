@@ -87,14 +87,15 @@ orthogonal to gradient accumulation and does not change the batch contract.
 
 ## Metrics
 
-Metrics are written per step to `logging.metrics_file` and include:
+Metrics are written to `logging.metrics_file` every `train.log_every` steps
+(and on eval steps) and include:
 
 - `loss`
 - `grad_norm`
 - `lr`
 - `tokens_seen`
-- `packing_mode`, `packing_utilization`
-- `first_step_compile_time_s` (step 0 only)
+- `packing_mode`, `packing_utilization` (when iterator stats are enabled)
+- `first_step_compile_time_s` (first logged step after compile)
 - `peak_memory_gb` (best-effort, device-dependent)
 - `eval_loss` (only when eval runs)
 
