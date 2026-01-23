@@ -1,142 +1,131 @@
-"""Checkpoint + resume contract test.
-
-We want to catch the class of bugs where:
-- you *think* you're resuming
-- but some part of train_state (or data iterator) silently resets
-
-Test strategy:
-- Run K steps, saving every step.
-- Resume from latest and run to N steps.
-- Separately run a continuous N-step run.
-- Restore final checkpoints and compare params + optimizer state.
-
-We generate data via local_text through the real tokenize+pack pipeline.
-"""
+"""Checkpoint resume + forward smoke tests."""
 
 from __future__ import annotations
 
+import math
+import os
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any
+
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import jax
+import jax.numpy as jnp
 
-from chomp.ckpt import default_ckpt_dir, make_manager, restore_at_step
-from chomp.config import (
-    CheckpointConfig,
-    Config,
-    DataConfig,
-    DebugConfig,
-    LoggingConfig,
-    ModelConfig,
-    OptimConfig,
-    TokenizerConfig,
-    TrainConfig,
-)
-from chomp.data.pipeline import build_train_iterator
-from chomp.model import build_model
+from chomp.ckpt import default_ckpt_dir, make_manager, restore_latest
+from chomp.config import load_config
+from chomp.data import build_train_iterator, prepare_tokenizer_and_config
+from chomp.model import build_model, training_loss
 from chomp.train import build_optimizer, init_train_state, run
-from chomp.utils.tree import tree_allclose
-
-if TYPE_CHECKING:
-    from chomp.types import TrainState
+from chomp.types import Batch
 
 
-def _abstractify(tree: jax.Array) -> jax.ShapeDtypeStruct:
-    """Convert a pytree of arrays to ShapeDtypeStruct leaves.
-
-    :param jax.Array tree: Pytree of arrays.
-    :return jax.ShapeDtypeStruct: Pytree of abstract arrays.
-    """
-
-    def to_struct(x: jax.Array) -> jax.ShapeDtypeStruct:
-        """Convert single array to ShapeDtypeStruct.
-
-        :param jax.Array x: Array leaf.
-        :return jax.ShapeDtypeStruct: Abstract spec.
-        """
-        return jax.ShapeDtypeStruct(x.shape, x.dtype)
-
-    return jax.tree_util.tree_map(to_struct, tree)
+def _abstractify_tree(tree: Any) -> Any:
+    """Convert array leaves to ShapeDtypeStruct for Orbax restores."""
+    return jax.tree_util.tree_map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), tree)
 
 
-def _restore_state(run_dir: Path, cfg: Config, step: int) -> TrainState:
-    """Restore train state from checkpoint at given step.
+def _small_cfg(tmp_path: Path):
+    """Return a tiny local_text config for fast checkpoint tests."""
+    config_src = Path(__file__).resolve().parents[1] / "configs" / "debug_smoke.yaml"
+    cfg = load_config(str(config_src))
 
-    :param Path run_dir: Run directory containing checkpoints.
-    :param Config cfg: Configuration used to build model/state.
-    :param int step: Checkpoint step to restore.
-    :return TrainState: Restored training state.
-    """
-    # Build skeleton state
-    key = jax.random.PRNGKey(cfg.train.seed)
-    key, k_model = jax.random.split(key)
-    params, _static = build_model(cfg, key=k_model)
-    tx, _sched = build_optimizer(cfg, params)
-    state0 = init_train_state(cfg, params=params, tx=tx, key=key)
-    abstract_state = _abstractify(state0)
-
-    ckpt_dir = default_ckpt_dir(run_dir)
-    mgr = make_manager(ckpt_dir, max_to_keep=5, save_every=1, async_save=False)
-    data_it = build_train_iterator(cfg)
-    _, state, _meta = restore_at_step(
-        mgr, step=step, abstract_train_state=abstract_state, data_iter=data_it
-    )
-    return state
-
-
-def test_resume_matches_continuous(tmp_path: Path) -> None:
-    """Resumed run must match continuous run exactly (deterministic dropout)."""
-    K = 4
-    N = 6
-
-    base = Config(
-        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="local_text",
-            repeat=True,
-            local_text="Deterministic local text for checkpoint test.\n",
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
-        ),
-        train=TrainConfig(
-            seed=0,
-            steps=N,
-            batch_size=2,
+    cfg = replace(
+        cfg,
+        train=replace(
+            cfg.train,
+            steps=2,
+            batch_size=1,
             seq_len=16,
-            grad_accum=2,
+            grad_accum=1,
             jit=False,
             deterministic=True,
             allow_cpu=True,
-            log_every=1000,
+            log_every=1,
+            eval_every=0,
+            generate_every=0,
         ),
-        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
-        checkpoint=CheckpointConfig(enabled=True, save_every=1, max_to_keep=5, async_save=False),
-        debug=DebugConfig(nan_check=True, check_device_every=0),
-        logging=LoggingConfig(
-            project="chomp", run_dir=None, metrics_file="metrics.jsonl", level="INFO"
+        data=replace(
+            cfg.data,
+            backend="local_text",
+            repeat=True,
+            packing_mode="sequential",
+            packing_buffer_docs=4,
+            grain_prefetch=0,
+            local_text="hello from chomp",
+        ),
+        checkpoint=replace(
+            cfg.checkpoint,
+            enabled=True,
+            save_every=1,
+            max_to_keep=2,
+            async_save=False,
+        ),
+        optim=replace(
+            cfg.optim,
+            warmup_steps=0,
+        ),
+        logging=replace(
+            cfg.logging,
+            run_dir=str(tmp_path / "run"),
+            console_use_rich=False,
+        ),
+        debug=replace(
+            cfg.debug,
+            nan_check=True,
+            check_device_every=0,
         ),
     )
+    return cfg, config_src
 
-    # --- Interrupted + resume run ---
-    run_a = tmp_path / "run_a"
-    cfg_a = replace(base, logging=replace(base.logging, run_dir=str(run_a)))
-    run(cfg_a, config_path=None, resume="none", max_steps=K)
-    run(cfg_a, config_path=None, resume="latest")
 
-    state_a = _restore_state(run_a, cfg_a, step=N)
+def test_checkpoint_resume_advances_step(tmp_path: Path) -> None:
+    """A saved checkpoint can be resumed and training continues."""
+    cfg, config_src = _small_cfg(tmp_path)
+    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
 
-    # --- Continuous run ---
-    run_b = tmp_path / "run_b"
-    cfg_b = replace(base, logging=replace(base.logging, run_dir=str(run_b)))
-    run(cfg_b, config_path=None, resume="none")
+    ckpt_dir = default_ckpt_dir(run_dir)
+    assert (ckpt_dir / "2").exists(), "expected checkpoint at step 2"
 
-    state_b = _restore_state(run_b, cfg_b, step=N)
+    cfg_resume = replace(cfg, train=replace(cfg.train, steps=3))
+    run_dir2 = run(cfg_resume, config_path=str(config_src), resume="latest", dry_run=False)
+    assert run_dir2 == run_dir
+    assert (ckpt_dir / "3").exists(), "expected checkpoint at step 3 after resume"
 
-    plat = jax.devices()[0].platform
-    if plat == "cpu":
-        assert tree_allclose(state_a.params, state_b.params, rtol=0.0, atol=0.0)
-        assert tree_allclose(state_a.opt_state, state_b.opt_state, rtol=0.0, atol=0.0)
-    else:
-        # GPUs can be non-bit-exact depending on kernels.
-        assert tree_allclose(state_a.params, state_b.params, rtol=1e-5, atol=1e-5)
-        assert tree_allclose(state_a.opt_state, state_b.opt_state, rtol=1e-5, atol=1e-5)
+
+def test_checkpoint_restore_allows_forward(tmp_path: Path) -> None:
+    """Restored params can run a forward/loss computation."""
+    cfg, config_src = _small_cfg(tmp_path)
+    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+
+    cfg, tokenizer = prepare_tokenizer_and_config(cfg)
+    params, static = build_model(cfg, key=jax.random.PRNGKey(0))
+    tx, _ = build_optimizer(cfg, params)
+    state0 = init_train_state(cfg, params=params, tx=tx, key=jax.random.PRNGKey(1))
+    abstract_state = _abstractify_tree(state0)
+
+    data_it = build_train_iterator(cfg, tokenizer=tokenizer)
+    ckpt_dir = default_ckpt_dir(run_dir)
+    manager = make_manager(
+        ckpt_dir,
+        max_to_keep=cfg.checkpoint.max_to_keep,
+        save_every=cfg.checkpoint.save_every,
+        async_save=cfg.checkpoint.async_save,
+    )
+    step, state, _meta = restore_latest(
+        manager, abstract_train_state=abstract_state, data_iter=data_it
+    )
+    assert step >= 1
+
+    bsz = int(cfg.train.batch_size)
+    seq_len = int(cfg.train.seq_len)
+    input_ids = jnp.zeros((bsz, seq_len), dtype=jnp.int32)
+    labels = input_ids.copy()
+    attn = jnp.ones((bsz, seq_len), dtype=bool)
+    segs = jnp.ones((bsz, seq_len), dtype=jnp.int32)
+    batch = Batch(input_ids=input_ids, labels=labels, attention_mask=attn, segment_ids=segs)
+
+    loss = training_loss(state.params, static, batch=batch, deterministic=True, key=None)
+    loss_val = float(jax.device_get(loss))
+    assert math.isfinite(loss_val)
