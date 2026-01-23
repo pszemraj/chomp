@@ -54,6 +54,26 @@ Loss masking is handled in the data pipeline:
 If `train.eval_every > 0`, chomp runs a full pass over the validation texts
 selected at run start and logs `eval_loss`.
 
+## Generation samples
+
+If `train.generate_every > 0`, chomp periodically samples a prompt from a
+separate stream of the training split and runs `megalodon_jax.generate`,
+printing both the prompt and generated continuation to the console (Rich panels
+when enabled).
+
+Default behaviors (when the `generate_*` fields are `null`):
+
+- `train.generate_input_len`: half of `train.seq_len`
+- `train.generate_max_tokens`: `model.chunk_size + 16`
+- prompt selection: if a sample is longer than `generate_input_len`, randomly
+  use the first or last `generate_input_len` tokens; otherwise use the full
+  sample (no EOS token appended)
+
+Optional sampling controls (`train.generate_temperature`, `train.generate_top_k`,
+`train.generate_top_p`) are passed through when set; otherwise the Megalodon
+defaults apply. Generation is currently only enabled for the `megalodon`
+backend (dummy runs skip it silently).
+
 ## Dry run
 
 Use `chomp-train <config.yaml> --dry-run` to validate config, build the tokenizer/model/data

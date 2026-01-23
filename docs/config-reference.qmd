@@ -1153,7 +1153,7 @@ Truncate documents to this many tokens before packing. `null` means no truncatio
 
 ## train (TrainConfig) {#train}
 
-Training loop configuration. Contains 12 fields.
+Training loop configuration. Contains 18 fields.
 
 #### `train.seed` {#train.seed}
 
@@ -1306,6 +1306,86 @@ Run evaluation every N steps. Set to `0` to disable periodic evaluation.
 |----------|-------|
 | Required | No |
 | Constraints | Must be ≥ 0 |
+
+#### `train.generate_every` {#train.generate_every}
+
+```yaml
+generate_every: int = 5000
+```
+
+Run text generation every N steps. Set to `0` to disable.
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Constraints | Must be ≥ 0 |
+
+#### `train.generate_input_len` {#train.generate_input_len}
+
+```yaml
+generate_input_len: int | null = null
+```
+
+Prompt length (tokens) for generation samples. `null` uses half of
+`train.seq_len`. If a sample is longer, the prompt is taken from the first or
+last `generate_input_len` tokens at random.
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Constraints | Must be positive and ≤ `train.seq_len` when set |
+
+#### `train.generate_max_tokens` {#train.generate_max_tokens}
+
+```yaml
+generate_max_tokens: int | null = null
+```
+
+Maximum number of new tokens to generate. `null` uses `model.chunk_size + 16`.
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Constraints | Must be positive when set |
+
+#### `train.generate_temperature` {#train.generate_temperature}
+
+```yaml
+generate_temperature: float | null = null
+```
+
+Sampling temperature. `null` uses the Megalodon default (`1.0`).
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Constraints | Must be ≥ 0 when set |
+
+#### `train.generate_top_k` {#train.generate_top_k}
+
+```yaml
+generate_top_k: int | null = null
+```
+
+Top-k sampling cutoff. `null` uses the Megalodon default.
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Constraints | Must be positive when set |
+
+#### `train.generate_top_p` {#train.generate_top_p}
+
+```yaml
+generate_top_p: float | null = null
+```
+
+Nucleus sampling threshold. `null` uses the Megalodon default.
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Constraints | Must be in (0, 1] when set |
 
 #### `train.profile` {#train.profile}
 
@@ -1684,6 +1764,7 @@ chomp validates all configuration at load time with actionable error messages.
 |------------|---------------|
 | `train.seq_len % model.chunk_size == 0` | `train.seq_len (X) must be divisible by model.chunk_size (Y)` |
 | `model.chunk_size <= train.seq_len` | `model.chunk_size (X) must be <= train.seq_len (Y)` |
+| `train.generate_input_len <= train.seq_len` | `train.generate_input_len must be <= train.seq_len (X), got Y` |
 | `model.model_dim % model.num_heads == 0` | `model.model_dim (X) must be divisible by model.num_heads (Y)` |
 | `model.pad_token_id != model.eos_token_id` | `model.pad_token_id must differ from model.eos_token_id` |
 | `optim.warmup_steps < train.steps` | `optim.warmup_steps (X) must be < train.steps (Y)` |
@@ -1901,7 +1982,7 @@ All configuration fields by section:
 
 **data.tokenizer** (10 fields): [`kind`](#data.tokenizer.kind), [`hf_name_or_path`](#data.tokenizer.hf_name_or_path), [`hf_use_fast`](#data.tokenizer.hf_use_fast), [`hf_trust_remote_code`](#data.tokenizer.hf_trust_remote_code), [`vocab_size_multiple`](#data.tokenizer.vocab_size_multiple), [`auto_set_special_tokens`](#data.tokenizer.auto_set_special_tokens), [`byte_offset`](#data.tokenizer.byte_offset), [`add_bos`](#data.tokenizer.add_bos), [`add_eos`](#data.tokenizer.add_eos), [`max_doc_tokens`](#data.tokenizer.max_doc_tokens)
 
-**train** (12 fields): [`seed`](#train.seed), [`steps`](#train.steps), [`batch_size`](#train.batch_size), [`seq_len`](#train.seq_len), [`grad_accum`](#train.grad_accum), [`jit`](#train.jit), [`deterministic`](#train.deterministic), [`allow_cpu`](#train.allow_cpu), [`log_every`](#train.log_every), [`eval_every`](#train.eval_every), [`profile`](#train.profile), [`profile_dir`](#train.profile_dir)
+**train** (18 fields): [`seed`](#train.seed), [`steps`](#train.steps), [`batch_size`](#train.batch_size), [`seq_len`](#train.seq_len), [`grad_accum`](#train.grad_accum), [`jit`](#train.jit), [`deterministic`](#train.deterministic), [`allow_cpu`](#train.allow_cpu), [`log_every`](#train.log_every), [`eval_every`](#train.eval_every), [`generate_every`](#train.generate_every), [`generate_input_len`](#train.generate_input_len), [`generate_max_tokens`](#train.generate_max_tokens), [`generate_temperature`](#train.generate_temperature), [`generate_top_k`](#train.generate_top_k), [`generate_top_p`](#train.generate_top_p), [`profile`](#train.profile), [`profile_dir`](#train.profile_dir)
 
 **optim** (5 fields): [`lr`](#optim.lr), [`weight_decay`](#optim.weight_decay), [`grad_clip_norm`](#optim.grad_clip_norm), [`warmup_steps`](#optim.warmup_steps), [`min_lr_ratio`](#optim.min_lr_ratio)
 

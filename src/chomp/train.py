@@ -25,8 +25,11 @@ from __future__ import annotations
 
 import logging
 import math
+import random
+import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -48,6 +51,7 @@ from chomp.ckpt import (
 from chomp.config import Config, derived_deterministic
 from chomp.data import (
     build_eval_iterator,
+    build_generation_text_stream,
     build_train_iterator,
     data_fingerprint,
     load_or_create_eval_texts,
@@ -62,6 +66,7 @@ from chomp.utils.profiling import start_trace, step_annotation, stop_trace
 from chomp.utils.tree import param_count
 
 _IGNORE_INDEX = -100
+logger = logging.getLogger(__name__)
 
 
 def _count_tokens(labels: jax.Array, attention_mask: jax.Array | None) -> jax.Array:
@@ -112,6 +117,105 @@ def _device_memory_stats_gb() -> dict[str, float]:
     if "peak_bytes_in_use" in ms:
         stats["peak_memory_gb"] = float(ms["peak_bytes_in_use"]) / 1e9
     return stats
+
+
+@dataclass(frozen=True)
+class GenerationSettings:
+    """Resolved generation settings for periodic sampling."""
+
+    every: int
+    input_len: int
+    max_new_tokens: int
+    temperature: float | None
+    top_k: int | None
+    top_p: float | None
+
+
+def _resolve_generation_settings(cfg: Config) -> GenerationSettings | None:
+    """Resolve generation defaults from config and model settings."""
+    every = int(cfg.train.generate_every)
+    if every <= 0:
+        return None
+    input_len = cfg.train.generate_input_len
+    if input_len is None:
+        input_len = max(1, int(cfg.train.seq_len) // 2)
+    max_new = cfg.train.generate_max_tokens
+    if max_new is None:
+        max_new = int(cfg.model.chunk_size) + 16
+    return GenerationSettings(
+        every=every,
+        input_len=int(input_len),
+        max_new_tokens=int(max_new),
+        temperature=cfg.train.generate_temperature,
+        top_k=cfg.train.generate_top_k,
+        top_p=cfg.train.generate_top_p,
+    )
+
+
+def _trim_trailing_token(tokens: list[int], token_id: int | None) -> list[int]:
+    """Trim trailing token_id values from a token list."""
+    if token_id is None:
+        return tokens
+    end = len(tokens)
+    while end > 0 and tokens[end - 1] == token_id:
+        end -= 1
+    return tokens[:end]
+
+
+def _select_prompt_tokens(
+    tokens: list[int],
+    *,
+    input_len: int,
+    eos_token_id: int | None,
+    rng: random.Random,
+) -> list[int]:
+    """Select a prompt slice from tokenized text."""
+    tokens = _trim_trailing_token(tokens, eos_token_id)
+    if not tokens:
+        return []
+    if len(tokens) <= input_len:
+        return tokens
+    if rng.random() < 0.5:
+        return tokens[:input_len]
+    return tokens[-input_len:]
+
+
+def _safe_decode(tokenizer: Any, tokens: list[int], *, label: str) -> str:
+    """Decode tokens with best-effort logging."""
+    try:
+        return tokenizer.decode(tokens, skip_special_tokens=True)
+    except Exception as exc:
+        logger.warning("Generation %s decode failed: %s", label, exc)
+        return "<decode failed>"
+
+
+def _emit_generation_output(
+    *,
+    step: int,
+    prompt_text: str,
+    generated_text: str,
+    use_rich: bool,
+) -> None:
+    """Print a generation sample to the console."""
+    if use_rich:
+        try:
+            from rich.console import Console
+            from rich.panel import Panel
+            from rich.rule import Rule
+        except Exception:
+            use_rich = False
+        else:
+            console = Console()
+            with tqdm.external_write_mode(file=sys.stdout, nolock=False):
+                console.print(Rule(f"Step {step} | Generation"))
+                console.print(Panel(prompt_text, title="Prompt", style="cyan"))
+                console.print(Panel(generated_text, title="Generated", style="magenta"))
+            return
+
+    bar = "=" * 50
+    tqdm.write(f"{bar} Step {step} {bar}")
+    tqdm.write(f"Prompt: {prompt_text}")
+    tqdm.write(f"Generated: {generated_text}")
 
 
 def _format_console_row(
@@ -488,6 +592,26 @@ def run(
     metrics_path = run_dir / cfg.logging.metrics_file
     save_tokenizer_snapshot(run_dir, cfg, tokenizer, allow_existing=allow_existing)
     eval_tokens = [] if dry_run else load_or_create_eval_texts(cfg, tokenizer=tokenizer)
+    gen_settings = None
+    gen_stream = None
+    gen_key = None
+    gen_rng = None
+    if not dry_run:
+        gen_settings = _resolve_generation_settings(cfg)
+        if gen_settings is not None and cfg.model.backend != "megalodon":
+            logger.debug(
+                "Generation is enabled but model.backend=%s; skipping generation.",
+                cfg.model.backend,
+            )
+            gen_settings = None
+        if gen_settings is not None:
+            try:
+                gen_stream = build_generation_text_stream(cfg, seed_offset=1)
+                gen_key = jax.random.PRNGKey(cfg.train.seed + 1234)
+                gen_rng = random.Random(cfg.train.seed + 5678)
+            except Exception as exc:
+                logger.warning("Failed to initialize generation stream: %s", exc)
+                gen_settings = None
 
     wandb_run = None
     wandb_cfg = cfg.logging.wandb
@@ -681,6 +805,81 @@ def run(
             return {"eval_loss": None, "eval_tokens": 0}
         return {"eval_loss": total_loss / total_tokens, "eval_tokens": int(total_tokens)}
 
+    def _run_generation_sample(step: int, params: Any) -> None:
+        """Sample a prompt and run generation."""
+        nonlocal gen_key, gen_rng, gen_settings, gen_stream
+        if gen_settings is None or gen_stream is None or gen_rng is None:
+            return
+        try:
+            item = next(gen_stream)
+        except StopIteration:
+            logger.warning("Generation stream exhausted; disabling generation.")
+            gen_settings = None
+            gen_stream = None
+            return
+
+        text = item if isinstance(item, str) else str(item)
+        tokens = tokenizer.encode(text)
+        prompt_tokens = _select_prompt_tokens(
+            tokens,
+            input_len=gen_settings.input_len,
+            eos_token_id=int(cfg.model.eos_token_id),
+            rng=gen_rng,
+        )
+        if not prompt_tokens:
+            logger.debug("Generation prompt empty at step %d; skipping.", step)
+            return
+
+        try:
+            from megalodon_jax import generate as mega_generate
+        except Exception as exc:  # pragma: no cover - optional runtime dependency
+            logger.warning("Generation requested but megalodon_jax unavailable: %s", exc)
+            gen_settings = None
+            return
+
+        model = eqx.combine(params, static)
+        needs_key = gen_settings.temperature is None or gen_settings.temperature > 0
+        key = gen_key if needs_key else None
+        gen_kwargs: dict[str, Any] = {
+            "bos_token_id": int(cfg.model.bos_token_id),
+            "eos_token_id": int(cfg.model.eos_token_id),
+        }
+        if gen_settings.temperature is not None:
+            gen_kwargs["temperature"] = float(gen_settings.temperature)
+        if gen_settings.top_k is not None:
+            gen_kwargs["top_k"] = int(gen_settings.top_k)
+        if gen_settings.top_p is not None:
+            gen_kwargs["top_p"] = float(gen_settings.top_p)
+
+        prompt_ids = jnp.asarray(prompt_tokens, dtype=jnp.int32)[None, :]
+        try:
+            output_ids, _cache, next_key = mega_generate(
+                model,
+                prompt_ids,
+                gen_settings.max_new_tokens,
+                key=key,
+                **gen_kwargs,
+            )
+        except Exception as exc:
+            logger.warning("Generation failed at step %d: %s", step, exc)
+            return
+
+        if next_key is not None:
+            gen_key = next_key
+
+        output_host = jax.device_get(output_ids)
+        output_tokens = [int(x) for x in output_host[0].tolist()]
+        gen_tokens = output_tokens[len(prompt_tokens) :]
+
+        prompt_text = _safe_decode(tokenizer, prompt_tokens, label="prompt")
+        generated_text = _safe_decode(tokenizer, gen_tokens, label="generated")
+        _emit_generation_output(
+            step=step,
+            prompt_text=prompt_text,
+            generated_text=generated_text,
+            use_rich=cfg.logging.console_use_rich,
+        )
+
     try:
         with MetricsWriter(metrics_path) as mw:
             for _ in tqdm(range(start_step, target_steps), desc="train", dynamic_ncols=True):
@@ -745,6 +944,13 @@ def run(
                 eval_row: dict[str, Any] = {}
                 if eval_step is not None and eval_every > 0 and (step_i % eval_every) == 0:
                     eval_row = _run_eval(state.params)
+
+                if (
+                    gen_settings is not None
+                    and gen_stream is not None
+                    and (step_i % gen_settings.every) == 0
+                ):
+                    _run_generation_sample(step_i, state.params)
 
                 # Log
                 should_log = (step_i % cfg.train.log_every) == 0 or bool(eval_row)

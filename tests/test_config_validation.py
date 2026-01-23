@@ -91,6 +91,34 @@ def test_eval_every_must_be_non_negative() -> None:
         validate_config(bad)
 
 
+def test_generate_every_must_be_non_negative() -> None:
+    """Negative generate_every must raise ValueError."""
+    cfg = _base_cfg()
+    bad_train = replace(cfg.train, generate_every=-1)
+    bad = replace(cfg, train=bad_train)
+    with pytest.raises(ValueError, match="generate_every"):
+        validate_config(bad)
+
+
+def test_generate_input_len_must_be_valid() -> None:
+    """generate_input_len must be positive and <= seq_len."""
+    cfg = _base_cfg()
+    bad_small = replace(cfg.train, generate_input_len=0)
+    with pytest.raises(ValueError, match="generate_input_len"):
+        validate_config(replace(cfg, train=bad_small))
+    bad_large = replace(cfg.train, generate_input_len=1024)
+    with pytest.raises(ValueError, match="generate_input_len"):
+        validate_config(replace(cfg, train=bad_large))
+
+
+def test_generate_top_p_must_be_in_range() -> None:
+    """generate_top_p outside (0,1] must raise ValueError."""
+    cfg = _base_cfg()
+    bad_train = replace(cfg.train, generate_top_p=1.5)
+    with pytest.raises(ValueError, match="generate_top_p"):
+        validate_config(replace(cfg, train=bad_train))
+
+
 def test_wandb_mode_must_be_valid() -> None:
     """Invalid wandb mode must raise ValueError."""
     cfg = _base_cfg()

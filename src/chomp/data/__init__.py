@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from .pipeline import (
     build_eval_iterator,
+    build_generation_text_stream,
     build_tokenizer,
     build_train_iterator,
     data_fingerprint,
@@ -28,6 +29,7 @@ from .pipeline import (
 
 __all__ = [
     "build_eval_iterator",
+    "build_generation_text_stream",
     "build_train_iterator",
     "data_fingerprint",
     "build_tokenizer",
