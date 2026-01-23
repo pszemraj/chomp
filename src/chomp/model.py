@@ -221,7 +221,7 @@ def training_loss(
     batch: Batch,
     deterministic: bool,
     key: jax.Array | None,
-    use_segment_ids: bool = True,
+    use_segment_ids: bool = False,
 ) -> jax.Array:
     """Compute training loss.
 
@@ -236,6 +236,7 @@ def training_loss(
     :param bool deterministic: If False, apply dropout.
     :param key: PRNG key required when deterministic=False.
     :param bool use_segment_ids: Whether to pass segment_ids to the model.
+        Default is False (stream semantics). Enable only when segment masking is on.
     :return jax.Array: Scalar loss value.
     """
 

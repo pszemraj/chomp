@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+import chomp.model as model_mod
 from chomp.config import Config, ModelConfig
 from chomp.model import build_model, training_loss
 from chomp.types import Batch
@@ -44,3 +45,45 @@ def test_training_loss_rejects_cache_kwarg() -> None:
             use_segment_ids=True,
             cache=None,
         )
+
+
+def test_training_loss_default_omits_segment_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default training_loss should not pass segment_ids (stream semantics)."""
+    cfg = Config(model=ModelConfig(backend="dummy", vocab_size=64, d_model=16, dropout=0.0))
+    key = jax.random.PRNGKey(0)
+    params, static = build_model(cfg, key=key)
+
+    input_ids = jnp.zeros((1, 4), dtype=jnp.int32)
+    labels = jnp.zeros((1, 4), dtype=jnp.int32)
+    attention = jnp.ones((1, 4), dtype=jnp.bool_)
+    segment_ids = jnp.ones((1, 4), dtype=jnp.int32)
+    batch = Batch(
+        input_ids=input_ids,
+        labels=labels,
+        attention_mask=attention,
+        segment_ids=segment_ids,
+    )
+
+    seen: dict[str, jax.Array | None] = {}
+
+    def _spy(
+        self: model_mod.DummyLM,
+        input_ids: jax.Array,
+        labels: jax.Array,
+        attention_mask: jax.Array | None = None,
+        *,
+        ignore_index: int = -100,
+        deterministic: bool = True,
+        key: jax.Array | None = None,
+        segment_ids: jax.Array | None = None,
+    ) -> jax.Array:
+        _ = (input_ids, labels, attention_mask, ignore_index, deterministic, key)
+        seen["segment_ids"] = segment_ids
+        return jnp.zeros((), dtype=jnp.float32)
+
+    monkeypatch.setattr(model_mod.DummyLM, "compute_loss", _spy, raising=True)
+
+    training_loss(params, static, batch=batch, deterministic=True, key=None)
+
+    assert "segment_ids" in seen
+    assert seen["segment_ids"] is None
