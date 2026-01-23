@@ -14,7 +14,7 @@ import jax
 import jax.numpy as jnp
 
 from chomp.ckpt import default_ckpt_dir, make_manager, restore_latest
-from chomp.config import load_config
+from chomp.config import Config, load_config
 from chomp.data import build_train_iterator, prepare_tokenizer_and_config
 from chomp.model import build_model, training_loss
 from chomp.train import build_optimizer, init_train_state, run
@@ -22,12 +22,20 @@ from chomp.types import Batch
 
 
 def _abstractify_tree(tree: Any) -> Any:
-    """Convert array leaves to ShapeDtypeStruct for Orbax restores."""
+    """Convert array leaves to ShapeDtypeStruct for Orbax restores.
+
+    :param Any tree: Pytree of JAX arrays.
+    :return Any: Pytree of ShapeDtypeStruct with matching structure.
+    """
     return jax.tree_util.tree_map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), tree)
 
 
-def _small_cfg(tmp_path: Path):
-    """Return a tiny local_text config for fast checkpoint tests."""
+def _small_cfg(tmp_path: Path) -> tuple[Config, Path]:
+    """Return a tiny local_text config for fast checkpoint tests.
+
+    :param Path tmp_path: Temporary directory provided by pytest.
+    :return tuple[Config, Path]: (config, config_path) for the smoke run.
+    """
     config_src = Path(__file__).resolve().parents[1] / "configs" / "debug_smoke.yaml"
     cfg = load_config(str(config_src))
 
