@@ -19,9 +19,8 @@ import sys
 from dataclasses import replace
 
 from chomp.config import load_config
-from chomp.train import run
-from chomp.utils.devices import validate_default_device
 from chomp.utils.io import setup_python_logging
+from chomp.utils.xla import configure_blackwell_xla_env
 
 
 def _parse_resume(raw: str) -> str | int:
@@ -87,6 +86,12 @@ def main(argv: list[str] | None = None) -> None:
 
     # Logging first so subsequent errors are readable
     setup_python_logging(cfg.logging.level, use_rich=cfg.logging.console_use_rich)
+
+    # Configure XLA env quirks before JAX backend init.
+    configure_blackwell_xla_env()
+
+    from chomp.train import run
+    from chomp.utils.devices import validate_default_device
 
     # Fail fast on CPU unless explicitly allowed
     validate_default_device(allow_cpu=cfg.train.allow_cpu)
