@@ -29,20 +29,21 @@ JAX wheels are platform- and CUDA-specific. Follow the official instructions:
 pip install -e .
 ```
 
-### 3) Install `megalodon-jax` (for real models)
+### 3) (Optional) Use a local `megalodon-jax` checkout
+
+`chomp` depends on `megalodon-jax` by default, so `pip install -e .` will
+install it from the GitHub source declared in `pyproject.toml`.
+
+If you want to develop against a local checkout instead:
 
 ```bash
 pip install -e /path/to/megalodon-jax
-```
-
-or:
-
-```bash
-pip install -e '.[megalodon]'
+pip install -e . --no-deps
 ```
 
 ### Tokenizer defaults + vocab rounding
 
+- Default tokenizer kind: `byte` (no external files)
 - Default HF tokenizer: `pszemraj/bytebpe-tokenizer-32k-mlm`
 - When `tokenizer.kind: hf`, chomp reads tokenizer metadata and:
   - rounds `model.vocab_size` up to `data.tokenizer.vocab_size_multiple` (default: 128)
@@ -61,7 +62,8 @@ data:
 
 ### Smoke test (offline)
 
-This uses `data.backend: local_text`, which still exercises tokenize+pack but avoids network.
+This uses `data.backend: local_text` (and `train.allow_cpu: true`), which still
+exercises tokenize+pack but avoids network/GPU requirements.
 
 ```bash
 chomp-train configs/debug_smoke.yaml
@@ -119,7 +121,7 @@ Each run directory includes a tokenizer snapshot under `tokenizer/`.
 
 - **Compile once**: fixed shapes; no dynamic padding; grad accumulation inside the compiled step.
 - **Token-weighted GA**: gradient accumulation scales by valid token count (correct with masks/padding).
-- **Segment masking toggle**: set `model.segment_masking` to enable/disable block-diagonal attention for packed sequences.
+- **Stream semantics**: corpus treated as a continuous token stream. Segment IDs are emitted for boundary loss masking; block-diagonal attention is intentionally not implemented.
 - **Boundary-aware loss masking**: `data.mask_boundary_loss` sets labels at segment boundaries to `-100` to avoid cross-document loss; `data.train_on_eos` controls EOS supervision.
 - **Bin packing optional**: set `data.packing_mode: bin` with `data.packing_buffer_docs` to enable FFD packing (pads to fixed length).
 - **Grain pipeline**: tune `data.grain_prefetch` for threaded prefetch and log `packing_utilization`.

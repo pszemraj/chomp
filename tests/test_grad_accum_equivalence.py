@@ -26,7 +26,8 @@ from chomp.types import Batch
 from chomp.utils.tree import tree_allclose
 
 
-def test_grad_accum_equivalence_dummy_local_text():
+def test_grad_accum_equivalence_dummy_local_text() -> None:
+    """Scan-based grad accum should match manual averaging + single update."""
     cfg = Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
         data=DataConfig(
@@ -67,7 +68,26 @@ def test_grad_accum_equivalence_dummy_local_text():
     # --- Reference: average microbatch grads + one update ---
     deterministic = True
 
-    def micro_loss(p, in_ids, labs, attn, segs, k, token_count):
+    def micro_loss(
+        p: jax.Array,
+        in_ids: jax.Array,
+        labs: jax.Array,
+        attn: jax.Array,
+        segs: jax.Array,
+        k: jax.Array,
+        token_count: jax.Array,
+    ) -> jax.Array:
+        """Compute loss for a single microbatch scaled by token count.
+
+        :param jax.Array p: Model parameters.
+        :param jax.Array in_ids: Input token ids.
+        :param jax.Array labs: Label token ids.
+        :param jax.Array attn: Attention mask.
+        :param jax.Array segs: Segment ids.
+        :param jax.Array k: PRNG key.
+        :param jax.Array token_count: Token count for scaling.
+        :return jax.Array: Scaled microbatch loss.
+        """
         micro = Batch(input_ids=in_ids, labels=labs, attention_mask=attn, segment_ids=segs)
         loss = training_loss(
             p,
@@ -75,7 +95,6 @@ def test_grad_accum_equivalence_dummy_local_text():
             batch=micro,
             deterministic=deterministic,
             key=k,
-            use_segment_ids=cfg.model.segment_masking,
         )
         return loss * token_count
 

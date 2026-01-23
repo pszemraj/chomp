@@ -92,9 +92,6 @@ class ModelConfig:
     # Megalodon-jax currently only supports "default"
     gemm_backend: Literal["default"] = "default"
 
-    # Packed training: apply block-diagonal segment masking in attention.
-    segment_masking: bool = True
-
 
 @dataclass(frozen=True)
 class TokenizerConfig:
@@ -224,6 +221,12 @@ class TrainConfig:
     allow_cpu: bool = False
     log_every: int = 25
     eval_every: int = 2500
+    generate_every: int = 5000
+    generate_input_len: int | None = None
+    generate_max_tokens: int | None = None
+    generate_temperature: float | None = None
+    generate_top_k: int | None = None
+    generate_top_p: float | None = None
 
     # Simple profiler support (Phase 0): if enabled, write a trace directory.
     profile: bool = False
@@ -491,6 +494,35 @@ def validate_config(cfg: Config) -> None:
         _vfail(f"train.log_every must be positive, got {cfg.train.log_every}")
     if cfg.train.eval_every < 0:
         _vfail(f"train.eval_every must be >= 0, got {cfg.train.eval_every}")
+    if cfg.train.generate_every < 0:
+        _vfail(f"train.generate_every must be >= 0, got {cfg.train.generate_every}")
+    if cfg.train.generate_input_len is not None:
+        if cfg.train.generate_input_len <= 0:
+            _vfail(
+                "train.generate_input_len must be positive when set, "
+                f"got {cfg.train.generate_input_len}"
+            )
+        if cfg.train.generate_input_len > cfg.train.seq_len:
+            _vfail(
+                "train.generate_input_len must be <= train.seq_len "
+                f"({cfg.train.seq_len}), got {cfg.train.generate_input_len}"
+            )
+    if cfg.train.generate_max_tokens is not None and cfg.train.generate_max_tokens <= 0:
+        _vfail(
+            "train.generate_max_tokens must be positive when set, "
+            f"got {cfg.train.generate_max_tokens}"
+        )
+    if cfg.train.generate_temperature is not None and cfg.train.generate_temperature < 0:
+        _vfail(
+            "train.generate_temperature must be >= 0 when set, "
+            f"got {cfg.train.generate_temperature}"
+        )
+    if cfg.train.generate_top_k is not None and cfg.train.generate_top_k <= 0:
+        _vfail(f"train.generate_top_k must be positive when set, got {cfg.train.generate_top_k}")
+    if cfg.train.generate_top_p is not None and (
+        cfg.train.generate_top_p <= 0 or cfg.train.generate_top_p > 1
+    ):
+        _vfail(f"train.generate_top_p must be in (0, 1] when set, got {cfg.train.generate_top_p}")
 
     # Optim
     if cfg.optim.lr <= 0:

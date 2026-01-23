@@ -43,6 +43,15 @@ class Tokenizer(Protocol):
         """Encode text string to a list of token ids."""
         ...
 
+    def decode(self, tokens: list[int], *, skip_special_tokens: bool = True) -> str:
+        """Decode token ids back into a text string.
+
+        :param list[int] tokens: Token ids to decode.
+        :param bool skip_special_tokens: If True, drop special tokens.
+        :return str: Decoded text.
+        """
+        ...
+
     def __len__(self) -> int: ...
 
 
@@ -91,6 +100,25 @@ class ByteTokenizer:
         off = int(self.byte_offset)
         return [off + int(x) for x in b]
 
+    def decode(self, tokens: list[int], *, skip_special_tokens: bool = True) -> str:
+        """Decode token ids back into UTF-8 text.
+
+        :param list[int] tokens: Token ids to decode.
+        :param bool skip_special_tokens: If True, drop tokens < byte_offset.
+        :return str: Decoded text.
+        """
+        off = int(self.byte_offset)
+        out = bytearray()
+        for tok in tokens:
+            val = int(tok)
+            if val < off:
+                if skip_special_tokens:
+                    continue
+                out.append(ord("?"))
+                continue
+            out.append(val - off)
+        return bytes(out).decode("utf-8", errors="replace")
+
     def __len__(self) -> int:
         return int(self.byte_offset) + 256
 
@@ -138,6 +166,15 @@ class HFTokenizer:
         if ids is None:
             raise RuntimeError("Tokenizer did not return input_ids")
         return list(ids)
+
+    def decode(self, tokens: list[int], *, skip_special_tokens: bool = True) -> str:
+        """Decode tokens back into text.
+
+        :param list[int] tokens: Token ids to decode.
+        :param bool skip_special_tokens: If True, drop special tokens.
+        :return str: Decoded text.
+        """
+        return self._tok.decode(list(tokens), skip_special_tokens=skip_special_tokens)
 
     def __len__(self) -> int:
         return int(len(self._tok))
@@ -194,12 +231,15 @@ def build_tokenizer(cfg: Config) -> Tokenizer:
     raise ValueError(f"Unknown tokenizer.kind: {tok.kind!r}")
 
 
-def _build_hf_stream(cfg: Config, *, split: str, repeat: bool) -> HFStreamingTextStream:
+def _build_hf_stream(
+    cfg: Config, *, split: str, repeat: bool, seed_offset: int = 0
+) -> HFStreamingTextStream:
     """Build an HF streaming text stream from config.
 
     :param Config cfg: Training configuration.
     :param str split: Dataset split name.
     :param bool repeat: Whether to repeat the stream when exhausted.
+    :param int seed_offset: Optional seed offset for independent streams.
     :return HFStreamingTextStream: Streaming text stream wrapper.
     """
     spec = HFStreamSpec(
@@ -209,7 +249,7 @@ def _build_hf_stream(cfg: Config, *, split: str, repeat: bool) -> HFStreamingTex
         text_key=cfg.data.text_key,
         shuffle=cfg.data.shuffle,
         shuffle_buffer_size=cfg.data.shuffle_buffer_size,
-        seed=cfg.data.seed,
+        seed=int(cfg.data.seed) + int(seed_offset),
         repeat=repeat,
         max_retries=cfg.data.max_retries,
         retry_delay_sec=cfg.data.retry_delay_sec,
@@ -428,6 +468,28 @@ def load_or_create_eval_texts(cfg: Config, *, tokenizer: Tokenizer) -> list[list
         logger.warning("Eval text set is empty (max_eval_samples=%d).", max_samples)
 
     return _tokenize_eval_texts(texts, tokenizer)
+
+
+def build_generation_text_stream(cfg: Config, *, seed_offset: int = 1) -> TextStream:
+    """Build a text stream for periodic generation prompts.
+
+    Uses the training split but with an optional seed offset so sampling stays
+    independent from the training iterator.
+
+    :param Config cfg: Training configuration.
+    :param int seed_offset: Offset added to the dataset shuffle seed.
+    :return TextStream: Streaming text iterator.
+    """
+    if cfg.data.backend == "hf":
+        return _build_hf_stream(
+            cfg,
+            split=cfg.data.hf_split,
+            repeat=cfg.data.repeat,
+            seed_offset=seed_offset,
+        )
+    if cfg.data.backend == "local_text":
+        return LocalTextStream(text=cfg.data.local_text, repeat=cfg.data.repeat)
+    raise ValueError(f"Unknown data.backend for generation: {cfg.data.backend!r}")
 
 
 def data_fingerprint(cfg: Config) -> dict[str, Any]:

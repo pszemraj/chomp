@@ -19,7 +19,8 @@ from chomp.config import (
 from chomp.train import run
 
 
-def test_train_repeat_false_exits_cleanly(tmp_path: Path):
+def test_train_repeat_false_exits_cleanly(tmp_path: Path) -> None:
+    """Training should exit cleanly and log data_exhausted when data ends."""
     cfg = Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
         data=DataConfig(

@@ -32,6 +32,11 @@ from chomp.utils.tree import tree_allclose
 
 
 def _base_cfg(run_dir: Path) -> Config:
+    """Create a base config for checkpoint tests.
+
+    :param Path run_dir: Run directory path.
+    :return Config: Config configured for checkpoint tests.
+    """
     return Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=16, dropout=0.0),
         data=DataConfig(
@@ -55,6 +60,10 @@ def _base_cfg(run_dir: Path) -> Config:
 
 
 def _make_state() -> TrainState:
+    """Create a minimal TrainState for testing.
+
+    :return TrainState: Minimal training state.
+    """
     return TrainState(
         step=jnp.array(1, dtype=jnp.int32),
         params={"w": jnp.array([1.0, 2.0], dtype=jnp.float32)},
@@ -63,14 +72,26 @@ def _make_state() -> TrainState:
     )
 
 
-def _abstractify(tree):
-    def to_struct(x):
+def _abstractify(tree: jax.Array) -> jax.ShapeDtypeStruct:
+    """Convert a pytree of arrays to ShapeDtypeStruct leaves.
+
+    :param jax.Array tree: Pytree of arrays.
+    :return jax.ShapeDtypeStruct: Pytree of abstract arrays.
+    """
+
+    def to_struct(x: jax.Array) -> jax.ShapeDtypeStruct:
+        """Convert single array to ShapeDtypeStruct.
+
+        :param jax.Array x: Array leaf.
+        :return jax.ShapeDtypeStruct: Abstract spec.
+        """
         return jax.ShapeDtypeStruct(x.shape, x.dtype)
 
     return jax.tree_util.tree_map(to_struct, tree)
 
 
-def test_async_checkpoint_roundtrip(tmp_path: Path):
+def test_async_checkpoint_roundtrip(tmp_path: Path) -> None:
+    """Async checkpoint save should roundtrip state correctly."""
     run_dir = tmp_path / "run_async"
     cfg = _base_cfg(run_dir)
     state = _make_state()
@@ -92,7 +113,8 @@ def test_async_checkpoint_roundtrip(tmp_path: Path):
     assert tree_allclose(restored.opt_state, state.opt_state, rtol=0.0, atol=0.0)
 
 
-def test_latest_step_ignores_incomplete(tmp_path: Path):
+def test_latest_step_ignores_incomplete(tmp_path: Path) -> None:
+    """Checkpoint manager should ignore incomplete checkpoint directories."""
     run_dir = tmp_path / "run_latest"
     cfg = _base_cfg(run_dir)
     state = _make_state()
@@ -108,7 +130,8 @@ def test_latest_step_ignores_incomplete(tmp_path: Path):
     assert mgr.latest_step() == 1
 
 
-def test_corrupt_checkpoint_fails_restore(tmp_path: Path):
+def test_corrupt_checkpoint_fails_restore(tmp_path: Path) -> None:
+    """Corrupted checkpoint metadata should raise an error on restore."""
     run_dir = tmp_path / "run_corrupt"
     cfg = _base_cfg(run_dir)
     state = _make_state()
@@ -134,7 +157,8 @@ def test_corrupt_checkpoint_fails_restore(tmp_path: Path):
         restore_at_step(mgr, step=1, abstract_train_state=abstract_state, data_iter=data_it_restore)
 
 
-def test_max_to_keep_prunes_checkpoints(tmp_path: Path):
+def test_max_to_keep_prunes_checkpoints(tmp_path: Path) -> None:
+    """Checkpoint manager should prune old checkpoints per max_to_keep."""
     run_dir = tmp_path / "run_prune"
     cfg = _base_cfg(run_dir)
     state = _make_state()

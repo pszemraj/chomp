@@ -43,7 +43,7 @@ The 10 most commonly adjusted fields for typical experiments:
 Override any field using dot-path notation:
 
 ```bash
-chomp-train --config configs/my_config.yaml \
+chomp-train configs/my_config.yaml \
   --override train.steps=2000 \
   --override train.batch_size=4 \
   --override optim.lr=1e-4
@@ -64,7 +64,7 @@ Unknown keys or invalid values fail fast during validation with actionable error
 
 ## model (ModelConfig) {#model}
 
-Model architecture and precision policy. Contains 36 fields.
+Model architecture and precision policy. Contains 35 fields.
 
 ### Backend Selection {#model-backend}
 
@@ -113,6 +113,24 @@ When using an HF tokenizer, vocab size is automatically aligned to
 `data.tokenizer.vocab_size_multiple` (default: 128) and at least the tokenizer vocab size.
 :::
 
+#### `model.dropout` {#model.dropout}
+
+```yaml
+dropout: float = 0.0
+```
+
+Dropout rate used by the model backend (dummy and Megalodon).
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Backend | `dummy` and `megalodon` |
+| Range | `[0.0, 1.0]` |
+
+::: {.callout-note}
+Setting dropout > 0 disables deterministic training unless `train.deterministic: true` is explicit.
+:::
+
 ---
 
 ### Architecture (DummyLM) {#model-dummy}
@@ -132,24 +150,6 @@ Hidden dimension for DummyLM backend.
 | Required | No |
 | Backend | `dummy` only |
 | Constraints | Must be positive |
-
-#### `model.dropout` {#model.dropout}
-
-```yaml
-dropout: float = 0.0
-```
-
-Dropout rate for DummyLM.
-
-| Property | Value |
-|----------|-------|
-| Required | No |
-| Backend | `dummy` only |
-| Range | `[0.0, 1.0]` |
-
-::: {.callout-note}
-Setting dropout > 0 disables deterministic training unless `train.deterministic: true` is explicit.
-:::
 
 ---
 
@@ -626,26 +626,6 @@ GEMM backend selection. Currently only `"default"` is supported.
 |----------|-------|
 | Required | No |
 | Valid values | `"default"` |
-
-#### `model.segment_masking` {#model.segment_masking}
-
-```yaml
-segment_masking: bool = true
-```
-
-Apply block-diagonal segment masking in attention for packed sequences.
-
-| Property | Value |
-|----------|-------|
-| Required | No |
-| Recommended | `true` when using packing |
-
-::: {.callout-note}
-When enabled, attention is restricted within document boundaries in packed sequences,
-preventing cross-contamination between documents.
-:::
-
----
 
 ## data (DataConfig) {#data}
 
@@ -1173,7 +1153,7 @@ Truncate documents to this many tokens before packing. `null` means no truncatio
 
 ## train (TrainConfig) {#train}
 
-Training loop configuration. Contains 12 fields.
+Training loop configuration. Contains 18 fields.
 
 #### `train.seed` {#train.seed}
 
@@ -1326,6 +1306,86 @@ Run evaluation every N steps. Set to `0` to disable periodic evaluation.
 |----------|-------|
 | Required | No |
 | Constraints | Must be ≥ 0 |
+
+#### `train.generate_every` {#train.generate_every}
+
+```yaml
+generate_every: int = 5000
+```
+
+Run text generation every N steps. Set to `0` to disable.
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Constraints | Must be ≥ 0 |
+
+#### `train.generate_input_len` {#train.generate_input_len}
+
+```yaml
+generate_input_len: int | null = null
+```
+
+Prompt length (tokens) for generation samples. `null` uses half of
+`train.seq_len`. If a sample is longer, the prompt is taken from the first or
+last `generate_input_len` tokens at random.
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Constraints | Must be positive and ≤ `train.seq_len` when set |
+
+#### `train.generate_max_tokens` {#train.generate_max_tokens}
+
+```yaml
+generate_max_tokens: int | null = null
+```
+
+Maximum number of new tokens to generate. `null` uses `model.chunk_size + 16`.
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Constraints | Must be positive when set |
+
+#### `train.generate_temperature` {#train.generate_temperature}
+
+```yaml
+generate_temperature: float | null = null
+```
+
+Sampling temperature. `null` uses the Megalodon default (`1.0`).
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Constraints | Must be ≥ 0 when set |
+
+#### `train.generate_top_k` {#train.generate_top_k}
+
+```yaml
+generate_top_k: int | null = null
+```
+
+Top-k sampling cutoff. `null` uses the Megalodon default.
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Constraints | Must be positive when set |
+
+#### `train.generate_top_p` {#train.generate_top_p}
+
+```yaml
+generate_top_p: float | null = null
+```
+
+Nucleus sampling threshold. `null` uses the Megalodon default.
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Constraints | Must be in (0, 1] when set |
 
 #### `train.profile` {#train.profile}
 
@@ -1704,6 +1764,7 @@ chomp validates all configuration at load time with actionable error messages.
 |------------|---------------|
 | `train.seq_len % model.chunk_size == 0` | `train.seq_len (X) must be divisible by model.chunk_size (Y)` |
 | `model.chunk_size <= train.seq_len` | `model.chunk_size (X) must be <= train.seq_len (Y)` |
+| `train.generate_input_len <= train.seq_len` | `train.generate_input_len must be <= train.seq_len (X), got Y` |
 | `model.model_dim % model.num_heads == 0` | `model.model_dim (X) must be divisible by model.num_heads (Y)` |
 | `model.pad_token_id != model.eos_token_id` | `model.pad_token_id must differ from model.eos_token_id` |
 | `optim.warmup_steps < train.steps` | `optim.warmup_steps (X) must be < train.steps (Y)` |
@@ -1756,7 +1817,6 @@ model:
   vocab_size: 256
   d_model: 128
   dropout: 0.0
-  segment_masking: true
 
 data:
   backend: local_text
@@ -1808,25 +1868,23 @@ For real pretraining on Zyda-2:
 # configs/zyda2_100m_2048.yaml — Production 100M Megalodon
 model:
   backend: megalodon
-  vocab_size: 32000              # Tokenizer vocab size (already 128-aligned)
+  vocab_size: 32128
   model_dim: 768
   num_layers: 12
   num_heads: 12
-  z_dim: 384                     # model_dim // 2
-  value_dim: 768                 # Same as model_dim
-  ffn_hidden_dim: 3072           # 4 × model_dim
+  z_dim: 384
+  value_dim: 768
+  ffn_hidden_dim: 3072
   cema_ndim: 16
-  chunk_size: 512                # Must divide seq_len
+  chunk_size: 512
   dropout: 0.0
   attention_dropout: 0.0
   hidden_dropout: 0.0
-  pad_token_id: 3                # Distinct from eos_token_id
+  pad_token_id: 0
   bos_token_id: 1
   eos_token_id: 2
   init_mode: he
-  use_checkpoint: true           # Gradient checkpointing
-  segment_masking: true
-  # Precision policy (NEVER use fp16)
+  use_checkpoint: true
   param_dtype: float32
   compute_dtype: bfloat16
   accum_dtype: float32
@@ -1840,7 +1898,8 @@ data:
   hf_eval_split: validation
   text_key: text
   packing_mode: bin
-  packing_buffer_docs: 256       # >= batch_size × grad_accum
+  packing_buffer_docs: 256
+  packing_max_docs_per_bin: null
   grain_prefetch: 2
   mask_boundary_loss: true
   train_on_eos: true
@@ -1852,6 +1911,7 @@ data:
     kind: hf
     hf_name_or_path: pszemraj/bytebpe-tokenizer-32k-mlm
     hf_use_fast: true
+    hf_trust_remote_code: false
     vocab_size_multiple: 128
     auto_set_special_tokens: true
     add_bos: false
@@ -1861,11 +1921,11 @@ train:
   seed: 0
   steps: 10000
   batch_size: 2
-  seq_len: 2048                  # Must be divisible by chunk_size
-  grad_accum: 8                  # Effective batch = 16
+  seq_len: 2048
+  grad_accum: 8
   jit: true
   deterministic: true
-  allow_cpu: false               # Require GPU
+  allow_cpu: false
   log_every: 25
   eval_every: 2500
 
@@ -1873,17 +1933,18 @@ optim:
   lr: 3.0e-4
   weight_decay: 0.01
   grad_clip_norm: 1.0
-  warmup_steps: 100              # Must be < steps
+  warmup_steps: 100
   min_lr_ratio: 0.0
 
 checkpoint:
   enabled: true
   save_every: 5000
   max_to_keep: 3
-  async_save: true               # Non-blocking saves
+  async_save: true
 
 logging:
   project: chomp
+  run_dir: null
   metrics_file: metrics.jsonl
   level: INFO
   console_use_rich: true
@@ -1891,6 +1952,8 @@ logging:
   wandb:
     enabled: true
     project: chomp
+    entity: null
+    run_name: null
     mode: online
     tags: ["zyda2", "100m", "seq2048", "chunk512"]
 
@@ -1917,13 +1980,13 @@ If any of these diverge, update the doc in the same commit as the code change.
 
 All configuration fields by section:
 
-**model** (36 fields): [`backend`](#model.backend), [`vocab_size`](#model.vocab_size), [`d_model`](#model.d_model), [`dropout`](#model.dropout), [`model_dim`](#model.model_dim), [`num_layers`](#model.num_layers), [`num_heads`](#model.num_heads), [`z_dim`](#model.z_dim), [`value_dim`](#model.value_dim), [`ffn_hidden_dim`](#model.ffn_hidden_dim), [`cema_ndim`](#model.cema_ndim), [`chunk_size`](#model.chunk_size), [`max_cache_len`](#model.max_cache_len), [`cache_unbounded`](#model.cache_unbounded), [`norm_num_groups`](#model.norm_num_groups), [`norm_eps`](#model.norm_eps), [`rope_base`](#model.rope_base), [`swiglu`](#model.swiglu), [`rescale_nffn`](#model.rescale_nffn), [`scale_emb`](#model.scale_emb), [`norm_affine`](#model.norm_affine), [`attention_dropout`](#model.attention_dropout), [`hidden_dropout`](#model.hidden_dropout), [`pad_token_id`](#model.pad_token_id), [`bos_token_id`](#model.bos_token_id), [`eos_token_id`](#model.eos_token_id), [`max_positions`](#model.max_positions), [`init_mode`](#model.init_mode), [`use_checkpoint`](#model.use_checkpoint), [`output_size`](#model.output_size), [`param_dtype`](#model.param_dtype), [`compute_dtype`](#model.compute_dtype), [`accum_dtype`](#model.accum_dtype), [`softmax_dtype`](#model.softmax_dtype), [`gemm_backend`](#model.gemm_backend), [`segment_masking`](#model.segment_masking)
+**model** (35 fields): [`backend`](#model.backend), [`vocab_size`](#model.vocab_size), [`d_model`](#model.d_model), [`dropout`](#model.dropout), [`model_dim`](#model.model_dim), [`num_layers`](#model.num_layers), [`num_heads`](#model.num_heads), [`z_dim`](#model.z_dim), [`value_dim`](#model.value_dim), [`ffn_hidden_dim`](#model.ffn_hidden_dim), [`cema_ndim`](#model.cema_ndim), [`chunk_size`](#model.chunk_size), [`max_cache_len`](#model.max_cache_len), [`cache_unbounded`](#model.cache_unbounded), [`norm_num_groups`](#model.norm_num_groups), [`norm_eps`](#model.norm_eps), [`rope_base`](#model.rope_base), [`swiglu`](#model.swiglu), [`rescale_nffn`](#model.rescale_nffn), [`scale_emb`](#model.scale_emb), [`norm_affine`](#model.norm_affine), [`attention_dropout`](#model.attention_dropout), [`hidden_dropout`](#model.hidden_dropout), [`pad_token_id`](#model.pad_token_id), [`bos_token_id`](#model.bos_token_id), [`eos_token_id`](#model.eos_token_id), [`max_positions`](#model.max_positions), [`init_mode`](#model.init_mode), [`use_checkpoint`](#model.use_checkpoint), [`output_size`](#model.output_size), [`param_dtype`](#model.param_dtype), [`compute_dtype`](#model.compute_dtype), [`accum_dtype`](#model.accum_dtype), [`softmax_dtype`](#model.softmax_dtype), [`gemm_backend`](#model.gemm_backend)
 
 **data** (23 fields): [`backend`](#data.backend), [`hf_dataset`](#data.hf_dataset), [`hf_name`](#data.hf_name), [`hf_split`](#data.hf_split), [`hf_eval_split`](#data.hf_eval_split), [`text_key`](#data.text_key), [`shuffle`](#data.shuffle), [`shuffle_buffer_size`](#data.shuffle_buffer_size), [`seed`](#data.seed), [`repeat`](#data.repeat), [`max_retries`](#data.max_retries), [`retry_delay_sec`](#data.retry_delay_sec), [`state_update_interval`](#data.state_update_interval), [`local_text`](#data.local_text), [`packing_mode`](#data.packing_mode), [`packing_buffer_docs`](#data.packing_buffer_docs), [`packing_max_docs_per_bin`](#data.packing_max_docs_per_bin), [`mask_boundary_loss`](#data.mask_boundary_loss), [`train_on_eos`](#data.train_on_eos), [`grain_prefetch`](#data.grain_prefetch), [`max_eval_samples`](#data.max_eval_samples), [`tokenizer`](#data.tokenizer), [`device_put`](#data.device_put)
 
 **data.tokenizer** (10 fields): [`kind`](#data.tokenizer.kind), [`hf_name_or_path`](#data.tokenizer.hf_name_or_path), [`hf_use_fast`](#data.tokenizer.hf_use_fast), [`hf_trust_remote_code`](#data.tokenizer.hf_trust_remote_code), [`vocab_size_multiple`](#data.tokenizer.vocab_size_multiple), [`auto_set_special_tokens`](#data.tokenizer.auto_set_special_tokens), [`byte_offset`](#data.tokenizer.byte_offset), [`add_bos`](#data.tokenizer.add_bos), [`add_eos`](#data.tokenizer.add_eos), [`max_doc_tokens`](#data.tokenizer.max_doc_tokens)
 
-**train** (12 fields): [`seed`](#train.seed), [`steps`](#train.steps), [`batch_size`](#train.batch_size), [`seq_len`](#train.seq_len), [`grad_accum`](#train.grad_accum), [`jit`](#train.jit), [`deterministic`](#train.deterministic), [`allow_cpu`](#train.allow_cpu), [`log_every`](#train.log_every), [`eval_every`](#train.eval_every), [`profile`](#train.profile), [`profile_dir`](#train.profile_dir)
+**train** (18 fields): [`seed`](#train.seed), [`steps`](#train.steps), [`batch_size`](#train.batch_size), [`seq_len`](#train.seq_len), [`grad_accum`](#train.grad_accum), [`jit`](#train.jit), [`deterministic`](#train.deterministic), [`allow_cpu`](#train.allow_cpu), [`log_every`](#train.log_every), [`eval_every`](#train.eval_every), [`generate_every`](#train.generate_every), [`generate_input_len`](#train.generate_input_len), [`generate_max_tokens`](#train.generate_max_tokens), [`generate_temperature`](#train.generate_temperature), [`generate_top_k`](#train.generate_top_k), [`generate_top_p`](#train.generate_top_p), [`profile`](#train.profile), [`profile_dir`](#train.profile_dir)
 
 **optim** (5 fields): [`lr`](#optim.lr), [`weight_decay`](#optim.weight_decay), [`grad_clip_norm`](#optim.grad_clip_norm), [`warmup_steps`](#optim.warmup_steps), [`min_lr_ratio`](#optim.min_lr_ratio)
 

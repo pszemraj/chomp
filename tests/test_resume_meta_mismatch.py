@@ -1,3 +1,5 @@
+"""Resume should reject config mismatches like changed seq_len."""
+
 from __future__ import annotations
 
 from dataclasses import replace
@@ -19,7 +21,8 @@ from chomp.config import (
 from chomp.train import run
 
 
-def test_resume_rejects_seq_len_mismatch(tmp_path: Path):
+def test_resume_rejects_seq_len_mismatch(tmp_path: Path) -> None:
+    """Resuming with different seq_len should raise RuntimeError."""
     base = Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
         data=DataConfig(

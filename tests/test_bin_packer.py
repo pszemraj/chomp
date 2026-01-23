@@ -8,10 +8,17 @@ from chomp.data.pack import BinPacker
 
 
 def _doc(token: int, length: int) -> list[int]:
+    """Create a document of repeated tokens.
+
+    :param int token: Token value to repeat.
+    :param int length: Number of repetitions.
+    :return list[int]: Token list of length ``length``.
+    """
     return [token] * length
 
 
-def test_bin_packer_packs_multiple_docs():
+def test_bin_packer_packs_multiple_docs() -> None:
+    """Bin packer should combine multiple documents into packed bins."""
     packer = BinPacker(
         seq_len=8,
         add_bos=False,
@@ -44,7 +51,8 @@ def test_bin_packer_packs_multiple_docs():
         assert unique.size >= 2
 
 
-def test_bin_packer_state_roundtrip():
+def test_bin_packer_state_roundtrip() -> None:
+    """Bin packer state should roundtrip correctly via get/set_state."""
     packer = BinPacker(
         seq_len=8,
         add_bos=False,

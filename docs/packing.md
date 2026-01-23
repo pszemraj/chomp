@@ -32,15 +32,21 @@ Key bin-packing knobs:
 - `data.packing_buffer_docs`: number of documents to buffer before packing.
 - `data.packing_max_docs_per_bin`: optional cap on documents per bin.
 
-## Segment IDs and attention
+## Stream Semantics
 
-Each document (or document segment) gets a monotonically increasing
-`segment_id` **within a bin**. When
-`model.segment_masking=true`, the Megalodon patch uses these IDs to form a
-block-diagonal attention mask so tokens only attend within their document.
+chomp treats the corpus as a continuous token stream. This is the only supported
+attention behavior and matches common pretraining setups.
 
-If you disable `model.segment_masking`, segment IDs are still emitted but only
-used for loss masking (see below).
+**Rationale:**
+
+- Attention-only segment masking would still leak across documents via
+  Megalodon's ComplexEMA and TimestepNorm ("expensive partial correctness").
+- Boundary loss masking (via `data.mask_boundary_loss`) handles the most
+  important document-boundary concern by preventing cross-document loss.
+- Stream semantics keeps the system minimal and predictable.
+
+Segment IDs are still emitted by the data pipeline for boundary loss masking,
+but they are not used to alter attention.
 
 ## Boundary-aware loss masking
 
@@ -75,5 +81,4 @@ flag and will preserve the fixed-shape batch contract.
 Near-term packing work focuses on:
 
 - position ID resets at segment boundaries (if/when Megalodon exposes this)
-- upstreaming the segment mask patch to megalodon-jax
 - improving utilization stats and diagnostics

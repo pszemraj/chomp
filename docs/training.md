@@ -33,11 +33,16 @@ Two environment flags are helpful on newer GPUs:
 - `XLA_FLAGS=--xla_gpu_enable_triton_gemm=false` if Triton GEMM causes
   `CUDA_ERROR_OUT_OF_MEMORY` on RTX 5090 with `jax/jaxlib 0.8.2`.
 
-## Segment masking
+When `chomp-train` detects an RTX 50xx (Blackwell) GPU, it automatically appends
+`--xla_gpu_enable_triton_gemm=false` to `XLA_FLAGS` and warns if
+`XLA_PYTHON_CLIENT_PREALLOCATE` is not set to `false`. On other GPUs, the helper
+stays quiet (debug log only).
 
-When `model.segment_masking=true`, the Megalodon patch builds a block-diagonal
-attention mask from `segment_ids`. This prevents attention across packed
-document boundaries.
+## Attention and loss masking
+
+chomp uses **stream semantics**, treating the corpus as a continuous token
+stream. This is standard for simple pretraining. Segment IDs are still emitted
+for boundary loss masking but are not used to alter attention.
 
 Loss masking is handled in the data pipeline:
 
@@ -48,6 +53,26 @@ Loss masking is handled in the data pipeline:
 
 If `train.eval_every > 0`, chomp runs a full pass over the validation texts
 selected at run start and logs `eval_loss`.
+
+## Generation samples
+
+If `train.generate_every > 0`, chomp periodically samples a prompt from a
+separate stream of the training split and runs `megalodon_jax.generate`,
+printing both the prompt and generated continuation to the console (Rich panels
+when enabled).
+
+Default behaviors (when the `generate_*` fields are `null`):
+
+- `train.generate_input_len`: half of `train.seq_len`
+- `train.generate_max_tokens`: `model.chunk_size + 16`
+- prompt selection: if a sample is longer than `generate_input_len`, randomly
+  use the first or last `generate_input_len` tokens; otherwise use the full
+  sample (no EOS token appended)
+
+Optional sampling controls (`train.generate_temperature`, `train.generate_top_k`,
+`train.generate_top_p`) are passed through when set; otherwise the Megalodon
+defaults apply. Generation is currently only enabled for the `megalodon`
+backend (dummy runs skip it silently).
 
 ## Dry run
 
@@ -62,14 +87,15 @@ orthogonal to gradient accumulation and does not change the batch contract.
 
 ## Metrics
 
-Metrics are written per step to `logging.metrics_file` and include:
+Metrics are written to `logging.metrics_file` every `train.log_every` steps
+(and on eval steps) and include:
 
 - `loss`
 - `grad_norm`
 - `lr`
 - `tokens_seen`
-- `packing_mode`, `packing_utilization`
-- `first_step_compile_time_s` (step 0 only)
+- `packing_mode`, `packing_utilization` (when iterator stats are enabled)
+- `first_step_compile_time_s` (first logged step after compile)
 - `peak_memory_gb` (best-effort, device-dependent)
 - `eval_loss` (only when eval runs)
 

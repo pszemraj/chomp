@@ -10,6 +10,7 @@ from chomp.model import build_model
 
 
 def test_dummy_init_stats_are_sane() -> None:
+    """Model parameters should be finite with positive variance."""
     cfg = Config(model=ModelConfig(backend="dummy", vocab_size=128, d_model=32, dropout=0.0))
     key = jax.random.PRNGKey(0)
     params, _static = build_model(cfg, key=key)

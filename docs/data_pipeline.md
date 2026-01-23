@@ -64,7 +64,7 @@ Both packers emit fixed windows of length `seq_len + 1`, then split into:
 - `input_ids = tokens[0..T-1]`
 - `labels = tokens[0..T-1]` (the model shifts internally)
 
-Segment IDs are emitted for each token to support block-diagonal attention.
+Segment IDs are emitted for each token to support boundary loss masking.
 
 Loss masking controls:
 

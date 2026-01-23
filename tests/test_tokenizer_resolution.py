@@ -9,7 +9,16 @@ from chomp.data.pipeline import resolve_tokenizer_config
 
 
 class _DummyTokenizer:
-    def __init__(self, size: int, *, bos: int | None, eos: int | None, pad: int | None):
+    """Mock tokenizer with configurable special tokens."""
+
+    def __init__(self, size: int, *, bos: int | None, eos: int | None, pad: int | None) -> None:
+        """Initialize mock tokenizer.
+
+        :param int size: Tokenizer vocab size.
+        :param int | None bos: BOS token id.
+        :param int | None eos: EOS token id.
+        :param int | None pad: PAD token id.
+        """
         self._size = int(size)
         self._bos = bos
         self._eos = eos
@@ -20,18 +29,31 @@ class _DummyTokenizer:
 
     @property
     def bos_token_id(self) -> int | None:
+        """Return BOS token ID.
+
+        :return int | None: BOS token id.
+        """
         return self._bos
 
     @property
     def eos_token_id(self) -> int | None:
+        """Return EOS token ID.
+
+        :return int | None: EOS token id.
+        """
         return self._eos
 
     @property
     def pad_token_id(self) -> int | None:
+        """Return pad token ID.
+
+        :return int | None: PAD token id.
+        """
         return self._pad
 
 
-def test_vocab_size_rounds_up_to_multiple():
+def test_vocab_size_rounds_up_to_multiple() -> None:
+    """Vocab size should round up to configured multiple."""
     cfg = Config(
         model=ModelConfig(vocab_size=300),
         data=DataConfig(
@@ -46,7 +68,8 @@ def test_vocab_size_rounds_up_to_multiple():
     assert updated.model.vocab_size == 384
 
 
-def test_auto_sets_special_token_ids():
+def test_auto_sets_special_token_ids() -> None:
+    """auto_set_special_tokens should copy IDs from tokenizer to config."""
     cfg = Config(
         model=ModelConfig(vocab_size=512, bos_token_id=0, eos_token_id=1, pad_token_id=2),
         data=DataConfig(
@@ -69,7 +92,8 @@ def test_auto_sets_special_token_ids():
     assert updated.model.pad_token_id == 12
 
 
-def test_tokenizer_pad_equals_eos_raises():
+def test_tokenizer_pad_equals_eos_raises() -> None:
+    """Tokenizer with pad==eos should raise ValueError."""
     cfg = Config(
         model=ModelConfig(vocab_size=512, bos_token_id=0, eos_token_id=1, pad_token_id=2),
         data=DataConfig(

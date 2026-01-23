@@ -19,7 +19,8 @@ from chomp.config import (
 from chomp.train import run
 
 
-def test_eval_logging_writes_metrics(tmp_path: Path):
+def test_eval_logging_writes_metrics(tmp_path: Path) -> None:
+    """Eval should write eval_loss to metrics file."""
     run_dir = tmp_path / "run"
     cfg = Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
