@@ -15,7 +15,7 @@ def test_configure_blackwell_sets_flags_and_warns(monkeypatch, caplog) -> None:
     monkeypatch.delenv("XLA_PYTHON_CLIENT_PREALLOCATE", raising=False)
 
     caplog.set_level(logging.INFO)
-    changed = xla.configure_blackwell_xla_env()
+    changed = xla.configure_blackwell_xla_env(force=True)
 
     assert changed is True
     flags = os.environ.get("XLA_FLAGS", "")
@@ -34,7 +34,7 @@ def test_configure_blackwell_skips_non_blackwell(monkeypatch, caplog) -> None:
     monkeypatch.setenv("XLA_FLAGS", "--keep")
 
     caplog.set_level(logging.DEBUG)
-    changed = xla.configure_blackwell_xla_env()
+    changed = xla.configure_blackwell_xla_env(force=True)
 
     assert changed is False
     assert os.environ.get("XLA_FLAGS") == "--keep"

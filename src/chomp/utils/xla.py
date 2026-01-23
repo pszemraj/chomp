@@ -10,6 +10,8 @@ import subprocess
 _TRITON_FLAG = "--xla_gpu_enable_triton_gemm=false"
 _PREALLOC_ENV = "XLA_PYTHON_CLIENT_PREALLOCATE"
 _RTX_RE = re.compile(r"RTX\s*(\d{4})", re.IGNORECASE)
+_CONFIG_DONE = False
+_LAST_RESULT: bool | None = None
 
 
 def _query_nvidia_gpu_names() -> list[str]:
@@ -51,19 +53,32 @@ def _update_xla_flags(existing: str) -> tuple[str, bool]:
     return " ".join(filtered).strip(), changed
 
 
-def configure_blackwell_xla_env(*, logger: logging.Logger | None = None) -> bool:
+def configure_blackwell_xla_env(
+    *, logger: logging.Logger | None = None, force: bool = False
+) -> bool:
     """Configure XLA env vars for RTX 50xx GPUs.
 
     Returns True if an RTX 50xx GPU was detected.
+
+    :param logger: Optional logger override.
+    :param bool force: If True, re-run even if already configured.
     """
+    global _CONFIG_DONE, _LAST_RESULT
+    if _CONFIG_DONE and not force:
+        return bool(_LAST_RESULT)
+
     log = logger or logging.getLogger(__name__)
     names = _query_nvidia_gpu_names()
     if not names:
         log.debug("No NVIDIA GPUs detected via nvidia-smi; skipping Blackwell XLA setup.")
+        _CONFIG_DONE = True
+        _LAST_RESULT = False
         return False
     blackwell = [name for name in names if _is_rtx_50xx(name)]
     if not blackwell:
         log.debug("NVIDIA GPU(s) detected but not RTX 50xx: %s", ", ".join(names))
+        _CONFIG_DONE = True
+        _LAST_RESULT = False
         return False
 
     log.info("Detected RTX 50xx GPU(s): %s", ", ".join(blackwell))
@@ -95,4 +110,6 @@ def configure_blackwell_xla_env(*, logger: logging.Logger | None = None) -> bool
     else:
         log.info("%s=%s", _PREALLOC_ENV, prealloc)
 
+    _CONFIG_DONE = True
+    _LAST_RESULT = True
     return True
