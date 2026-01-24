@@ -45,7 +45,7 @@ dependencies = [
 dev = ["pytest>=7.4", "ruff>=0.4.0"]
 
 [project.scripts]
-chomp-train = "chomp.scripts.train:main"
+chomp = "chomp.cli.main:cli"
 
 [tool.hatch.metadata]
 allow-direct-references = true
