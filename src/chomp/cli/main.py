@@ -40,3 +40,7 @@ def cli() -> None:
 from chomp.cli.train import train  # noqa: E402
 
 cli.add_command(train)
+
+from chomp.cli.generate import generate  # noqa: E402
+
+cli.add_command(generate)
