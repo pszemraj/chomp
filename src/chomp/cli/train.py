@@ -49,10 +49,7 @@ def train(
     resume_raw: str,
     dry_run: bool,
 ) -> None:
-    """Train a Megalodon model.
-
-    CONFIG is the path to a YAML config file.
-    """
+    """Train a Megalodon model."""
     cfg = load_config(config, overrides=list(overrides))
 
     if run_dir is not None:
@@ -66,6 +63,7 @@ def train(
     # Configure XLA env quirks before JAX backend init.
     configure_blackwell_xla_env()
 
+    # Deferred import: chomp.train triggers JAX init, must run after XLA env config
     from chomp.train import run
     from chomp.utils.devices import validate_default_device
 

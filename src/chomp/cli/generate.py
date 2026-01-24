@@ -7,9 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import click
-import equinox as eqx
-import jax
-import jax.numpy as jnp
 
 
 def _find_checkpoint_dir(checkpoint_path: str) -> tuple[Path, Path]:
@@ -102,20 +99,21 @@ def _restore_params(step_dir: Path, abstract_params: Any) -> Any:
     :param Any abstract_params: Abstract tree for params (ShapeDtypeStruct).
     :return Any: Restored params pytree.
     """
+    import jax
+    import jax.numpy as jnp
     import orbax.checkpoint as ocp
 
-    # Build abstract train_state matching what was saved
-    abstract_train_state = {
+    # Abstract structure matching checkpoint layout (only params needed for inference)
+    abstract_ckpt = {
         "step": jax.ShapeDtypeStruct((), jnp.int32),
         "params": abstract_params,
-        "opt_state": None,  # We don't need opt_state for generation
+        "opt_state": None,
         "rng": jax.ShapeDtypeStruct((2,), jnp.uint32),
     }
 
-    # Create manager for this single restore
     mgr = ocp.CheckpointManager(
         directory=str(step_dir.parent),
-        item_names=("train_state",),
+        item_names=("train_state",),  # checkpoint item name from training
         options=ocp.CheckpointManagerOptions(create=False),
     )
 
@@ -123,7 +121,7 @@ def _restore_params(step_dir: Path, abstract_params: Any) -> Any:
     restored = mgr.restore(
         step,
         args=ocp.args.Composite(
-            train_state=ocp.args.StandardRestore(abstract_train_state),
+            train_state=ocp.args.StandardRestore(abstract_ckpt),
         ),
     )
 
@@ -185,10 +183,17 @@ def generate(
     seed: int,
     config_override: str | None,
 ) -> None:
-    """Generate text from a trained checkpoint.
+    """Generate text from a trained checkpoint."""
+    from chomp.utils.xla import configure_blackwell_xla_env
 
-    CHECKPOINT is a path to a run directory, checkpoints directory, or step directory.
-    """
+    # Configure XLA env quirks before JAX backend init.
+    configure_blackwell_xla_env()
+
+    # Deferred imports: must run after XLA env config
+    import equinox as eqx
+    import jax
+    import jax.numpy as jnp
+
     from chomp.data.pipeline import build_tokenizer
     from chomp.model import build_model
 
