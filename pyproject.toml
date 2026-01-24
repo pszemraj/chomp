@@ -37,6 +37,8 @@ dependencies = [
   "datasets>=3.0.0",
   # transformers (tokenizers)
   "transformers>=4.40.0",
+  # CLI
+  "click>=8.0",
 ]
 
 [project.optional-dependencies]
