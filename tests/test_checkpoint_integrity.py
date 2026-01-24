@@ -85,7 +85,7 @@ def _abstractify(tree: jax.Array) -> jax.ShapeDtypeStruct:
         :param jax.Array x: Array leaf.
         :return jax.ShapeDtypeStruct: Abstract spec.
         """
-        return jax.ShapeDtypeStruct(x.shape, x.dtype)
+        return jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=getattr(x, "sharding", None))
 
     return jax.tree_util.tree_map(to_struct, tree)
 

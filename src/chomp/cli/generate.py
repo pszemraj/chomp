@@ -223,7 +223,10 @@ def generate(
     params, static = build_model(cfg, key=model_key)
 
     # Get abstract params for restoration
-    abstract_params = jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), params)
+    abstract_params = jax.tree.map(
+        lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=getattr(x, "sharding", None)),
+        params,
+    )
 
     # Restore params from checkpoint
     click.echo("Restoring model parameters...")

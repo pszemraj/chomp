@@ -27,7 +27,10 @@ def _abstractify_tree(tree: Any) -> Any:
     :param Any tree: Pytree of JAX arrays.
     :return Any: Pytree of ShapeDtypeStruct with matching structure.
     """
-    return jax.tree_util.tree_map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), tree)
+    return jax.tree_util.tree_map(
+        lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=getattr(x, "sharding", None)),
+        tree,
+    )
 
 
 def _small_cfg(tmp_path: Path) -> tuple[Config, Path]:

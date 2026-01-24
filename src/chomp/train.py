@@ -377,7 +377,7 @@ def _abstractify_tree(tree: Any) -> Any:
         :param jax.Array x: Concrete array.
         :return jax.ShapeDtypeStruct: Abstract specification.
         """
-        return jax.ShapeDtypeStruct(x.shape, x.dtype)
+        return jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=getattr(x, "sharding", None))
 
     return jax.tree_util.tree_map(to_struct, tree)
 

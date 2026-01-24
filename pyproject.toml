@@ -62,6 +62,9 @@ packages = ["src/chomp"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+filterwarnings = [
+  "ignore:Implicit conversion of an array to a dtype is deprecated.*:DeprecationWarning:chex._src.asserts",
+]
 
 [tool.ruff]
 line-length = 100
