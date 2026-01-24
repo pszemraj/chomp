@@ -9,7 +9,9 @@ from typing import Any
 import click
 
 
-def _find_checkpoint_dir(checkpoint_path: str) -> tuple[Path, Path]:
+def _find_checkpoint_dir(
+    checkpoint_path: str, config_override: str | None = None
+) -> tuple[Path, Path]:
     """Find checkpoint directory and config file.
 
     Supports:
@@ -17,6 +19,7 @@ def _find_checkpoint_dir(checkpoint_path: str) -> tuple[Path, Path]:
     - Run directory: runs/my_run/ (uses latest checkpoint)
 
     :param str checkpoint_path: Path to run_dir or step directory.
+    :param config_override: Optional path to override config file.
     :raises click.ClickException: If no valid checkpoint found.
     :return tuple: (step_dir, run_dir)
     """
@@ -40,8 +43,13 @@ def _find_checkpoint_dir(checkpoint_path: str) -> tuple[Path, Path]:
         latest_step = steps[-1]
         return path / str(latest_step), path.parent
 
-    # Case 3: Run directory (look for checkpoints/latest)
+    # Case 3: Run directory (look for checkpoints/latest or root_dir)
     ckpt_dir = path / "checkpoints"
+    if config_override or (path / "config_resolved.json").exists():
+        cfg = _load_config_from_checkpoint(path, config_override)
+        if cfg.checkpoint.root_dir:
+            ckpt_dir = Path(cfg.checkpoint.root_dir)
+
     if ckpt_dir.exists():
         steps = sorted([int(d.name) for d in ckpt_dir.iterdir() if d.is_dir() and d.name.isdigit()])
         if not steps:
@@ -201,7 +209,7 @@ def generate(
     from chomp.model import build_model
 
     # Find checkpoint and load config
-    step_dir, run_dir = _find_checkpoint_dir(checkpoint)
+    step_dir, run_dir = _find_checkpoint_dir(checkpoint, config_override=config_override)
     click.echo(f"Loading checkpoint from: {step_dir}")
 
     cfg = _load_config_from_checkpoint(run_dir, config_override)
@@ -241,8 +249,7 @@ def generate(
         "bos_token_id": int(cfg.model.bos_token_id),
         "eos_token_id": int(cfg.model.eos_token_id),
     }
-    if temperature > 0:
-        gen_kwargs["temperature"] = temperature
+    gen_kwargs["temperature"] = temperature
     if top_k is not None:
         gen_kwargs["top_k"] = top_k
     if top_p is not None:
