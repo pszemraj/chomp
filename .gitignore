@@ -228,3 +228,7 @@ wandb/
 # Local development artifacts
 scratch/
 plan/
+
+# Custom configs (ignored by default; keep configs/custom/.gitkeep)
+configs/custom/*.yaml
+configs/custom/*.yml

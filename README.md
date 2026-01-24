@@ -66,7 +66,7 @@ This uses `data.backend: local_text` (and `train.allow_cpu: true`), which still
 exercises tokenize+pack but avoids network/GPU requirements.
 
 ```bash
-chomp-train configs/debug_smoke.yaml
+chomp train configs/debug_smoke.yaml
 ```
 
 ### Dry run (single compiled step)
@@ -74,7 +74,7 @@ chomp-train configs/debug_smoke.yaml
 This validates config + tokenizer + model + data path and compiles one step, then exits.
 
 ```bash
-chomp-train configs/debug_smoke.yaml --dry-run
+chomp train configs/debug_smoke.yaml --dry-run
 ```
 
 ### Real streaming dataset: Zyphra/Zyda-2 (sample-100BT)
@@ -108,14 +108,29 @@ Resume requires setting `logging.run_dir` (either in YAML or via CLI) to an exis
 
 ```bash
 # 1) Start a run and save checkpoints
-chomp-train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run
+chomp train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run
 
 # 2) Resume from the latest checkpoint
-chomp-train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run --resume latest
+chomp train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run --resume latest
 ```
 
 Resume performs strict config/data compatibility checks and fails fast on mismatches.
 Each run directory includes a tokenizer snapshot under `tokenizer/`.
+
+### Generate from a checkpoint
+
+```bash
+chomp generate runs/chomp/debug_run --prompt "Hello world" --max-tokens 64 --temperature 0
+```
+
+### Example configs
+
+- `configs/zyda2_100m_2048.yaml`: 100M-ish Megalodon, Zyda-2 sample-100BT.
+- `configs/zyda2_200m_2048.yaml`: MegalodonConfig defaults (~200M) with Zyda-2 sample-100BT.
+- `configs/debug_smoke.yaml`: tiny local_text smoke run for CI and debugging.
+
+If you want to keep local experiment configs out of version control, copy them
+into `configs/custom/` (tracked with a `.gitkeep`, but `*.yaml`/`*.yml` ignored).
 
 ## Design principles
 

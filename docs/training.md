@@ -33,7 +33,7 @@ Two environment flags are helpful on newer GPUs:
 - `XLA_FLAGS=--xla_gpu_enable_triton_gemm=false` if Triton GEMM causes
   `CUDA_ERROR_OUT_OF_MEMORY` on RTX 5090 with `jax/jaxlib 0.8.2`.
 
-When `chomp-train` detects an RTX 50xx (Blackwell) GPU, it automatically appends
+When `chomp train` detects an RTX 50xx (Blackwell) GPU, it automatically appends
 `--xla_gpu_enable_triton_gemm=false` to `XLA_FLAGS` and warns if
 `XLA_PYTHON_CLIENT_PREALLOCATE` is not set to `false`. On other GPUs, the helper
 stays quiet (debug log only).
@@ -76,7 +76,7 @@ backend (dummy runs skip it silently).
 
 ## Dry run
 
-Use `chomp-train <config.yaml> --dry-run` to validate config, build the tokenizer/model/data
+Use `chomp train <config.yaml> --dry-run` to validate config, build the tokenizer/model/data
 pipeline, and compile one step before exiting. W&B logging is skipped in dry-run
 mode to avoid creating noisy runs.
 

@@ -18,7 +18,8 @@ config tree, and dot-path overrides are supported from the CLI.
 ## Precision Policy
 
 **Never use `fp16`** — Megalodon's CEMA and normalization layers are unstable with fp16.
-Always use `bfloat16` for compute and `float32` for parameters/accumulation.
+For training, `bfloat16` compute with `float32` parameters/accumulation is recommended
+(the MegalodonConfig defaults are float32 for all dtypes).
 :::
 
 ## Quick Reference {#quick-reference}
@@ -43,7 +44,7 @@ The 10 most commonly adjusted fields for typical experiments:
 Override any field using dot-path notation:
 
 ```bash
-chomp-train configs/my_config.yaml \
+chomp train configs/my_config.yaml \
   --override train.steps=2000 \
   --override train.batch_size=4 \
   --override optim.lr=1e-4
@@ -58,6 +59,11 @@ Nested fields use multiple dots:
 
 ::: {.callout-note}
 Unknown keys or invalid values fail fast during validation with actionable error messages.
+:::
+
+::: {.callout-tip}
+Store personal experiment configs under `configs/custom/`. The directory is tracked
+via `.gitkeep`, but `configs/custom/*.yaml` and `configs/custom/*.yml` are ignored.
 :::
 
 ---

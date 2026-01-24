@@ -9,12 +9,18 @@ see `docs/config-reference.qmd`.
 ## Loading and overrides
 
 ```bash
-chomp-train configs/debug_smoke.yaml \
+chomp train configs/debug_smoke.yaml \
   --override train.steps=200 \
   --override train.batch_size=4
 ```
 
 Unknown keys or invalid values fail fast during validation.
+
+## Custom configs (ignored by git)
+
+Store personal experiment configs under `configs/custom/`. The directory is tracked
+via `.gitkeep`, but `configs/custom/*.yaml` and `configs/custom/*.yml` are ignored
+so you can iterate locally without committing every run configuration.
 
 ## Top-level config tree
 
