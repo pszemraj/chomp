@@ -49,7 +49,14 @@ def train(
     resume_raw: str,
     dry_run: bool,
 ) -> None:
-    """Train a Megalodon model."""
+    """Train a Megalodon model.
+
+    :param str config: Path to YAML config file.
+    :param overrides: Config overrides in key=value format.
+    :param run_dir: Override for logging.run_dir (optional).
+    :param str resume_raw: Resume mode: 'none', 'latest', or step number.
+    :param bool dry_run: If True, compile one step then exit.
+    """
     cfg = load_config(config, overrides=list(overrides))
 
     if run_dir is not None:

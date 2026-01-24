@@ -176,7 +176,17 @@ def generate(
     seed: int,
     config_override: str | None,
 ) -> None:
-    """Generate text from a trained checkpoint."""
+    """Generate text from a trained checkpoint.
+
+    :param str checkpoint: Path to run directory or checkpoint step directory.
+    :param str prompt: Text prompt for generation.
+    :param int max_tokens: Maximum number of tokens to generate.
+    :param float temperature: Sampling temperature (0 for greedy).
+    :param top_k: Top-k sampling cutoff (optional).
+    :param top_p: Nucleus sampling threshold (optional).
+    :param int seed: Random seed for sampling.
+    :param config_override: Path to override config file (optional).
+    """
     from chomp.utils.xla import configure_blackwell_xla_env
 
     # Configure XLA env quirks before JAX backend init.
