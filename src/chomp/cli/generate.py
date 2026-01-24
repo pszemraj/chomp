@@ -95,37 +95,30 @@ def _load_config_from_checkpoint(run_dir: Path, config_override: str | None) -> 
 def _restore_params(step_dir: Path, abstract_params: Any) -> Any:
     """Restore just the params from a checkpoint.
 
+    Uses PyTreeCheckpointer directly on the train_state directory to load only
+    the params subtree, skipping opt_state/rng/step.
+
     :param Path step_dir: Checkpoint step directory.
     :param Any abstract_params: Abstract tree for params (ShapeDtypeStruct).
     :return Any: Restored params pytree.
     """
-    import jax
-    import jax.numpy as jnp
     import orbax.checkpoint as ocp
 
-    # Abstract structure matching checkpoint layout (only params needed for inference)
-    abstract_ckpt = {
-        "step": jax.ShapeDtypeStruct((), jnp.int32),
-        "params": abstract_params,
-        "opt_state": None,
-        "rng": jax.ShapeDtypeStruct((2,), jnp.uint32),
-    }
+    # Build abstract structure with only params key
+    abstract_train_state = {"params": abstract_params}
 
-    mgr = ocp.CheckpointManager(
-        directory=str(step_dir.parent),
-        item_names=("train_state",),  # checkpoint item name from training
-        options=ocp.CheckpointManagerOptions(create=False),
+    # Use PyTreeCheckpointer directly on the train_state directory
+    ckptr = ocp.PyTreeCheckpointer()
+    train_state_dir = step_dir / "train_state"
+
+    restored = ckptr.restore(
+        train_state_dir,
+        item=abstract_train_state,
+        transforms={},
+        restore_args=ocp.checkpoint_utils.construct_restore_args(abstract_train_state),
     )
 
-    step = int(step_dir.name)
-    restored = mgr.restore(
-        step,
-        args=ocp.args.Composite(
-            train_state=ocp.args.StandardRestore(abstract_ckpt),
-        ),
-    )
-
-    return restored["train_state"]["params"]
+    return restored["params"]
 
 
 @click.command()
