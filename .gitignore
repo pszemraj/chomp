@@ -221,3 +221,10 @@ __marimo__/
 # Chomp runs + W&B logs
 runs/
 wandb/
+
+# Claude Code local config
+.claude/
+
+# Local development artifacts
+scratch/
+plan/
