@@ -626,33 +626,43 @@ class TrainBatchIterator:
     def __iter__(self) -> TrainBatchIterator:
         return self
 
+    def _push_next_document(self) -> None:
+        """Fetch one item from the text stream and add it to the packer."""
+        item = next(self._text_stream)
+        if isinstance(item, str):
+            ids = self._tok.encode(item)
+        elif isinstance(item, list):
+            ids = item
+        else:
+            ids = list(item)
+        self._packer.add_document(ids)
+
+    def _next_sequence(self) -> tuple[np.ndarray, np.ndarray]:
+        """Pop the next [T+1] token/segment sequence from the packer."""
+        while not self._packer.can_pop():
+            self._push_next_document()
+        return self._packer.pop_seq_plus_one_with_segments()
+
+    def _mask_labels(self, labels: np.ndarray, segs: np.ndarray) -> np.ndarray:
+        """Apply boundary and EOS masking to label array."""
+        if self._mask_boundary_loss:
+            same = (segs[1:] == segs[:-1]) & (segs[1:] > 0) & (segs[:-1] > 0)
+            if labels.size > 1:
+                labels[1:] = np.where(same[:-1], labels[1:], _IGNORE_INDEX).astype(np.int32)
+        if not self._train_on_eos:
+            labels = np.where(labels == self._eos_id, _IGNORE_INDEX, labels).astype(np.int32)
+        return labels
+
     def __next__(self) -> Batch:
         seqs = []
         need = self._A * self._B
 
         while len(seqs) < need:
-            # Ensure packer has enough tokens
-            while not self._packer.can_pop():
-                item = next(self._text_stream)
-                if isinstance(item, str):
-                    ids = self._tok.encode(item)
-                elif isinstance(item, list):
-                    ids = item
-                else:
-                    ids = list(item)
-                self._packer.add_document(ids)
-
-            seq, segs = self._packer.pop_seq_plus_one_with_segments()  # [T+1]
+            seq, segs = self._next_sequence()  # [T+1]
             # Convert to input/labels [T]. Labels align with input_ids; model shifts internally.
             inp = np.asarray(seq[:-1], dtype=np.int32)
-            lab = inp.copy()
+            lab = self._mask_labels(inp.copy(), segs)
             seg = np.asarray(segs[:-1], dtype=np.int32)
-            if self._mask_boundary_loss:
-                same = (segs[1:] == segs[:-1]) & (segs[1:] > 0) & (segs[:-1] > 0)
-                if lab.size > 1:
-                    lab[1:] = np.where(same[:-1], lab[1:], _IGNORE_INDEX).astype(np.int32)
-            if not self._train_on_eos:
-                lab = np.where(lab == self._eos_id, _IGNORE_INDEX, lab).astype(np.int32)
             seqs.append((inp, lab, seg))
 
         # Stack -> [A*B, T]
