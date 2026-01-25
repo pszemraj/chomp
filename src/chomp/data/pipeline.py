@@ -637,13 +637,21 @@ class TrainBatchIterator:
         self._packer.add_document(ids)
 
     def _next_sequence(self) -> tuple[np.ndarray, np.ndarray]:
-        """Pop the next [T+1] token/segment sequence from the packer."""
+        """Pop the next [T+1] token/segment sequence from the packer.
+
+        :return tuple[np.ndarray, np.ndarray]: Tokens and segment IDs (length T+1).
+        """
         while not self._packer.can_pop():
             self._push_next_document()
         return self._packer.pop_seq_plus_one_with_segments()
 
     def _mask_labels(self, labels: np.ndarray, segs: np.ndarray) -> np.ndarray:
-        """Apply boundary and EOS masking to label array."""
+        """Apply boundary and EOS masking to label array.
+
+        :param np.ndarray labels: Label array of length T.
+        :param np.ndarray segs: Segment IDs of length T+1.
+        :return np.ndarray: Masked labels of length T.
+        """
         if self._mask_boundary_loss:
             same = (segs[1:] == segs[:-1]) & (segs[1:] > 0) & (segs[:-1] > 0)
             if labels.size > 1:

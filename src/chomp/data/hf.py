@@ -141,7 +141,10 @@ class HFStreamingTextStream:
             return
 
     def _next_item(self) -> str:
-        """Fetch and validate the next text item."""
+        """Fetch and validate the next text item.
+
+        :return str: Text payload from the dataset item.
+        """
         item = next(self._it)
         if self._spec.text_key not in item:
             raise KeyError(

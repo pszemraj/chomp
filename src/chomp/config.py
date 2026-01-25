@@ -460,6 +460,12 @@ def _resolve_variables(data: dict[str, Any]) -> dict[str, Any]:
     resolving: set[str] = set()
 
     def _lookup_var(path: str) -> Any:
+        """Resolve a variable path from the variables mapping.
+
+        :param str path: Dot-separated variable path (e.g., "foo.bar").
+        :raises ValueError: If the reference is missing or circular.
+        :return Any: Resolved variable value.
+        """
         if path in resolved:
             return resolved[path]
         if path in resolving:
@@ -480,9 +486,19 @@ def _resolve_variables(data: dict[str, Any]) -> dict[str, Any]:
         return value
 
     def _sub_var(match: re.Match[str]) -> str:
+        """Replace a regex match with the referenced variable value.
+
+        :param re.Match[str] match: Regex match containing the variable path.
+        :return str: Stringified variable value.
+        """
         return str(_lookup_var(match.group(1)))
 
     def _resolve_value(value: Any) -> Any:
+        """Resolve variables within a nested config value.
+
+        :param Any value: Arbitrary nested value (dict/list/str/etc.).
+        :return Any: Resolved value with variables expanded.
+        """
         if isinstance(value, dict):
             return {k: _resolve_value(v) for k, v in value.items()}
         if isinstance(value, list):
@@ -550,6 +566,7 @@ def _vfail(msg: str) -> None:
 
 
 def _validate_train(cfg: Config) -> None:
+    """Validate training-related config fields."""
     if cfg.train.steps <= 0:
         _vfail(f"train.steps must be positive, got {cfg.train.steps}")
     if cfg.train.batch_size <= 0:
@@ -594,6 +611,7 @@ def _validate_train(cfg: Config) -> None:
 
 
 def _validate_optim(cfg: Config) -> None:
+    """Validate optimizer-related config fields."""
     if cfg.optim.lr <= 0:
         _vfail(f"optim.lr must be positive, got {cfg.optim.lr}")
     if cfg.optim.grad_clip_norm < 0:
@@ -610,6 +628,7 @@ def _validate_optim(cfg: Config) -> None:
 
 
 def _validate_checkpoint(cfg: Config) -> None:
+    """Validate checkpoint-related config fields."""
     if cfg.checkpoint.enabled:
         if cfg.checkpoint.save_every <= 0:
             _vfail(f"checkpoint.save_every must be positive, got {cfg.checkpoint.save_every}")
@@ -618,6 +637,7 @@ def _validate_checkpoint(cfg: Config) -> None:
 
 
 def _validate_model(cfg: Config) -> None:
+    """Validate model-related config fields."""
     if cfg.model.vocab_size <= 0:
         _vfail(f"model.vocab_size must be positive, got {cfg.model.vocab_size}")
     if cfg.model.backend == "dummy":
@@ -657,6 +677,7 @@ def _validate_model(cfg: Config) -> None:
 
 
 def _validate_data(cfg: Config) -> None:
+    """Validate data pipeline-related config fields."""
     if cfg.data.backend == "hf":
         if not cfg.data.hf_dataset:
             _vfail("data.hf_dataset must be non-empty when data.backend='hf'")
@@ -714,6 +735,7 @@ def _validate_data(cfg: Config) -> None:
 
 
 def _validate_logging(cfg: Config) -> None:
+    """Validate logging-related config fields."""
     if cfg.logging.log_file is not None and not str(cfg.logging.log_file).strip():
         _vfail("logging.log_file must be a non-empty string or null")
     if cfg.logging.wandb.mode not in ("online", "offline", "disabled"):
@@ -724,6 +746,7 @@ def _validate_logging(cfg: Config) -> None:
 
 
 def _validate_tokenizer(cfg: Config) -> None:
+    """Validate tokenizer-related config fields."""
     tok = cfg.data.tokenizer
     if tok.kind == "hf":
         if not tok.hf_name_or_path:

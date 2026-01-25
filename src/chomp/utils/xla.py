@@ -50,7 +50,11 @@ def _is_rtx_50xx(name: str) -> bool:
 
 
 def _detect_blackwell(names: list[str]) -> list[str]:
-    """Filter GPU names for RTX 50xx matches."""
+    """Filter GPU names for RTX 50xx matches.
+
+    :param list[str] names: GPU name strings.
+    :return list[str]: Names that match the RTX 50xx pattern.
+    """
     return [name for name in names if _is_rtx_50xx(name)]
 
 
@@ -70,7 +74,11 @@ def _update_xla_flags(existing: str) -> tuple[str, bool]:
 
 
 def _log_prealloc_status(log: logging.Logger, prealloc: str | None) -> None:
-    """Log warnings or info about XLA preallocation settings."""
+    """Log warnings or info about XLA preallocation settings.
+
+    :param logging.Logger log: Logger to emit messages.
+    :param str | None prealloc: Value of preallocation env var.
+    """
     if prealloc is None or str(prealloc).strip() == "":
         log.warning(
             "%s is not set. Recommended: %s=false to avoid full GPU preallocation.",

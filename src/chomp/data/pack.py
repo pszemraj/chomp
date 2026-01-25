@@ -540,7 +540,11 @@ class BinPacker:
         self._enqueue_bins(bins)
 
     def _seed_bins(self, segments: list[np.ndarray]) -> tuple[list[_Bin], list[np.ndarray]]:
-        """Create bins and seed them with the largest segments."""
+        """Create bins and seed them with the largest segments.
+
+        :param list[np.ndarray] segments: Sorted segments (largest first).
+        :return tuple[list[_Bin], list[np.ndarray]]: Seeded bins and leftover segments.
+        """
         bins = [
             _Bin(capacity=self._capacity, max_docs=self._max_docs_per_bin)
             for _ in range(self._bins_per_pack)
@@ -550,7 +554,12 @@ class BinPacker:
         return bins, segments[self._bins_per_pack :]
 
     def _place_remaining(self, bins: list[_Bin], remaining: list[np.ndarray]) -> list[np.ndarray]:
-        """Place remaining segments into bins, returning leftovers."""
+        """Place remaining segments into bins, returning leftovers.
+
+        :param list[_Bin] bins: Bins to fill.
+        :param list[np.ndarray] remaining: Segments to place.
+        :return list[np.ndarray]: Segments that did not fit in any bin.
+        """
         leftover: list[np.ndarray] = []
         for seg in remaining:
             placed = False

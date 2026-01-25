@@ -174,7 +174,15 @@ def _setup_run_dir_and_tokenizer(
     jax.Array | None,
     random.Random | None,
 ]:
-    """Prepare run directory, tokenizer snapshot, eval tokens, and generation stream."""
+    """Prepare run directory, tokenizer snapshot, eval tokens, and generation stream.
+
+    :param Config cfg: Training configuration.
+    :param str | None config_path: Optional config path for run_dir bookkeeping.
+    :param bool allow_existing: Whether to reuse an existing run directory.
+    :param bool dry_run: If True, skip heavy data/generation setup.
+    :return tuple[Config, Any, Path, Path, list[list[int]], GenerationSettings | None, Any | None, jax.Array | None, random.Random | None]:
+        Updated config, tokenizer, run/metrics paths, eval tokens, generation settings, stream, key, and RNG.
+    """
     cfg, tokenizer = prepare_tokenizer_and_config(cfg)
 
     run_dir = create_run_dir(cfg, config_path=config_path, allow_existing=allow_existing)
@@ -220,7 +228,13 @@ def _setup_run_dir_and_tokenizer(
 
 
 def _maybe_init_wandb(cfg: Config, *, run_dir: Path, dry_run: bool) -> Any | None:
-    """Initialize W&B if enabled, otherwise return None."""
+    """Initialize W&B if enabled, otherwise return None.
+
+    :param Config cfg: Training configuration.
+    :param Path run_dir: Run directory path.
+    :param bool dry_run: Whether this is a dry run.
+    :return Any | None: W&B run object or None if disabled.
+    """
     wandb_cfg = cfg.logging.wandb
     if wandb_cfg.enabled and wandb_cfg.mode != "disabled" and not dry_run:
         try:
@@ -255,7 +269,12 @@ def _maybe_init_wandb(cfg: Config, *, run_dir: Path, dry_run: bool) -> Any | Non
 
 
 def _maybe_start_profile(cfg: Config, *, run_dir: Path) -> bool:
-    """Start profiling if enabled; returns True if started."""
+    """Start profiling if enabled; returns True if started.
+
+    :param Config cfg: Training configuration.
+    :param Path run_dir: Run directory path.
+    :return bool: True if profiling was started.
+    """
     if cfg.train.profile:
         trace_dir = cfg.train.profile_dir or str(run_dir / "trace")
         Path(trace_dir).mkdir(parents=True, exist_ok=True)
@@ -269,7 +288,12 @@ def _build_model_state(
 ) -> tuple[
     Any, Any, optax.GradientTransformation, Callable[[jax.Array], jax.Array], TrainState, Any
 ]:
-    """Build model, optimizer, and initial TrainState."""
+    """Build model, optimizer, and initial TrainState.
+
+    :param Config cfg: Training configuration.
+    :return tuple[Any, Any, optax.GradientTransformation, Callable[[jax.Array], jax.Array], TrainState, Any]:
+        Params, static, optimizer, LR schedule, train state, and abstract state.
+    """
     key = jax.random.PRNGKey(cfg.train.seed)
     key, k_model = jax.random.split(key)
     params, static = build_model(cfg, key=k_model)
@@ -280,7 +304,12 @@ def _build_model_state(
 
 
 def _build_checkpoint_manager(cfg: Config, run_dir: Path) -> Any | None:
-    """Create checkpoint manager when enabled."""
+    """Create checkpoint manager when enabled.
+
+    :param Config cfg: Training configuration.
+    :param Path run_dir: Run directory path.
+    :return Any | None: Checkpoint manager or None if disabled.
+    """
     if not cfg.checkpoint.enabled:
         return None
     ckpt_dir = (
@@ -303,7 +332,16 @@ def _maybe_restore_state(
     data_it: Any,
     cfg: Config,
 ) -> TrainState:
-    """Restore state if requested, otherwise return the initial state."""
+    """Restore state if requested, otherwise return the initial state.
+
+    :param Literal["none", "latest"] | int resume: Resume selector.
+    :param Any | None manager: Checkpoint manager.
+    :param TrainState state0: Initial state.
+    :param Any abstract_state: Abstract train state for restore shape.
+    :param Any data_it: Data iterator to restore.
+    :param Config cfg: Training configuration.
+    :return TrainState: Restored or initial state.
+    """
     if resume == "none":
         return state0
     if manager is None:

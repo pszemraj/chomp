@@ -68,6 +68,11 @@ def abstractify_tree(tree: Any) -> Any:
     """
 
     def to_struct(x: jax.Array) -> jax.ShapeDtypeStruct:
+        """Convert a leaf array to a ShapeDtypeStruct.
+
+        :param jax.Array x: Leaf array.
+        :return jax.ShapeDtypeStruct: Shape/dtype/sharding descriptor.
+        """
         return jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=getattr(x, "sharding", None))
 
     return jax.tree_util.tree_map(to_struct, tree)

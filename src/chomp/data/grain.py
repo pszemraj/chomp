@@ -88,7 +88,11 @@ class GrainTrainBatchIterator:
 
 
 def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any]]:
-    """Create Grain dataset classes without importing grain at module import time."""
+    """Create Grain dataset classes without importing grain at module import time.
+
+    :param grain: Imported grain module.
+    :return tuple[type[Any], type[Any]]: Iterator and dataset classes.
+    """
 
     class _TrainBatchDatasetIterator(grain.DatasetIterator):  # type: ignore[misc]
         """DatasetIterator that delegates to TrainBatchIterator."""
