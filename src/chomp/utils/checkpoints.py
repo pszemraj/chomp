@@ -222,9 +222,8 @@ def resolve_checkpoint_path(
 
     if (path / "config_resolved.json").exists():
         run_dir = path
-        cfg = load_config_for_checkpoint(
-            step_dir=path, run_dir=run_dir, config_override=config_override
-        )
+        # Use the run's resolved config to locate checkpoints, regardless of overrides.
+        cfg = _config_from_data(_read_run_dir_config(run_dir))
         ckpt_root = Path(cfg.checkpoint.root_dir) if cfg.checkpoint.root_dir else None
         if ckpt_root is None:
             ckpt_root = run_dir / "checkpoints"

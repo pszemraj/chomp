@@ -149,6 +149,36 @@ def test_resolve_step_dir_external_root_uses_meta(tmp_path: Path) -> None:
     assert loaded.logging.run_dir == str(run_dir)
 
 
+def test_run_dir_uses_resolved_config_for_ckpt_root(tmp_path: Path) -> None:
+    """Run dir resolution should use config_resolved.json for checkpoint root."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+
+    ckpt_root = tmp_path / "external_ckpts"
+    step_dir = ckpt_root / "5" / "train_state"
+    step_dir.mkdir(parents=True)
+
+    cfg = Config()
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, root_dir=str(ckpt_root)))
+    (run_dir / "config_resolved.json").write_text(json.dumps(cfg.to_dict(), indent=2))
+
+    override_path = tmp_path / "override.yaml"
+    override_path.write_text(
+        """
+model:
+  backend: dummy
+""".lstrip()
+    )
+
+    found_step, found_run = resolve_checkpoint_path(
+        str(run_dir), config_override=str(override_path)
+    )
+
+    assert found_run == run_dir
+    assert found_step.parent == ckpt_root
+    assert found_step.name == "5"
+
+
 def test_generate_config_applies_tokenizer_derived_fields(tmp_path: Path) -> None:
     """Generate config loading should round vocab_size via resolve_tokenizer_config.
 
