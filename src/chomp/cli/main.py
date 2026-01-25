@@ -40,7 +40,10 @@ def parse_resume(raw: str) -> str | int:
     if raw in {"latest", "last"}:
         return "latest"
     try:
-        return int(raw)
+        step = int(raw)
+        if step < 0:
+            raise click.BadParameter(f"Resume step must be non-negative, got {step}.")
+        return step
     except ValueError as e:
         raise click.BadParameter(
             f"Invalid resume value {raw!r}. Use 'none', 'latest', or an integer step."

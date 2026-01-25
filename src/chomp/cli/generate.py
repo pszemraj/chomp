@@ -211,7 +211,7 @@ def generate(
     import jax
     import jax.numpy as jnp
 
-    from chomp.data.pipeline import build_tokenizer
+    from chomp.data.pipeline import build_tokenizer, resolve_tokenizer_config
     from chomp.model import build_model
 
     # Find checkpoint and load config
@@ -226,8 +226,10 @@ def generate(
             f"Found {cfg.model.backend!r} in the checkpoint config."
         )
 
-    # Build tokenizer
+    # Build tokenizer and resolve tokenizer-derived config fields
+    # (vocab_size rounding, special token IDs) before model build
     tokenizer = build_tokenizer(cfg)
+    cfg = resolve_tokenizer_config(cfg, tokenizer)
 
     # Build model skeleton for abstract shapes
     key = jax.random.key(seed)

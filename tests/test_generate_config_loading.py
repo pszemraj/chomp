@@ -8,6 +8,7 @@ from pathlib import Path
 
 from chomp.cli.generate import _find_checkpoint_dir, _load_config_from_checkpoint
 from chomp.config import Config
+from chomp.data.pipeline import build_tokenizer, resolve_tokenizer_config
 
 
 def test_load_config_from_checkpoint_resolves_variables(tmp_path: Path) -> None:
@@ -93,3 +94,79 @@ def test_find_checkpoint_dir_resolves_root_dir_relative_to_run(tmp_path: Path) -
 
     assert found_run == run_dir
     assert found_step == step_dir
+
+
+def test_generate_config_applies_tokenizer_derived_fields(tmp_path: Path) -> None:
+    """Generate config loading should round vocab_size via resolve_tokenizer_config.
+
+    This test verifies that when loading a config for generation, the tokenizer-
+    derived fields (vocab_size rounding, special tokens) are applied. Without
+    calling resolve_tokenizer_config, model shapes would mismatch the checkpoint.
+    """
+    config_path = tmp_path / "config.yaml"
+    # Create config with vocab_size=300 which should round up to 384 (multiple of 128)
+    config_path.write_text(
+        """
+model:
+  backend: dummy
+  vocab_size: 300
+  d_model: 32
+  dropout: 0.0
+
+data:
+  backend: local_text
+  repeat: true
+  local_text: "hello"
+  packing_mode: sequential
+  tokenizer:
+    kind: byte
+    byte_offset: 0
+    add_bos: false
+    add_eos: false
+    vocab_size_multiple: 128
+
+train:
+  steps: 10
+  batch_size: 1
+  seq_len: 32
+  grad_accum: 1
+  jit: false
+  deterministic: true
+  allow_cpu: true
+  log_every: 1
+  eval_every: 0
+
+optim:
+  lr: 3.0e-4
+  warmup_steps: 0
+
+checkpoint:
+  enabled: true
+  save_every: 5
+  max_to_keep: 1
+  async_save: false
+
+logging:
+  project: chomp
+  run_dir: null
+  wandb:
+    enabled: false
+
+debug:
+  nan_check: true
+  check_device_every: 1
+""".lstrip()
+    )
+
+    # Load config (simulating what generate CLI does)
+    cfg = _load_config_from_checkpoint(tmp_path, str(config_path))
+
+    # Before tokenizer resolution, vocab_size is 300
+    assert cfg.model.vocab_size == 300
+
+    # After building tokenizer and resolving, vocab_size should be 384
+    tokenizer = build_tokenizer(cfg)
+    cfg_resolved = resolve_tokenizer_config(cfg, tokenizer)
+
+    # Byte tokenizer has 256 tokens, rounded up to 384 (next multiple of 128)
+    assert cfg_resolved.model.vocab_size == 384

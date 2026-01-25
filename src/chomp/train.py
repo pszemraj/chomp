@@ -65,7 +65,7 @@ from chomp.types import IGNORE_INDEX, Batch, TrainState
 from chomp.utils.devices import assert_batch_on_device
 from chomp.utils.io import MetricsWriter, add_file_logging, create_run_dir
 from chomp.utils.profiling import start_trace, step_annotation, stop_trace
-from chomp.utils.tree import param_count
+from chomp.utils.tree import abstractify_tree, param_count
 
 logger = logging.getLogger(__name__)
 
@@ -299,7 +299,7 @@ def _build_model_state(
     params, static = build_model(cfg, key=k_model)
     tx, schedule = build_optimizer(cfg, params)
     state0 = init_train_state(cfg, params=params, tx=tx, key=key)
-    abstract_state = _abstractify_tree(state0)
+    abstract_state = abstractify_tree(state0)
     return params, static, tx, schedule, state0, abstract_state
 
 
@@ -567,24 +567,6 @@ def init_train_state(
     return TrainState(
         step=jnp.array(0, dtype=jnp.int32), params=params, opt_state=opt_state, rng=key
     )
-
-
-def _abstractify_tree(tree: Any) -> Any:
-    """Convert a pytree of arrays to ShapeDtypeStruct for Orbax restore.
-
-    :param Any tree: Pytree of JAX arrays.
-    :return Any: Pytree of ShapeDtypeStruct with same structure.
-    """
-
-    def to_struct(x: jax.Array) -> jax.ShapeDtypeStruct:
-        """Convert a single array to its abstract shape/dtype specification.
-
-        :param jax.Array x: Concrete array.
-        :return jax.ShapeDtypeStruct: Abstract specification.
-        """
-        return jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=getattr(x, "sharding", None))
-
-    return jax.tree_util.tree_map(to_struct, tree)
 
 
 def make_train_step(

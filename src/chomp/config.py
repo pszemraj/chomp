@@ -20,6 +20,7 @@ Design stance (hard-earned):
 from __future__ import annotations
 
 import re
+import warnings
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -437,6 +438,7 @@ def load_config(path: str | Path, overrides: Iterable[str] | None = None) -> Con
 _VAR_INLINE_RE = re.compile(r"\{\$variables\.([A-Za-z0-9_.-]+)\}")
 _VAR_BRACE_RE = re.compile(r"\$\{variables\.([A-Za-z0-9_.-]+)\}")
 _VAR_FULL_RE = re.compile(r"\$variables\.([A-Za-z0-9_.-]+)$")
+_VAR_SUSPICIOUS_RE = re.compile(r"\$variables\.[A-Za-z0-9_.-]+")
 
 
 def _resolve_variables(data: dict[str, Any]) -> dict[str, Any]:
@@ -509,6 +511,13 @@ def _resolve_variables(data: dict[str, Any]) -> dict[str, Any]:
                 return _lookup_var(full.group(1))
             out = _VAR_INLINE_RE.sub(_sub_var, value)
             out = _VAR_BRACE_RE.sub(_sub_var, out)
+            remaining = _VAR_SUSPICIOUS_RE.findall(out)
+            if remaining:
+                warnings.warn(
+                    f"String contains unresolved variable-like patterns: {remaining}. "
+                    "Use {$variables.name} or ${variables.name} for inline substitution.",
+                    stacklevel=2,
+                )
             return out
         return value
 
