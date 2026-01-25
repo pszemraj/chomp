@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 """Minimal data pipeline for chomp (Phases 0–4-ish).
 
 This is intentionally *not* a framework.

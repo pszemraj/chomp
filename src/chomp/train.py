@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 """Training loop + compiled train step.
 
 This module is the heart of chomp.

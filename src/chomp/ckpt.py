@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 """Checkpointing (Orbax) for chomp.
 
 Senior-engineer stance:

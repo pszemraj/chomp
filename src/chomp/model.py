@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 """Model integration.
 
 This file is intentionally the *only* place that knows about the model backend.
