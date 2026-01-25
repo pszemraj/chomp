@@ -25,14 +25,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import warnings
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
 
-from chomp.config import Config
+from chomp.config import Config, validate_config
 from chomp.types import IGNORE_INDEX, Batch
 
 from .hf import HFStreamingTextStream, HFStreamSpec, ListTokenStream, LocalTextStream
@@ -340,14 +339,8 @@ def resolve_tokenizer_config(cfg: Config, tok: Tokenizer) -> Config:
         cfg if not model_updates else replace(cfg, model=replace(cfg.model, **model_updates))
     )
 
-    if updated_cfg.model.pad_token_id == updated_cfg.model.eos_token_id:
-        warnings.warn(
-            "pad_token_id equals eos_token_id after tokenizer resolution. This is allowed, "
-            "but EOS tokens may be treated as padding in some models. Prefer a distinct pad token "
-            "when possible.",
-            stacklevel=2,
-        )
-
+    # Re-validate after tokenizer-derived updates (vocab rounding, special tokens).
+    validate_config(updated_cfg)
     return updated_cfg
 
 
