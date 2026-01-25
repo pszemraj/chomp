@@ -49,6 +49,10 @@ def _find_checkpoint_dir(
         cfg = _load_config_from_checkpoint(path, config_override)
         if cfg.checkpoint.root_dir:
             ckpt_dir = Path(cfg.checkpoint.root_dir)
+            if not ckpt_dir.is_absolute() and not ckpt_dir.exists():
+                run_relative = (path / ckpt_dir).resolve()
+                if run_relative.exists():
+                    ckpt_dir = run_relative
 
     if ckpt_dir.exists():
         steps = sorted([int(d.name) for d in ckpt_dir.iterdir() if d.is_dir() and d.name.isdigit()])
@@ -71,8 +75,6 @@ def _load_config_from_checkpoint(run_dir: Path, config_override: str | None) -> 
     :raises click.ClickException: If config file not found.
     :return Config: Loaded configuration.
     """
-    from dataclasses import replace
-
     from chomp.config import _from_nested_dict, _resolve_variables, validate_config
 
     if config_override:
@@ -99,12 +101,6 @@ def _load_config_from_checkpoint(run_dir: Path, config_override: str | None) -> 
 
     data = _resolve_variables(data)
     cfg = _from_nested_dict(data)
-
-    if cfg.checkpoint.root_dir:
-        root_dir = Path(cfg.checkpoint.root_dir)
-        if not root_dir.is_absolute():
-            root_dir = (config_path.parent / root_dir).resolve()
-            cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, root_dir=str(root_dir)))
 
     validate_config(cfg)
     return cfg
@@ -223,6 +219,12 @@ def generate(
     click.echo(f"Loading checkpoint from: {step_dir}")
 
     cfg = _load_config_from_checkpoint(run_dir, config_override)
+
+    if cfg.model.backend != "megalodon":
+        raise click.ClickException(
+            "generate only supports model.backend='megalodon'. "
+            f"Found {cfg.model.backend!r} in the checkpoint config."
+        )
 
     # Build tokenizer
     tokenizer = build_tokenizer(cfg)

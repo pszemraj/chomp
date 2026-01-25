@@ -14,6 +14,7 @@ import pytest
 from click.testing import CliRunner
 
 from chomp.ckpt import default_ckpt_dir
+from chomp.cli import cli
 from chomp.cli.generate import _find_checkpoint_dir, _restore_params
 from chomp.config import Config, load_config
 from chomp.model import build_model
@@ -120,6 +121,25 @@ def test_find_checkpoint_dir_with_step_dir(tmp_path: Path) -> None:
     assert step_dir == step_dir_input
 
 
+def test_generate_rejects_non_megalodon_backend(tmp_path: Path) -> None:
+    """generate should fail fast when model.backend is not megalodon."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    cfg = Config()
+    cfg = replace(cfg, model=replace(cfg.model, backend="dummy"))
+    (run_dir / "config_resolved.json").write_text(json.dumps(cfg.to_dict(), indent=2))
+
+    step_dir = run_dir / "checkpoints" / "1" / "train_state"
+    step_dir.mkdir(parents=True)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["generate", str(run_dir), "--prompt", "hello"])
+
+    assert result.exit_code != 0
+    assert "model.backend" in result.output
+
+
 def test_restore_params_partial_restore(tmp_path: Path) -> None:
     """_restore_params loads only params from a full TrainState checkpoint.
 
@@ -188,16 +208,77 @@ def test_restore_params_values_differ_from_init(tmp_path: Path) -> None:
 )
 def test_generate_cli_produces_output(tmp_path: Path) -> None:
     """End-to-end test of the generate CLI command."""
-    from chomp.cli import cli
+    import orbax.checkpoint as ocp
 
-    cfg, config_src = _small_cfg(tmp_path)
-    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write config_resolved.json (normally done by train.run)
+    cfg = Config()
+    cfg = replace(
+        cfg,
+        model=replace(
+            cfg.model,
+            backend="megalodon",
+            vocab_size=256,
+            model_dim=32,
+            num_layers=1,
+            num_heads=1,
+            z_dim=16,
+            value_dim=32,
+            ffn_hidden_dim=64,
+            cema_ndim=16,
+            chunk_size=8,
+            dropout=0.0,
+            attention_dropout=0.0,
+            hidden_dropout=0.0,
+            param_dtype="float32",
+            compute_dtype="float32",
+            accum_dtype="float32",
+            softmax_dtype="float32",
+        ),
+        data=replace(
+            cfg.data,
+            backend="local_text",
+            local_text="hello from generate test",
+            tokenizer=replace(
+                cfg.data.tokenizer,
+                kind="byte",
+                add_bos=False,
+                add_eos=False,
+            ),
+        ),
+        train=replace(
+            cfg.train,
+            seq_len=16,
+            batch_size=1,
+            grad_accum=1,
+            allow_cpu=False,
+        ),
+        logging=replace(
+            cfg.logging,
+            run_dir=str(run_dir),
+            console_use_rich=False,
+            wandb=replace(cfg.logging.wandb, enabled=False),
+        ),
+        checkpoint=replace(
+            cfg.checkpoint,
+            enabled=True,
+            save_every=1,
+            max_to_keep=1,
+            async_save=False,
+        ),
+    )
+
+    # Write config_resolved.json for CLI lookup
     config_resolved = run_dir / "config_resolved.json"
-    if not config_resolved.exists():
-        with open(config_resolved, "w") as f:
-            json.dump(cfg.to_dict(), f)
+    config_resolved.write_text(json.dumps(cfg.to_dict(), indent=2))
+
+    # Create a minimal checkpoint with just params.
+    params, _static = build_model(cfg, key=jax.random.PRNGKey(0))
+    ckpt_dir = run_dir / "checkpoints" / "1" / "train_state"
+    ckpt_dir.parent.mkdir(parents=True, exist_ok=True)
+    ckptr = ocp.PyTreeCheckpointer()
+    ckptr.save(ckpt_dir, {"params": params}, force=True)
 
     runner = CliRunner()
     result = runner.invoke(
