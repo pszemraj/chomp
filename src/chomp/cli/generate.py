@@ -81,13 +81,23 @@ def _load_config_from_checkpoint(run_dir: Path, config_override: str | None) -> 
         if not config_path.exists():
             raise click.ClickException(f"Config override not found: {config_path}")
         if config_path.suffix in {".yaml", ".yml"}:
-            import yaml
-
-            with config_path.open() as f:
-                data = yaml.safe_load(f) or {}
+            try:
+                import yaml
+            except ImportError as e:
+                raise click.ClickException(
+                    "pyyaml is required to load YAML configs. Install with: pip install pyyaml"
+                ) from e
+            try:
+                with config_path.open() as f:
+                    data = yaml.safe_load(f) or {}
+            except yaml.YAMLError as e:
+                raise click.ClickException(f"Invalid YAML in {config_path}: {e}") from e
         else:
-            with config_path.open() as f:
-                data = json.load(f) or {}
+            try:
+                with config_path.open() as f:
+                    data = json.load(f) or {}
+            except json.JSONDecodeError as e:
+                raise click.ClickException(f"Invalid JSON in {config_path}: {e}") from e
     else:
         config_path = run_dir / "config_resolved.json"
         if not config_path.exists():
@@ -95,8 +105,11 @@ def _load_config_from_checkpoint(run_dir: Path, config_override: str | None) -> 
                 f"config_resolved.json not found in {run_dir}. "
                 "Use --config to provide a config file."
             )
-        with config_path.open() as f:
-            data = json.load(f) or {}
+        try:
+            with config_path.open() as f:
+                data = json.load(f) or {}
+        except json.JSONDecodeError as e:
+            raise click.ClickException(f"Corrupted config_resolved.json in {run_dir}: {e}") from e
 
     data = _resolve_variables(data)
     cfg = _from_nested_dict(data)
@@ -113,16 +126,22 @@ def _restore_params(step_dir: Path, abstract_params: Any) -> Any:
 
     :param Path step_dir: Checkpoint step directory.
     :param Any abstract_params: Abstract tree for params (ShapeDtypeStruct).
+    :raises click.ClickException: If train_state directory not found.
     :return Any: Restored params pytree.
     """
     import orbax.checkpoint as ocp
+
+    train_state_dir = step_dir / "train_state"
+    if not train_state_dir.exists():
+        raise click.ClickException(
+            f"train_state directory not found in {step_dir}. Is this a valid chomp checkpoint?"
+        )
 
     # Build abstract structure with only params key
     abstract_train_state = {"params": abstract_params}
 
     # Use PyTreeCheckpointer directly on the train_state directory
     ckptr = ocp.PyTreeCheckpointer()
-    train_state_dir = step_dir / "train_state"
 
     restored = ckptr.restore(
         train_state_dir,
@@ -144,27 +163,27 @@ def _restore_params(step_dir: Path, abstract_params: Any) -> Any:
 )
 @click.option(
     "--max-tokens",
-    type=int,
+    type=click.IntRange(min=1),
     default=128,
     help="Maximum number of tokens to generate.",
 )
 @click.option(
     "--temperature",
-    type=float,
+    type=click.FloatRange(min=0.0),
     default=1.0,
     help="Sampling temperature. Use 0 for greedy decoding.",
 )
 @click.option(
     "--top-k",
-    type=int,
+    type=click.IntRange(min=1),
     default=None,
     help="Top-k sampling (optional).",
 )
 @click.option(
     "--top-p",
-    type=float,
+    type=click.FloatRange(min=0.0, max=1.0, min_open=True),
     default=None,
-    help="Nucleus sampling threshold (optional).",
+    help="Nucleus sampling threshold (optional, in (0, 1]).",
 )
 @click.option(
     "--seed",
