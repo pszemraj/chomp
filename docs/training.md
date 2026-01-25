@@ -93,7 +93,8 @@ Metrics are written to `logging.metrics_file` every `train.log_every` steps
 - `loss`
 - `grad_norm`
 - `lr`
-- `tokens_seen`
+- `tokens_seen` (actual valid tokens, after masking)
+- `tokens_per_sec` (actual valid tokens / step_time_s)
 - `packing_mode`, `packing_utilization` (when iterator stats are enabled)
 - `first_step_compile_time_s` (first logged step after compile)
 - `peak_memory_gb` (best-effort, device-dependent)
@@ -107,3 +108,5 @@ Console output is throttled by `train.log_every` and prints a compact
 one-line summary (loss, grad norm, LR, step time, throughput, optional eval
 loss, packing utilization, and best-effort device memory). Full logs from
 third-party libraries are written to `logging.log_file` under the run directory.
+
+`tokens_seen` resumes from checkpoint metadata when available.

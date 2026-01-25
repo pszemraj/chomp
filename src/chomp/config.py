@@ -245,6 +245,7 @@ class OptimConfig:
     weight_decay: float = 0.01
     grad_clip_norm: float = 1.0
     warmup_steps: int = 10
+    decay_steps: int | None = None
     min_lr_ratio: float = 0.0
 
 
@@ -627,12 +628,15 @@ def _validate_optim(cfg: Config) -> None:
         _vfail(f"optim.grad_clip_norm must be >= 0, got {cfg.optim.grad_clip_norm}")
     if cfg.optim.warmup_steps < 0:
         _vfail(f"optim.warmup_steps must be >= 0, got {cfg.optim.warmup_steps}")
+    if cfg.optim.decay_steps is not None and cfg.optim.decay_steps <= 0:
+        _vfail(f"optim.decay_steps must be positive when set, got {cfg.optim.decay_steps}")
     if cfg.optim.min_lr_ratio < 0 or cfg.optim.min_lr_ratio > 1:
         _vfail(f"optim.min_lr_ratio must be in [0, 1], got {cfg.optim.min_lr_ratio}")
-    if cfg.optim.warmup_steps >= cfg.train.steps:
+    decay_steps = cfg.optim.decay_steps if cfg.optim.decay_steps is not None else cfg.train.steps
+    if cfg.optim.warmup_steps >= decay_steps:
         _vfail(
-            f"optim.warmup_steps ({cfg.optim.warmup_steps}) must be < train.steps "
-            f"({cfg.train.steps})"
+            f"optim.warmup_steps ({cfg.optim.warmup_steps}) must be < optim.decay_steps "
+            f"({decay_steps})"
         )
 
 
@@ -794,8 +798,18 @@ def _validate_tokenizer(cfg: Config) -> None:
             f"data.tokenizer.vocab_size_multiple must be positive, got {tok.vocab_size_multiple}"
         )
 
-    if tok.max_doc_tokens is not None and tok.max_doc_tokens <= 0:
-        _vfail(f"data.tokenizer.max_doc_tokens must be positive when set, got {tok.max_doc_tokens}")
+    if tok.max_doc_tokens is not None and tok.max_doc_tokens == 0:
+        warnings.warn(
+            "data.tokenizer.max_doc_tokens=0 disables truncation; the tokenizer will be "
+            "resolved with no max_doc_tokens cap.",
+            stacklevel=2,
+        )
+    if tok.max_doc_tokens is not None and tok.max_doc_tokens < 0:
+        warnings.warn(
+            "data.tokenizer.max_doc_tokens < 0 disables truncation; the tokenizer will be "
+            "resolved with no max_doc_tokens cap.",
+            stacklevel=2,
+        )
 
     # Special token ids must be in range if enabled
     if tok.add_bos and not (0 <= cfg.model.bos_token_id < cfg.model.vocab_size):

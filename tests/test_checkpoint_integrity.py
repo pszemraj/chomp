@@ -23,6 +23,7 @@ from chomp.config import (
     DataConfig,
     LoggingConfig,
     ModelConfig,
+    OptimConfig,
     TokenizerConfig,
     TrainConfig,
 )
@@ -54,6 +55,7 @@ def _base_cfg(run_dir: Path) -> Config:
             deterministic=True,
             allow_cpu=True,
         ),
+        optim=OptimConfig(warmup_steps=0),
         checkpoint=CheckpointConfig(enabled=True, save_every=1, max_to_keep=2, async_save=False),
         logging=LoggingConfig(project="chomp", run_dir=str(run_dir), metrics_file="metrics.jsonl"),
     )

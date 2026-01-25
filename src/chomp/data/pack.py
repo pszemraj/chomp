@@ -6,8 +6,8 @@ continuous token stream and slice into fixed windows.
 
 Core contract:
 - Packer consumes documents as token id sequences (list[int] / np.ndarray)
-- Packer yields fixed arrays of length (seq_len + 1)
-  (we need +1 to produce input_ids and labels via shifting)
+- Packer yields fixed arrays of length (seq_len)
+  (input_ids and labels are aligned; model shifts internally)
 
 Senior dev notes:
 - Do not build packers with repeated `np.concatenate` in the hot path. You'll
@@ -33,7 +33,7 @@ def _prepare_doc_tokens(
     bos_id: int,
     eos_id: int,
     max_doc_tokens: int | None,
-) -> np.ndarray:
+) -> tuple[np.ndarray, bool]:
     """Build a document token array with optional BOS/EOS and truncation.
 
     :param tokens: Iterable of token IDs for the document.
@@ -42,11 +42,19 @@ def _prepare_doc_tokens(
     :param int bos_id: BOS token ID.
     :param int eos_id: EOS token ID.
     :param max_doc_tokens: Optional cap on document length before special tokens.
-    :return np.ndarray: Token array for the document (int32).
+    :return tuple[np.ndarray, bool]: (Token array (int32), truncated flag).
     """
-    arr = np.asarray(list(tokens), dtype=np.int32)
+    if isinstance(tokens, np.ndarray):
+        arr = tokens.astype(np.int32, copy=False)
+    elif isinstance(tokens, (list, tuple)):
+        arr = np.asarray(tokens, dtype=np.int32)
+    else:
+        arr = np.fromiter(tokens, dtype=np.int32)
+
+    truncated = False
     if max_doc_tokens is not None and arr.size > max_doc_tokens:
         arr = arr[:max_doc_tokens]
+        truncated = True
 
     pieces = []
     if add_bos:
@@ -57,10 +65,10 @@ def _prepare_doc_tokens(
         pieces.append(np.asarray([eos_id], dtype=np.int32))
 
     if not pieces:
-        return np.empty((0,), dtype=np.int32)
+        return np.empty((0,), dtype=np.int32), truncated
     if len(pieces) == 1:
-        return pieces[0]
-    return np.concatenate(pieces, axis=0)
+        return pieces[0], truncated
+    return np.concatenate(pieces, axis=0), truncated
 
 
 class _ChunkedIntBuffer:
@@ -244,13 +252,15 @@ class TokenPacker:
         self._token_buf = _ChunkedIntBuffer()
         self._segment_buf = _ChunkedIntBuffer()
         self._next_segment_id = 1
+        self._docs_seen = 0
+        self._docs_truncated = 0
 
     def add_document(self, tokens: Iterable[int]) -> None:
         """Add a tokenized document to the packer buffer.
 
         :param tokens: Iterable of token IDs for the document.
         """
-        doc = _prepare_doc_tokens(
+        doc, truncated = _prepare_doc_tokens(
             tokens,
             add_bos=self.add_bos,
             add_eos=self.add_eos,
@@ -258,6 +268,9 @@ class TokenPacker:
             eos_id=self.eos_id,
             max_doc_tokens=self.max_doc_tokens,
         )
+        self._docs_seen += 1
+        if truncated:
+            self._docs_truncated += 1
         if doc.size == 0:
             return
         segment_id = int(self._next_segment_id)
@@ -269,31 +282,31 @@ class TokenPacker:
         """Check if buffer has enough tokens for one sequence.
 
         :raises RuntimeError: If token/segment buffers are misaligned.
-        :return bool: True if at least seq_len+1 tokens are available.
+        :return bool: True if at least seq_len tokens are available.
         """
         if self._token_buf.size != self._segment_buf.size:
             raise RuntimeError("token/segment buffers are misaligned")
-        return self._token_buf.size >= (self.seq_len + 1)
+        return self._token_buf.size >= self.seq_len
 
-    def pop_seq_plus_one(self) -> np.ndarray:
-        """Return [seq_len+1] tokens.
+    def pop_seq(self) -> np.ndarray:
+        """Return [seq_len] tokens.
 
-        :return np.ndarray: Array of shape [seq_len+1] containing token IDs.
+        :return np.ndarray: Array of shape [seq_len] containing token IDs.
         """
-        tokens, _segs = self.pop_seq_plus_one_with_segments()
+        tokens, _segs = self.pop_seq_with_segments()
         return tokens
 
-    def pop_seq_plus_one_with_segments(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return ([seq_len+1] tokens, [seq_len+1] segment_ids).
+    def pop_seq_with_segments(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return ([seq_len] tokens, [seq_len] segment_ids).
 
         :raises RuntimeError: If token/segment buffers are misaligned.
-        :return tuple: (tokens, segment_ids) arrays of shape [seq_len+1].
+        :return tuple: (tokens, segment_ids) arrays of shape [seq_len].
         """
 
         if self._token_buf.size != self._segment_buf.size:
             raise RuntimeError("token/segment buffers are misaligned")
-        tokens = self._token_buf.take(self.seq_len + 1)
-        segs = self._segment_buf.take(self.seq_len + 1)
+        tokens = self._token_buf.take(self.seq_len)
+        segs = self._segment_buf.take(self.seq_len)
         return tokens, segs
 
     def get_state(self) -> dict[str, Any]:
@@ -318,6 +331,16 @@ class TokenPacker:
         self._token_buf.load_remaining(st.remaining_tokens)
         self._segment_buf.load_remaining(st.remaining_segments)
         self._next_segment_id = int(st.next_segment_id)
+
+    def get_stats(self) -> dict[str, int]:
+        """Return basic document stats.
+
+        :return dict[str, int]: docs_seen and docs_truncated counts.
+        """
+        return {
+            "docs_seen": int(self._docs_seen),
+            "docs_truncated": int(self._docs_truncated),
+        }
 
 
 @dataclass(frozen=True)
@@ -437,7 +460,7 @@ class BinPacker:
             raise ValueError(f"buffer_docs must be positive, got {buffer_docs}")
 
         self.seq_len = int(seq_len)
-        self._capacity = int(seq_len) + 1
+        self._capacity = int(seq_len)
         self.add_bos = bool(add_bos)
         self.add_eos = bool(add_eos)
         self.bos_id = int(bos_id)
@@ -450,13 +473,15 @@ class BinPacker:
 
         self._pending_docs: list[np.ndarray] = []
         self._ready: deque[tuple[np.ndarray, np.ndarray]] = deque()
+        self._docs_seen = 0
+        self._docs_truncated = 0
 
     def add_document(self, tokens: Iterable[int]) -> None:
         """Add a tokenized document to the bin packer buffer.
 
         :param tokens: Iterable of token IDs for the document.
         """
-        doc = _prepare_doc_tokens(
+        doc, truncated = _prepare_doc_tokens(
             tokens,
             add_bos=self.add_bos,
             add_eos=self.add_eos,
@@ -464,6 +489,9 @@ class BinPacker:
             eos_id=self.eos_id,
             max_doc_tokens=self.max_doc_tokens,
         )
+        self._docs_seen += 1
+        if truncated:
+            self._docs_truncated += 1
         if doc.size == 0:
             return
 
@@ -488,11 +516,11 @@ class BinPacker:
         self._pack_bins()
         return bool(self._ready)
 
-    def pop_seq_plus_one_with_segments(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return ([seq_len+1] tokens, [seq_len+1] segment_ids).
+    def pop_seq_with_segments(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return ([seq_len] tokens, [seq_len] segment_ids).
 
         :raises RuntimeError: If called before any sequences are ready.
-        :return tuple: (tokens, segment_ids) arrays of shape [seq_len+1].
+        :return tuple: (tokens, segment_ids) arrays of shape [seq_len].
         """
         if not self.can_pop():
             raise RuntimeError("bin packer has no ready sequences")
@@ -527,6 +555,16 @@ class BinPacker:
                 for tokens, segs in zip(st.ready_tokens, st.ready_segments, strict=True)
             ]
         )
+
+    def get_stats(self) -> dict[str, int]:
+        """Return basic document stats.
+
+        :return dict[str, int]: docs_seen and docs_truncated counts.
+        """
+        return {
+            "docs_seen": int(self._docs_seen),
+            "docs_truncated": int(self._docs_truncated),
+        }
 
     def _pack_bins(self) -> None:
         """Pack buffered documents into ready sequences."""
@@ -582,7 +620,7 @@ class BinPacker:
         """Render a bin into (tokens, segment_ids) arrays.
 
         :param _Bin b: Bin with packed segments.
-        :return tuple[np.ndarray, np.ndarray]: Token and segment arrays of length seq_len+1.
+        :return tuple[np.ndarray, np.ndarray]: Token and segment arrays of length seq_len.
         """
         tokens = np.full((self._capacity,), self._pad_id, dtype=np.int32)
         segs = np.zeros((self._capacity,), dtype=np.int32)

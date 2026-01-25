@@ -46,6 +46,7 @@ class CheckpointMeta:
 
     step: int
     timestamp: str
+    tokens_seen: int | None
 
     # Versions for debugging (not for strict gating in v0)
     python: str
@@ -83,13 +84,18 @@ def _safe_version(pkg: str) -> str | None:
 
 
 def build_meta(
-    *, step: int, config: dict[str, Any], data_fingerprint: dict[str, Any]
+    *,
+    step: int,
+    config: dict[str, Any],
+    data_fingerprint: dict[str, Any],
+    tokens_seen: int | None = None,
 ) -> CheckpointMeta:
     """Build checkpoint metadata with version info and config snapshot.
 
     :param int step: Current training step.
     :param dict[str, Any] config: Full config dict for reproducibility.
     :param dict[str, Any] data_fingerprint: Data pipeline fingerprint.
+    :param int | None tokens_seen: Optional cumulative token count for resume accounting.
     :return CheckpointMeta: Populated metadata object.
     """
     import platform
@@ -102,6 +108,7 @@ def build_meta(
         orbax=_safe_version("orbax-checkpoint"),
         chomp=_safe_version("chomp") or "0.0.0",
         megalodon_jax=_safe_version("megalodon-jax"),
+        tokens_seen=int(tokens_seen) if tokens_seen is not None else None,
         config=config,
         data_fingerprint=data_fingerprint,
     )
@@ -320,11 +327,14 @@ def _restore_step(
     return step, train_state, meta
 
 
-def check_resume_compat(cfg: Config, meta: dict[str, Any] | None) -> None:
+def check_resume_compat(
+    cfg: Config, meta: dict[str, Any] | None, *, tokenizer_snapshot_hash: str | None = None
+) -> None:
     """Validate checkpoint metadata against current config.
 
     :param Config cfg: Current training configuration.
     :param meta: Checkpoint metadata dict (or None if missing).
+    :param str | None tokenizer_snapshot_hash: Optional tokenizer snapshot hash for strict checks.
     :raises RuntimeError: If meta is missing or config mismatches are found.
     """
 
@@ -356,7 +366,7 @@ def check_resume_compat(cfg: Config, meta: dict[str, Any] | None) -> None:
             else:
                 warnings.append(msg)
 
-    cur_fp = data_fingerprint(cfg)
+    cur_fp = data_fingerprint(cfg, tokenizer_snapshot_hash=tokenizer_snapshot_hash)
 
     # Data source comparisons.
     src_prev = meta_fp.get("source") or {}
@@ -437,6 +447,15 @@ def check_resume_compat(cfg: Config, meta: dict[str, Any] | None) -> None:
         tok_prev.get("auto_set_special_tokens"),
         severity="error",
     )
+    snap_prev = tok_prev.get("snapshot_sha256")
+    snap_cur = tok_cur.get("snapshot_sha256")
+    if snap_prev is not None or snap_cur is not None:
+        _cmp(
+            "tokenizer.snapshot_sha256",
+            snap_cur,
+            snap_prev,
+            severity="error",
+        )
 
     # Packing/loss behavior comparisons.
     pack_prev = meta_fp.get("packing") or {}
@@ -510,6 +529,8 @@ def check_resume_compat(cfg: Config, meta: dict[str, Any] | None) -> None:
 
     # Model/optimizer comparisons.
     cur_cfg = cfg.to_dict()
+    train_prev = meta_cfg.get("train") or {}
+    train_cur = cur_cfg.get("train") or {}
     model_prev = meta_cfg.get("model") or {}
     model_cur = cur_cfg.get("model") or {}
     for key in sorted(set(model_prev) | set(model_cur)):
@@ -519,6 +540,20 @@ def check_resume_compat(cfg: Config, meta: dict[str, Any] | None) -> None:
     optim_cur = cur_cfg.get("optim") or {}
     for key in sorted(set(optim_prev) | set(optim_cur)):
         _cmp(f"optim.{key}", optim_cur.get(key), optim_prev.get(key), severity="error")
+
+    decay_prev = optim_prev.get("decay_steps")
+    decay_cur = optim_cur.get("decay_steps")
+    if decay_prev is None:
+        decay_prev = train_prev.get("steps")
+    if decay_cur is None:
+        decay_cur = train_cur.get("steps")
+    _cmp("optim.decay_steps_effective", decay_cur, decay_prev, severity="error")
+
+    if train_cur.get("steps") != train_prev.get("steps"):
+        warnings.append(
+            "train.steps mismatch (checkpoint="
+            f"{train_prev.get('steps')!r}, current={train_cur.get('steps')!r})"
+        )
 
     if warnings:
         logger.warning(

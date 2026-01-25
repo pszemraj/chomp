@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, TrainConfig
+from chomp.config import Config, DataConfig, ModelConfig, OptimConfig, TokenizerConfig, TrainConfig
 from chomp.data.pipeline import build_train_iterator
 
 
@@ -100,7 +100,7 @@ def test_hf_pipeline_segment_ids_and_label_mask(
             repeat=False,
             mask_boundary_loss=True,
             train_on_eos=True,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=True, add_eos=True),
+            tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
         ),
         train=TrainConfig(
             steps=1,
@@ -111,6 +111,7 @@ def test_hf_pipeline_segment_ids_and_label_mask(
             deterministic=True,
             allow_cpu=True,
         ),
+        optim=OptimConfig(warmup_steps=0),
     )
 
     it = build_train_iterator(cfg)

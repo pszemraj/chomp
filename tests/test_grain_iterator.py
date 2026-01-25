@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, TrainConfig
+from chomp.config import Config, DataConfig, ModelConfig, OptimConfig, TokenizerConfig, TrainConfig
 from chomp.data.pipeline import build_train_iterator
 
 
@@ -33,6 +33,7 @@ def test_grain_iterator_state_roundtrip() -> None:
             deterministic=True,
             allow_cpu=True,
         ),
+        optim=OptimConfig(warmup_steps=0),
     )
 
     it = build_train_iterator(cfg)
@@ -79,6 +80,7 @@ def test_grain_iterator_stats_disabled_with_device_put() -> None:
             deterministic=True,
             allow_cpu=True,
         ),
+        optim=OptimConfig(warmup_steps=0),
     )
 
     it = build_train_iterator(cfg)

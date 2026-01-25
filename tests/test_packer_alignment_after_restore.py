@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, TrainConfig
+from chomp.config import Config, DataConfig, ModelConfig, OptimConfig, TokenizerConfig, TrainConfig
 from chomp.data.pipeline import build_train_iterator
 
 if TYPE_CHECKING:
@@ -45,6 +45,7 @@ def test_packer_alignment_after_restore() -> None:
             deterministic=True,
             allow_cpu=True,
         ),
+        optim=OptimConfig(warmup_steps=0),
     )
 
     it = build_train_iterator(cfg)

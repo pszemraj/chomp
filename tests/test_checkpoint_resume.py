@@ -64,6 +64,7 @@ def _small_cfg(tmp_path: Path) -> tuple[Config, Path]:
         optim=replace(
             cfg.optim,
             warmup_steps=0,
+            decay_steps=2,
         ),
         logging=replace(
             cfg.logging,

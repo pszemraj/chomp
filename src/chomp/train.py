@@ -57,8 +57,10 @@ from chomp.data import (
     build_train_iterator,
     data_fingerprint,
     load_or_create_eval_texts,
+    load_tokenizer_snapshot,
     prepare_tokenizer_and_config,
     save_tokenizer_snapshot,
+    tokenizer_snapshot_hash,
 )
 from chomp.model import build_model, training_loss
 from chomp.types import IGNORE_INDEX, Batch, TrainState
@@ -183,7 +185,19 @@ def _setup_run_dir_and_tokenizer(
     :return tuple[Config, Any, Path, Path, list[list[int]], GenerationSettings | None, Any | None, jax.Array | None, random.Random | None]:
         Updated config, tokenizer, run/metrics paths, eval tokens, generation settings, stream, key, and RNG.
     """
-    cfg, tokenizer = prepare_tokenizer_and_config(cfg)
+    tokenizer = None
+    if allow_existing and cfg.logging.run_dir is not None:
+        run_dir_hint = Path(cfg.logging.run_dir)
+        tok_dir = run_dir_hint / "tokenizer"
+        if tok_dir.exists():
+            tokenizer = load_tokenizer_snapshot(run_dir_hint, cfg)
+        else:
+            logger.warning(
+                "Resume requested but tokenizer snapshot is missing at %s; rebuilding from config.",
+                tok_dir,
+            )
+
+    cfg, tokenizer = prepare_tokenizer_and_config(cfg, tokenizer=tokenizer)
 
     run_dir = create_run_dir(cfg, config_path=config_path, allow_existing=allow_existing)
     if cfg.logging.log_file is not None:
@@ -334,7 +348,8 @@ def _maybe_restore_state(
     abstract_state: Any,
     data_it: Any,
     cfg: Config,
-) -> TrainState:
+    tokenizer_hash: str | None,
+) -> tuple[TrainState, dict[str, Any] | None]:
     """Restore state if requested, otherwise return the initial state.
 
     :param Literal["none", "latest"] | int resume: Resume selector.
@@ -343,10 +358,11 @@ def _maybe_restore_state(
     :param Any abstract_state: Abstract train state for restore shape.
     :param Any data_it: Data iterator to restore.
     :param Config cfg: Training configuration.
-    :return TrainState: Restored or initial state.
+    :param str | None tokenizer_hash: Optional tokenizer snapshot hash for resume checks.
+    :return tuple: (TrainState, meta) where meta is checkpoint metadata if restored.
     """
     if resume == "none":
-        return state0
+        return state0, None
     if manager is None:
         raise RuntimeError("resume requested but checkpointing is disabled")
 
@@ -360,8 +376,8 @@ def _maybe_restore_state(
         )
 
     print(f"[chomp] resumed from checkpoint step {step_r}")
-    check_resume_compat(cfg, meta)
-    return state
+    check_resume_compat(cfg, meta, tokenizer_snapshot_hash=tokenizer_hash)
+    return state, meta
 
 
 def _trim_trailing_token(tokens: list[int], token_id: int | None) -> list[int]:
@@ -535,7 +551,7 @@ def build_optimizer(
         init_value=0.0,
         peak_value=cfg.optim.lr,
         warmup_steps=cfg.optim.warmup_steps,
-        decay_steps=cfg.train.steps,
+        decay_steps=cfg.optim.decay_steps or cfg.train.steps,
         end_value=cfg.optim.lr * cfg.optim.min_lr_ratio,
     )
 
@@ -700,6 +716,7 @@ def make_train_step(
             "loss": loss,
             "grad_norm": grad_norm.astype(jnp.float32),
             "lr": lr.astype(jnp.float32),
+            "token_sum": token_sum.astype(jnp.float32),
         }
         return new_state, metrics
 
@@ -816,6 +833,7 @@ def run(
         allow_existing=allow_existing,
         dry_run=dry_run,
     )
+    tokenizer_hash = tokenizer_snapshot_hash(run_dir)
 
     wandb_run = _maybe_init_wandb(cfg, run_dir=run_dir, dry_run=dry_run)
     profile_enabled = _maybe_start_profile(cfg, run_dir=run_dir)
@@ -833,13 +851,14 @@ def run(
     manager = _build_checkpoint_manager(cfg, run_dir)
 
     # Restore if requested
-    state = _maybe_restore_state(
+    state, resume_meta = _maybe_restore_state(
         resume=resume,
         manager=manager,
         state0=state0,
         abstract_state=abstract_state,
         data_it=data_it,
         cfg=cfg,
+        tokenizer_hash=tokenizer_hash,
     )
 
     train_step = make_train_step(cfg, static=static, tx=tx, lr_schedule=schedule)
@@ -869,10 +888,8 @@ def run(
         if cfg.debug.nan_check:
             _check_finite_metrics(metrics_host, step=step_i)
 
-        tokens_per_step = (
-            int(cfg.train.grad_accum) * int(cfg.train.batch_size) * int(cfg.train.seq_len)
-        )
-        tokens_per_sec = float(tokens_per_step) / step_time_s if step_time_s > 0 else 0.0
+        token_sum = float(metrics_host.get("token_sum", 0.0))
+        tokens_per_sec = token_sum / step_time_s if step_time_s > 0 else 0.0
         mem_stats = _device_memory_stats_gb()
         packing_util = (
             float(data_stats["packing_utilization"])
@@ -920,8 +937,12 @@ def run(
         print(f"[chomp] start_step ({start_step}) >= target steps ({target_steps}); nothing to do")
         return run_dir
 
-    tokens_per_step = int(cfg.train.grad_accum) * int(cfg.train.batch_size) * int(cfg.train.seq_len)
     console_every = int(cfg.train.log_every)
+    host_step = int(start_step)
+    tokens_seen_base = 0.0
+    if resume_meta and resume_meta.get("tokens_seen") is not None:
+        tokens_seen_base = float(resume_meta["tokens_seen"])
+    tokens_seen_device = jnp.asarray(tokens_seen_base, dtype=jnp.float32)
 
     def _run_eval(params: Any) -> dict[str, Any]:
         """Run a full eval pass over the cached eval texts.
@@ -1036,11 +1057,12 @@ def run(
                 try:
                     batch = next(data_it)
                 except StopIteration:
-                    step_i = int(jax.device_get(state.step))
+                    tokens_seen_host = int(jax.device_get(tokens_seen_device))
+                    step_i = int(host_step)
                     row = {
                         "step": int(step_i),
                         "data_exhausted": True,
-                        "tokens_seen": int(step_i) * tokens_per_step,
+                        "tokens_seen": int(tokens_seen_host),
                         "wall_time_s": time.perf_counter() - t0,
                     }
                     mw.write(row)
@@ -1054,7 +1076,7 @@ def run(
 
                 # Batch placement validation (real check)
                 if cfg.debug.check_device_every > 0 and (
-                    int(jax.device_get(state.step)) % cfg.debug.check_device_every == 0
+                    host_step % cfg.debug.check_device_every == 0
                 ):
                     assert_batch_on_device(batch, allow_cpu=cfg.train.allow_cpu)
 
@@ -1062,25 +1084,46 @@ def run(
                 with step_annotation("train_step"):
                     t1 = time.perf_counter()
                     state, metrics = train_step(state, batch)
-                    # Synchronize for accurate timing
-                    metrics_host = jax.device_get(metrics)
+                    tokens_seen_device = tokens_seen_device + metrics["token_sum"]
+
+                host_step += 1
+                step_i = int(host_step)
+
+                should_eval = (
+                    eval_step is not None and eval_every > 0 and (step_i % eval_every) == 0
+                )
+                should_log = (step_i % cfg.train.log_every) == 0 or should_eval
+                should_console = (step_i % console_every) == 0 or should_eval
+                should_sync = should_log or should_console or (t_compile is None)
+
+                metrics_host = None
+                tokens_seen_host = None
+                step_time_s = None
+                tokens_per_sec = 0.0
+
+                if should_sync:
+                    metrics_host, tokens_seen_host = jax.device_get((metrics, tokens_seen_device))
                     t2 = time.perf_counter()
-                step_time_s = t2 - t1
-                tokens_per_sec = float(tokens_per_step) / step_time_s if step_time_s > 0 else 0.0
-
-                if t_compile is None:
-                    t_compile = t2 - t1
-
-                step_i = int(jax.device_get(state.step))
-
-                # Debug NaN check
-                if cfg.debug.nan_check:
-                    _check_finite_metrics(metrics_host, step=step_i)
+                    step_time_s = t2 - t1
+                    if t_compile is None:
+                        t_compile = step_time_s
+                    if cfg.debug.nan_check:
+                        _check_finite_metrics(metrics_host, step=step_i)
+                    token_sum = float(metrics_host.get("token_sum", 0.0))
+                    tokens_per_sec = token_sum / step_time_s if step_time_s > 0 else 0.0
 
                 # Checkpoint save (after state updated)
                 if manager is not None and (step_i % int(cfg.checkpoint.save_every) == 0):
+                    tokens_seen_ckpt = tokens_seen_host
+                    if tokens_seen_ckpt is None:
+                        tokens_seen_ckpt = int(jax.device_get(tokens_seen_device))
                     meta = build_meta(
-                        step=step_i, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg)
+                        step=step_i,
+                        config=cfg.to_dict(),
+                        data_fingerprint=data_fingerprint(
+                            cfg, tokenizer_snapshot_hash=tokenizer_hash
+                        ),
+                        tokens_seen=tokens_seen_ckpt,
                     )
                     save(
                         manager,
@@ -1091,7 +1134,7 @@ def run(
                     )
 
                 eval_row: dict[str, Any] = {}
-                if eval_step is not None and eval_every > 0 and (step_i % eval_every) == 0:
+                if should_eval:
                     eval_row = _run_eval(state.params)
 
                 if (
@@ -1102,10 +1145,14 @@ def run(
                     _run_generation_sample(step_i, state.params)
 
                 # Log
-                should_log = (step_i % cfg.train.log_every) == 0 or bool(eval_row)
-                should_console = (step_i % console_every) == 0 or bool(eval_row)
                 mem_stats = _device_memory_stats_gb() if (should_log or should_console) else {}
                 if should_log:
+                    if metrics_host is None:
+                        metrics_host, tokens_seen_host = jax.device_get(
+                            (metrics, tokens_seen_device)
+                        )
+                    if tokens_seen_host is None:
+                        tokens_seen_host = int(jax.device_get(tokens_seen_device))
                     row = {
                         "step": int(step_i),
                         "loss": float(metrics_host["loss"]),
@@ -1113,7 +1160,7 @@ def run(
                         "lr": float(metrics_host["lr"]),
                         "step_time_s": float(step_time_s),
                         "tokens_per_sec": float(tokens_per_sec),
-                        "tokens_seen": int(step_i) * tokens_per_step,
+                        "tokens_seen": int(tokens_seen_host),
                         "wall_time_s": time.perf_counter() - t0,
                     }
                     if data_stats:
@@ -1147,6 +1194,8 @@ def run(
                         row_wandb = {k: v for k, v in row.items() if k not in wandb_drop}
                         wandb_run.log(row_wandb, step=step_i)
                 if should_console:
+                    if metrics_host is None:
+                        metrics_host = jax.device_get(metrics)
                     eval_loss = eval_row.get("eval_loss") if eval_row else None
                     packing_util = None
                     if data_stats and "packing_utilization" in data_stats:

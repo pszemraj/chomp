@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, TrainConfig
+from chomp.config import Config, DataConfig, ModelConfig, OptimConfig, TokenizerConfig, TrainConfig
 from chomp.data.pipeline import build_train_iterator
 
 
@@ -29,6 +29,7 @@ def test_labels_align_with_inputs_except_masked() -> None:
             deterministic=True,
             allow_cpu=True,
         ),
+        optim=OptimConfig(warmup_steps=0),
     )
 
     it = build_train_iterator(cfg)

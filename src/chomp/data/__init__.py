@@ -23,8 +23,10 @@ from .pipeline import (
     build_train_iterator,
     data_fingerprint,
     load_or_create_eval_texts,
+    load_tokenizer_snapshot,
     prepare_tokenizer_and_config,
     save_tokenizer_snapshot,
+    tokenizer_snapshot_hash,
 )
 
 __all__ = [
@@ -34,6 +36,8 @@ __all__ = [
     "data_fingerprint",
     "build_tokenizer",
     "load_or_create_eval_texts",
+    "load_tokenizer_snapshot",
     "prepare_tokenizer_and_config",
     "save_tokenizer_snapshot",
+    "tokenizer_snapshot_hash",
 ]

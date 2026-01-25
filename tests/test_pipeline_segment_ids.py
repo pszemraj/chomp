@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, TrainConfig
+from chomp.config import Config, DataConfig, ModelConfig, OptimConfig, TokenizerConfig, TrainConfig
 from chomp.data.pipeline import build_train_iterator
 
 
@@ -29,6 +29,7 @@ def test_pipeline_segment_ids_multiple_docs() -> None:
             deterministic=True,
             allow_cpu=True,
         ),
+        optim=OptimConfig(warmup_steps=0),
     )
 
     it = build_train_iterator(cfg)
@@ -65,6 +66,7 @@ def test_boundary_loss_mask_toggle() -> None:
             deterministic=True,
             allow_cpu=True,
         ),
+        optim=OptimConfig(warmup_steps=0),
     )
 
     it = build_train_iterator(cfg)
@@ -100,6 +102,7 @@ def test_pipeline_bin_packing_segment_ids() -> None:
             deterministic=True,
             allow_cpu=True,
         ),
+        optim=OptimConfig(warmup_steps=0),
     )
 
     it = build_train_iterator(cfg)

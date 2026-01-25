@@ -36,16 +36,16 @@ def test_bin_packer_packs_multiple_docs() -> None:
         packer.add_document(_doc(tok, length))
 
     assert packer.can_pop()
-    seq1, seg1 = packer.pop_seq_plus_one_with_segments()
-    seq2, seg2 = packer.pop_seq_plus_one_with_segments()
+    seq1, seg1 = packer.pop_seq_with_segments()
+    seq2, seg2 = packer.pop_seq_with_segments()
 
-    assert seq1.shape == (9,)
-    assert seq2.shape == (9,)
+    assert seq1.shape == (8,)
+    assert seq2.shape == (8,)
 
     for seq, segs in [(seq1, seg1), (seq2, seg2)]:
-        assert np.any(seq == 0)
         pad_mask = seq == 0
-        assert np.all(segs[pad_mask] == 0)
+        if np.any(pad_mask):
+            assert np.all(segs[pad_mask] == 0)
 
         unique = np.unique(segs[segs > 0])
         assert unique.size >= 2
@@ -69,9 +69,9 @@ def test_bin_packer_state_roundtrip() -> None:
     for tok, length in [(21, 6), (22, 2), (23, 6), (24, 2)]:
         packer.add_document(_doc(tok, length))
 
-    _ = packer.pop_seq_plus_one_with_segments()
+    _ = packer.pop_seq_with_segments()
     state = packer.get_state()
-    seq_b = packer.pop_seq_plus_one_with_segments()
+    seq_b = packer.pop_seq_with_segments()
 
     restored = BinPacker(
         seq_len=8,
@@ -86,7 +86,7 @@ def test_bin_packer_state_roundtrip() -> None:
         pad_id=0,
     )
     restored.set_state(state)
-    seq_b2 = restored.pop_seq_plus_one_with_segments()
+    seq_b2 = restored.pop_seq_with_segments()
 
     np.testing.assert_array_equal(seq_b[0], seq_b2[0])
     np.testing.assert_array_equal(seq_b[1], seq_b2[1])

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Protocol
 
 import numpy as np
 
 from chomp.config import Config
 from chomp.types import Batch
+
+logger = logging.getLogger(__name__)
 
 
 class _IteratorProtocol(Protocol):
@@ -84,7 +87,18 @@ class GrainTrainBatchIterator:
 
         :return dict[str, float | int | str]: Utilization stats for the last batch.
         """
-        return dict(self._last_stats)
+        if not self._enable_stats:
+            return {}
+        stats: dict[str, float | int | str] = dict(self._last_stats)
+        get_stats = getattr(self._it, "get_stats", None)
+        if callable(get_stats):
+            try:
+                extra = get_stats()
+            except Exception:
+                extra = {}
+            if extra:
+                stats.update(extra)
+        return stats
 
 
 def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any]]:
@@ -122,6 +136,12 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any]]:
             """Restore iterator state from checkpoint."""
             self._it.set_state(state)
 
+        def get_stats(self) -> dict[str, int]:
+            """Return packer-level document stats if available."""
+            if hasattr(self._it, "get_stats"):
+                return dict(self._it.get_stats())
+            return {}
+
     class _TrainBatchIterDataset(grain.IterDataset):  # type: ignore[misc]
         """IterDataset that yields chomp Batch objects."""
 
@@ -156,6 +176,12 @@ def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchItera
 
     _TrainBatchDatasetIterator, _TrainBatchIterDataset = _make_grain_iter_classes(grain)
     ds = _TrainBatchIterDataset(cfg=cfg, tokenizer=tokenizer)
+
+    if cfg.data.device_put and cfg.data.grain_prefetch > 0:
+        logger.warning(
+            "data.device_put=True with grain_prefetch>0 may place device transfers on "
+            "background threads; consider setting data.device_put=false."
+        )
 
     if cfg.data.grain_prefetch > 0:
         ds = grain.experimental.ThreadPrefetchIterDataset(
