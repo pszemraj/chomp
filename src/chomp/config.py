@@ -239,14 +239,19 @@ class TrainConfig:
 
 @dataclass(frozen=True)
 class OptimConfig:
-    """Optimizer configuration for AdamW with linear warmup and cosine decay."""
+    """Optimizer configuration for AdamW or Muon with warmup+cosine decay."""
 
+    name: Literal["adamw", "muon"] = "adamw"
     lr: float = 3e-4
     weight_decay: float = 0.01
     grad_clip_norm: float = 1.0
     warmup_steps: int = 10
     decay_steps: int | None = None
     min_lr_ratio: float = 0.0
+    muon_momentum: float = 0.95
+    muon_ns_steps: int = 5
+    muon_nesterov: bool = True
+    muon_allow_all_2d: bool = False
 
 
 @dataclass(frozen=True)
@@ -622,6 +627,8 @@ def _validate_train(cfg: Config) -> None:
 
 def _validate_optim(cfg: Config) -> None:
     """Validate optimizer-related config fields."""
+    if cfg.optim.name not in ("adamw", "muon"):
+        _vfail(f"optim.name must be 'adamw' or 'muon', got {cfg.optim.name!r}")
     if cfg.optim.lr <= 0:
         _vfail(f"optim.lr must be positive, got {cfg.optim.lr}")
     if cfg.optim.grad_clip_norm < 0:
@@ -632,6 +639,10 @@ def _validate_optim(cfg: Config) -> None:
         _vfail(f"optim.decay_steps must be positive when set, got {cfg.optim.decay_steps}")
     if cfg.optim.min_lr_ratio < 0 or cfg.optim.min_lr_ratio > 1:
         _vfail(f"optim.min_lr_ratio must be in [0, 1], got {cfg.optim.min_lr_ratio}")
+    if cfg.optim.muon_momentum <= 0 or cfg.optim.muon_momentum >= 1:
+        _vfail(f"optim.muon_momentum must be in (0, 1), got {cfg.optim.muon_momentum}")
+    if cfg.optim.muon_ns_steps <= 0:
+        _vfail(f"optim.muon_ns_steps must be positive, got {cfg.optim.muon_ns_steps}")
     if cfg.optim.warmup_steps >= cfg.train.steps:
         _vfail(
             f"optim.warmup_steps ({cfg.optim.warmup_steps}) must be < train.steps "

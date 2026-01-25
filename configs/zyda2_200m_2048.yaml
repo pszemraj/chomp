@@ -62,6 +62,7 @@ train:
   eval_every: 2500
 
 optim:
+  name: muon
   lr: 3.0e-4
   weight_decay: 0.01
   grad_clip_norm: 1.0

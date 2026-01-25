@@ -15,6 +15,19 @@ Grad accumulation is **token-weighted**: microbatch losses are scaled by the
 count of valid (non-masked) tokens to keep updates correct with padding or
 boundary masks.
 
+## Optimizer selection
+
+`optim.name` selects the optimizer:
+
+- `adamw` (default)
+- `muon`: applies Muon to eligible 2D `*.weight` matrices (excluding embeddings)
+  and uses AdamW for everything else. Set `optim.muon_allow_all_2d=true` to apply
+  Muon to all 2D tensors.
+
+Both optimizers use the same warmup+cosine schedule (`optim.lr`,
+`optim.warmup_steps`, `optim.decay_steps`, `optim.min_lr_ratio`) and the same
+weight-decay mask (matrices only).
+
 ## Determinism
 
 `train.deterministic` controls dropout behavior:

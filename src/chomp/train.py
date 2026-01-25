@@ -13,7 +13,7 @@ Design rules (hard-earned):
 
 Phases 0–2:
 - dummy or Megalodon model backend
-- Optax AdamW with warmup+cosine schedule
+- Optax AdamW or Muon with warmup+cosine schedule
 - scan-based grad accumulation
 
 Phase 3:
@@ -518,7 +518,7 @@ def _format_console_row(
 
 
 def _weight_decay_mask(params: Any) -> Any:
-    """Heuristic: apply weight decay to matrices (ndim >= 2), not to biases/scales.
+    """Apply weight decay to matrix-like parameters (ndim >= 2).
 
     :param Any params: Parameter pytree.
     :return Any: Boolean mask pytree with True for parameters that should have weight decay.
@@ -535,6 +535,60 @@ def _weight_decay_mask(params: Any) -> Any:
         return x.ndim >= 2
 
     return jax.tree_util.tree_map(mask_one, params)
+
+
+_MUON_EMBED_EXCLUDE = (".embed.", ".embedding.")
+
+
+def _path_to_str(path: tuple[Any, ...]) -> str:
+    """Convert a JAX tree path to a dotted string.
+
+    :param tuple[Any, ...] path: Path elements from tree_flatten_with_path.
+    :return str: Dotted path string (with list indices in brackets).
+    """
+    parts: list[str] = []
+    for key in path:
+        if hasattr(key, "name"):
+            parts.append(str(key.name))
+        elif hasattr(key, "key"):
+            parts.append(str(key.key))
+        elif hasattr(key, "idx"):
+            parts.append(f"[{key.idx}]")
+        else:
+            parts.append(str(key))
+    return ".".join(parts)
+
+
+def _is_muon_weight_path(path_str: str) -> bool:
+    """Return True if a path refers to a muon-eligible weight matrix.
+
+    :param str path_str: Dotted parameter path.
+    :return bool: True if the path should use Muon.
+    """
+    if not path_str.endswith(".weight"):
+        return False
+    return not any(token in path_str for token in _MUON_EMBED_EXCLUDE)
+
+
+def _muon_param_labels(params: Any, *, allow_all_2d: bool) -> Any:
+    """Label parameters for Muon vs AdamW updates.
+
+    :param Any params: Parameter pytree.
+    :param bool allow_all_2d: If True, apply Muon to all 2D tensors.
+    :return Any: Pytree of string labels ("muon" or "adam").
+    """
+    flat, treedef = jax.tree_util.tree_flatten_with_path(params)
+    labels: list[str] = []
+    for path, leaf in flat:
+        if not hasattr(leaf, "ndim") or leaf.ndim != 2:
+            labels.append("adam")
+            continue
+        if allow_all_2d:
+            labels.append("muon")
+            continue
+        path_str = _path_to_str(path)
+        labels.append("muon" if _is_muon_weight_path(path_str) else "adam")
+    return treedef.unflatten(labels)
 
 
 def build_optimizer(
@@ -559,13 +613,41 @@ def build_optimizer(
     if cfg.optim.grad_clip_norm and cfg.optim.grad_clip_norm > 0:
         transforms.append(optax.clip_by_global_norm(cfg.optim.grad_clip_norm))
 
-    transforms.append(
-        optax.adamw(
+    if cfg.optim.name == "muon":
+        allow_all_2d = cfg.optim.muon_allow_all_2d
+        if cfg.model.backend != "megalodon":
+            allow_all_2d = True
+
+        param_labels = _muon_param_labels(params, allow_all_2d=allow_all_2d)
+        muon_count = sum(1 for label in jax.tree_util.tree_leaves(param_labels) if label == "muon")
+        if muon_count == 0:
+            logger.warning(
+                "optim.name=muon selected but no muon-eligible parameters were found; "
+                "falling back to AdamW for all parameters."
+            )
+        muon_tx = optax.chain(
+            optax.contrib.scale_by_muon(
+                ns_steps=cfg.optim.muon_ns_steps,
+                beta=cfg.optim.muon_momentum,
+                nesterov=cfg.optim.muon_nesterov,
+            ),
+            optax.add_decayed_weights(cfg.optim.weight_decay, mask=_weight_decay_mask),
+            optax.scale_by_learning_rate(schedule),
+        )
+        adam_tx = optax.adamw(
             learning_rate=schedule,
             weight_decay=cfg.optim.weight_decay,
-            mask=_weight_decay_mask(params),
+            mask=_weight_decay_mask,
         )
-    )
+        transforms.append(optax.multi_transform({"muon": muon_tx, "adam": adam_tx}, param_labels))
+    else:
+        transforms.append(
+            optax.adamw(
+                learning_rate=schedule,
+                weight_decay=cfg.optim.weight_decay,
+                mask=_weight_decay_mask,
+            )
+        )
 
     tx = optax.chain(*transforms)
     return tx, schedule

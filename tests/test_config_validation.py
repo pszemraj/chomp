@@ -140,6 +140,33 @@ def test_min_lr_ratio_must_be_in_range() -> None:
         validate_config(bad)
 
 
+def test_optim_name_must_be_valid() -> None:
+    """Unknown optim.name must raise ValueError."""
+    cfg = _base_cfg()
+    bad_optim = replace(cfg.optim, name="sgd")
+    bad = replace(cfg, optim=bad_optim)
+    with pytest.raises(ValueError, match="optim.name"):
+        validate_config(bad)
+
+
+def test_muon_momentum_must_be_in_range() -> None:
+    """muon_momentum outside (0, 1) must raise ValueError."""
+    cfg = _base_cfg()
+    bad_optim = replace(cfg.optim, muon_momentum=1.5)
+    bad = replace(cfg, optim=bad_optim)
+    with pytest.raises(ValueError, match="muon_momentum"):
+        validate_config(bad)
+
+
+def test_muon_ns_steps_must_be_positive() -> None:
+    """muon_ns_steps <= 0 must raise ValueError."""
+    cfg = _base_cfg()
+    bad_optim = replace(cfg.optim, muon_ns_steps=0)
+    bad = replace(cfg, optim=bad_optim)
+    with pytest.raises(ValueError, match="muon_ns_steps"):
+        validate_config(bad)
+
+
 def test_log_file_must_be_non_empty() -> None:
     """Empty or whitespace log_file must raise ValueError."""
     cfg = _base_cfg()
