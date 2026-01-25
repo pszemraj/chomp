@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from chomp.config import (
@@ -55,3 +56,6 @@ def test_dry_run_compiles_single_step(tmp_path: Path) -> None:
 
     assert (run_dir / "config_resolved.json").exists()
     assert not (run_dir / cfg.logging.metrics_file).exists()
+
+    data = json.loads((run_dir / "config_resolved.json").read_text())
+    assert data["derived"]["optim"]["decay_steps_effective"] == cfg.train.steps

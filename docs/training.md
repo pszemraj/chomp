@@ -80,6 +80,9 @@ Use `chomp train <config.yaml> --dry-run` to validate config, build the tokenize
 pipeline, and compile one step before exiting. W&B logging is skipped in dry-run
 mode to avoid creating noisy runs.
 
+`config_resolved.json` includes a small `derived` section; for example
+`derived.optim.decay_steps_effective` records the effective LR schedule horizon.
+
 ## Gradient checkpointing
 
 Megalodon supports activation checkpointing via `model.use_checkpoint`. This is

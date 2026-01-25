@@ -131,3 +131,37 @@ def test_tokenizer_pad_equals_eos_warns() -> None:
         updated = resolve_tokenizer_config(cfg, tok)
     assert updated.model.pad_token_id == 0
     assert updated.model.eos_token_id == 0
+
+
+def test_default_max_doc_tokens_inferred() -> None:
+    """max_doc_tokens should default to 4 * seq_len when unset."""
+    cfg = Config(
+        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32),
+        data=DataConfig(
+            backend="local_text",
+            local_text="tokenizer config text\n",
+            tokenizer=TokenizerConfig(kind="byte", vocab_size_multiple=128, max_doc_tokens=None),
+        ),
+        train=TrainConfig(steps=10, batch_size=1, seq_len=16, grad_accum=1, allow_cpu=True),
+        optim=OptimConfig(warmup_steps=0),
+    )
+    tok = _DummyTokenizer(size=256, bos=None, eos=None, pad=None)
+    updated = resolve_tokenizer_config(cfg, tok)
+    assert updated.data.tokenizer.max_doc_tokens == 64
+
+
+def test_zero_max_doc_tokens_disables_truncation() -> None:
+    """max_doc_tokens=0 should resolve to None (no truncation)."""
+    cfg = Config(
+        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32),
+        data=DataConfig(
+            backend="local_text",
+            local_text="tokenizer config text\n",
+            tokenizer=TokenizerConfig(kind="byte", vocab_size_multiple=128, max_doc_tokens=0),
+        ),
+        train=TrainConfig(steps=10, batch_size=1, seq_len=16, grad_accum=1, allow_cpu=True),
+        optim=OptimConfig(warmup_steps=0),
+    )
+    tok = _DummyTokenizer(size=256, bos=None, eos=None, pad=None)
+    updated = resolve_tokenizer_config(cfg, tok)
+    assert updated.data.tokenizer.max_doc_tokens is None
