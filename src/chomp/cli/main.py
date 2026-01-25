@@ -9,6 +9,23 @@ import click
 
 from chomp._version import __version__
 
+BANNER = f"""
+           __
+  _____   / /_   ____    ____ ___     ____
+ / ___/  / __ \\ / __ \\  / __ `__ \\   / __ \\
+/ /__   / / / // /_/ / / / / / / /  / /_/ /
+\\___/  /_/ /_/ \\____/ /_/ /_/ /_/  / .___/
+                                  /_/
+
+Version: {__version__}
+Repo:    https://github.com/pszemraj/chomp
+""".strip("\n")
+
+
+def print_banner() -> None:
+    """Print the chomp banner."""
+    click.echo(BANNER)
+
 
 def parse_resume(raw: str) -> str | int:
     """Parse the resume CLI argument.

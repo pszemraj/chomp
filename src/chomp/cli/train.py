@@ -9,7 +9,7 @@ from dataclasses import replace
 
 import click
 
-from chomp.cli.main import parse_resume
+from chomp.cli.main import parse_resume, print_banner
 from chomp.config import load_config
 from chomp.utils.io import setup_python_logging
 from chomp.utils.xla import configure_blackwell_xla_env
@@ -57,6 +57,7 @@ def train(
     :param str resume_raw: Resume mode: 'none', 'latest', or step number.
     :param bool dry_run: If True, compile one step then exit.
     """
+    print_banner()
     cfg = load_config(config, overrides=list(overrides))
 
     if run_dir is not None:
