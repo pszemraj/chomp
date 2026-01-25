@@ -25,6 +25,7 @@ Supported forms:
 
 - Exact value: `chunk_size: $variables.chunk_size` (type preserved)
 - Inline string: `tags: ["seq{$variables.seq_len}", "chunk{$variables.chunk_size}"]`
+- Brace form: `tags: ["seq_${variables.seq_len}"]`
 
 Example:
 
@@ -40,6 +41,10 @@ logging:
   wandb:
     tags: ["seq{$variables.seq_len}", "chunk{$variables.chunk_size}"]
 ```
+
+Variables can be nested (dot paths are supported). Resolution happens before
+CLI overrides are applied, and missing/circular references raise a validation
+error.
 
 ## Custom configs (ignored by git)
 
