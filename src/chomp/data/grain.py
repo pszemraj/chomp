@@ -137,7 +137,10 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any]]:
             self._it.set_state(state)
 
         def get_stats(self) -> dict[str, int]:
-            """Return packer-level document stats if available."""
+            """Return packer-level document stats if available.
+
+            :return dict[str, int]: Packer stats, or an empty dict if unavailable.
+            """
             if hasattr(self._it, "get_stats"):
                 return dict(self._it.get_stats())
             return {}

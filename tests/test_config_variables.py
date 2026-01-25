@@ -11,6 +11,12 @@ from chomp.config import load_config
 
 
 def _write_config(tmp_path: Path, text: str) -> Path:
+    """Write a temporary config file.
+
+    :param Path tmp_path: Temporary directory for test files.
+    :param str text: Config contents to write.
+    :return Path: Path to the written config file.
+    """
     path = tmp_path / "config.yaml"
     path.write_text(text, encoding="utf-8")
     return path

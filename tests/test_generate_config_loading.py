@@ -6,6 +6,8 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from chomp.config import Config
 from chomp.data.pipeline import build_tokenizer, resolve_tokenizer_config
 from chomp.utils.checkpoints import load_config_for_checkpoint, resolve_checkpoint_path
@@ -98,8 +100,14 @@ def test_resolve_checkpoint_root_dir_relative_to_run(tmp_path: Path) -> None:
     assert found_step == step_dir
 
 
-def test_resolve_checkpoint_ignores_cwd_shadow(tmp_path: Path, monkeypatch) -> None:
-    """Relative root_dir should resolve against run_dir even if CWD has same-named dir."""
+def test_resolve_checkpoint_ignores_cwd_shadow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Relative root_dir should resolve against run_dir even if CWD has same-named dir.
+
+    :param Path tmp_path: Temporary directory for test artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Pytest monkeypatch fixture.
+    """
     # Create run directory with checkpoints
     run_dir = tmp_path / "runs" / "my_run"
     run_dir.mkdir(parents=True)

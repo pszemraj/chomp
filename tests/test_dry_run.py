@@ -65,7 +65,11 @@ def test_dry_run_compiles_single_step(tmp_path: Path) -> None:
 
 
 def test_deterministic_checkpointing_warns(tmp_path: Path, caplog: LogCaptureFixture) -> None:
-    """Deterministic mode should warn when use_checkpoint is enabled."""
+    """Deterministic mode should warn when use_checkpoint is enabled.
+
+    :param Path tmp_path: Temporary directory for the run artifacts.
+    :param LogCaptureFixture caplog: Log capture fixture.
+    """
     run_dir = tmp_path / "dry_run_warn"
     cfg = Config(
         model=ModelConfig(

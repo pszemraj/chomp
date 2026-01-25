@@ -546,6 +546,12 @@ def check_resume_compat(
     def _effective_decay_horizon(
         train_cfg: dict[str, Any], optim_cfg: dict[str, Any]
     ) -> int | None:
+        """Return the effective LR schedule horizon in steps.
+
+        :param dict[str, Any] train_cfg: Training config section.
+        :param dict[str, Any] optim_cfg: Optimizer config section.
+        :return int | None: Warmup + decay horizon, or None if unavailable.
+        """
         warmup = optim_cfg.get("warmup_steps")
         if warmup is None:
             return None
