@@ -6,7 +6,6 @@ import math
 import os
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
@@ -19,18 +18,7 @@ from chomp.data import build_train_iterator, prepare_tokenizer_and_config
 from chomp.model import build_model, training_loss
 from chomp.train import build_optimizer, init_train_state, run
 from chomp.types import Batch
-
-
-def _abstractify_tree(tree: Any) -> Any:
-    """Convert array leaves to ShapeDtypeStruct for Orbax restores.
-
-    :param Any tree: Pytree of JAX arrays.
-    :return Any: Pytree of ShapeDtypeStruct with matching structure.
-    """
-    return jax.tree_util.tree_map(
-        lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=getattr(x, "sharding", None)),
-        tree,
-    )
+from chomp.utils.tree import abstractify_tree
 
 
 def _small_cfg(tmp_path: Path) -> tuple[Config, Path]:
@@ -114,7 +102,7 @@ def test_checkpoint_restore_allows_forward(tmp_path: Path) -> None:
     params, static = build_model(cfg, key=jax.random.PRNGKey(0))
     tx, _ = build_optimizer(cfg, params)
     state0 = init_train_state(cfg, params=params, tx=tx, key=jax.random.PRNGKey(1))
-    abstract_state = _abstractify_tree(state0)
+    abstract_state = abstractify_tree(state0)
 
     data_it = build_train_iterator(cfg, tokenizer=tokenizer)
     ckpt_dir = default_ckpt_dir(run_dir)

@@ -6,7 +6,6 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
@@ -19,6 +18,7 @@ from chomp.cli.generate import _find_checkpoint_dir, _restore_params
 from chomp.config import Config, load_config
 from chomp.model import build_model
 from chomp.train import run
+from chomp.utils.tree import abstractify_tree
 
 
 def _small_cfg(tmp_path: Path) -> tuple[Config, Path]:
@@ -79,18 +79,6 @@ def _small_cfg(tmp_path: Path) -> tuple[Config, Path]:
     return cfg, config_src
 
 
-def _abstractify_tree(tree: Any) -> Any:
-    """Convert array leaves to ShapeDtypeStruct for Orbax restores.
-
-    :param Any tree: Pytree of JAX arrays.
-    :return Any: Pytree of ShapeDtypeStruct with matching structure.
-    """
-    return jax.tree_util.tree_map(
-        lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=getattr(x, "sharding", None)),
-        tree,
-    )
-
-
 def test_find_checkpoint_dir_with_run_dir(tmp_path: Path) -> None:
     """_find_checkpoint_dir finds latest checkpoint from run directory."""
     cfg, config_src = _small_cfg(tmp_path)
@@ -143,7 +131,7 @@ def test_restore_params_partial_restore(tmp_path: Path) -> None:
 
     # Build model to get abstract params shape
     params, _static = build_model(cfg, key=jax.random.PRNGKey(0))
-    abstract_params = _abstractify_tree(params)
+    abstract_params = abstractify_tree(params)
 
     # Find checkpoint
     ckpt_dir = default_ckpt_dir(run_dir)
@@ -174,7 +162,7 @@ def test_restore_params_values_differ_from_init(tmp_path: Path) -> None:
 
     # Build fresh model
     params_fresh, _static = build_model(cfg, key=jax.random.PRNGKey(0))
-    abstract_params = _abstractify_tree(params_fresh)
+    abstract_params = abstractify_tree(params_fresh)
 
     # Restore from checkpoint
     ckpt_dir = default_ckpt_dir(run_dir)
