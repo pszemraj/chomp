@@ -19,6 +19,7 @@ Design stance (hard-earned):
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -418,6 +419,8 @@ def load_config(path: str | Path, overrides: Iterable[str] | None = None) -> Con
     with path.open("r") as f:
         data = yaml.safe_load(f) or {}
 
+    data = _resolve_variables(data)
+
     cfg = _from_nested_dict(data)
 
     if overrides:
@@ -429,6 +432,72 @@ def load_config(path: str | Path, overrides: Iterable[str] | None = None) -> Con
 
     validate_config(cfg)
     return cfg
+
+
+_VAR_INLINE_RE = re.compile(r"\{\$variables\.([A-Za-z0-9_.-]+)\}")
+_VAR_BRACE_RE = re.compile(r"\$\{variables\.([A-Za-z0-9_.-]+)\}")
+_VAR_FULL_RE = re.compile(r"\$variables\.([A-Za-z0-9_.-]+)$")
+
+
+def _resolve_variables(data: dict[str, Any]) -> dict[str, Any]:
+    """Resolve variable references in a config dict before dataclass parsing.
+
+    Supported forms:
+    - Exact value: "$variables.foo" -> replaced with the referenced value (type preserved).
+    - Inline string: "seq{$variables.seq_len}" or "${variables.seq_len}" -> interpolated.
+
+    Variable definitions live under top-level key "variables" and may be nested.
+
+    :param dict[str, Any] data: Raw YAML-loaded data.
+    :raises ValueError: If a variable reference is missing or circular.
+    :return dict[str, Any]: Data with variables resolved (variables removed).
+    """
+    raw_vars = data.get("variables") or {}
+    if not isinstance(raw_vars, dict):
+        raise ValueError("variables must be a mapping if provided")
+
+    resolved: dict[str, Any] = {}
+    resolving: set[str] = set()
+
+    def _lookup_var(path: str) -> Any:
+        if path in resolved:
+            return resolved[path]
+        if path in resolving:
+            cycle = " -> ".join(list(resolving) + [path])
+            raise ValueError(f"Circular variable reference: {cycle}")
+
+        parts = path.split(".")
+        cur: Any = raw_vars
+        for part in parts:
+            if not isinstance(cur, dict) or part not in cur:
+                raise ValueError(f"Unknown variable reference: variables.{path}")
+            cur = cur[part]
+
+        resolving.add(path)
+        value = _resolve_value(cur)
+        resolving.remove(path)
+        resolved[path] = value
+        return value
+
+    def _sub_var(match: re.Match[str]) -> str:
+        return str(_lookup_var(match.group(1)))
+
+    def _resolve_value(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: _resolve_value(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_resolve_value(v) for v in value]
+        if isinstance(value, str):
+            full = _VAR_FULL_RE.fullmatch(value)
+            if full:
+                return _lookup_var(full.group(1))
+            out = _VAR_INLINE_RE.sub(_sub_var, value)
+            out = _VAR_BRACE_RE.sub(_sub_var, out)
+            return out
+        return value
+
+    resolved_data = {k: _resolve_value(v) for k, v in data.items() if k != "variables"}
+    return resolved_data
 
 
 def _from_nested_dict(data: dict[str, Any]) -> Config:

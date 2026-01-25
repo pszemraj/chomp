@@ -16,6 +16,31 @@ chomp train configs/debug_smoke.yaml \
 
 Unknown keys or invalid values fail fast during validation.
 
+## Variables and interpolation
+
+You can define reusable values under a top-level `variables` section and reference
+them elsewhere in the config.
+
+Supported forms:
+
+- Exact value: `chunk_size: $variables.chunk_size` (type preserved)
+- Inline string: `tags: ["seq{$variables.seq_len}", "chunk{$variables.chunk_size}"]`
+
+Example:
+
+```yaml
+variables:
+  chunk_size: 1024
+  seq_len: 2048
+model:
+  chunk_size: $variables.chunk_size
+train:
+  seq_len: $variables.seq_len
+logging:
+  wandb:
+    tags: ["seq{$variables.seq_len}", "chunk{$variables.chunk_size}"]
+```
+
 ## Custom configs (ignored by git)
 
 Store personal experiment configs under `configs/custom/`. The directory is tracked
