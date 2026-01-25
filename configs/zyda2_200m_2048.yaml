@@ -56,7 +56,7 @@ train:
   seq_len: 2048
   grad_accum: 8
   jit: true
-  deterministic: true
+  deterministic: false
   allow_cpu: false
   log_every: 25
   eval_every: 2500

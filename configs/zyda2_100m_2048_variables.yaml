@@ -60,7 +60,7 @@ train:
   seq_len: $variables.seq_len
   grad_accum: 8
   jit: true
-  deterministic: true
+  deterministic: false
   allow_cpu: false
   log_every: 25
   eval_every: 2500
