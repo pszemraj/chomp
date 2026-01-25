@@ -512,6 +512,11 @@ Enable gradient checkpointing (activation recomputation) to reduce memory.
 | Backend | `megalodon` only |
 | Recommended | `true` for large models or long sequences |
 
+::: {.callout-warning}
+In `megalodon-jax`, checkpointing is disabled when `train.deterministic=true`.
+Set `train.deterministic=false` (with dropout at 0.0 if desired) to enable it.
+:::
+
 #### `model.output_size` {#model.output_size}
 
 ```yaml
@@ -1301,6 +1306,11 @@ Force deterministic training. `null` auto-derives from dropout settings.
 
 ::: {.callout-note}
 When `null`: deterministic if all dropout rates are 0.0.
+:::
+
+::: {.callout-warning}
+In `megalodon-jax`, `train.deterministic=true` disables activation checkpointing
+even if `model.use_checkpoint=true`.
 :::
 
 #### `train.allow_cpu` {#train.allow_cpu}

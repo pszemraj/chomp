@@ -23,7 +23,10 @@ boundary masks.
 - `True`: force deterministic
 - `False`: force stochastic
 
-Deterministic runs are recommended for resume and regression tests.
+Deterministic runs are recommended for resume and regression tests. Note that
+in `megalodon-jax`, activation checkpointing is disabled when
+`train.deterministic=true`. If you want checkpointing with deterministic math,
+set `train.deterministic=false` and keep all dropout rates at `0.0`.
 
 ## GPU environment notes
 
@@ -87,6 +90,7 @@ mode to avoid creating noisy runs.
 
 Megalodon supports activation checkpointing via `model.use_checkpoint`. This is
 orthogonal to gradient accumulation and does not change the batch contract.
+In `megalodon-jax`, checkpointing is gated on `train.deterministic=false`.
 
 ## Metrics
 

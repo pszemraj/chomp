@@ -833,6 +833,12 @@ def run(
         allow_existing=allow_existing,
         dry_run=dry_run,
     )
+    if cfg.model.use_checkpoint and derived_deterministic(cfg):
+        logger.warning(
+            "train.deterministic=true disables activation checkpointing in megalodon-jax. "
+            "Set train.deterministic=false (and keep dropout at 0.0 for deterministic math) "
+            "to enable checkpointing."
+        )
     tokenizer_hash = tokenizer_snapshot_hash(run_dir)
 
     wandb_run = _maybe_init_wandb(cfg, run_dir=run_dir, dry_run=dry_run)
