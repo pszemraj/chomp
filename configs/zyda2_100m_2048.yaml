@@ -3,7 +3,7 @@ model:
   vocab_size: 32128
   model_dim: 768
   num_layers: 12
-  num_heads: 12
+  num_heads: 2
   z_dim: 384
   value_dim: 768
   ffn_hidden_dim: 3072
