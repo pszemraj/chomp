@@ -96,6 +96,34 @@ def test_find_checkpoint_dir_resolves_root_dir_relative_to_run(tmp_path: Path) -
     assert found_step == step_dir
 
 
+def test_find_checkpoint_dir_ignores_cwd_shadow(tmp_path: Path, monkeypatch) -> None:
+    """Relative root_dir should resolve against run_dir even if CWD has same-named dir."""
+    # Create run directory with checkpoints
+    run_dir = tmp_path / "runs" / "my_run"
+    run_dir.mkdir(parents=True)
+
+    cfg = Config()
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, root_dir="ckpts"))
+    (run_dir / "config_resolved.json").write_text(json.dumps(cfg.to_dict(), indent=2))
+
+    correct_step_dir = run_dir / "ckpts" / "100"
+    correct_step_dir.mkdir(parents=True)
+
+    # Create a shadow "ckpts" directory in a different location (simulating CWD)
+    shadow_dir = tmp_path / "ckpts" / "999"
+    shadow_dir.mkdir(parents=True)
+
+    # Change CWD to tmp_path where shadow exists
+    monkeypatch.chdir(tmp_path)
+
+    # Should find run's checkpoint, not the CWD shadow
+    found_step, found_run = _find_checkpoint_dir(str(run_dir))
+
+    assert found_run == run_dir
+    assert found_step == correct_step_dir
+    assert "999" not in str(found_step)  # Ensure we didn't pick up shadow
+
+
 def test_generate_config_applies_tokenizer_derived_fields(tmp_path: Path) -> None:
     """Generate config loading should round vocab_size via resolve_tokenizer_config.
 

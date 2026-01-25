@@ -49,10 +49,9 @@ def _find_checkpoint_dir(
         cfg = _load_config_from_checkpoint(path, config_override)
         if cfg.checkpoint.root_dir:
             ckpt_dir = Path(cfg.checkpoint.root_dir)
-            if not ckpt_dir.is_absolute() and not ckpt_dir.exists():
-                run_relative = (path / ckpt_dir).resolve()
-                if run_relative.exists():
-                    ckpt_dir = run_relative
+            if not ckpt_dir.is_absolute():
+                # Always resolve relative paths against run_dir, not CWD
+                ckpt_dir = (path / ckpt_dir).resolve()
 
     if ckpt_dir.exists():
         steps = sorted([int(d.name) for d in ckpt_dir.iterdir() if d.is_dir() and d.name.isdigit()])
