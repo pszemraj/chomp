@@ -9,36 +9,19 @@ chomp's philosophy is intentionally boring:
 - arrays-only TrainState checkpointing is straightforward
 - real streaming data no synthetic crutches
 
-Implemented so far (this draft):
-
-- Phases 0-2: config + model integration + compiled train_step with `lax.scan` grad accumulation
-- Phase 3: Orbax checkpointing + resume contract (train_state + data iterator state)
-- Phases 4-5: HF streaming tokenize pack Grain pipeline fixed [A,B,T] batches
-
 ## Install
 
 ### 1) Install JAX + jaxlib
 
-JAX wheels are platform- and CUDA-specific. Follow the official instructions:
-
-- <https://docs.jax.dev/en/latest/installation.html>
+JAX wheels are platform, hardware-, and CUDA-specific. Follow the [official instructions](https://docs.jax.dev/en/latest/installation.html).
 
 ### 2) Install `chomp`
 
 ```bash
+git clone https://github.com/pszemraj/chomp.git
+cd chomp
+# activate your virtual environment here
 pip install -e .
-```
-
-### 3) (Optional) Use a local `megalodon-jax` checkout
-
-`chomp` depends on `megalodon-jax` by default, so `pip install -e .` will
-install it from the GitHub source declared in `pyproject.toml`.
-
-If you want to develop against a local checkout instead:
-
-```bash
-pip install -e /path/to/megalodon-jax
-pip install -e . --no-deps
 ```
 
 ### Tokenizer defaults + vocab rounding
