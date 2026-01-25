@@ -2,120 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 import click
 
-
-def _find_checkpoint_dir(
-    checkpoint_path: str, config_override: str | None = None
-) -> tuple[Path, Path]:
-    """Find checkpoint directory and config file.
-
-    Supports:
-    - Direct step directory: runs/my_run/checkpoints/500/
-    - Run directory: runs/my_run/ (uses latest checkpoint)
-
-    :param str checkpoint_path: Path to run_dir or step directory.
-    :param config_override: Optional path to override config file.
-    :raises click.ClickException: If no valid checkpoint found.
-    :return tuple: (step_dir, run_dir)
-    """
-    path = Path(checkpoint_path).resolve()
-
-    # Case 1: Direct step directory (has train_state subdirectory)
-    if (path / "train_state").exists():
-        # Walk up to find run_dir
-        ckpt_parent = path.parent
-        if ckpt_parent.name == "checkpoints":
-            run_dir = ckpt_parent.parent
-        else:
-            run_dir = path.parent
-        return path, run_dir
-
-    # Case 2: Checkpoints directory
-    if path.name == "checkpoints":
-        steps = sorted([int(d.name) for d in path.iterdir() if d.is_dir() and d.name.isdigit()])
-        if not steps:
-            raise click.ClickException(f"No step directories found in {path}")
-        latest_step = steps[-1]
-        return path / str(latest_step), path.parent
-
-    # Case 3: Run directory (look for checkpoints/latest or root_dir)
-    ckpt_dir = path / "checkpoints"
-    if config_override or (path / "config_resolved.json").exists():
-        cfg = _load_config_from_checkpoint(path, config_override)
-        if cfg.checkpoint.root_dir:
-            ckpt_dir = Path(cfg.checkpoint.root_dir)
-            if not ckpt_dir.is_absolute():
-                # Always resolve relative paths against run_dir, not CWD
-                ckpt_dir = (path / ckpt_dir).resolve()
-
-    if ckpt_dir.exists():
-        steps = sorted([int(d.name) for d in ckpt_dir.iterdir() if d.is_dir() and d.name.isdigit()])
-        if not steps:
-            raise click.ClickException(f"No step directories found in {ckpt_dir}")
-        latest_step = steps[-1]
-        return ckpt_dir / str(latest_step), path
-
-    raise click.ClickException(
-        f"Could not find checkpoint at {path}. "
-        "Provide a run_dir, checkpoints dir, or step directory."
-    )
-
-
-def _load_config_from_checkpoint(run_dir: Path, config_override: str | None) -> Any:
-    """Load config from checkpoint or override file.
-
-    :param Path run_dir: Run directory containing config_resolved.json.
-    :param config_override: Optional path to override config file.
-    :raises click.ClickException: If config file not found.
-    :return Config: Loaded configuration.
-    """
-    from chomp.config import _from_nested_dict, _resolve_variables, validate_config
-
-    if config_override:
-        config_path = Path(config_override)
-        if not config_path.exists():
-            raise click.ClickException(f"Config override not found: {config_path}")
-        if config_path.suffix in {".yaml", ".yml"}:
-            try:
-                import yaml
-            except ImportError as e:
-                raise click.ClickException(
-                    "pyyaml is required to load YAML configs. Install with: pip install pyyaml"
-                ) from e
-            try:
-                with config_path.open() as f:
-                    data = yaml.safe_load(f) or {}
-            except yaml.YAMLError as e:
-                raise click.ClickException(f"Invalid YAML in {config_path}: {e}") from e
-        else:
-            try:
-                with config_path.open() as f:
-                    data = json.load(f) or {}
-            except json.JSONDecodeError as e:
-                raise click.ClickException(f"Invalid JSON in {config_path}: {e}") from e
-    else:
-        config_path = run_dir / "config_resolved.json"
-        if not config_path.exists():
-            raise click.ClickException(
-                f"config_resolved.json not found in {run_dir}. "
-                "Use --config to provide a config file."
-            )
-        try:
-            with config_path.open() as f:
-                data = json.load(f) or {}
-        except json.JSONDecodeError as e:
-            raise click.ClickException(f"Corrupted config_resolved.json in {run_dir}: {e}") from e
-
-    data = _resolve_variables(data)
-    cfg = _from_nested_dict(data)
-
-    validate_config(cfg)
-    return cfg
+from chomp.utils.checkpoints import load_config_for_checkpoint, resolve_checkpoint_path
 
 
 def _restore_params(step_dir: Path, abstract_params: Any) -> Any:
@@ -233,10 +125,18 @@ def generate(
     from chomp.model import build_model
 
     # Find checkpoint and load config
-    step_dir, run_dir = _find_checkpoint_dir(checkpoint, config_override=config_override)
+    try:
+        step_dir, run_dir = resolve_checkpoint_path(checkpoint, config_override=config_override)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Loading checkpoint from: {step_dir}")
 
-    cfg = _load_config_from_checkpoint(run_dir, config_override)
+    try:
+        cfg = load_config_for_checkpoint(
+            step_dir=step_dir, run_dir=run_dir, config_override=config_override
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
 
     if cfg.model.backend != "megalodon":
         raise click.ClickException(

@@ -6,12 +6,12 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from chomp.cli.generate import _find_checkpoint_dir, _load_config_from_checkpoint
 from chomp.config import Config
 from chomp.data.pipeline import build_tokenizer, resolve_tokenizer_config
+from chomp.utils.checkpoints import load_config_for_checkpoint, resolve_checkpoint_path
 
 
-def test_load_config_from_checkpoint_resolves_variables(tmp_path: Path) -> None:
+def test_load_config_for_checkpoint_resolves_variables(tmp_path: Path) -> None:
     """Variable placeholders in override configs should resolve before validation."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -73,12 +73,14 @@ debug:
 """.lstrip()
     )
 
-    cfg = _load_config_from_checkpoint(tmp_path, str(config_path))
+    cfg = load_config_for_checkpoint(
+        step_dir=tmp_path, run_dir=None, config_override=str(config_path)
+    )
 
     assert cfg.train.seq_len == 64
 
 
-def test_find_checkpoint_dir_resolves_root_dir_relative_to_run(tmp_path: Path) -> None:
+def test_resolve_checkpoint_root_dir_relative_to_run(tmp_path: Path) -> None:
     """Relative checkpoint.root_dir should resolve against the run directory."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -88,15 +90,15 @@ def test_find_checkpoint_dir_resolves_root_dir_relative_to_run(tmp_path: Path) -
     (run_dir / "config_resolved.json").write_text(json.dumps(cfg.to_dict(), indent=2))
 
     step_dir = run_dir / "relative_ckpts" / "1"
-    step_dir.mkdir(parents=True)
+    (step_dir / "train_state").mkdir(parents=True)
 
-    found_step, found_run = _find_checkpoint_dir(str(run_dir))
+    found_step, found_run = resolve_checkpoint_path(str(run_dir))
 
     assert found_run == run_dir
     assert found_step == step_dir
 
 
-def test_find_checkpoint_dir_ignores_cwd_shadow(tmp_path: Path, monkeypatch) -> None:
+def test_resolve_checkpoint_ignores_cwd_shadow(tmp_path: Path, monkeypatch) -> None:
     """Relative root_dir should resolve against run_dir even if CWD has same-named dir."""
     # Create run directory with checkpoints
     run_dir = tmp_path / "runs" / "my_run"
@@ -107,7 +109,7 @@ def test_find_checkpoint_dir_ignores_cwd_shadow(tmp_path: Path, monkeypatch) -> 
     (run_dir / "config_resolved.json").write_text(json.dumps(cfg.to_dict(), indent=2))
 
     correct_step_dir = run_dir / "ckpts" / "100"
-    correct_step_dir.mkdir(parents=True)
+    (correct_step_dir / "train_state").mkdir(parents=True)
 
     # Create a shadow "ckpts" directory in a different location (simulating CWD)
     shadow_dir = tmp_path / "ckpts" / "999"
@@ -117,11 +119,34 @@ def test_find_checkpoint_dir_ignores_cwd_shadow(tmp_path: Path, monkeypatch) -> 
     monkeypatch.chdir(tmp_path)
 
     # Should find run's checkpoint, not the CWD shadow
-    found_step, found_run = _find_checkpoint_dir(str(run_dir))
+    found_step, found_run = resolve_checkpoint_path(str(run_dir))
 
     assert found_run == run_dir
     assert found_step == correct_step_dir
     assert "999" not in str(found_step)  # Ensure we didn't pick up shadow
+
+
+def test_resolve_step_dir_external_root_uses_meta(tmp_path: Path) -> None:
+    """Step directories under external roots should resolve config via metadata."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+
+    cfg = Config()
+    cfg = replace(cfg, logging=replace(cfg.logging, run_dir=str(run_dir)))
+
+    step_dir = tmp_path / "external_ckpts" / "100"
+    (step_dir / "train_state").mkdir(parents=True)
+    meta_dir = step_dir / "meta"
+    meta_dir.mkdir(parents=True)
+    (meta_dir / "metadata").write_text(json.dumps({"config": cfg.to_dict()}, indent=2))
+
+    found_step, found_run = resolve_checkpoint_path(str(step_dir))
+
+    assert found_step == step_dir
+    assert found_run == run_dir
+
+    loaded = load_config_for_checkpoint(step_dir=step_dir, run_dir=None, config_override=None)
+    assert loaded.logging.run_dir == str(run_dir)
 
 
 def test_generate_config_applies_tokenizer_derived_fields(tmp_path: Path) -> None:
@@ -187,7 +212,9 @@ debug:
     )
 
     # Load config (simulating what generate CLI does)
-    cfg = _load_config_from_checkpoint(tmp_path, str(config_path))
+    cfg = load_config_for_checkpoint(
+        step_dir=tmp_path, run_dir=None, config_override=str(config_path)
+    )
 
     # Before tokenizer resolution, vocab_size is 300
     assert cfg.model.vocab_size == 300

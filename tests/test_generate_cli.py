@@ -15,10 +15,11 @@ from click.testing import CliRunner
 
 from chomp.ckpt import default_ckpt_dir
 from chomp.cli import cli
-from chomp.cli.generate import _find_checkpoint_dir, _restore_params
+from chomp.cli.generate import _restore_params
 from chomp.config import Config, load_config
 from chomp.model import build_model
 from chomp.train import run
+from chomp.utils.checkpoints import resolve_checkpoint_path
 from chomp.utils.tree import abstractify_tree
 
 
@@ -80,26 +81,26 @@ def _small_cfg(tmp_path: Path) -> tuple[Config, Path]:
     return cfg, config_src
 
 
-def test_find_checkpoint_dir_with_run_dir(tmp_path: Path) -> None:
-    """_find_checkpoint_dir finds latest checkpoint from run directory."""
+def test_resolve_checkpoint_with_run_dir(tmp_path: Path) -> None:
+    """resolve_checkpoint_path finds latest checkpoint from run directory."""
     cfg, config_src = _small_cfg(tmp_path)
     run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
 
-    step_dir, found_run_dir = _find_checkpoint_dir(str(run_dir))
+    step_dir, found_run_dir = resolve_checkpoint_path(str(run_dir))
 
     assert found_run_dir == run_dir
     assert step_dir.name == "2"  # latest step
     assert (step_dir / "train_state").exists()
 
 
-def test_find_checkpoint_dir_with_root_dir(tmp_path: Path) -> None:
-    """_find_checkpoint_dir respects checkpoint.root_dir when given run_dir."""
+def test_resolve_checkpoint_with_root_dir(tmp_path: Path) -> None:
+    """resolve_checkpoint_path respects checkpoint.root_dir when given run_dir."""
     cfg, config_src = _small_cfg(tmp_path)
     ckpt_root = tmp_path / "ckpt_root"
     cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, root_dir=str(ckpt_root)))
     run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
 
-    step_dir, found_run_dir = _find_checkpoint_dir(str(run_dir))
+    step_dir, found_run_dir = resolve_checkpoint_path(str(run_dir))
 
     assert found_run_dir == run_dir
     assert step_dir.parent == ckpt_root
@@ -107,15 +108,15 @@ def test_find_checkpoint_dir_with_root_dir(tmp_path: Path) -> None:
     assert (step_dir / "train_state").exists()
 
 
-def test_find_checkpoint_dir_with_step_dir(tmp_path: Path) -> None:
-    """_find_checkpoint_dir accepts direct step directory."""
+def test_resolve_checkpoint_with_step_dir(tmp_path: Path) -> None:
+    """resolve_checkpoint_path accepts direct step directory."""
     cfg, config_src = _small_cfg(tmp_path)
     run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
 
     ckpt_dir = default_ckpt_dir(run_dir)
     step_dir_input = ckpt_dir / "1"
 
-    step_dir, found_run_dir = _find_checkpoint_dir(str(step_dir_input))
+    step_dir, found_run_dir = resolve_checkpoint_path(str(step_dir_input))
 
     assert found_run_dir == run_dir
     assert step_dir == step_dir_input
