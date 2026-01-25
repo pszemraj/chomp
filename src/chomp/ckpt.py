@@ -539,15 +539,32 @@ def check_resume_compat(
     optim_prev = meta_cfg.get("optim") or {}
     optim_cur = cur_cfg.get("optim") or {}
     for key in sorted(set(optim_prev) | set(optim_cur)):
+        if key == "decay_steps":
+            continue
         _cmp(f"optim.{key}", optim_cur.get(key), optim_prev.get(key), severity="error")
 
-    decay_prev = optim_prev.get("decay_steps")
-    decay_cur = optim_cur.get("decay_steps")
-    if decay_prev is None:
-        decay_prev = train_prev.get("steps")
-    if decay_cur is None:
-        decay_cur = train_cur.get("steps")
+    def _effective_decay_horizon(
+        train_cfg: dict[str, Any], optim_cfg: dict[str, Any]
+    ) -> int | None:
+        warmup = optim_cfg.get("warmup_steps")
+        if warmup is None:
+            return None
+        decay = optim_cfg.get("decay_steps")
+        if decay is None:
+            steps = train_cfg.get("steps")
+            if steps is None:
+                return None
+            decay = int(steps) - int(warmup)
+        return int(warmup) + int(decay)
+
+    decay_prev = _effective_decay_horizon(train_prev, optim_prev)
+    decay_cur = _effective_decay_horizon(train_cur, optim_cur)
     _cmp("optim.decay_steps_effective", decay_cur, decay_prev, severity="error")
+    if optim_prev.get("decay_steps") != optim_cur.get("decay_steps") and decay_cur == decay_prev:
+        warnings.append(
+            "optim.decay_steps changed but effective schedule horizon is unchanged "
+            f"(prev={optim_prev.get('decay_steps')!r}, cur={optim_cur.get('decay_steps')!r})"
+        )
 
     if train_cur.get("steps") != train_prev.get("steps"):
         warnings.append(

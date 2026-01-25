@@ -632,11 +632,10 @@ def _validate_optim(cfg: Config) -> None:
         _vfail(f"optim.decay_steps must be positive when set, got {cfg.optim.decay_steps}")
     if cfg.optim.min_lr_ratio < 0 or cfg.optim.min_lr_ratio > 1:
         _vfail(f"optim.min_lr_ratio must be in [0, 1], got {cfg.optim.min_lr_ratio}")
-    decay_steps = cfg.optim.decay_steps if cfg.optim.decay_steps is not None else cfg.train.steps
-    if cfg.optim.warmup_steps >= decay_steps:
+    if cfg.optim.warmup_steps >= cfg.train.steps:
         _vfail(
-            f"optim.warmup_steps ({cfg.optim.warmup_steps}) must be < optim.decay_steps "
-            f"({decay_steps})"
+            f"optim.warmup_steps ({cfg.optim.warmup_steps}) must be < train.steps "
+            f"({cfg.train.steps})"
         )
 
 
@@ -849,6 +848,29 @@ def derived_deterministic(cfg: Config) -> bool:
         and cfg.model.attention_dropout == 0.0
         and cfg.model.hidden_dropout == 0.0
     )
+
+
+def resolve_decay_duration(cfg: Config) -> int:
+    """Resolve cosine decay duration (post-warmup) in steps.
+
+    If `optim.decay_steps` is unset, we default to `train.steps - optim.warmup_steps`
+    so the schedule ends at `train.steps`.
+
+    :param Config cfg: Training configuration.
+    :return int: Decay duration in steps.
+    """
+    if cfg.optim.decay_steps is None:
+        return int(cfg.train.steps) - int(cfg.optim.warmup_steps)
+    return int(cfg.optim.decay_steps)
+
+
+def resolve_decay_horizon(cfg: Config) -> int:
+    """Resolve the total schedule horizon (warmup + decay) in steps.
+
+    :param Config cfg: Training configuration.
+    :return int: Total schedule steps (warmup + decay duration).
+    """
+    return int(cfg.optim.warmup_steps) + resolve_decay_duration(cfg)
 
 
 def dtype_from_str(name: str) -> jnp.dtype:

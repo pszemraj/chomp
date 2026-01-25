@@ -50,7 +50,7 @@ from chomp.ckpt import (
     restore_latest,
     save,
 )
-from chomp.config import Config, derived_deterministic
+from chomp.config import Config, derived_deterministic, resolve_decay_horizon
 from chomp.data import (
     build_eval_iterator,
     build_generation_text_stream,
@@ -551,7 +551,7 @@ def build_optimizer(
         init_value=0.0,
         peak_value=cfg.optim.lr,
         warmup_steps=cfg.optim.warmup_steps,
-        decay_steps=cfg.optim.decay_steps or cfg.train.steps,
+        decay_steps=resolve_decay_horizon(cfg),
         end_value=cfg.optim.lr * cfg.optim.min_lr_ratio,
     )
 

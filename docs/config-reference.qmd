@@ -1505,11 +1505,11 @@ Linear warmup steps.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be ≥ 0; **must be < `optim.decay_steps` (effective)** |
+| Constraints | Must be ≥ 0; **must be < `train.steps`** |
 
 ::: {.callout-warning}
-If `warmup_steps >= optim.decay_steps (effective)`:
-`optim.warmup_steps (X) must be < optim.decay_steps (Y)`
+If `warmup_steps >= train.steps`:
+`optim.warmup_steps (X) must be < train.steps (Y)`
 :::
 
 **Related:** [`train.steps`](#train.steps)
@@ -1520,13 +1520,16 @@ If `warmup_steps >= optim.decay_steps (effective)`:
 decay_steps: int | null = null
 ```
 
-Cosine decay horizon (in steps). `null` uses `train.steps`. Set explicitly if you
-plan to resume with a different `train.steps` but keep the same LR schedule.
+Cosine decay duration (in steps) after warmup. The effective schedule horizon is
+`optim.warmup_steps + optim.decay_steps`. `null` defaults to
+`train.steps - optim.warmup_steps` so the schedule ends at `train.steps`.
+Set explicitly if you plan to resume with a different `train.steps` but keep the
+same LR schedule.
 
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be positive when set; must be > `optim.warmup_steps` |
+| Constraints | Must be positive when set |
 
 **Related:** [`train.steps`](#train.steps)
 
@@ -1821,7 +1824,7 @@ chomp validates all configuration at load time with actionable error messages.
 | `model.chunk_size <= train.seq_len` | `model.chunk_size (X) must be <= train.seq_len (Y)` |
 | `train.generate_input_len <= train.seq_len` | `train.generate_input_len must be <= train.seq_len (X), got Y` |
 | `model.model_dim % model.num_heads == 0` | `model.model_dim (X) must be divisible by model.num_heads (Y)` |
-| `optim.warmup_steps < optim.decay_steps` (effective) | `optim.warmup_steps (X) must be < optim.decay_steps (Y)` |
+| `optim.warmup_steps < train.steps` | `optim.warmup_steps (X) must be < train.steps (Y)` |
 | `data.packing_buffer_docs >= batch_size × grad_accum` (bin mode) | `data.packing_buffer_docs must be >= train.batch_size * train.grad_accum (N), got M` |
 | `byte_offset > 0` when `add_bos` or `add_eos` (byte tokenizer) | `byte tokenizer with add_bos/add_eos requires data.tokenizer.byte_offset > 0` |
 
