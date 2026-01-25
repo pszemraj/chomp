@@ -32,7 +32,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from chomp.config import Config
-from chomp.types import Batch
+from chomp.types import IGNORE_INDEX, Batch
 
 from .hf import HFStreamingTextStream, HFStreamSpec, ListTokenStream, LocalTextStream
 from .pack import BinPacker, TokenPacker
@@ -75,7 +75,6 @@ class TextStream(Protocol):
 
 
 logger = logging.getLogger(__name__)
-_IGNORE_INDEX = -100
 
 
 @dataclass
@@ -648,9 +647,9 @@ class TrainBatchIterator:
         if self._mask_boundary_loss:
             same = (segs[1:] == segs[:-1]) & (segs[1:] > 0) & (segs[:-1] > 0)
             if labels.size > 1:
-                labels[1:] = np.where(same[:-1], labels[1:], _IGNORE_INDEX).astype(np.int32)
+                labels[1:] = np.where(same[:-1], labels[1:], IGNORE_INDEX).astype(np.int32)
         if not self._train_on_eos:
-            labels = np.where(labels == self._eos_id, _IGNORE_INDEX, labels).astype(np.int32)
+            labels = np.where(labels == self._eos_id, IGNORE_INDEX, labels).astype(np.int32)
         return labels
 
     def __next__(self) -> Batch:

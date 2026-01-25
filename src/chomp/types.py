@@ -33,6 +33,8 @@ from typing import Any
 import equinox as eqx
 import jax
 
+IGNORE_INDEX = -100
+
 
 class Batch(eqx.Module):
     """A fixed-shape training batch.

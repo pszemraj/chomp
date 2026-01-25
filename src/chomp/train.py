@@ -61,13 +61,12 @@ from chomp.data import (
     save_tokenizer_snapshot,
 )
 from chomp.model import build_model, training_loss
-from chomp.types import Batch, TrainState
+from chomp.types import IGNORE_INDEX, Batch, TrainState
 from chomp.utils.devices import assert_batch_on_device
 from chomp.utils.io import MetricsWriter, add_file_logging, create_run_dir
 from chomp.utils.profiling import start_trace, step_annotation, stop_trace
 from chomp.utils.tree import param_count
 
-_IGNORE_INDEX = -100
 logger = logging.getLogger(__name__)
 
 
@@ -80,7 +79,7 @@ def _count_tokens(labels: jax.Array, attention_mask: jax.Array | None) -> jax.Ar
     """
 
     shift_labels = labels[:, 1:]
-    valid = shift_labels != _IGNORE_INDEX
+    valid = shift_labels != IGNORE_INDEX
     if attention_mask is not None:
         valid = valid & attention_mask[:, 1:].astype(bool)
     return jnp.sum(valid, dtype=jnp.int32)
