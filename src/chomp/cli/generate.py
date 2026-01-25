@@ -71,7 +71,9 @@ def _load_config_from_checkpoint(run_dir: Path, config_override: str | None) -> 
     :raises click.ClickException: If config file not found.
     :return Config: Loaded configuration.
     """
-    from chomp.config import _from_nested_dict, validate_config
+    from dataclasses import replace
+
+    from chomp.config import _from_nested_dict, _resolve_variables, validate_config
 
     if config_override:
         config_path = Path(config_override)
@@ -81,10 +83,10 @@ def _load_config_from_checkpoint(run_dir: Path, config_override: str | None) -> 
             import yaml
 
             with config_path.open() as f:
-                data = yaml.safe_load(f)
+                data = yaml.safe_load(f) or {}
         else:
             with config_path.open() as f:
-                data = json.load(f)
+                data = json.load(f) or {}
     else:
         config_path = run_dir / "config_resolved.json"
         if not config_path.exists():
@@ -93,9 +95,17 @@ def _load_config_from_checkpoint(run_dir: Path, config_override: str | None) -> 
                 "Use --config to provide a config file."
             )
         with config_path.open() as f:
-            data = json.load(f)
+            data = json.load(f) or {}
 
+    data = _resolve_variables(data)
     cfg = _from_nested_dict(data)
+
+    if cfg.checkpoint.root_dir:
+        root_dir = Path(cfg.checkpoint.root_dir)
+        if not root_dir.is_absolute():
+            root_dir = (config_path.parent / root_dir).resolve()
+            cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, root_dir=str(root_dir)))
+
     validate_config(cfg)
     return cfg
 
