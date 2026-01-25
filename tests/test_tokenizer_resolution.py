@@ -92,8 +92,8 @@ def test_auto_sets_special_token_ids() -> None:
     assert updated.model.pad_token_id == 12
 
 
-def test_tokenizer_pad_equals_eos_raises() -> None:
-    """Tokenizer with pad==eos should raise ValueError."""
+def test_tokenizer_pad_equals_eos_warns() -> None:
+    """Tokenizer with pad==eos should warn but still resolve."""
     cfg = Config(
         model=ModelConfig(vocab_size=512, bos_token_id=0, eos_token_id=1, pad_token_id=2),
         data=DataConfig(
@@ -110,5 +110,7 @@ def test_tokenizer_pad_equals_eos_raises() -> None:
         train=TrainConfig(steps=1, batch_size=1, seq_len=8, grad_accum=1, allow_cpu=True),
     )
     tok = _DummyTokenizer(size=512, bos=0, eos=0, pad=0)
-    with pytest.raises(ValueError, match="pad_token_id"):
-        resolve_tokenizer_config(cfg, tok)
+    with pytest.warns(UserWarning, match="pad_token_id equals eos_token_id"):
+        updated = resolve_tokenizer_config(cfg, tok)
+    assert updated.model.pad_token_id == 0
+    assert updated.model.eos_token_id == 0

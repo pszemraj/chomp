@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import warnings
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -340,9 +341,11 @@ def resolve_tokenizer_config(cfg: Config, tok: Tokenizer) -> Config:
     )
 
     if updated_cfg.model.pad_token_id == updated_cfg.model.eos_token_id:
-        raise ValueError(
-            "pad_token_id must differ from eos_token_id after tokenizer resolution. "
-            "Choose a tokenizer with a distinct pad token or override model.pad_token_id."
+        warnings.warn(
+            "pad_token_id equals eos_token_id after tokenizer resolution. This is allowed, "
+            "but EOS tokens may be treated as padding in some models. Prefer a distinct pad token "
+            "when possible.",
+            stacklevel=2,
         )
 
     return updated_cfg

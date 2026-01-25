@@ -679,9 +679,10 @@ def _validate_model(cfg: Config) -> None:
         _vfail(f"model.backend must be 'dummy' or 'megalodon', got {cfg.model.backend!r}")
 
     if cfg.model.pad_token_id == cfg.model.eos_token_id:
-        _vfail(
-            "model.pad_token_id must differ from model.eos_token_id. "
-            "Choose a tokenizer with a distinct pad token or set model.pad_token_id explicitly."
+        warnings.warn(
+            "model.pad_token_id equals model.eos_token_id. This is allowed, but EOS tokens may "
+            "be treated as padding in some models. Prefer a distinct pad token when possible.",
+            stacklevel=2,
         )
 
 

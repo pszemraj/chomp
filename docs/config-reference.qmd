@@ -540,16 +540,17 @@ Token ID used for padding.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | **Must differ from `eos_token_id`** |
+| Constraints | Should differ from `eos_token_id` (recommended) |
 
 ::: {.callout-important}
-## pad_token_id ≠ eos_token_id
+## pad_token_id should differ from eos_token_id
 
 Megalodon zero-masks pad embeddings and the training loop masks pad positions in loss.
-If `pad_token_id == eos_token_id`, EOS tokens get zeroed and masked, breaking supervision.
+If `pad_token_id == eos_token_id`, EOS tokens may be treated as padding depending on the
+model implementation, which can degrade EOS supervision.
 
-If your tokenizer sets `pad_token_id == eos_token_id`, chomp fails validation after tokenizer
-resolution. Choose a tokenizer with distinct pad/eos, or set
+If your tokenizer sets `pad_token_id == eos_token_id`, chomp will emit a warning after tokenizer
+resolution. Prefer a tokenizer with distinct pad/eos, or set
 `data.tokenizer.auto_set_special_tokens: false` and override `model.pad_token_id` explicitly
 (only safe if you never emit pad tokens).
 :::
@@ -582,7 +583,7 @@ End-of-sequence token ID.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be in `[0, vocab_size)`; **must differ from `pad_token_id`** |
+| Constraints | Must be in `[0, vocab_size)` |
 
 **Related:** [`data.tokenizer.add_eos`](#data.tokenizer.add_eos), [`data.train_on_eos`](#data.train_on_eos)
 
@@ -1803,7 +1804,6 @@ chomp validates all configuration at load time with actionable error messages.
 | `model.chunk_size <= train.seq_len` | `model.chunk_size (X) must be <= train.seq_len (Y)` |
 | `train.generate_input_len <= train.seq_len` | `train.generate_input_len must be <= train.seq_len (X), got Y` |
 | `model.model_dim % model.num_heads == 0` | `model.model_dim (X) must be divisible by model.num_heads (Y)` |
-| `model.pad_token_id != model.eos_token_id` | `model.pad_token_id must differ from model.eos_token_id` |
 | `optim.warmup_steps < train.steps` | `optim.warmup_steps (X) must be < train.steps (Y)` |
 | `data.packing_buffer_docs >= batch_size × grad_accum` (bin mode) | `data.packing_buffer_docs must be >= train.batch_size * train.grad_accum (N), got M` |
 | `byte_offset > 0` when `add_bos` or `add_eos` (byte tokenizer) | `byte tokenizer with add_bos/add_eos requires data.tokenizer.byte_offset > 0` |
@@ -1826,11 +1826,11 @@ model:
 :::
 
 ::: {.callout-important}
-## pad_token_id Must Differ from eos_token_id
+## pad_token_id Should Differ from eos_token_id
 
 If your tokenizer uses the same ID for padding and EOS (common with GPT-2 style tokenizers),
-chomp fails validation. Prefer a tokenizer with distinct pad/eos, or disable
-`data.tokenizer.auto_set_special_tokens` and override `model.pad_token_id` explicitly:
+chomp emits a warning after tokenizer resolution. Prefer a tokenizer with distinct pad/eos, or
+disable `data.tokenizer.auto_set_special_tokens` and override `model.pad_token_id` explicitly:
 
 ```yaml
 model:
