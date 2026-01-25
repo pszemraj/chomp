@@ -549,10 +549,7 @@ def _vfail(msg: str) -> None:
     raise ValueError(f"Config validation failed: {msg}")
 
 
-def validate_config(cfg: Config) -> None:
-    """Validate config with actionable error messages."""
-
-    # Train
+def _validate_train(cfg: Config) -> None:
     if cfg.train.steps <= 0:
         _vfail(f"train.steps must be positive, got {cfg.train.steps}")
     if cfg.train.batch_size <= 0:
@@ -595,7 +592,8 @@ def validate_config(cfg: Config) -> None:
     ):
         _vfail(f"train.generate_top_p must be in (0, 1] when set, got {cfg.train.generate_top_p}")
 
-    # Optim
+
+def _validate_optim(cfg: Config) -> None:
     if cfg.optim.lr <= 0:
         _vfail(f"optim.lr must be positive, got {cfg.optim.lr}")
     if cfg.optim.grad_clip_norm < 0:
@@ -610,14 +608,16 @@ def validate_config(cfg: Config) -> None:
             f"({cfg.train.steps})"
         )
 
-    # Checkpoint
+
+def _validate_checkpoint(cfg: Config) -> None:
     if cfg.checkpoint.enabled:
         if cfg.checkpoint.save_every <= 0:
             _vfail(f"checkpoint.save_every must be positive, got {cfg.checkpoint.save_every}")
         if cfg.checkpoint.max_to_keep <= 0:
             _vfail(f"checkpoint.max_to_keep must be positive, got {cfg.checkpoint.max_to_keep}")
 
-    # Model
+
+def _validate_model(cfg: Config) -> None:
     if cfg.model.vocab_size <= 0:
         _vfail(f"model.vocab_size must be positive, got {cfg.model.vocab_size}")
     if cfg.model.backend == "dummy":
@@ -655,7 +655,8 @@ def validate_config(cfg: Config) -> None:
             "Choose a tokenizer with a distinct pad token or set model.pad_token_id explicitly."
         )
 
-    # Data
+
+def _validate_data(cfg: Config) -> None:
     if cfg.data.backend == "hf":
         if not cfg.data.hf_dataset:
             _vfail("data.hf_dataset must be non-empty when data.backend='hf'")
@@ -669,7 +670,8 @@ def validate_config(cfg: Config) -> None:
             _vfail("data.text_key must be non-empty")
         if cfg.data.shuffle and cfg.data.shuffle_buffer_size <= 0:
             _vfail(
-                f"data.shuffle_buffer_size must be positive when data.shuffle=true, got {cfg.data.shuffle_buffer_size}"
+                "data.shuffle_buffer_size must be positive when data.shuffle=true, "
+                f"got {cfg.data.shuffle_buffer_size}"
             )
     elif cfg.data.backend == "local_text":
         if not cfg.data.local_text:
@@ -702,14 +704,6 @@ def validate_config(cfg: Config) -> None:
     if cfg.data.max_eval_samples < 0:
         _vfail(f"data.max_eval_samples must be >=0, got {cfg.data.max_eval_samples}")
 
-    # Logging / wandb
-    if cfg.logging.log_file is not None and not str(cfg.logging.log_file).strip():
-        _vfail("logging.log_file must be a non-empty string or null")
-    if cfg.logging.wandb.mode not in ("online", "offline", "disabled"):
-        _vfail(
-            "logging.wandb.mode must be 'online', 'offline', or 'disabled', "
-            f"got {cfg.logging.wandb.mode!r}"
-        )
     # HF streaming robustness knobs
     if cfg.data.max_retries < 0:
         _vfail(f"data.max_retries must be >=0, got {cfg.data.max_retries}")
@@ -718,7 +712,18 @@ def validate_config(cfg: Config) -> None:
     if cfg.data.state_update_interval <= 0:
         _vfail(f"data.state_update_interval must be >0, got {cfg.data.state_update_interval}")
 
-    # Tokenizer
+
+def _validate_logging(cfg: Config) -> None:
+    if cfg.logging.log_file is not None and not str(cfg.logging.log_file).strip():
+        _vfail("logging.log_file must be a non-empty string or null")
+    if cfg.logging.wandb.mode not in ("online", "offline", "disabled"):
+        _vfail(
+            "logging.wandb.mode must be 'online', 'offline', or 'disabled', "
+            f"got {cfg.logging.wandb.mode!r}"
+        )
+
+
+def _validate_tokenizer(cfg: Config) -> None:
     tok = cfg.data.tokenizer
     if tok.kind == "hf":
         if not tok.hf_name_or_path:
@@ -764,6 +769,17 @@ def validate_config(cfg: Config) -> None:
         _vfail("model.bos_token_id must be within [0, vocab_size) when add_bos=true")
     if tok.add_eos and not (0 <= cfg.model.eos_token_id < cfg.model.vocab_size):
         _vfail("model.eos_token_id must be within [0, vocab_size) when add_eos=true")
+
+
+def validate_config(cfg: Config) -> None:
+    """Validate config with actionable error messages."""
+    _validate_train(cfg)
+    _validate_optim(cfg)
+    _validate_checkpoint(cfg)
+    _validate_model(cfg)
+    _validate_data(cfg)
+    _validate_logging(cfg)
+    _validate_tokenizer(cfg)
 
 
 def derived_deterministic(cfg: Config) -> bool:
