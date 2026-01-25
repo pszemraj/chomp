@@ -56,7 +56,7 @@ Two config knobs control loss behavior at packed boundaries:
   - When enabled, labels at **segment transitions** are set to `-100`.
   - This prevents the model from learning cross-document next-token
     predictions (e.g., predicting the first token of the next document from
-    the previous document’s final token).
+    the previous document's final token).
 
 - `data.train_on_eos` (default: true)
   - When disabled, any label equal to `model.eos_token_id` is set to `-100`.
