@@ -117,6 +117,42 @@ class HFStreamingTextStream:
     def __iter__(self) -> HFStreamingTextStream:
         return self
 
+    def _record_state(self) -> None:
+        """Cache state_dict periodically for retry recovery."""
+        self._n_since_state += 1
+        if self._n_since_state < self._spec.state_update_interval:
+            return
+        self._n_since_state = 0
+        try:
+            self._last_state = self._ds.state_dict()  # type: ignore[attr-defined]
+        except Exception:
+            self._last_state = None
+
+    def _recover_iterator(self) -> None:
+        """Best-effort rebuild from last cached state."""
+        if self._last_state is None:
+            return
+        try:
+            self._ds = self._load_ds_for_epoch(self._epoch)
+            self._ds.load_state_dict(self._last_state)  # type: ignore[attr-defined]
+            self._it = iter(self._ds)
+        except Exception:
+            # Fall back to sleeping and retrying next() on current iterator.
+            return
+
+    def _next_item(self) -> str:
+        """Fetch and validate the next text item."""
+        item = next(self._it)
+        if self._spec.text_key not in item:
+            raise KeyError(
+                f"HF item missing text key {self._spec.text_key!r}. Keys: {sorted(item.keys())}"
+            )
+        text = item[self._spec.text_key]
+        if not isinstance(text, str):
+            text = str(text)
+        self._record_state()
+        return text
+
     def __next__(self) -> str:
         if self._it is None or self._ds is None:
             self._build()
@@ -124,26 +160,7 @@ class HFStreamingTextStream:
         # Retry loop for transient failures
         for attempt in range(self._spec.max_retries + 1):
             try:
-                item = next(self._it)
-                if self._spec.text_key not in item:
-                    raise KeyError(
-                        f"HF item missing text key {self._spec.text_key!r}. Keys: {sorted(item.keys())}"
-                    )
-                text = item[self._spec.text_key]
-                if not isinstance(text, str):
-                    text = str(text)
-
-                # Periodically cache state for retry recovery.
-                self._n_since_state += 1
-                if self._n_since_state >= self._spec.state_update_interval:
-                    self._n_since_state = 0
-                    # Best-effort: only works on streaming datasets.
-                    try:
-                        self._last_state = self._ds.state_dict()  # type: ignore[attr-defined]
-                    except Exception:
-                        self._last_state = None
-
-                return text
+                return self._next_item()
 
             except StopIteration:
                 if not self._spec.repeat:
@@ -158,14 +175,7 @@ class HFStreamingTextStream:
                     raise
 
                 # Best-effort recovery: rebuild ds from last known state if available.
-                if self._last_state is not None:
-                    try:
-                        self._ds = self._load_ds_for_epoch(self._epoch)
-                        self._ds.load_state_dict(self._last_state)  # type: ignore[attr-defined]
-                        self._it = iter(self._ds)
-                    except Exception:
-                        # Fall back to sleeping and retrying next() on current iterator.
-                        pass
+                self._recover_iterator()
 
                 time.sleep(self._spec.retry_delay_sec * (2**attempt))
 
