@@ -312,9 +312,12 @@ def _build_checkpoint_manager(cfg: Config, run_dir: Path) -> Any | None:
     """
     if not cfg.checkpoint.enabled:
         return None
-    ckpt_dir = (
-        Path(cfg.checkpoint.root_dir) if cfg.checkpoint.root_dir else default_ckpt_dir(run_dir)
-    )
+    if cfg.checkpoint.root_dir:
+        ckpt_dir = Path(cfg.checkpoint.root_dir)
+        if not ckpt_dir.is_absolute():
+            ckpt_dir = run_dir / ckpt_dir
+    else:
+        ckpt_dir = default_ckpt_dir(run_dir)
     return make_manager(
         ckpt_dir,
         max_to_keep=cfg.checkpoint.max_to_keep,

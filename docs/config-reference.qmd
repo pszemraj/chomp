@@ -1550,7 +1550,8 @@ Enable checkpointing.
 root_dir: str | null = null
 ```
 
-Checkpoint directory. `null` uses `<run_dir>/checkpoints`.
+Checkpoint directory. `null` uses `<run_dir>/checkpoints`. Relative paths are resolved against
+`run_dir`.
 
 | Property | Value |
 |----------|-------|
