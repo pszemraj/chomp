@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 """Training loop + compiled train step.
 
 This module is the heart of chomp.
@@ -59,13 +61,12 @@ from chomp.data import (
     save_tokenizer_snapshot,
 )
 from chomp.model import build_model, training_loss
-from chomp.types import Batch, TrainState
+from chomp.types import IGNORE_INDEX, Batch, TrainState
 from chomp.utils.devices import assert_batch_on_device
 from chomp.utils.io import MetricsWriter, add_file_logging, create_run_dir
 from chomp.utils.profiling import start_trace, step_annotation, stop_trace
-from chomp.utils.tree import param_count
+from chomp.utils.tree import abstractify_tree, param_count
 
-_IGNORE_INDEX = -100
 logger = logging.getLogger(__name__)
 
 
@@ -78,7 +79,7 @@ def _count_tokens(labels: jax.Array, attention_mask: jax.Array | None) -> jax.Ar
     """
 
     shift_labels = labels[:, 1:]
-    valid = shift_labels != _IGNORE_INDEX
+    valid = shift_labels != IGNORE_INDEX
     if attention_mask is not None:
         valid = valid & attention_mask[:, 1:].astype(bool)
     return jnp.sum(valid, dtype=jnp.int32)
@@ -154,6 +155,213 @@ def _resolve_generation_settings(cfg: Config) -> GenerationSettings | None:
         top_k=cfg.train.generate_top_k,
         top_p=cfg.train.generate_top_p,
     )
+
+
+def _setup_run_dir_and_tokenizer(
+    cfg: Config,
+    *,
+    config_path: str | None,
+    allow_existing: bool,
+    dry_run: bool,
+) -> tuple[
+    Config,
+    Any,
+    Path,
+    Path,
+    list[list[int]],
+    GenerationSettings | None,
+    Any | None,
+    jax.Array | None,
+    random.Random | None,
+]:
+    """Prepare run directory, tokenizer snapshot, eval tokens, and generation stream.
+
+    :param Config cfg: Training configuration.
+    :param str | None config_path: Optional config path for run_dir bookkeeping.
+    :param bool allow_existing: Whether to reuse an existing run directory.
+    :param bool dry_run: If True, skip heavy data/generation setup.
+    :return tuple[Config, Any, Path, Path, list[list[int]], GenerationSettings | None, Any | None, jax.Array | None, random.Random | None]:
+        Updated config, tokenizer, run/metrics paths, eval tokens, generation settings, stream, key, and RNG.
+    """
+    cfg, tokenizer = prepare_tokenizer_and_config(cfg)
+
+    run_dir = create_run_dir(cfg, config_path=config_path, allow_existing=allow_existing)
+    if cfg.logging.log_file is not None:
+        add_file_logging(run_dir / cfg.logging.log_file, level=cfg.logging.level)
+    metrics_path = run_dir / cfg.logging.metrics_file
+    save_tokenizer_snapshot(run_dir, cfg, tokenizer, allow_existing=allow_existing)
+
+    eval_tokens = [] if dry_run else load_or_create_eval_texts(cfg, tokenizer=tokenizer)
+
+    gen_settings: GenerationSettings | None = None
+    gen_stream = None
+    gen_key = None
+    gen_rng = None
+    if not dry_run:
+        gen_settings = _resolve_generation_settings(cfg)
+        if gen_settings is not None and cfg.model.backend != "megalodon":
+            logger.debug(
+                "Generation is enabled but model.backend=%s; skipping generation.",
+                cfg.model.backend,
+            )
+            gen_settings = None
+        if gen_settings is not None:
+            try:
+                gen_stream = build_generation_text_stream(cfg, seed_offset=1)
+                gen_key = jax.random.PRNGKey(cfg.train.seed + 1234)
+                gen_rng = random.Random(cfg.train.seed + 5678)
+            except Exception as exc:
+                logger.warning("Failed to initialize generation stream: %s", exc)
+                gen_settings = None
+
+    return (
+        cfg,
+        tokenizer,
+        run_dir,
+        metrics_path,
+        eval_tokens,
+        gen_settings,
+        gen_stream,
+        gen_key,
+        gen_rng,
+    )
+
+
+def _maybe_init_wandb(cfg: Config, *, run_dir: Path, dry_run: bool) -> Any | None:
+    """Initialize W&B if enabled, otherwise return None.
+
+    :param Config cfg: Training configuration.
+    :param Path run_dir: Run directory path.
+    :param bool dry_run: Whether this is a dry run.
+    :return Any | None: W&B run object or None if disabled.
+    """
+    wandb_cfg = cfg.logging.wandb
+    if wandb_cfg.enabled and wandb_cfg.mode != "disabled" and not dry_run:
+        try:
+            import wandb
+        except Exception as exc:  # pragma: no cover - optional runtime dependency
+            raise RuntimeError(
+                "wandb is enabled but not installed. Install with `pip install wandb`."
+            ) from exc
+
+        tags = list(wandb_cfg.tags) if wandb_cfg.tags else None
+        wandb_run = wandb.init(
+            project=wandb_cfg.project or cfg.logging.project,
+            entity=wandb_cfg.entity,
+            name=wandb_cfg.run_name or run_dir.name,
+            mode=wandb_cfg.mode,
+            config=cfg.to_dict(),
+            tags=tags,
+        )
+        cfg_path = run_dir / "config_original.yaml"
+        if cfg_path.exists():
+            artifact = wandb.Artifact(f"{run_dir.name}-config", type="config")
+            artifact.add_file(str(cfg_path), name="config_original.yaml")
+            wandb_run.log_artifact(artifact)
+        else:
+            logging.getLogger(__name__).info(
+                "config_original.yaml not found; skipping W&B artifact."
+            )
+        return wandb_run
+    if dry_run and wandb_cfg.enabled:
+        logging.getLogger(__name__).info("dry_run: skipping W&B initialization.")
+    return None
+
+
+def _maybe_start_profile(cfg: Config, *, run_dir: Path) -> bool:
+    """Start profiling if enabled; returns True if started.
+
+    :param Config cfg: Training configuration.
+    :param Path run_dir: Run directory path.
+    :return bool: True if profiling was started.
+    """
+    if cfg.train.profile:
+        trace_dir = cfg.train.profile_dir or str(run_dir / "trace")
+        Path(trace_dir).mkdir(parents=True, exist_ok=True)
+        start_trace(trace_dir)
+        return True
+    return False
+
+
+def _build_model_state(
+    cfg: Config,
+) -> tuple[
+    Any, Any, optax.GradientTransformation, Callable[[jax.Array], jax.Array], TrainState, Any
+]:
+    """Build model, optimizer, and initial TrainState.
+
+    :param Config cfg: Training configuration.
+    :return tuple[Any, Any, optax.GradientTransformation, Callable[[jax.Array], jax.Array], TrainState, Any]:
+        Params, static, optimizer, LR schedule, train state, and abstract state.
+    """
+    key = jax.random.PRNGKey(cfg.train.seed)
+    key, k_model = jax.random.split(key)
+    params, static = build_model(cfg, key=k_model)
+    tx, schedule = build_optimizer(cfg, params)
+    state0 = init_train_state(cfg, params=params, tx=tx, key=key)
+    abstract_state = abstractify_tree(state0)
+    return params, static, tx, schedule, state0, abstract_state
+
+
+def _build_checkpoint_manager(cfg: Config, run_dir: Path) -> Any | None:
+    """Create checkpoint manager when enabled.
+
+    :param Config cfg: Training configuration.
+    :param Path run_dir: Run directory path.
+    :return Any | None: Checkpoint manager or None if disabled.
+    """
+    if not cfg.checkpoint.enabled:
+        return None
+    if cfg.checkpoint.root_dir:
+        ckpt_dir = Path(cfg.checkpoint.root_dir)
+        if not ckpt_dir.is_absolute():
+            ckpt_dir = run_dir / ckpt_dir
+    else:
+        ckpt_dir = default_ckpt_dir(run_dir)
+    return make_manager(
+        ckpt_dir,
+        max_to_keep=cfg.checkpoint.max_to_keep,
+        save_every=cfg.checkpoint.save_every,
+        async_save=cfg.checkpoint.async_save,
+    )
+
+
+def _maybe_restore_state(
+    *,
+    resume: Literal["none", "latest"] | int,
+    manager: Any | None,
+    state0: TrainState,
+    abstract_state: Any,
+    data_it: Any,
+    cfg: Config,
+) -> TrainState:
+    """Restore state if requested, otherwise return the initial state.
+
+    :param Literal["none", "latest"] | int resume: Resume selector.
+    :param Any | None manager: Checkpoint manager.
+    :param TrainState state0: Initial state.
+    :param Any abstract_state: Abstract train state for restore shape.
+    :param Any data_it: Data iterator to restore.
+    :param Config cfg: Training configuration.
+    :return TrainState: Restored or initial state.
+    """
+    if resume == "none":
+        return state0
+    if manager is None:
+        raise RuntimeError("resume requested but checkpointing is disabled")
+
+    if resume == "latest":
+        step_r, state, meta = restore_latest(
+            manager, abstract_train_state=abstract_state, data_iter=data_it
+        )
+    else:
+        step_r, state, meta = restore_at_step(
+            manager, step=int(resume), abstract_train_state=abstract_state, data_iter=data_it
+        )
+
+    print(f"[chomp] resumed from checkpoint step {step_r}")
+    check_resume_compat(cfg, meta)
+    return state
 
 
 def _trim_trailing_token(tokens: list[int], token_id: int | None) -> list[int]:
@@ -362,24 +570,6 @@ def init_train_state(
     return TrainState(
         step=jnp.array(0, dtype=jnp.int32), params=params, opt_state=opt_state, rng=key
     )
-
-
-def _abstractify_tree(tree: Any) -> Any:
-    """Convert a pytree of arrays to ShapeDtypeStruct for Orbax restore.
-
-    :param Any tree: Pytree of JAX arrays.
-    :return Any: Pytree of ShapeDtypeStruct with same structure.
-    """
-
-    def to_struct(x: jax.Array) -> jax.ShapeDtypeStruct:
-        """Convert a single array to its abstract shape/dtype specification.
-
-        :param jax.Array x: Concrete array.
-        :return jax.ShapeDtypeStruct: Abstract specification.
-        """
-        return jax.ShapeDtypeStruct(x.shape, x.dtype)
-
-    return jax.tree_util.tree_map(to_struct, tree)
 
 
 def make_train_step(
@@ -610,120 +800,47 @@ def run(
 
     allow_existing = resume != "none"
 
-    # Resolve tokenizer-derived config (vocab rounding, special tokens).
-    cfg, tokenizer = prepare_tokenizer_and_config(cfg)
+    (
+        cfg,
+        tokenizer,
+        run_dir,
+        metrics_path,
+        eval_tokens,
+        gen_settings,
+        gen_stream,
+        gen_key,
+        gen_rng,
+    ) = _setup_run_dir_and_tokenizer(
+        cfg,
+        config_path=config_path,
+        allow_existing=allow_existing,
+        dry_run=dry_run,
+    )
 
-    # Prepare run dir
-    run_dir = create_run_dir(cfg, config_path=config_path, allow_existing=allow_existing)
-    if cfg.logging.log_file is not None:
-        add_file_logging(run_dir / cfg.logging.log_file, level=cfg.logging.level)
-    metrics_path = run_dir / cfg.logging.metrics_file
-    save_tokenizer_snapshot(run_dir, cfg, tokenizer, allow_existing=allow_existing)
-    eval_tokens = [] if dry_run else load_or_create_eval_texts(cfg, tokenizer=tokenizer)
-    gen_settings = None
-    gen_stream = None
-    gen_key = None
-    gen_rng = None
-    if not dry_run:
-        gen_settings = _resolve_generation_settings(cfg)
-        if gen_settings is not None and cfg.model.backend != "megalodon":
-            logger.debug(
-                "Generation is enabled but model.backend=%s; skipping generation.",
-                cfg.model.backend,
-            )
-            gen_settings = None
-        if gen_settings is not None:
-            try:
-                gen_stream = build_generation_text_stream(cfg, seed_offset=1)
-                gen_key = jax.random.PRNGKey(cfg.train.seed + 1234)
-                gen_rng = random.Random(cfg.train.seed + 5678)
-            except Exception as exc:
-                logger.warning("Failed to initialize generation stream: %s", exc)
-                gen_settings = None
+    wandb_run = _maybe_init_wandb(cfg, run_dir=run_dir, dry_run=dry_run)
+    profile_enabled = _maybe_start_profile(cfg, run_dir=run_dir)
 
-    wandb_run = None
-    wandb_cfg = cfg.logging.wandb
-    if wandb_cfg.enabled and wandb_cfg.mode != "disabled" and not dry_run:
-        try:
-            import wandb
-        except Exception as exc:  # pragma: no cover - optional runtime dependency
-            raise RuntimeError(
-                "wandb is enabled but not installed. Install with `pip install wandb`."
-            ) from exc
-
-        tags = list(wandb_cfg.tags) if wandb_cfg.tags else None
-        wandb_run = wandb.init(
-            project=wandb_cfg.project or cfg.logging.project,
-            entity=wandb_cfg.entity,
-            name=wandb_cfg.run_name or run_dir.name,
-            mode=wandb_cfg.mode,
-            config=cfg.to_dict(),
-            tags=tags,
-        )
-        cfg_path = run_dir / "config_original.yaml"
-        if cfg_path.exists():
-            artifact = wandb.Artifact(f"{run_dir.name}-config", type="config")
-            artifact.add_file(str(cfg_path), name="config_original.yaml")
-            wandb_run.log_artifact(artifact)
-        else:
-            logging.getLogger(__name__).info(
-                "config_original.yaml not found; skipping W&B artifact."
-            )
-    elif dry_run and wandb_cfg.enabled:
-        logging.getLogger(__name__).info("dry_run: skipping W&B initialization.")
-
-    # Optional profiling
-    if cfg.train.profile:
-        trace_dir = cfg.train.profile_dir or str(run_dir / "trace")
-        Path(trace_dir).mkdir(parents=True, exist_ok=True)
-        start_trace(trace_dir)
-
-    # Build model
-    key = jax.random.PRNGKey(cfg.train.seed)
-    key, k_model = jax.random.split(key)
-    params, static = build_model(cfg, key=k_model)
+    params, static, tx, schedule, state0, abstract_state = _build_model_state(cfg)
 
     # Log param count once
     n_params = param_count(params)
     print(f"[chomp] params: {n_params:,}")
 
-    # Optim + state skeleton
-    tx, schedule = build_optimizer(cfg, params)
-    state0 = init_train_state(cfg, params=params, tx=tx, key=key)
-    abstract_state = _abstractify_tree(state0)
-
     # Data iterator (host-side)
     data_it = build_train_iterator(cfg, tokenizer=tokenizer)
 
     # Checkpoint manager
-    manager = None
-    if cfg.checkpoint.enabled:
-        ckpt_dir = (
-            Path(cfg.checkpoint.root_dir) if cfg.checkpoint.root_dir else default_ckpt_dir(run_dir)
-        )
-        manager = make_manager(
-            ckpt_dir,
-            max_to_keep=cfg.checkpoint.max_to_keep,
-            save_every=cfg.checkpoint.save_every,
-            async_save=cfg.checkpoint.async_save,
-        )
+    manager = _build_checkpoint_manager(cfg, run_dir)
 
     # Restore if requested
-    state = state0
-    if resume != "none":
-        if manager is None:
-            raise RuntimeError("resume requested but checkpointing is disabled")
-        if resume == "latest":
-            step_r, state, _meta = restore_latest(
-                manager, abstract_train_state=abstract_state, data_iter=data_it
-            )
-        else:
-            step_r, state, _meta = restore_at_step(
-                manager, step=int(resume), abstract_train_state=abstract_state, data_iter=data_it
-            )
-
-        print(f"[chomp] resumed from checkpoint step {step_r}")
-        check_resume_compat(cfg, _meta)
+    state = _maybe_restore_state(
+        resume=resume,
+        manager=manager,
+        state0=state0,
+        abstract_state=abstract_state,
+        data_it=data_it,
+        cfg=cfg,
+    )
 
     train_step = make_train_step(cfg, static=static, tx=tx, lr_schedule=schedule)
     eval_every = int(cfg.train.eval_every)
@@ -783,7 +900,7 @@ def run(
             wandb_run.finish()
         if manager is not None:
             manager.wait_until_finished()
-        if cfg.train.profile:
+        if profile_enabled:
             stop_trace()
         return run_dir
 

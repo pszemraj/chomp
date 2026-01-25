@@ -221,3 +221,14 @@ __marimo__/
 # Chomp runs + W&B logs
 runs/
 wandb/
+
+# Claude Code local config
+.claude/
+
+# Local development artifacts
+scratch/
+plan/
+
+# Custom configs (ignored by default; keep configs/custom/.gitkeep)
+configs/custom/*.yaml
+configs/custom/*.yml

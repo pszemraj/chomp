@@ -534,17 +534,33 @@ class BinPacker:
             return
 
         segments = sorted(self._pending_docs, key=lambda x: int(x.size), reverse=True)
+        bins, remaining = self._seed_bins(segments)
+        leftover = self._place_remaining(bins, remaining)
+        self._pending_docs = leftover
+        self._enqueue_bins(bins)
+
+    def _seed_bins(self, segments: list[np.ndarray]) -> tuple[list[_Bin], list[np.ndarray]]:
+        """Create bins and seed them with the largest segments.
+
+        :param list[np.ndarray] segments: Sorted segments (largest first).
+        :return tuple[list[_Bin], list[np.ndarray]]: Seeded bins and leftover segments.
+        """
         bins = [
             _Bin(capacity=self._capacity, max_docs=self._max_docs_per_bin)
             for _ in range(self._bins_per_pack)
         ]
-
         for idx in range(self._bins_per_pack):
             bins[idx].add(segments[idx])
+        return bins, segments[self._bins_per_pack :]
 
-        remaining = segments[self._bins_per_pack :]
+    def _place_remaining(self, bins: list[_Bin], remaining: list[np.ndarray]) -> list[np.ndarray]:
+        """Place remaining segments into bins, returning leftovers.
+
+        :param list[_Bin] bins: Bins to fill.
+        :param list[np.ndarray] remaining: Segments to place.
+        :return list[np.ndarray]: Segments that did not fit in any bin.
+        """
         leftover: list[np.ndarray] = []
-
         for seg in remaining:
             placed = False
             for b in bins:
@@ -554,9 +570,10 @@ class BinPacker:
                     break
             if not placed:
                 leftover.append(seg)
+        return leftover
 
-        self._pending_docs = leftover
-
+    def _enqueue_bins(self, bins: list[_Bin]) -> None:
+        """Render all bins into ready sequences."""
         for b in bins:
             tokens, segs = self._render_bin(b)
             self._ready.append((tokens, segs))

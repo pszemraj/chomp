@@ -155,12 +155,12 @@ def test_default_init_mode_is_he() -> None:
     assert cfg.model.init_mode == "he"
 
 
-def test_pad_token_id_must_differ_from_eos() -> None:
-    """pad_token_id equal to eos_token_id must raise ValueError."""
+def test_pad_token_id_equal_to_eos_warns() -> None:
+    """pad_token_id equal to eos_token_id should warn but still validate."""
     cfg = _base_cfg()
     bad_model = replace(cfg.model, pad_token_id=2, eos_token_id=2)
     bad = replace(cfg, model=bad_model)
-    with pytest.raises(ValueError, match="pad_token_id"):
+    with pytest.warns(UserWarning, match="pad_token_id equals model.eos_token_id"):
         validate_config(bad)
 
 

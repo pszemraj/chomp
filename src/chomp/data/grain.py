@@ -87,18 +87,12 @@ class GrainTrainBatchIterator:
         return dict(self._last_stats)
 
 
-def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchIterator:
-    """Build a Grain-backed batch iterator.
+def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any]]:
+    """Create Grain dataset classes without importing grain at module import time.
 
-    :param Config cfg: Training configuration.
-    :param tokenizer: Tokenizer instance for encoding text.
-        :raises RuntimeError: If grain is not installed.
-        :return GrainTrainBatchIterator: Iterator yielding Batch objects.
+    :param grain: Imported grain module.
+    :return tuple[type[Any], type[Any]]: Iterator and dataset classes.
     """
-    try:
-        import grain.python as grain
-    except Exception as exc:  # pragma: no cover - missing dependency
-        raise RuntimeError("Grain is not installed. Install with `pip install grain`.") from exc
 
     class _TrainBatchDatasetIterator(grain.DatasetIterator):  # type: ignore[misc]
         """DatasetIterator that delegates to TrainBatchIterator."""
@@ -144,6 +138,23 @@ def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchItera
         def __iter__(self) -> grain.DatasetIterator:
             return _TrainBatchDatasetIterator(cfg=self._cfg, tokenizer=self._tokenizer)
 
+    return _TrainBatchDatasetIterator, _TrainBatchIterDataset
+
+
+def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchIterator:
+    """Build a Grain-backed batch iterator.
+
+    :param Config cfg: Training configuration.
+    :param tokenizer: Tokenizer instance for encoding text.
+        :raises RuntimeError: If grain is not installed.
+        :return GrainTrainBatchIterator: Iterator yielding Batch objects.
+    """
+    try:
+        import grain.python as grain
+    except Exception as exc:  # pragma: no cover - missing dependency
+        raise RuntimeError("Grain is not installed. Install with `pip install grain`.") from exc
+
+    _TrainBatchDatasetIterator, _TrainBatchIterDataset = _make_grain_iter_classes(grain)
     ds = _TrainBatchIterDataset(cfg=cfg, tokenizer=tokenizer)
 
     if cfg.data.grain_prefetch > 0:

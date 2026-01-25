@@ -1,3 +1,7 @@
+variables:
+  seq_len: 2048
+  chunk_size: 512
+
 model:
   backend: megalodon
   vocab_size: 32128
@@ -8,7 +12,7 @@ model:
   value_dim: 768
   ffn_hidden_dim: 3072
   cema_ndim: 16
-  chunk_size: 512
+  chunk_size: $variables.chunk_size
   dropout: 0.0
   attention_dropout: 0.0
   hidden_dropout: 0.0
@@ -53,7 +57,7 @@ train:
   seed: 0
   steps: 10000
   batch_size: 2
-  seq_len: 2048
+  seq_len: $variables.seq_len
   grad_accum: 8
   jit: true
   deterministic: true
@@ -87,7 +91,7 @@ logging:
     entity: null
     run_name: null
     mode: online
-    tags: ["zyda2", "100m", "seq2048", "chunk512"]
+    tags: ["zyda2", "100m", "seq{$variables.seq_len}", "chunk{$variables.chunk_size}"]
 
 debug:
   nan_check: true

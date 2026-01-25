@@ -11,7 +11,6 @@ Keep it minimal: this is not a generic library.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 import jax
@@ -61,64 +60,19 @@ def tree_allclose(a: Any, b: Any, *, rtol: float = 1e-6, atol: float = 1e-6) -> 
     return True
 
 
-def tree_equal(a: Any, b: Any) -> bool:
-    """Tree-wise exact equality for arrays.
+def abstractify_tree(tree: Any) -> Any:
+    """Convert a pytree of arrays to ShapeDtypeStruct leaves.
 
-    :param Any a: First pytree.
-    :param Any b: Second pytree.
-    :return bool: True if all arrays are exactly equal.
+    :param Any tree: Pytree of JAX arrays.
+    :return Any: Pytree of ShapeDtypeStruct with matching structure.
     """
 
-    la = jax.tree_util.tree_leaves(a)
-    lb = jax.tree_util.tree_leaves(b)
-    if len(la) != len(lb):
-        return False
-    for xa, xb in zip(la, lb, strict=True):
-        if hasattr(xa, "shape") and hasattr(xb, "shape"):
-            if xa.shape != xb.shape or xa.dtype != xb.dtype:
-                return False
-            if not jnp.array_equal(xa, xb):
-                return False
-        else:
-            if xa != xb:
-                return False
-    return True
+    def to_struct(x: jax.Array) -> jax.ShapeDtypeStruct:
+        """Convert a leaf array to a ShapeDtypeStruct.
 
+        :param jax.Array x: Leaf array.
+        :return jax.ShapeDtypeStruct: Shape/dtype/sharding descriptor.
+        """
+        return jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=getattr(x, "sharding", None))
 
-@dataclass(frozen=True)
-class TensorStats:
-    """Statistics for a single tensor (shape, dtype, mean, std, min, max)."""
-
-    shape: tuple[int, ...]
-    dtype: str
-    mean: float
-    std: float
-    min: float
-    max: float
-
-
-def sample_tensor_stats(params: Any, *, max_tensors: int = 8) -> list[TensorStats]:
-    """Sample a few tensors from the params tree and compute simple stats.
-
-    This catches obvious broken initialization (all-zeros, NaNs, infs) early.
-
-    :param Any params: Parameter pytree.
-    :param int max_tensors: Maximum number of tensors to sample.
-    :return list[TensorStats]: Statistics for sampled tensors.
-    """
-
-    leaves = [x for x in jax.tree_util.tree_leaves(params) if hasattr(x, "shape")]
-    out: list[TensorStats] = []
-    for x in leaves[:max_tensors]:
-        xf = x.astype(jnp.float32)
-        out.append(
-            TensorStats(
-                shape=tuple(x.shape),
-                dtype=str(x.dtype),
-                mean=float(jnp.mean(xf)),
-                std=float(jnp.std(xf)),
-                min=float(jnp.min(xf)),
-                max=float(jnp.max(xf)),
-            )
-        )
-    return out
+    return jax.tree_util.tree_map(to_struct, tree)

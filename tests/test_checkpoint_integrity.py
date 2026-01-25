@@ -28,7 +28,7 @@ from chomp.config import (
 )
 from chomp.data import build_train_iterator, data_fingerprint
 from chomp.types import TrainState
-from chomp.utils.tree import tree_allclose
+from chomp.utils.tree import abstractify_tree, tree_allclose
 
 
 def _base_cfg(run_dir: Path) -> Config:
@@ -72,24 +72,6 @@ def _make_state() -> TrainState:
     )
 
 
-def _abstractify(tree: jax.Array) -> jax.ShapeDtypeStruct:
-    """Convert a pytree of arrays to ShapeDtypeStruct leaves.
-
-    :param jax.Array tree: Pytree of arrays.
-    :return jax.ShapeDtypeStruct: Pytree of abstract arrays.
-    """
-
-    def to_struct(x: jax.Array) -> jax.ShapeDtypeStruct:
-        """Convert single array to ShapeDtypeStruct.
-
-        :param jax.Array x: Array leaf.
-        :return jax.ShapeDtypeStruct: Abstract spec.
-        """
-        return jax.ShapeDtypeStruct(x.shape, x.dtype)
-
-    return jax.tree_util.tree_map(to_struct, tree)
-
-
 def test_async_checkpoint_roundtrip(tmp_path: Path) -> None:
     """Async checkpoint save should roundtrip state correctly."""
     run_dir = tmp_path / "run_async"
@@ -103,7 +85,7 @@ def test_async_checkpoint_roundtrip(tmp_path: Path) -> None:
     save(mgr, step=1, train_state=state, data_iter=data_it, meta=meta)
     mgr.wait_until_finished()
 
-    abstract_state = _abstractify(state)
+    abstract_state = abstractify_tree(state)
     data_it_restore = build_train_iterator(cfg)
     step, restored, _meta = restore_latest(
         mgr, abstract_train_state=abstract_state, data_iter=data_it_restore
@@ -151,7 +133,7 @@ def test_corrupt_checkpoint_fails_restore(tmp_path: Path) -> None:
     assert corrupt_target is not None
     corrupt_target.write_text("{not: valid json", encoding="utf-8")
 
-    abstract_state = _abstractify(state)
+    abstract_state = abstractify_tree(state)
     with pytest.raises((ValueError, RuntimeError, KeyError, json.JSONDecodeError)):
         data_it_restore = build_train_iterator(cfg)
         restore_at_step(mgr, step=1, abstract_train_state=abstract_state, data_iter=data_it_restore)

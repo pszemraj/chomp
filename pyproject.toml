@@ -37,13 +37,15 @@ dependencies = [
   "datasets>=3.0.0",
   # transformers (tokenizers)
   "transformers>=4.40.0",
+  # CLI
+  "click>=8.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "ruff>=0.4.0"]
 
 [project.scripts]
-chomp-train = "chomp.scripts.train:main"
+chomp = "chomp.cli.main:cli"
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -60,6 +62,9 @@ packages = ["src/chomp"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+filterwarnings = [
+  "ignore:Implicit conversion of an array to a dtype is deprecated.*:DeprecationWarning:chex._src.asserts",
+]
 
 [tool.ruff]
 line-length = 100

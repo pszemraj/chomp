@@ -40,7 +40,7 @@ def test_train_step_compiles_once(tmp_path: Path) -> None:
     cmd = [
         sys.executable,
         "-c",
-        f"from chomp.scripts.train import main; main(['{config_src}'])",
+        f"from chomp.cli.train import train; train.main(['{config_src}'], standalone_mode=False)",
     ]
 
     p = subprocess.run(cmd, cwd=str(work), env=env, capture_output=True, text=True)

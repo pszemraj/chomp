@@ -44,10 +44,10 @@ so you can make an informed decision.
 
 ```bash
 # Start a run
-chomp-train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run
+chomp train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run
 
 # Resume latest
-chomp-train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run --resume latest
+chomp train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run --resume latest
 ```
 
 If a mismatch is detected, resume fails fast with a detailed error.

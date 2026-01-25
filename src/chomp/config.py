@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 """Configuration for chomp.
 
 Rule #1: **One config system.**
@@ -17,6 +19,8 @@ Design stance (hard-earned):
 
 from __future__ import annotations
 
+import re
+import warnings
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -416,6 +420,8 @@ def load_config(path: str | Path, overrides: Iterable[str] | None = None) -> Con
     with path.open("r") as f:
         data = yaml.safe_load(f) or {}
 
+    data = _resolve_variables(data)
+
     cfg = _from_nested_dict(data)
 
     if overrides:
@@ -427,6 +433,96 @@ def load_config(path: str | Path, overrides: Iterable[str] | None = None) -> Con
 
     validate_config(cfg)
     return cfg
+
+
+_VAR_INLINE_RE = re.compile(r"\{\$variables\.([A-Za-z0-9_.-]+)\}")
+_VAR_BRACE_RE = re.compile(r"\$\{variables\.([A-Za-z0-9_.-]+)\}")
+_VAR_FULL_RE = re.compile(r"\$variables\.([A-Za-z0-9_.-]+)$")
+_VAR_SUSPICIOUS_RE = re.compile(r"\$variables\.[A-Za-z0-9_.-]+")
+
+
+def _resolve_variables(data: dict[str, Any]) -> dict[str, Any]:
+    """Resolve variable references in a config dict before dataclass parsing.
+
+    Supported forms:
+    - Exact value: "$variables.foo" -> replaced with the referenced value (type preserved).
+    - Inline string: "seq{$variables.seq_len}" or "${variables.seq_len}" -> interpolated.
+
+    Variable definitions live under top-level key "variables" and may be nested.
+
+    :param dict[str, Any] data: Raw YAML-loaded data.
+    :raises ValueError: If a variable reference is missing or circular.
+    :return dict[str, Any]: Data with variables resolved (variables removed).
+    """
+    raw_vars = data.get("variables") or {}
+    if not isinstance(raw_vars, dict):
+        raise ValueError("variables must be a mapping if provided")
+
+    resolved: dict[str, Any] = {}
+    resolving: set[str] = set()
+
+    def _lookup_var(path: str) -> Any:
+        """Resolve a variable path from the variables mapping.
+
+        :param str path: Dot-separated variable path (e.g., "foo.bar").
+        :raises ValueError: If the reference is missing or circular.
+        :return Any: Resolved variable value.
+        """
+        if path in resolved:
+            return resolved[path]
+        if path in resolving:
+            cycle = " -> ".join(list(resolving) + [path])
+            raise ValueError(f"Circular variable reference: {cycle}")
+
+        parts = path.split(".")
+        cur: Any = raw_vars
+        for part in parts:
+            if not isinstance(cur, dict) or part not in cur:
+                raise ValueError(f"Unknown variable reference: variables.{path}")
+            cur = cur[part]
+
+        resolving.add(path)
+        value = _resolve_value(cur)
+        resolving.remove(path)
+        resolved[path] = value
+        return value
+
+    def _sub_var(match: re.Match[str]) -> str:
+        """Replace a regex match with the referenced variable value.
+
+        :param re.Match[str] match: Regex match containing the variable path.
+        :return str: Stringified variable value.
+        """
+        return str(_lookup_var(match.group(1)))
+
+    def _resolve_value(value: Any) -> Any:
+        """Resolve variables within a nested config value.
+
+        :param Any value: Arbitrary nested value (dict/list/str/etc.).
+        :return Any: Resolved value with variables expanded.
+        """
+        if isinstance(value, dict):
+            return {k: _resolve_value(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_resolve_value(v) for v in value]
+        if isinstance(value, str):
+            full = _VAR_FULL_RE.fullmatch(value)
+            if full:
+                return _lookup_var(full.group(1))
+            out = _VAR_INLINE_RE.sub(_sub_var, value)
+            out = _VAR_BRACE_RE.sub(_sub_var, out)
+            remaining = _VAR_SUSPICIOUS_RE.findall(out)
+            if remaining:
+                warnings.warn(
+                    f"String contains unresolved variable-like patterns: {remaining}. "
+                    "Use {$variables.name} or ${variables.name} for inline substitution.",
+                    stacklevel=2,
+                )
+            return out
+        return value
+
+    resolved_data = {k: _resolve_value(v) for k, v in data.items() if k != "variables"}
+    return resolved_data
 
 
 def _from_nested_dict(data: dict[str, Any]) -> Config:
@@ -478,10 +574,8 @@ def _vfail(msg: str) -> None:
     raise ValueError(f"Config validation failed: {msg}")
 
 
-def validate_config(cfg: Config) -> None:
-    """Validate config with actionable error messages."""
-
-    # Train
+def _validate_train(cfg: Config) -> None:
+    """Validate training-related config fields."""
     if cfg.train.steps <= 0:
         _vfail(f"train.steps must be positive, got {cfg.train.steps}")
     if cfg.train.batch_size <= 0:
@@ -524,7 +618,9 @@ def validate_config(cfg: Config) -> None:
     ):
         _vfail(f"train.generate_top_p must be in (0, 1] when set, got {cfg.train.generate_top_p}")
 
-    # Optim
+
+def _validate_optim(cfg: Config) -> None:
+    """Validate optimizer-related config fields."""
     if cfg.optim.lr <= 0:
         _vfail(f"optim.lr must be positive, got {cfg.optim.lr}")
     if cfg.optim.grad_clip_norm < 0:
@@ -539,14 +635,18 @@ def validate_config(cfg: Config) -> None:
             f"({cfg.train.steps})"
         )
 
-    # Checkpoint
+
+def _validate_checkpoint(cfg: Config) -> None:
+    """Validate checkpoint-related config fields."""
     if cfg.checkpoint.enabled:
         if cfg.checkpoint.save_every <= 0:
             _vfail(f"checkpoint.save_every must be positive, got {cfg.checkpoint.save_every}")
         if cfg.checkpoint.max_to_keep <= 0:
             _vfail(f"checkpoint.max_to_keep must be positive, got {cfg.checkpoint.max_to_keep}")
 
-    # Model
+
+def _validate_model(cfg: Config) -> None:
+    """Validate model-related config fields."""
     if cfg.model.vocab_size <= 0:
         _vfail(f"model.vocab_size must be positive, got {cfg.model.vocab_size}")
     if cfg.model.backend == "dummy":
@@ -579,12 +679,15 @@ def validate_config(cfg: Config) -> None:
         _vfail(f"model.backend must be 'dummy' or 'megalodon', got {cfg.model.backend!r}")
 
     if cfg.model.pad_token_id == cfg.model.eos_token_id:
-        _vfail(
-            "model.pad_token_id must differ from model.eos_token_id. "
-            "Choose a tokenizer with a distinct pad token or set model.pad_token_id explicitly."
+        warnings.warn(
+            "model.pad_token_id equals model.eos_token_id. This is allowed, but EOS tokens may "
+            "be treated as padding in some models. Prefer a distinct pad token when possible.",
+            stacklevel=2,
         )
 
-    # Data
+
+def _validate_data(cfg: Config) -> None:
+    """Validate data pipeline-related config fields."""
     if cfg.data.backend == "hf":
         if not cfg.data.hf_dataset:
             _vfail("data.hf_dataset must be non-empty when data.backend='hf'")
@@ -598,7 +701,8 @@ def validate_config(cfg: Config) -> None:
             _vfail("data.text_key must be non-empty")
         if cfg.data.shuffle and cfg.data.shuffle_buffer_size <= 0:
             _vfail(
-                f"data.shuffle_buffer_size must be positive when data.shuffle=true, got {cfg.data.shuffle_buffer_size}"
+                "data.shuffle_buffer_size must be positive when data.shuffle=true, "
+                f"got {cfg.data.shuffle_buffer_size}"
             )
     elif cfg.data.backend == "local_text":
         if not cfg.data.local_text:
@@ -631,14 +735,6 @@ def validate_config(cfg: Config) -> None:
     if cfg.data.max_eval_samples < 0:
         _vfail(f"data.max_eval_samples must be >=0, got {cfg.data.max_eval_samples}")
 
-    # Logging / wandb
-    if cfg.logging.log_file is not None and not str(cfg.logging.log_file).strip():
-        _vfail("logging.log_file must be a non-empty string or null")
-    if cfg.logging.wandb.mode not in ("online", "offline", "disabled"):
-        _vfail(
-            "logging.wandb.mode must be 'online', 'offline', or 'disabled', "
-            f"got {cfg.logging.wandb.mode!r}"
-        )
     # HF streaming robustness knobs
     if cfg.data.max_retries < 0:
         _vfail(f"data.max_retries must be >=0, got {cfg.data.max_retries}")
@@ -647,7 +743,20 @@ def validate_config(cfg: Config) -> None:
     if cfg.data.state_update_interval <= 0:
         _vfail(f"data.state_update_interval must be >0, got {cfg.data.state_update_interval}")
 
-    # Tokenizer
+
+def _validate_logging(cfg: Config) -> None:
+    """Validate logging-related config fields."""
+    if cfg.logging.log_file is not None and not str(cfg.logging.log_file).strip():
+        _vfail("logging.log_file must be a non-empty string or null")
+    if cfg.logging.wandb.mode not in ("online", "offline", "disabled"):
+        _vfail(
+            "logging.wandb.mode must be 'online', 'offline', or 'disabled', "
+            f"got {cfg.logging.wandb.mode!r}"
+        )
+
+
+def _validate_tokenizer(cfg: Config) -> None:
+    """Validate tokenizer-related config fields."""
     tok = cfg.data.tokenizer
     if tok.kind == "hf":
         if not tok.hf_name_or_path:
@@ -693,6 +802,17 @@ def validate_config(cfg: Config) -> None:
         _vfail("model.bos_token_id must be within [0, vocab_size) when add_bos=true")
     if tok.add_eos and not (0 <= cfg.model.eos_token_id < cfg.model.vocab_size):
         _vfail("model.eos_token_id must be within [0, vocab_size) when add_eos=true")
+
+
+def validate_config(cfg: Config) -> None:
+    """Validate config with actionable error messages."""
+    _validate_train(cfg)
+    _validate_optim(cfg)
+    _validate_checkpoint(cfg)
+    _validate_model(cfg)
+    _validate_data(cfg)
+    _validate_logging(cfg)
+    _validate_tokenizer(cfg)
 
 
 def derived_deterministic(cfg: Config) -> bool:

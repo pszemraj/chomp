@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, TrainConfig
+from chomp.config import Config, DataConfig, ModelConfig, OptimConfig, TokenizerConfig, TrainConfig
 from chomp.data.pipeline import resolve_tokenizer_config
 
 
@@ -55,13 +55,14 @@ class _DummyTokenizer:
 def test_vocab_size_rounds_up_to_multiple() -> None:
     """Vocab size should round up to configured multiple."""
     cfg = Config(
-        model=ModelConfig(vocab_size=300),
+        model=ModelConfig(backend="dummy", vocab_size=300, d_model=32),
         data=DataConfig(
             backend="local_text",
             local_text="tokenizer config text\n",
             tokenizer=TokenizerConfig(kind="byte", vocab_size_multiple=128),
         ),
         train=TrainConfig(steps=1, batch_size=1, seq_len=8, grad_accum=1, allow_cpu=True),
+        optim=OptimConfig(warmup_steps=0),
     )
     tok = _DummyTokenizer(size=256, bos=None, eos=None, pad=None)
     updated = resolve_tokenizer_config(cfg, tok)
@@ -71,7 +72,14 @@ def test_vocab_size_rounds_up_to_multiple() -> None:
 def test_auto_sets_special_token_ids() -> None:
     """auto_set_special_tokens should copy IDs from tokenizer to config."""
     cfg = Config(
-        model=ModelConfig(vocab_size=512, bos_token_id=0, eos_token_id=1, pad_token_id=2),
+        model=ModelConfig(
+            backend="dummy",
+            vocab_size=512,
+            d_model=32,
+            bos_token_id=0,
+            eos_token_id=1,
+            pad_token_id=2,
+        ),
         data=DataConfig(
             backend="local_text",
             local_text="tokenizer config text\n",
@@ -84,6 +92,7 @@ def test_auto_sets_special_token_ids() -> None:
             ),
         ),
         train=TrainConfig(steps=1, batch_size=1, seq_len=8, grad_accum=1, allow_cpu=True),
+        optim=OptimConfig(warmup_steps=0),
     )
     tok = _DummyTokenizer(size=512, bos=10, eos=11, pad=12)
     updated = resolve_tokenizer_config(cfg, tok)
@@ -92,10 +101,17 @@ def test_auto_sets_special_token_ids() -> None:
     assert updated.model.pad_token_id == 12
 
 
-def test_tokenizer_pad_equals_eos_raises() -> None:
-    """Tokenizer with pad==eos should raise ValueError."""
+def test_tokenizer_pad_equals_eos_warns() -> None:
+    """Tokenizer with pad==eos should warn but still resolve."""
     cfg = Config(
-        model=ModelConfig(vocab_size=512, bos_token_id=0, eos_token_id=1, pad_token_id=2),
+        model=ModelConfig(
+            backend="dummy",
+            vocab_size=512,
+            d_model=32,
+            bos_token_id=0,
+            eos_token_id=1,
+            pad_token_id=2,
+        ),
         data=DataConfig(
             backend="local_text",
             local_text="tokenizer config text\n",
@@ -108,7 +124,10 @@ def test_tokenizer_pad_equals_eos_raises() -> None:
             ),
         ),
         train=TrainConfig(steps=1, batch_size=1, seq_len=8, grad_accum=1, allow_cpu=True),
+        optim=OptimConfig(warmup_steps=0),
     )
     tok = _DummyTokenizer(size=512, bos=0, eos=0, pad=0)
-    with pytest.raises(ValueError, match="pad_token_id"):
-        resolve_tokenizer_config(cfg, tok)
+    with pytest.warns(UserWarning, match="pad_token_id equals model.eos_token_id"):
+        updated = resolve_tokenizer_config(cfg, tok)
+    assert updated.model.pad_token_id == 0
+    assert updated.model.eos_token_id == 0

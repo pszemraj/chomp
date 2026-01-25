@@ -1,14 +1,14 @@
 model:
   backend: megalodon
-  vocab_size: 32128
-  model_dim: 768
+  vocab_size: 32000
+  model_dim: 1024
   num_layers: 12
-  num_heads: 2
-  z_dim: 384
-  value_dim: 768
-  ffn_hidden_dim: 3072
+  num_heads: 1
+  z_dim: 256
+  value_dim: 2048
+  ffn_hidden_dim: 2560
   cema_ndim: 16
-  chunk_size: 512
+  chunk_size: 1024
   dropout: 0.0
   attention_dropout: 0.0
   hidden_dropout: 0.0
@@ -16,7 +16,7 @@ model:
   bos_token_id: 1
   eos_token_id: 2
   init_mode: he
-  use_checkpoint: true
+  use_checkpoint: false
   param_dtype: float32
   compute_dtype: bfloat16
   accum_dtype: float32
@@ -65,8 +65,8 @@ optim:
   lr: 3.0e-4
   weight_decay: 0.01
   grad_clip_norm: 1.0
-  warmup_steps: 100
-  min_lr_ratio: 0.0
+  warmup_steps: 1000
+  min_lr_ratio: 0.1
 
 checkpoint:
   enabled: true
@@ -87,7 +87,7 @@ logging:
     entity: null
     run_name: null
     mode: online
-    tags: ["zyda2", "100m", "seq2048", "chunk512"]
+    tags: ["zyda2", "200m", "seq2048", "chunk2048", "default"]
 
 debug:
   nan_check: true

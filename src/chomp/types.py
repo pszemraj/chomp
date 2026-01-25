@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 """Core pytrees and shared types.
 
 Keep this file small: it defines the **runtime contracts** between subsystems.
@@ -30,6 +32,8 @@ from typing import Any
 
 import equinox as eqx
 import jax
+
+IGNORE_INDEX = -100
 
 
 class Batch(eqx.Module):

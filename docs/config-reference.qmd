@@ -18,7 +18,8 @@ config tree, and dot-path overrides are supported from the CLI.
 ## Precision Policy
 
 **Never use `fp16`** — Megalodon's CEMA and normalization layers are unstable with fp16.
-Always use `bfloat16` for compute and `float32` for parameters/accumulation.
+For training, `bfloat16` compute with `float32` parameters/accumulation is recommended
+(the MegalodonConfig defaults are float32 for all dtypes).
 :::
 
 ## Quick Reference {#quick-reference}
@@ -43,7 +44,7 @@ The 10 most commonly adjusted fields for typical experiments:
 Override any field using dot-path notation:
 
 ```bash
-chomp-train configs/my_config.yaml \
+chomp train configs/my_config.yaml \
   --override train.steps=2000 \
   --override train.batch_size=4 \
   --override optim.lr=1e-4
@@ -58,6 +59,41 @@ Nested fields use multiple dots:
 
 ::: {.callout-note}
 Unknown keys or invalid values fail fast during validation with actionable error messages.
+:::
+
+## Variables and interpolation {#variables}
+
+Define reusable values under a top-level `variables` section and reference them
+elsewhere in the config.
+
+Supported forms:
+
+- Exact value: `chunk_size: $variables.chunk_size` (type preserved)
+- Inline string: `tags: ["seq{$variables.seq_len}", "chunk{$variables.chunk_size}"]`
+- Brace form: `tags: ["seq_${variables.seq_len}"]`
+
+Example:
+
+```yaml
+variables:
+  chunk_size: 1024
+  seq_len: 2048
+model:
+  chunk_size: $variables.chunk_size
+train:
+  seq_len: $variables.seq_len
+logging:
+  wandb:
+    tags: ["seq{$variables.seq_len}", "chunk{$variables.chunk_size}"]
+```
+
+Variables can be nested (dot paths are supported). Resolution happens before
+CLI overrides are applied, and missing/circular references raise a validation
+error.
+
+::: {.callout-tip}
+Store personal experiment configs under `configs/custom/`. The directory is tracked
+via `.gitkeep`, but `configs/custom/*.yaml` and `configs/custom/*.yml` are ignored.
 :::
 
 ---
@@ -504,16 +540,17 @@ Token ID used for padding.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | **Must differ from `eos_token_id`** |
+| Constraints | Should differ from `eos_token_id` (recommended) |
 
 ::: {.callout-important}
-## pad_token_id ≠ eos_token_id
+## pad_token_id should differ from eos_token_id
 
 Megalodon zero-masks pad embeddings and the training loop masks pad positions in loss.
-If `pad_token_id == eos_token_id`, EOS tokens get zeroed and masked, breaking supervision.
+If `pad_token_id == eos_token_id`, EOS tokens may be treated as padding depending on the
+model implementation, which can degrade EOS supervision.
 
-If your tokenizer sets `pad_token_id == eos_token_id`, chomp fails validation after tokenizer
-resolution. Choose a tokenizer with distinct pad/eos, or set
+If your tokenizer sets `pad_token_id == eos_token_id`, chomp will emit a warning after tokenizer
+resolution. Prefer a tokenizer with distinct pad/eos, or set
 `data.tokenizer.auto_set_special_tokens: false` and override `model.pad_token_id` explicitly
 (only safe if you never emit pad tokens).
 :::
@@ -546,7 +583,7 @@ End-of-sequence token ID.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be in `[0, vocab_size)`; **must differ from `pad_token_id`** |
+| Constraints | Must be in `[0, vocab_size)` |
 
 **Related:** [`data.tokenizer.add_eos`](#data.tokenizer.add_eos), [`data.train_on_eos`](#data.train_on_eos)
 
@@ -1514,7 +1551,8 @@ Enable checkpointing.
 root_dir: str | null = null
 ```
 
-Checkpoint directory. `null` uses `<run_dir>/checkpoints`.
+Checkpoint directory. `null` uses `<run_dir>/checkpoints`. Relative paths are resolved against
+`run_dir`.
 
 | Property | Value |
 |----------|-------|
@@ -1766,7 +1804,6 @@ chomp validates all configuration at load time with actionable error messages.
 | `model.chunk_size <= train.seq_len` | `model.chunk_size (X) must be <= train.seq_len (Y)` |
 | `train.generate_input_len <= train.seq_len` | `train.generate_input_len must be <= train.seq_len (X), got Y` |
 | `model.model_dim % model.num_heads == 0` | `model.model_dim (X) must be divisible by model.num_heads (Y)` |
-| `model.pad_token_id != model.eos_token_id` | `model.pad_token_id must differ from model.eos_token_id` |
 | `optim.warmup_steps < train.steps` | `optim.warmup_steps (X) must be < train.steps (Y)` |
 | `data.packing_buffer_docs >= batch_size × grad_accum` (bin mode) | `data.packing_buffer_docs must be >= train.batch_size * train.grad_accum (N), got M` |
 | `byte_offset > 0` when `add_bos` or `add_eos` (byte tokenizer) | `byte tokenizer with add_bos/add_eos requires data.tokenizer.byte_offset > 0` |
@@ -1789,11 +1826,11 @@ model:
 :::
 
 ::: {.callout-important}
-## pad_token_id Must Differ from eos_token_id
+## pad_token_id Should Differ from eos_token_id
 
 If your tokenizer uses the same ID for padding and EOS (common with GPT-2 style tokenizers),
-chomp fails validation. Prefer a tokenizer with distinct pad/eos, or disable
-`data.tokenizer.auto_set_special_tokens` and override `model.pad_token_id` explicitly:
+chomp emits a warning after tokenizer resolution. Prefer a tokenizer with distinct pad/eos, or
+disable `data.tokenizer.auto_set_special_tokens` and override `model.pad_token_id` explicitly:
 
 ```yaml
 model:
@@ -1803,178 +1840,6 @@ model:
 :::
 
 ---
-
-## Example Configurations {#examples}
-
-### Minimal Smoke Test
-
-For offline testing without network dependencies:
-
-```yaml
-# configs/debug_smoke.yaml — Minimal offline smoke test
-model:
-  backend: dummy
-  vocab_size: 256
-  d_model: 128
-  dropout: 0.0
-
-data:
-  backend: local_text
-  repeat: true
-  packing_mode: bin
-  packing_buffer_docs: 32
-  mask_boundary_loss: true
-  train_on_eos: true
-  local_text: |
-    Hello from chomp. This is a local_text debug stream.
-    It exists so tests and smoke runs don't depend on network.
-  tokenizer:
-    kind: byte
-    byte_offset: 0
-    add_bos: false
-    add_eos: false
-
-train:
-  seed: 0
-  steps: 10
-  batch_size: 2
-  seq_len: 128
-  grad_accum: 2
-  jit: true
-  deterministic: true
-  allow_cpu: true      # Allow CPU for CI
-  log_every: 1
-  eval_every: 0        # Disable eval
-
-optim:
-  lr: 3.0e-4
-  warmup_steps: 2
-
-checkpoint:
-  enabled: true
-  save_every: 5
-  async_save: false    # Sync saves for testing
-
-debug:
-  nan_check: true
-  check_device_every: 1
-```
-
-### Production Training (100M Megalodon)
-
-For real pretraining on Zyda-2:
-
-```yaml
-# configs/zyda2_100m_2048.yaml — Production 100M Megalodon
-model:
-  backend: megalodon
-  vocab_size: 32128
-  model_dim: 768
-  num_layers: 12
-  num_heads: 12
-  z_dim: 384
-  value_dim: 768
-  ffn_hidden_dim: 3072
-  cema_ndim: 16
-  chunk_size: 512
-  dropout: 0.0
-  attention_dropout: 0.0
-  hidden_dropout: 0.0
-  pad_token_id: 0
-  bos_token_id: 1
-  eos_token_id: 2
-  init_mode: he
-  use_checkpoint: true
-  param_dtype: float32
-  compute_dtype: bfloat16
-  accum_dtype: float32
-  softmax_dtype: float32
-
-data:
-  backend: hf
-  hf_dataset: Zyphra/Zyda-2
-  hf_name: sample-100BT
-  hf_split: train
-  hf_eval_split: validation
-  text_key: text
-  packing_mode: bin
-  packing_buffer_docs: 256
-  packing_max_docs_per_bin: null
-  grain_prefetch: 2
-  mask_boundary_loss: true
-  train_on_eos: true
-  max_eval_samples: 1000
-  shuffle: true
-  shuffle_buffer_size: 10000
-  repeat: true
-  tokenizer:
-    kind: hf
-    hf_name_or_path: pszemraj/bytebpe-tokenizer-32k-mlm
-    hf_use_fast: true
-    hf_trust_remote_code: false
-    vocab_size_multiple: 128
-    auto_set_special_tokens: true
-    add_bos: false
-    add_eos: true
-
-train:
-  seed: 0
-  steps: 10000
-  batch_size: 2
-  seq_len: 2048
-  grad_accum: 8
-  jit: true
-  deterministic: true
-  allow_cpu: false
-  log_every: 25
-  eval_every: 2500
-
-optim:
-  lr: 3.0e-4
-  weight_decay: 0.01
-  grad_clip_norm: 1.0
-  warmup_steps: 100
-  min_lr_ratio: 0.0
-
-checkpoint:
-  enabled: true
-  save_every: 5000
-  max_to_keep: 3
-  async_save: true
-
-logging:
-  project: chomp
-  run_dir: null
-  metrics_file: metrics.jsonl
-  level: INFO
-  console_use_rich: true
-  log_file: train.log
-  wandb:
-    enabled: true
-    project: chomp
-    entity: null
-    run_name: null
-    mode: online
-    tags: ["zyda2", "100m", "seq2048", "chunk512"]
-
-debug:
-  nan_check: true
-  check_device_every: 10
-```
-
----
-
-## Sync Checklist {#sync-checklist}
-
-When config schema changes, update this reference alongside code:
-
-- Defaults and valid values in `src/chomp/config.py`
-- Cross-field validation rules in `src/chomp/config.py`
-- Tokenizer resolution and vocab rounding behavior in `src/chomp/data/pipeline.py`
-- Example configs in `configs/` (if defaults/semantics changed)
-- Field counts in section headers and the field index
-
-If any of these diverge, update the doc in the same commit as the code change.
 
 ## Field Index {#index}
 

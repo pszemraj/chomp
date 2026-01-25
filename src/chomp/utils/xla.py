@@ -49,6 +49,15 @@ def _is_rtx_50xx(name: str) -> bool:
     return not (model_num == 5000 and "geforce" not in name.lower())
 
 
+def _detect_blackwell(names: list[str]) -> list[str]:
+    """Filter GPU names for RTX 50xx matches.
+
+    :param list[str] names: GPU name strings.
+    :return list[str]: Names that match the RTX 50xx pattern.
+    """
+    return [name for name in names if _is_rtx_50xx(name)]
+
+
 def _update_xla_flags(existing: str) -> tuple[str, bool]:
     """Ensure the Triton GEMM flag is present and conflicting entries are removed.
 
@@ -62,6 +71,28 @@ def _update_xla_flags(existing: str) -> tuple[str, bool]:
         filtered.append(_TRITON_FLAG)
         changed = True
     return " ".join(filtered).strip(), changed
+
+
+def _log_prealloc_status(log: logging.Logger, prealloc: str | None) -> None:
+    """Log warnings or info about XLA preallocation settings.
+
+    :param logging.Logger log: Logger to emit messages.
+    :param str | None prealloc: Value of preallocation env var.
+    """
+    if prealloc is None or str(prealloc).strip() == "":
+        log.warning(
+            "%s is not set. Recommended: %s=false to avoid full GPU preallocation.",
+            _PREALLOC_ENV,
+            _PREALLOC_ENV,
+        )
+    elif str(prealloc).lower() not in {"false", "0", "no"}:
+        log.warning(
+            "%s=%s (recommended: false) to avoid full GPU preallocation.",
+            _PREALLOC_ENV,
+            prealloc,
+        )
+    else:
+        log.info("%s=%s", _PREALLOC_ENV, prealloc)
 
 
 def configure_blackwell_xla_env(
@@ -86,7 +117,7 @@ def configure_blackwell_xla_env(
         _CONFIG_DONE = True
         _LAST_RESULT = False
         return False
-    blackwell = [name for name in names if _is_rtx_50xx(name)]
+    blackwell = _detect_blackwell(names)
     if not blackwell:
         log.debug("NVIDIA GPU(s) detected but not RTX 50xx: %s", ", ".join(names))
         _CONFIG_DONE = True
@@ -107,20 +138,7 @@ def configure_blackwell_xla_env(
         log.info("XLA_FLAGS already contains %s.", _TRITON_FLAG)
 
     prealloc = os.environ.get(_PREALLOC_ENV)
-    if prealloc is None or str(prealloc).strip() == "":
-        log.warning(
-            "%s is not set. Recommended: %s=false to avoid full GPU preallocation.",
-            _PREALLOC_ENV,
-            _PREALLOC_ENV,
-        )
-    elif str(prealloc).lower() not in {"false", "0", "no"}:
-        log.warning(
-            "%s=%s (recommended: false) to avoid full GPU preallocation.",
-            _PREALLOC_ENV,
-            prealloc,
-        )
-    else:
-        log.info("%s=%s", _PREALLOC_ENV, prealloc)
+    _log_prealloc_status(log, prealloc)
 
     _CONFIG_DONE = True
     _LAST_RESULT = True
