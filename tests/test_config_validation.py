@@ -149,6 +149,15 @@ def test_muon_lr_scale_must_be_positive() -> None:
         validate_config(bad)
 
 
+def test_muon_weight_decay_mult_must_be_non_negative() -> None:
+    """muon_weight_decay_mult < 0 must raise ValueError."""
+    cfg = _base_cfg()
+    bad_optim = replace(cfg.optim, muon_weight_decay_mult=-1.0)
+    bad = replace(cfg, optim=bad_optim)
+    with pytest.raises(ValueError, match="muon_weight_decay_mult"):
+        validate_config(bad)
+
+
 def test_optim_name_must_be_valid() -> None:
     """Unknown optim.name must raise ValueError."""
     cfg = _base_cfg()

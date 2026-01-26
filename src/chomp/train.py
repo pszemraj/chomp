@@ -750,6 +750,7 @@ def build_optimizer(
             """Return Muon dimension numbers for masked Muon parameters."""
             return _muon_weight_dim_numbers(tree, allow_all_2d=True)
 
+        muon_weight_decay = cfg.optim.weight_decay * cfg.optim.muon_weight_decay_mult
         muon_tx = optax.chain(
             optax.contrib.scale_by_muon(
                 beta=cfg.optim.muon_momentum,
@@ -757,7 +758,7 @@ def build_optimizer(
                 nesterov=cfg.optim.muon_nesterov,
                 weight_dimension_numbers=muon_dim_fn,
             ),
-            optax.add_decayed_weights(cfg.optim.weight_decay, mask=_weight_decay_mask),
+            optax.add_decayed_weights(muon_weight_decay, mask=_weight_decay_mask),
             optax.scale_by_learning_rate(muon_schedule),
         )
         adam_tx = optax.adamw(

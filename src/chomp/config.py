@@ -245,6 +245,7 @@ class OptimConfig:
     lr: float = 3e-4
     muon_lr_scale: float = 200.0
     weight_decay: float = 0.01
+    muon_weight_decay_mult: float = 1.0
     grad_clip_norm: float = 1.0
     warmup_steps: int = 10
     decay_steps: int | None = None
@@ -642,6 +643,8 @@ def _validate_optim(cfg: Config) -> None:
         _vfail(f"optim.min_lr_ratio must be in [0, 1], got {cfg.optim.min_lr_ratio}")
     if cfg.optim.muon_lr_scale <= 0:
         _vfail(f"optim.muon_lr_scale must be positive, got {cfg.optim.muon_lr_scale}")
+    if cfg.optim.muon_weight_decay_mult < 0:
+        _vfail(f"optim.muon_weight_decay_mult must be >= 0, got {cfg.optim.muon_weight_decay_mult}")
     if cfg.optim.muon_momentum <= 0 or cfg.optim.muon_momentum >= 1:
         _vfail(f"optim.muon_momentum must be in (0, 1), got {cfg.optim.muon_momentum}")
     if cfg.optim.muon_ns_steps <= 0:

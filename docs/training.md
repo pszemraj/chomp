@@ -29,6 +29,7 @@ Both optimizers use the same warmup+cosine schedule (`optim.lr`,
 `optim.warmup_steps`, `optim.decay_steps`, `optim.min_lr_ratio`) and the same
 weight-decay mask (matrices only).
 For Muon runs, Adam uses `optim.lr` and Muon uses `optim.lr * optim.muon_lr_scale`.
+Muon weight decay can be scaled independently via `optim.muon_weight_decay_mult`.
 
 ## Determinism
 
