@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import equinox as eqx
 import jax
+import jax.numpy as jnp
 from megalodon_jax.config import MegalodonConfig
 from megalodon_jax.model import MegalodonForCausalLM
 from optax.contrib import MuonDimensionNumbers
 
-from chomp.train import _muon_weight_dim_numbers, _path_to_str
+from chomp.config import Config
+from chomp.train import _muon_weight_dim_numbers, _path_to_str, build_optimizer
 
 
 def _megalodon_params() -> Any:
@@ -63,3 +66,21 @@ def test_muon_param_labels_allow_all_2d() -> None:
     mapping = _label_map(dim_nums)
 
     assert mapping["model.embed.weight"] is True
+
+
+def test_muon_update_handles_none_leaves() -> None:
+    """Muon optimizer should tolerate None leaves in the update tree."""
+    params = _megalodon_params()
+    cfg = Config()
+    cfg = replace(cfg, optim=replace(cfg.optim, name="muon"))
+    tx, _ = build_optimizer(cfg, params)
+    opt_state = tx.init(params)
+    grads = jax.tree_util.tree_map(
+        lambda x: None if x is None else jnp.ones_like(x),
+        params,
+        is_leaf=lambda x: x is None,
+    )
+    updates, _ = tx.update(grads, opt_state, params)
+    leaves = jax.tree_util.tree_leaves(updates, is_leaf=lambda x: x is None)
+    assert any(leaf is None for leaf in leaves)
+    assert any(leaf is not None for leaf in leaves)

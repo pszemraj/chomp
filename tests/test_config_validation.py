@@ -140,6 +140,15 @@ def test_min_lr_ratio_must_be_in_range() -> None:
         validate_config(bad)
 
 
+def test_muon_lr_scale_must_be_positive() -> None:
+    """muon_lr_scale <= 0 must raise ValueError."""
+    cfg = _base_cfg()
+    bad_optim = replace(cfg.optim, muon_lr_scale=0.0)
+    bad = replace(cfg, optim=bad_optim)
+    with pytest.raises(ValueError, match="muon_lr_scale"):
+        validate_config(bad)
+
+
 def test_optim_name_must_be_valid() -> None:
     """Unknown optim.name must raise ValueError."""
     cfg = _base_cfg()

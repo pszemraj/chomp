@@ -477,6 +477,7 @@ def _format_console_row(
     loss: float,
     grad_norm: float,
     lr: float,
+    lr_muon: float | None,
     step_time_s: float,
     tokens_per_sec: float,
     eval_loss: float | None,
@@ -490,6 +491,7 @@ def _format_console_row(
     :param float loss: Training loss value.
     :param float grad_norm: Gradient norm value.
     :param float lr: Learning rate value.
+    :param float | None lr_muon: Optional Muon learning rate.
     :param float step_time_s: Step wall time in seconds.
     :param float tokens_per_sec: Throughput in tokens per second.
     :param float | None eval_loss: Optional eval loss.
@@ -507,6 +509,8 @@ def _format_console_row(
         f"time {step_time_s:.3f}s",
         f"tok/s {tokens_per_sec:.0f}",
     ]
+    if lr_muon is not None:
+        parts.append(f"muon_lr {lr_muon:.2e}")
     if eval_loss is not None:
         parts.append(f"eval {eval_loss:.4f}")
     if packing_util is not None:
@@ -602,6 +606,35 @@ def _muon_weight_dim_numbers(params: Any, *, allow_all_2d: bool) -> Any:
     return treedef.unflatten(dim_nums)
 
 
+def _scale_updates(mask_fn: Callable[[Any], Any], scale: float) -> optax.GradientTransformation:
+    """Scale masked updates by a fixed factor.
+
+    :param Callable mask_fn: Function returning a boolean mask pytree.
+    :param float scale: Scaling factor to apply where mask is True.
+    :return optax.GradientTransformation: Stateless scaling transform.
+    """
+
+    def init_fn(params: Any) -> optax.EmptyState:
+        del params
+        return optax.EmptyState()
+
+    def update_fn(
+        updates: Any, state: optax.EmptyState, params: Any | None = None
+    ) -> tuple[Any, optax.EmptyState]:
+        mask_source = params if params is not None else updates
+        mask = mask_fn(mask_source)
+
+        def _apply_scale(m: bool, g: Any) -> Any:
+            if g is None:
+                return None
+            return g * scale if m else g
+
+        updates = jax.tree.map(_apply_scale, mask, updates, is_leaf=lambda node: node is None)
+        return updates, state
+
+    return optax.GradientTransformation(init_fn, update_fn)
+
+
 def build_optimizer(
     cfg: Config, params: Any
 ) -> tuple[optax.GradientTransformation, Callable[[jax.Array], jax.Array]]:
@@ -628,6 +661,7 @@ def build_optimizer(
         allow_all_2d = cfg.optim.muon_allow_all_2d
         if cfg.model.backend != "megalodon":
             allow_all_2d = True
+        muon_lr_scale = float(cfg.optim.muon_lr_scale)
 
         def dim_fn(tree: Any) -> Any:
             """Return muon dimension numbers for eligible parameters."""
@@ -640,12 +674,25 @@ def build_optimizer(
                 "optim.name=muon selected but no muon-eligible parameters were found; "
                 "falling back to AdamW for all parameters."
             )
+
+        def _is_muon_dim_leaf(node: Any) -> bool:
+            return node is None or isinstance(node, optax.contrib.MuonDimensionNumbers)
+
+        def adam_mask_fn(tree: Any) -> Any:
+            dim_tree_local = dim_fn(tree)
+            return jax.tree_util.tree_map(
+                lambda dim: dim is None, dim_tree_local, is_leaf=_is_muon_dim_leaf
+            )
+
+        def muon_schedule(step: jax.Array) -> jax.Array:
+            return schedule(step) * muon_lr_scale
+
         transforms.append(
             optax.add_decayed_weights(cfg.optim.weight_decay, mask=_weight_decay_mask)
         )
         transforms.append(
             optax.contrib.muon(
-                learning_rate=schedule,
+                learning_rate=muon_schedule,
                 beta=cfg.optim.muon_momentum,
                 ns_steps=cfg.optim.muon_ns_steps,
                 nesterov=cfg.optim.muon_nesterov,
@@ -654,6 +701,8 @@ def build_optimizer(
                 muon_weight_dimension_numbers=dim_fn,
             )
         )
+        if muon_lr_scale != 1.0:
+            transforms.append(_scale_updates(adam_mask_fn, 1.0 / muon_lr_scale))
     else:
         transforms.append(
             optax.adamw(
@@ -992,6 +1041,8 @@ def run(
 
         token_sum = float(metrics_host.get("token_sum", 0.0))
         tokens_per_sec = token_sum / step_time_s if step_time_s > 0 else 0.0
+        lr_adam = float(metrics_host["lr"])
+        lr_muon = lr_adam * cfg.optim.muon_lr_scale if cfg.optim.name == "muon" else None
         mem_stats = _device_memory_stats_gb()
         packing_util = (
             float(data_stats["packing_utilization"])
@@ -1004,7 +1055,8 @@ def run(
             step=step_i,
             loss=float(metrics_host["loss"]),
             grad_norm=float(metrics_host["grad_norm"]),
-            lr=float(metrics_host["lr"]),
+            lr=lr_adam,
+            lr_muon=lr_muon,
             step_time_s=float(step_time_s),
             tokens_per_sec=float(tokens_per_sec),
             eval_loss=None,
@@ -1263,16 +1315,22 @@ def run(
                             )
                         if tokens_seen_host is None:
                             tokens_seen_host = int(jax.device_get(tokens_seen_device))
+                        lr_adam = float(metrics_host["lr"])
+                        lr_muon = (
+                            lr_adam * cfg.optim.muon_lr_scale if cfg.optim.name == "muon" else None
+                        )
                         row = {
                             "step": int(step_i),
                             "loss": float(metrics_host["loss"]),
                             "grad_norm": float(metrics_host["grad_norm"]),
-                            "lr": float(metrics_host["lr"]),
+                            "lr": lr_adam,
                             "step_time_s": float(step_time_s),
                             "tokens_per_sec": float(tokens_per_sec),
                             "tokens_seen": int(tokens_seen_host),
                             "wall_time_s": time.perf_counter() - t0,
                         }
+                        if lr_muon is not None:
+                            row["lr_muon"] = float(lr_muon)
                         if data_stats:
                             row.update(data_stats)
                         if eval_row:
@@ -1306,6 +1364,10 @@ def run(
                     if should_console:
                         if metrics_host is None:
                             metrics_host = jax.device_get(metrics)
+                        lr_adam = float(metrics_host["lr"])
+                        lr_muon = (
+                            lr_adam * cfg.optim.muon_lr_scale if cfg.optim.name == "muon" else None
+                        )
                         eval_loss = eval_row.get("eval_loss") if eval_row else None
                         packing_util = None
                         if data_stats and "packing_utilization" in data_stats:
@@ -1320,7 +1382,8 @@ def run(
                             step=step_i,
                             loss=float(metrics_host["loss"]),
                             grad_norm=float(metrics_host["grad_norm"]),
-                            lr=float(metrics_host["lr"]),
+                            lr=lr_adam,
+                            lr_muon=lr_muon,
                             step_time_s=float(step_time_s),
                             tokens_per_sec=float(tokens_per_sec),
                             eval_loss=float(eval_loss) if eval_loss is not None else None,

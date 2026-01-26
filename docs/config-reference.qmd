@@ -1463,7 +1463,7 @@ Directory for profiler traces. `null` uses a default location.
 
 ## optim (OptimConfig) {#optim}
 
-Optimizer configuration for AdamW or Muon with linear warmup and cosine decay. Contains 11 fields.
+Optimizer configuration for AdamW or Muon with linear warmup and cosine decay. Contains 12 fields.
 
 #### `optim.name` {#optim.name}
 
@@ -1492,6 +1492,20 @@ Peak learning rate.
 | Required | No |
 | Constraints | Must be positive |
 | Recommended | `3e-4` (small models), `1e-4` to `6e-5` (large models) |
+
+#### `optim.muon_lr_scale` {#optim.muon_lr_scale}
+
+```yaml
+muon_lr_scale: float = 200.0
+```
+
+Multiplier applied to `optim.lr` to set Muon's peak LR. Effective Muon LR is
+`optim.lr * optim.muon_lr_scale`.
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Constraints | Must be positive |
 
 #### `optim.weight_decay` {#optim.weight_decay}
 
@@ -1948,7 +1962,7 @@ All configuration fields by section:
 
 **train** (18 fields): [`seed`](#train.seed), [`steps`](#train.steps), [`batch_size`](#train.batch_size), [`seq_len`](#train.seq_len), [`grad_accum`](#train.grad_accum), [`jit`](#train.jit), [`deterministic`](#train.deterministic), [`allow_cpu`](#train.allow_cpu), [`log_every`](#train.log_every), [`eval_every`](#train.eval_every), [`generate_every`](#train.generate_every), [`generate_input_len`](#train.generate_input_len), [`generate_max_tokens`](#train.generate_max_tokens), [`generate_temperature`](#train.generate_temperature), [`generate_top_k`](#train.generate_top_k), [`generate_top_p`](#train.generate_top_p), [`profile`](#train.profile), [`profile_dir`](#train.profile_dir)
 
-**optim** (11 fields): [`name`](#optim.name), [`lr`](#optim.lr), [`weight_decay`](#optim.weight_decay), [`grad_clip_norm`](#optim.grad_clip_norm), [`warmup_steps`](#optim.warmup_steps), [`decay_steps`](#optim.decay_steps), [`min_lr_ratio`](#optim.min_lr_ratio), [`muon_momentum`](#optim.muon_momentum), [`muon_ns_steps`](#optim.muon_ns_steps), [`muon_nesterov`](#optim.muon_nesterov), [`muon_allow_all_2d`](#optim.muon_allow_all_2d)
+**optim** (12 fields): [`name`](#optim.name), [`lr`](#optim.lr), [`muon_lr_scale`](#optim.muon_lr_scale), [`weight_decay`](#optim.weight_decay), [`grad_clip_norm`](#optim.grad_clip_norm), [`warmup_steps`](#optim.warmup_steps), [`decay_steps`](#optim.decay_steps), [`min_lr_ratio`](#optim.min_lr_ratio), [`muon_momentum`](#optim.muon_momentum), [`muon_ns_steps`](#optim.muon_ns_steps), [`muon_nesterov`](#optim.muon_nesterov), [`muon_allow_all_2d`](#optim.muon_allow_all_2d)
 
 **checkpoint** (5 fields): [`enabled`](#checkpoint.enabled), [`root_dir`](#checkpoint.root_dir), [`save_every`](#checkpoint.save_every), [`max_to_keep`](#checkpoint.max_to_keep), [`async_save`](#checkpoint.async_save)
 
