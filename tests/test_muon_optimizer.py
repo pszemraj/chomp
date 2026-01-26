@@ -13,7 +13,12 @@ from megalodon_jax.model import MegalodonForCausalLM
 from optax.contrib import MuonDimensionNumbers
 
 from chomp.config import Config
-from chomp.train import _muon_weight_dim_numbers, _path_to_str, build_optimizer
+from chomp.train import (
+    _muon_lr_from_adam,
+    _muon_weight_dim_numbers,
+    _path_to_str,
+    build_optimizer,
+)
 
 
 def _megalodon_params() -> Any:
@@ -86,3 +91,21 @@ def test_muon_update_handles_none_leaves() -> None:
     leaves = jax.tree_util.tree_leaves(updates, is_leaf=lambda x: x is None)
     assert any(leaf is None for leaf in leaves)
     assert any(leaf is not None for leaf in leaves)
+
+
+def test_muon_lr_scale_matches_schedule() -> None:
+    """Muon LR should be a scaled copy of the Adam schedule."""
+    params = _megalodon_params()
+    cfg = Config()
+    cfg = replace(cfg, train=replace(cfg.train, steps=10))
+    cfg = replace(
+        cfg,
+        optim=replace(
+            cfg.optim, name="muon", lr=1e-3, warmup_steps=2, decay_steps=8, muon_lr_scale=10.0
+        ),
+    )
+    _, schedule = build_optimizer(cfg, params)
+    for step in (0, 1, 2, 5, 9):
+        lr_adam = schedule(jnp.array(step))
+        lr_muon = _muon_lr_from_adam(lr_adam, cfg)
+        assert jnp.allclose(lr_muon, lr_adam * cfg.optim.muon_lr_scale)

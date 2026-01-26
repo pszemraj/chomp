@@ -645,6 +645,16 @@ def _muon_weight_dim_numbers(params: Any, *, allow_all_2d: bool) -> Any:
     return treedef.unflatten(dim_nums)
 
 
+def _muon_lr_from_adam(lr_adam: jax.Array, cfg: Config) -> jax.Array:
+    """Return the Muon learning rate derived from the AdamW schedule.
+
+    :param jax.Array lr_adam: AdamW learning rate for the current step.
+    :param Config cfg: Training configuration.
+    :return jax.Array: Muon learning rate (scaled).
+    """
+    return lr_adam * cfg.optim.muon_lr_scale
+
+
 def _scale_updates(mask_fn: Callable[[Any], Any], scale: float) -> optax.GradientTransformation:
     """Scale masked updates by a fixed factor.
 
@@ -700,7 +710,6 @@ def build_optimizer(
         allow_all_2d = cfg.optim.muon_allow_all_2d
         if cfg.model.backend != "megalodon":
             allow_all_2d = True
-        muon_lr_scale = float(cfg.optim.muon_lr_scale)
         muon_tensors, adam_tensors, muon_2d, total_2d, muon_paths = _muon_param_stats(
             params, allow_all_2d=allow_all_2d
         )
@@ -735,7 +744,7 @@ def build_optimizer(
             return treedef.unflatten(labels)
 
         def muon_schedule(step: jax.Array) -> jax.Array:
-            return schedule(step) * muon_lr_scale
+            return _muon_lr_from_adam(schedule(step), cfg)
 
         def muon_dim_fn(tree: Any) -> Any:
             """Return Muon dimension numbers for masked Muon parameters."""
@@ -1096,7 +1105,7 @@ def run(
         token_sum = float(metrics_host.get("token_sum", 0.0))
         tokens_per_sec = token_sum / step_time_s if step_time_s > 0 else 0.0
         lr_adam = float(metrics_host["lr"])
-        lr_muon = lr_adam * cfg.optim.muon_lr_scale if cfg.optim.name == "muon" else None
+        lr_muon = _muon_lr_from_adam(lr_adam, cfg) if cfg.optim.name == "muon" else None
         mem_stats = _device_memory_stats_gb()
         packing_util = (
             float(data_stats["packing_utilization"])
@@ -1371,7 +1380,7 @@ def run(
                             tokens_seen_host = int(jax.device_get(tokens_seen_device))
                         lr_adam = float(metrics_host["lr"])
                         lr_muon = (
-                            lr_adam * cfg.optim.muon_lr_scale if cfg.optim.name == "muon" else None
+                            _muon_lr_from_adam(lr_adam, cfg) if cfg.optim.name == "muon" else None
                         )
                         row = {
                             "step": int(step_i),
@@ -1420,7 +1429,7 @@ def run(
                             metrics_host = jax.device_get(metrics)
                         lr_adam = float(metrics_host["lr"])
                         lr_muon = (
-                            lr_adam * cfg.optim.muon_lr_scale if cfg.optim.name == "muon" else None
+                            _muon_lr_from_adam(lr_adam, cfg) if cfg.optim.name == "muon" else None
                         )
                         eval_loss = eval_row.get("eval_loss") if eval_row else None
                         packing_util = None
