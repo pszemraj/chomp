@@ -715,46 +715,48 @@ def build_optimizer(
             sample = ", ".join(muon_paths[:5])
             logger.info("Muon sample params: %s", sample)
 
-        def dim_fn(tree: Any) -> Any:
-            """Return muon dimension numbers for eligible parameters."""
-            return _muon_weight_dim_numbers(tree, allow_all_2d=allow_all_2d)
-
-        dim_tree = dim_fn(params)
-        muon_count = sum(1 for dim in jax.tree_util.tree_leaves(dim_tree) if dim is not None)
-        if muon_count == 0:
+        if muon_2d == 0:
             logger.warning(
                 "optim.name=muon selected but no muon-eligible parameters were found; "
                 "falling back to AdamW for all parameters."
             )
 
-        def _is_muon_dim_leaf(node: Any) -> bool:
-            return node is None or isinstance(node, optax.contrib.MuonDimensionNumbers)
-
-        def adam_mask_fn(tree: Any) -> Any:
-            dim_tree_local = dim_fn(tree)
-            return jax.tree_util.tree_map(
-                lambda dim: dim is None, dim_tree_local, is_leaf=_is_muon_dim_leaf
-            )
+        def label_fn(tree: Any) -> Any:
+            """Return optimizer labels for each parameter leaf."""
+            flat, treedef = jax.tree_util.tree_flatten_with_path(tree)
+            labels: list[str] = []
+            for path, leaf in flat:
+                if not hasattr(leaf, "ndim"):
+                    labels.append("adam")
+                    continue
+                path_str = _path_to_str(path)
+                use_muon = leaf.ndim == 2 and (allow_all_2d or _is_muon_weight_path(path_str))
+                labels.append("muon" if use_muon else "adam")
+            return treedef.unflatten(labels)
 
         def muon_schedule(step: jax.Array) -> jax.Array:
             return schedule(step) * muon_lr_scale
 
-        transforms.append(
-            optax.add_decayed_weights(cfg.optim.weight_decay, mask=_weight_decay_mask)
-        )
-        transforms.append(
-            optax.contrib.muon(
-                learning_rate=muon_schedule,
+        def muon_dim_fn(tree: Any) -> Any:
+            """Return Muon dimension numbers for masked Muon parameters."""
+            return _muon_weight_dim_numbers(tree, allow_all_2d=True)
+
+        muon_tx = optax.chain(
+            optax.contrib.scale_by_muon(
                 beta=cfg.optim.muon_momentum,
                 ns_steps=cfg.optim.muon_ns_steps,
                 nesterov=cfg.optim.muon_nesterov,
-                weight_decay=0.0,
-                adam_weight_decay=0.0,
-                muon_weight_dimension_numbers=dim_fn,
-            )
+                weight_dimension_numbers=muon_dim_fn,
+            ),
+            optax.add_decayed_weights(cfg.optim.weight_decay, mask=_weight_decay_mask),
+            optax.scale_by_learning_rate(muon_schedule),
         )
-        if muon_lr_scale != 1.0:
-            transforms.append(_scale_updates(adam_mask_fn, 1.0 / muon_lr_scale))
+        adam_tx = optax.adamw(
+            learning_rate=schedule,
+            weight_decay=cfg.optim.weight_decay,
+            mask=_weight_decay_mask,
+        )
+        transforms.append(optax.multi_transform({"muon": muon_tx, "adam": adam_tx}, label_fn))
     else:
         transforms.append(
             optax.adamw(
