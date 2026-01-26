@@ -8,8 +8,9 @@ import equinox as eqx
 import jax
 from megalodon_jax.config import MegalodonConfig
 from megalodon_jax.model import MegalodonForCausalLM
+from optax.contrib import MuonDimensionNumbers
 
-from chomp.train import _muon_param_labels, _path_to_str
+from chomp.train import _muon_weight_dim_numbers, _path_to_str
 
 
 def _megalodon_params() -> Any:
@@ -29,36 +30,36 @@ def _megalodon_params() -> Any:
     return eqx.filter(model, eqx.is_array)
 
 
-def _label_map(labels: Any, params: Any) -> dict[str, str]:
-    """Create a mapping from parameter path to optimizer label.
+def _label_map(dim_nums: Any) -> dict[str, bool]:
+    """Create a mapping from parameter path to muon eligibility.
 
-    :param Any labels: Label pytree.
-    :param Any params: Parameter pytree.
-    :return dict[str, str]: Map of path string to label.
+    :param Any dim_nums: Muon dimension numbers pytree.
+    :return dict[str, bool]: Map of path string to muon eligibility.
     """
-    flat_params, _ = jax.tree_util.tree_flatten_with_path(params)
-    flat_labels, _ = jax.tree_util.tree_flatten(labels)
-    return {
-        _path_to_str(path): label for (path, _), label in zip(flat_params, flat_labels, strict=True)
-    }
+
+    def _is_leaf(node: Any) -> bool:
+        return node is None or isinstance(node, MuonDimensionNumbers)
+
+    flat_dims, _ = jax.tree_util.tree_flatten_with_path(dim_nums, is_leaf=_is_leaf)
+    return {_path_to_str(path): dim is not None for path, dim in flat_dims}
 
 
 def test_muon_param_labels_whitelist_excludes_embed() -> None:
     """Muon labels should include projection weights but exclude embeddings."""
     params = _megalodon_params()
-    labels = _muon_param_labels(params, allow_all_2d=False)
-    mapping = _label_map(labels, params)
+    dim_nums = _muon_weight_dim_numbers(params, allow_all_2d=False)
+    mapping = _label_map(dim_nums)
 
-    assert mapping["model.embed.weight"] == "adam"
-    assert mapping["model.layers.[0].attn.wz.weight"] == "muon"
-    assert mapping["model.layers.[0].ffn.fc1.weight"] == "muon"
-    assert mapping["model.layers.[0].attn.gamma"] == "adam"
+    assert mapping["model.embed.weight"] is False
+    assert mapping["model.layers.[0].attn.wz.weight"] is True
+    assert mapping["model.layers.[0].ffn.fc1.weight"] is True
+    assert mapping["model.layers.[0].attn.gamma"] is False
 
 
 def test_muon_param_labels_allow_all_2d() -> None:
     """allow_all_2d should label every 2D tensor as muon."""
     params = _megalodon_params()
-    labels = _muon_param_labels(params, allow_all_2d=True)
-    mapping = _label_map(labels, params)
+    dim_nums = _muon_weight_dim_numbers(params, allow_all_2d=True)
+    mapping = _label_map(dim_nums)
 
-    assert mapping["model.embed.weight"] == "muon"
+    assert mapping["model.embed.weight"] is True

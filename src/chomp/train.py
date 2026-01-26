@@ -579,25 +579,27 @@ def _is_muon_weight_path(path_str: str) -> bool:
     return not any(token in path_str for token in _MUON_EMBED_EXCLUDE)
 
 
-def _muon_param_labels(params: Any, *, allow_all_2d: bool) -> Any:
-    """Label parameters for Muon vs AdamW updates.
+def _muon_weight_dim_numbers(params: Any, *, allow_all_2d: bool) -> Any:
+    """Return Muon dimension specs for eligible parameters.
 
     :param Any params: Parameter pytree.
     :param bool allow_all_2d: If True, apply Muon to all 2D tensors.
-    :return Any: Pytree of string labels ("muon" or "adam").
+    :return Any: Pytree of MuonDimensionNumbers (muon) or None (adam).
     """
     flat, treedef = jax.tree_util.tree_flatten_with_path(params)
-    labels: list[str] = []
+    dim_nums: list[Any] = []
     for path, leaf in flat:
         if not hasattr(leaf, "ndim") or leaf.ndim != 2:
-            labels.append("adam")
+            dim_nums.append(None)
             continue
         if allow_all_2d:
-            labels.append("muon")
+            dim_nums.append(optax.contrib.MuonDimensionNumbers())
             continue
         path_str = _path_to_str(path)
-        labels.append("muon" if _is_muon_weight_path(path_str) else "adam")
-    return treedef.unflatten(labels)
+        dim_nums.append(
+            optax.contrib.MuonDimensionNumbers() if _is_muon_weight_path(path_str) else None
+        )
+    return treedef.unflatten(dim_nums)
 
 
 def build_optimizer(
@@ -627,28 +629,31 @@ def build_optimizer(
         if cfg.model.backend != "megalodon":
             allow_all_2d = True
 
-        param_labels = _muon_param_labels(params, allow_all_2d=allow_all_2d)
-        muon_count = sum(1 for label in jax.tree_util.tree_leaves(param_labels) if label == "muon")
+        def dim_fn(tree: Any) -> Any:
+            """Return muon dimension numbers for eligible parameters."""
+            return _muon_weight_dim_numbers(tree, allow_all_2d=allow_all_2d)
+
+        dim_tree = dim_fn(params)
+        muon_count = sum(1 for dim in jax.tree_util.tree_leaves(dim_tree) if dim is not None)
         if muon_count == 0:
             logger.warning(
                 "optim.name=muon selected but no muon-eligible parameters were found; "
                 "falling back to AdamW for all parameters."
             )
-        muon_tx = optax.chain(
-            optax.contrib.scale_by_muon(
-                ns_steps=cfg.optim.muon_ns_steps,
+        transforms.append(
+            optax.add_decayed_weights(cfg.optim.weight_decay, mask=_weight_decay_mask)
+        )
+        transforms.append(
+            optax.contrib.muon(
+                learning_rate=schedule,
                 beta=cfg.optim.muon_momentum,
+                ns_steps=cfg.optim.muon_ns_steps,
                 nesterov=cfg.optim.muon_nesterov,
-            ),
-            optax.add_decayed_weights(cfg.optim.weight_decay, mask=_weight_decay_mask),
-            optax.scale_by_learning_rate(schedule),
+                weight_decay=0.0,
+                adam_weight_decay=0.0,
+                muon_weight_dimension_numbers=dim_fn,
+            )
         )
-        adam_tx = optax.adamw(
-            learning_rate=schedule,
-            weight_decay=cfg.optim.weight_decay,
-            mask=_weight_decay_mask,
-        )
-        transforms.append(optax.multi_transform({"muon": muon_tx, "adam": adam_tx}, param_labels))
     else:
         transforms.append(
             optax.adamw(
