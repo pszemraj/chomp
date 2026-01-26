@@ -742,6 +742,11 @@ def build_optimizer(
     if cfg.optim.name == "muon":
         allow_all_2d = cfg.optim.muon_allow_all_2d
         allow_embed = cfg.optim.muon_allow_tied_embed
+        if cfg.model.backend == "megalodon" and allow_all_2d:
+            logger.warning(
+                "optim.muon_allow_all_2d=true will apply Muon to all 2D tensors, including "
+                "non-matmul parameters (e.g., embed.weight, attn.gamma/beta, cema.gamma_*)."
+            )
         muon_tensors, adam_tensors, muon_2d, total_2d, muon_paths = _muon_param_stats(
             params, allow_all_2d=allow_all_2d, allow_embed=allow_embed
         )

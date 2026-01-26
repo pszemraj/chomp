@@ -139,3 +139,12 @@ def test_muon_lr_scale_matches_schedule() -> None:
         lr_adam = schedule(jnp.array(step))
         lr_muon = _muon_lr_from_adam(lr_adam, cfg)
         assert jnp.allclose(lr_muon, lr_adam * cfg.optim.muon_lr_scale)
+
+
+def test_muon_allow_all_2d_warns(caplog: Any) -> None:
+    """Allowing all 2D params should warn for Megalodon backends."""
+    params = _megalodon_params()
+    cfg = Config()
+    cfg = replace(cfg, optim=replace(cfg.optim, name="muon", muon_allow_all_2d=True))
+    build_optimizer(cfg, params)
+    assert any("muon_allow_all_2d" in rec.message for rec in caplog.records)
