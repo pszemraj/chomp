@@ -1380,7 +1380,7 @@ def run(
                         t1 = time.perf_counter()
                         state, metrics = train_step(state, batch)
                         tokens_seen_device = tokens_seen_device + jnp.asarray(
-                            metrics["token_sum"], dtype=jnp.int64
+                            metrics["token_sum"], dtype=tokens_seen_device.dtype
                         )
 
                     host_step += 1
