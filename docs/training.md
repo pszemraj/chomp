@@ -23,7 +23,8 @@ boundary masks.
 - `muon`: applies Muon to a whitelist of projection weights
   (`attn.wz/wv/wr/wh1/wh2`, `ffn.fc1/fc2/fc3`, `lm_head`) and uses AdamW for
   everything else. Set `optim.muon_allow_all_2d=true` to apply Muon to all 2D
-  tensors.
+  tensors. Set `optim.muon_allow_tied_embed=true` to include the tied embedding
+  matrix.
 
 Both optimizers use the same warmup+cosine schedule (`optim.lr`,
 `optim.warmup_steps`, `optim.decay_steps`, `optim.min_lr_ratio`) and the same

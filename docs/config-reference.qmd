@@ -1643,6 +1643,23 @@ Use Nesterov momentum in Muon.
 muon_allow_all_2d: bool = false
 ```
 
+Allow Muon updates on all 2D tensors (overrides the projection-weight whitelist).
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+
+#### `optim.muon_allow_tied_embed` {#optim.muon_allow_tied_embed}
+
+```yaml
+muon_allow_tied_embed: bool = false
+```
+
+Allow Muon updates on the tied token embedding matrix (`model.embed.weight`).
+
+| Property | Value |
+|----------|-------|
+| Required | No |
 If `false` (default), Muon applies to 2D weight matrices named `*.weight` and
 excludes embeddings. If `true`, Muon applies to all 2D tensors.
 
@@ -1976,7 +1993,7 @@ All configuration fields by section:
 
 **train** (18 fields): [`seed`](#train.seed), [`steps`](#train.steps), [`batch_size`](#train.batch_size), [`seq_len`](#train.seq_len), [`grad_accum`](#train.grad_accum), [`jit`](#train.jit), [`deterministic`](#train.deterministic), [`allow_cpu`](#train.allow_cpu), [`log_every`](#train.log_every), [`eval_every`](#train.eval_every), [`generate_every`](#train.generate_every), [`generate_input_len`](#train.generate_input_len), [`generate_max_tokens`](#train.generate_max_tokens), [`generate_temperature`](#train.generate_temperature), [`generate_top_k`](#train.generate_top_k), [`generate_top_p`](#train.generate_top_p), [`profile`](#train.profile), [`profile_dir`](#train.profile_dir)
 
-**optim** (13 fields): [`name`](#optim.name), [`lr`](#optim.lr), [`muon_lr_scale`](#optim.muon_lr_scale), [`weight_decay`](#optim.weight_decay), [`muon_weight_decay_mult`](#optim.muon_weight_decay_mult), [`grad_clip_norm`](#optim.grad_clip_norm), [`warmup_steps`](#optim.warmup_steps), [`decay_steps`](#optim.decay_steps), [`min_lr_ratio`](#optim.min_lr_ratio), [`muon_momentum`](#optim.muon_momentum), [`muon_ns_steps`](#optim.muon_ns_steps), [`muon_nesterov`](#optim.muon_nesterov), [`muon_allow_all_2d`](#optim.muon_allow_all_2d)
+**optim** (14 fields): [`name`](#optim.name), [`lr`](#optim.lr), [`muon_lr_scale`](#optim.muon_lr_scale), [`weight_decay`](#optim.weight_decay), [`muon_weight_decay_mult`](#optim.muon_weight_decay_mult), [`grad_clip_norm`](#optim.grad_clip_norm), [`warmup_steps`](#optim.warmup_steps), [`decay_steps`](#optim.decay_steps), [`min_lr_ratio`](#optim.min_lr_ratio), [`muon_momentum`](#optim.muon_momentum), [`muon_ns_steps`](#optim.muon_ns_steps), [`muon_nesterov`](#optim.muon_nesterov), [`muon_allow_all_2d`](#optim.muon_allow_all_2d), [`muon_allow_tied_embed`](#optim.muon_allow_tied_embed)
 
 **checkpoint** (5 fields): [`enabled`](#checkpoint.enabled), [`root_dir`](#checkpoint.root_dir), [`save_every`](#checkpoint.save_every), [`max_to_keep`](#checkpoint.max_to_keep), [`async_save`](#checkpoint.async_save)
 

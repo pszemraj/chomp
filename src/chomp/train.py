@@ -593,7 +593,14 @@ def _is_muon_weight_path(path_str: str) -> bool:
     return any(token in path_str for token in _MUON_WEIGHT_WHITELIST)
 
 
-def _muon_param_stats(params: Any, *, allow_all_2d: bool) -> tuple[int, int, int, int, list[str]]:
+def _is_embed_weight_path(path_str: str) -> bool:
+    """Return True if a path refers to the token embedding weight."""
+    return path_str.endswith(".embed.weight")
+
+
+def _muon_param_stats(
+    params: Any, *, allow_all_2d: bool, allow_embed: bool
+) -> tuple[int, int, int, int, list[str]]:
     """Return Muon/Adam tensor counts and a sample of Muon paths.
 
     :param Any params: Parameter pytree.
@@ -613,7 +620,11 @@ def _muon_param_stats(params: Any, *, allow_all_2d: bool) -> tuple[int, int, int
         if leaf.ndim == 2:
             total_2d += 1
         path_str = _path_to_str(path)
-        use_muon = leaf.ndim == 2 and (allow_all_2d or _is_muon_weight_path(path_str))
+        use_muon = leaf.ndim == 2 and (
+            allow_all_2d
+            or _is_muon_weight_path(path_str)
+            or (allow_embed and _is_embed_weight_path(path_str))
+        )
         if use_muon:
             muon_tensors += 1
             muon_2d += 1
@@ -622,7 +633,7 @@ def _muon_param_stats(params: Any, *, allow_all_2d: bool) -> tuple[int, int, int
     return muon_tensors, adam_tensors, muon_2d, total_2d, muon_paths
 
 
-def _muon_weight_dim_numbers(params: Any, *, allow_all_2d: bool) -> Any:
+def _muon_weight_dim_numbers(params: Any, *, allow_all_2d: bool, allow_embed: bool = False) -> Any:
     """Return Muon dimension specs for eligible parameters.
 
     :param Any params: Parameter pytree.
@@ -640,7 +651,9 @@ def _muon_weight_dim_numbers(params: Any, *, allow_all_2d: bool) -> Any:
             continue
         path_str = _path_to_str(path)
         dim_nums.append(
-            optax.contrib.MuonDimensionNumbers() if _is_muon_weight_path(path_str) else None
+            optax.contrib.MuonDimensionNumbers()
+            if (_is_muon_weight_path(path_str) or (allow_embed and _is_embed_weight_path(path_str)))
+            else None
         )
     return treedef.unflatten(dim_nums)
 
@@ -708,10 +721,11 @@ def build_optimizer(
 
     if cfg.optim.name == "muon":
         allow_all_2d = cfg.optim.muon_allow_all_2d
+        allow_embed = cfg.optim.muon_allow_tied_embed
         if cfg.model.backend != "megalodon":
             allow_all_2d = True
         muon_tensors, adam_tensors, muon_2d, total_2d, muon_paths = _muon_param_stats(
-            params, allow_all_2d=allow_all_2d
+            params, allow_all_2d=allow_all_2d, allow_embed=allow_embed
         )
         logger.info(
             "Muon param split: %s muon / %s adam tensors; 2D coverage %s/%s",
@@ -739,7 +753,11 @@ def build_optimizer(
                     labels.append("adam")
                     continue
                 path_str = _path_to_str(path)
-                use_muon = leaf.ndim == 2 and (allow_all_2d or _is_muon_weight_path(path_str))
+                use_muon = leaf.ndim == 2 and (
+                    allow_all_2d
+                    or _is_muon_weight_path(path_str)
+                    or (allow_embed and _is_embed_weight_path(path_str))
+                )
                 labels.append("muon" if use_muon else "adam")
             return treedef.unflatten(labels)
 

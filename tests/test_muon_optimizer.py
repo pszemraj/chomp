@@ -75,6 +75,15 @@ def test_muon_param_labels_allow_all_2d() -> None:
     assert mapping["model.embed.weight"] is True
 
 
+def test_muon_param_labels_allow_tied_embed() -> None:
+    """allow_embed should include the tied embedding matrix."""
+    params = _megalodon_params()
+    dim_nums = _muon_weight_dim_numbers(params, allow_all_2d=False, allow_embed=True)
+    mapping = _label_map(dim_nums)
+
+    assert mapping["model.embed.weight"] is True
+
+
 def test_muon_update_handles_none_leaves() -> None:
     """Muon optimizer should tolerate None leaves in the update tree."""
     params = _megalodon_params()

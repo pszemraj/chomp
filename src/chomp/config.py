@@ -254,6 +254,7 @@ class OptimConfig:
     muon_ns_steps: int = 5
     muon_nesterov: bool = True
     muon_allow_all_2d: bool = False
+    muon_allow_tied_embed: bool = False
 
 
 @dataclass(frozen=True)
