@@ -675,6 +675,16 @@ def _muon_lr_from_adam(lr_adam: jax.Array, cfg: Config) -> jax.Array:
     return lr_adam * cfg.optim.muon_lr_scale
 
 
+def _init_tokens_seen(tokens_seen: int) -> jax.Array:
+    """Return an integer device counter for tokens seen.
+
+    :param int tokens_seen: Starting token count.
+    :return jax.Array: Device counter (int64 when enabled, else int32).
+    """
+    dtype = jnp.int64 if jax.config.read("jax_enable_x64") else jnp.int32
+    return jnp.asarray(tokens_seen, dtype=dtype)
+
+
 def _scale_updates(mask_fn: Callable[[Any], Any], scale: float) -> optax.GradientTransformation:
     """Scale masked updates by a fixed factor.
 
@@ -1194,10 +1204,10 @@ def run(
 
     console_every = int(cfg.train.log_every)
     host_step = int(start_step)
-    tokens_seen_base = 0.0
+    tokens_seen_base = 0
     if resume_meta and resume_meta.get("tokens_seen") is not None:
-        tokens_seen_base = float(resume_meta["tokens_seen"])
-    tokens_seen_device = jnp.asarray(tokens_seen_base, dtype=jnp.float32)
+        tokens_seen_base = int(resume_meta["tokens_seen"])
+    tokens_seen_device = _init_tokens_seen(tokens_seen_base)
 
     def _run_eval(params: Any) -> dict[str, Any]:
         """Run a full eval pass over the cached eval texts.
@@ -1345,7 +1355,9 @@ def run(
                     with step_annotation("train_step"):
                         t1 = time.perf_counter()
                         state, metrics = train_step(state, batch)
-                        tokens_seen_device = tokens_seen_device + metrics["token_sum"]
+                        tokens_seen_device = tokens_seen_device + jnp.asarray(
+                            metrics["token_sum"], dtype=jnp.int64
+                        )
 
                     host_step += 1
                     step_i = int(host_step)
