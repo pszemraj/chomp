@@ -732,8 +732,6 @@ def build_optimizer(
     if cfg.optim.name == "muon":
         allow_all_2d = cfg.optim.muon_allow_all_2d
         allow_embed = cfg.optim.muon_allow_tied_embed
-        if cfg.model.backend != "megalodon":
-            allow_all_2d = True
         muon_tensors, adam_tensors, muon_2d, total_2d, muon_paths = _muon_param_stats(
             params, allow_all_2d=allow_all_2d, allow_embed=allow_embed
         )
@@ -779,24 +777,26 @@ def build_optimizer(
             """Return the Muon learning rate schedule."""
             return _muon_lr_from_adam(schedule(step), cfg)
 
+        muon_weight_decay = cfg.optim.weight_decay * cfg.optim.muon_weight_decay_mult
+
         def muon_dim_fn(tree: Any) -> Any:
             """Return Muon dimension numbers for masked Muon parameters.
 
             :param Any tree: Parameter pytree.
             :return Any: Pytree of MuonDimensionNumbers for Muon params.
             """
-            return _muon_weight_dim_numbers(tree, allow_all_2d=True)
+            return _muon_weight_dim_numbers(
+                tree, allow_all_2d=allow_all_2d, allow_embed=allow_embed
+            )
 
-        muon_weight_decay = cfg.optim.weight_decay * cfg.optim.muon_weight_decay_mult
-        muon_tx = optax.chain(
-            optax.contrib.scale_by_muon(
-                beta=cfg.optim.muon_momentum,
-                ns_steps=cfg.optim.muon_ns_steps,
-                nesterov=cfg.optim.muon_nesterov,
-                weight_dimension_numbers=muon_dim_fn,
-            ),
-            optax.add_decayed_weights(muon_weight_decay, mask=_weight_decay_mask),
-            optax.scale_by_learning_rate(muon_schedule),
+        muon_tx = optax.contrib.muon(
+            learning_rate=muon_schedule,
+            ns_steps=cfg.optim.muon_ns_steps,
+            beta=cfg.optim.muon_momentum,
+            nesterov=cfg.optim.muon_nesterov,
+            weight_decay=muon_weight_decay,
+            weight_decay_mask=_weight_decay_mask,
+            muon_weight_dimension_numbers=muon_dim_fn,
         )
         adam_tx = optax.adamw(
             learning_rate=schedule,
