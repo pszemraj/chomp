@@ -594,7 +594,11 @@ def _is_muon_weight_path(path_str: str) -> bool:
 
 
 def _is_embed_weight_path(path_str: str) -> bool:
-    """Return True if a path refers to the token embedding weight."""
+    """Return True if a path refers to the token embedding weight.
+
+    :param str path_str: Dotted parameter path.
+    :return bool: True if the path is the embedding weight.
+    """
     return path_str.endswith(".embed.weight")
 
 
@@ -605,6 +609,7 @@ def _muon_param_stats(
 
     :param Any params: Parameter pytree.
     :param bool allow_all_2d: If True, apply Muon to all 2D tensors.
+    :param bool allow_embed: If True, allow Muon on tied embedding weights.
     :return tuple: (muon_tensors, adam_tensors, muon_2d, total_2d, muon_paths).
     """
     flat, _ = jax.tree_util.tree_flatten_with_path(params)
@@ -638,6 +643,7 @@ def _muon_weight_dim_numbers(params: Any, *, allow_all_2d: bool, allow_embed: bo
 
     :param Any params: Parameter pytree.
     :param bool allow_all_2d: If True, apply Muon to all 2D tensors.
+    :param bool allow_embed: If True, allow Muon on tied embedding weights.
     :return Any: Pytree of MuonDimensionNumbers (muon) or None (adam).
     """
     flat, treedef = jax.tree_util.tree_flatten_with_path(params)
@@ -677,16 +683,19 @@ def _scale_updates(mask_fn: Callable[[Any], Any], scale: float) -> optax.Gradien
     """
 
     def init_fn(params: Any) -> optax.EmptyState:
+        """Initialize stateless scaling state."""
         del params
         return optax.EmptyState()
 
     def update_fn(
         updates: Any, state: optax.EmptyState, params: Any | None = None
     ) -> tuple[Any, optax.EmptyState]:
+        """Scale updates for masked leaves and pass through others."""
         mask_source = params if params is not None else updates
         mask = mask_fn(mask_source)
 
         def _apply_scale(m: bool, g: Any) -> Any:
+            """Apply scaling to a single leaf if masked."""
             if g is None:
                 return None
             return g * scale if m else g
@@ -745,7 +754,11 @@ def build_optimizer(
             )
 
         def label_fn(tree: Any) -> Any:
-            """Return optimizer labels for each parameter leaf."""
+            """Return optimizer labels for each parameter leaf.
+
+            :param Any tree: Parameter pytree.
+            :return Any: Pytree of labels ("muon" or "adam").
+            """
             flat, treedef = jax.tree_util.tree_flatten_with_path(tree)
             labels: list[str] = []
             for path, leaf in flat:
@@ -762,10 +775,15 @@ def build_optimizer(
             return treedef.unflatten(labels)
 
         def muon_schedule(step: jax.Array) -> jax.Array:
+            """Return the Muon learning rate schedule."""
             return _muon_lr_from_adam(schedule(step), cfg)
 
         def muon_dim_fn(tree: Any) -> Any:
-            """Return Muon dimension numbers for masked Muon parameters."""
+            """Return Muon dimension numbers for masked Muon parameters.
+
+            :param Any tree: Parameter pytree.
+            :return Any: Pytree of MuonDimensionNumbers for Muon params.
+            """
             return _muon_weight_dim_numbers(tree, allow_all_2d=True)
 
         muon_weight_decay = cfg.optim.weight_decay * cfg.optim.muon_weight_decay_mult
