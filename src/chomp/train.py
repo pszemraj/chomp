@@ -25,6 +25,7 @@ Phases 4–5:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import random
@@ -538,6 +539,14 @@ def _weight_decay_mask(params: Any) -> Any:
 
 
 _MUON_EMBED_EXCLUDE = (".embed.", ".embedding.")
+
+
+def _flush_loggers() -> None:
+    """Flush all log handlers to ensure crash logs are written."""
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        with contextlib.suppress(Exception):
+            handler.flush()
 
 
 def _path_to_str(path: tuple[Any, ...]) -> str:
@@ -1138,183 +1147,232 @@ def run(
             use_rich=cfg.logging.console_use_rich,
         )
 
+    exit_code = 0
+    crash_reason = None
+    crash_type = None
+    crash_step = None
+
     try:
         with MetricsWriter(metrics_path) as mw:
-            for _ in tqdm(range(start_step, target_steps), desc="train", dynamic_ncols=True):
-                # Fetch batch (host) and (optionally) device_put
-                try:
-                    batch = next(data_it)
-                except StopIteration:
-                    tokens_seen_host = int(jax.device_get(tokens_seen_device))
+            try:
+                for _ in tqdm(range(start_step, target_steps), desc="train", dynamic_ncols=True):
+                    # Fetch batch (host) and (optionally) device_put
+                    try:
+                        batch = next(data_it)
+                    except StopIteration:
+                        tokens_seen_host = int(jax.device_get(tokens_seen_device))
+                        step_i = int(host_step)
+                        row = {
+                            "step": int(step_i),
+                            "data_exhausted": True,
+                            "tokens_seen": int(tokens_seen_host),
+                            "wall_time_s": time.perf_counter() - t0,
+                        }
+                        mw.write(row)
+                        if wandb_run is not None:
+                            wandb_run.log(row, step=step_i)
+                        print("[chomp] data exhausted; stopping early")
+                        break
+                    data_stats = data_it.get_stats()
+                    if not cfg.data.device_put:
+                        batch = jax.device_put(batch)
+
+                    # Batch placement validation (real check)
+                    if cfg.debug.check_device_every > 0 and (
+                        host_step % cfg.debug.check_device_every == 0
+                    ):
+                        assert_batch_on_device(batch, allow_cpu=cfg.train.allow_cpu)
+
+                    # Step (compile happens on first call)
+                    with step_annotation("train_step"):
+                        t1 = time.perf_counter()
+                        state, metrics = train_step(state, batch)
+                        tokens_seen_device = tokens_seen_device + metrics["token_sum"]
+
+                    host_step += 1
                     step_i = int(host_step)
-                    row = {
-                        "step": int(step_i),
-                        "data_exhausted": True,
-                        "tokens_seen": int(tokens_seen_host),
-                        "wall_time_s": time.perf_counter() - t0,
-                    }
-                    mw.write(row)
-                    if wandb_run is not None:
-                        wandb_run.log(row, step=step_i)
-                    print("[chomp] data exhausted; stopping early")
-                    break
-                data_stats = data_it.get_stats()
-                if not cfg.data.device_put:
-                    batch = jax.device_put(batch)
 
-                # Batch placement validation (real check)
-                if cfg.debug.check_device_every > 0 and (
-                    host_step % cfg.debug.check_device_every == 0
-                ):
-                    assert_batch_on_device(batch, allow_cpu=cfg.train.allow_cpu)
-
-                # Step (compile happens on first call)
-                with step_annotation("train_step"):
-                    t1 = time.perf_counter()
-                    state, metrics = train_step(state, batch)
-                    tokens_seen_device = tokens_seen_device + metrics["token_sum"]
-
-                host_step += 1
-                step_i = int(host_step)
-
-                should_eval = (
-                    eval_step is not None and eval_every > 0 and (step_i % eval_every) == 0
-                )
-                should_log = (step_i % cfg.train.log_every) == 0 or should_eval
-                should_console = (step_i % console_every) == 0 or should_eval
-                should_sync = should_log or should_console or (t_compile is None)
-
-                metrics_host = None
-                tokens_seen_host = None
-                step_time_s = None
-                tokens_per_sec = 0.0
-
-                if should_sync:
-                    metrics_host, tokens_seen_host = jax.device_get((metrics, tokens_seen_device))
-                    t2 = time.perf_counter()
-                    step_time_s = t2 - t1
-                    if t_compile is None:
-                        t_compile = step_time_s
-                    if cfg.debug.nan_check:
-                        _check_finite_metrics(metrics_host, step=step_i)
-                    token_sum = float(metrics_host.get("token_sum", 0.0))
-                    tokens_per_sec = token_sum / step_time_s if step_time_s > 0 else 0.0
-
-                # Checkpoint save (after state updated)
-                if manager is not None and (step_i % int(cfg.checkpoint.save_every) == 0):
-                    tokens_seen_ckpt = tokens_seen_host
-                    if tokens_seen_ckpt is None:
-                        tokens_seen_ckpt = int(jax.device_get(tokens_seen_device))
-                    meta = build_meta(
-                        step=step_i,
-                        config=cfg.to_dict(),
-                        data_fingerprint=data_fingerprint(
-                            cfg, tokenizer_snapshot_hash=tokenizer_hash
-                        ),
-                        tokens_seen=tokens_seen_ckpt,
+                    should_eval = (
+                        eval_step is not None and eval_every > 0 and (step_i % eval_every) == 0
                     )
-                    save(
-                        manager,
-                        step=step_i,
-                        train_state=state,
-                        data_iter=data_it,
-                        meta=meta,
-                    )
+                    should_log = (step_i % cfg.train.log_every) == 0 or should_eval
+                    should_console = (step_i % console_every) == 0 or should_eval
+                    should_sync = should_log or should_console or (t_compile is None)
 
-                eval_row: dict[str, Any] = {}
-                if should_eval:
-                    eval_row = _run_eval(state.params)
+                    metrics_host = None
+                    tokens_seen_host = None
+                    step_time_s = None
+                    tokens_per_sec = 0.0
 
-                if (
-                    gen_settings is not None
-                    and gen_stream is not None
-                    and (step_i % gen_settings.every) == 0
-                ):
-                    _run_generation_sample(step_i, state.params)
-
-                # Log
-                mem_stats = _device_memory_stats_gb() if (should_log or should_console) else {}
-                if should_log:
-                    if metrics_host is None:
+                    if should_sync:
                         metrics_host, tokens_seen_host = jax.device_get(
                             (metrics, tokens_seen_device)
                         )
-                    if tokens_seen_host is None:
-                        tokens_seen_host = int(jax.device_get(tokens_seen_device))
-                    row = {
-                        "step": int(step_i),
-                        "loss": float(metrics_host["loss"]),
-                        "grad_norm": float(metrics_host["grad_norm"]),
-                        "lr": float(metrics_host["lr"]),
-                        "step_time_s": float(step_time_s),
-                        "tokens_per_sec": float(tokens_per_sec),
-                        "tokens_seen": int(tokens_seen_host),
-                        "wall_time_s": time.perf_counter() - t0,
-                    }
-                    if data_stats:
-                        row.update(data_stats)
-                    if eval_row:
-                        row.update(eval_row)
-                    if mem_stats:
-                        row.update(mem_stats)
-                    if step_i == (start_step + 1) and t_compile is not None:
-                        row["first_step_compile_time_s"] = float(t_compile)
+                        t2 = time.perf_counter()
+                        step_time_s = t2 - t1
+                        if t_compile is None:
+                            t_compile = step_time_s
+                        if cfg.debug.nan_check:
+                            _check_finite_metrics(metrics_host, step=step_i)
+                        token_sum = float(metrics_host.get("token_sum", 0.0))
+                        tokens_per_sec = token_sum / step_time_s if step_time_s > 0 else 0.0
 
-                    local_drop = {
-                        "wall_time_s",
-                        "packing_tokens",
-                        "packing_capacity",
-                        "eval_tokens",
-                        "device_memory_gb",
-                    }
-                    row_local = {k: v for k, v in row.items() if k not in local_drop}
-                    mw.write(row_local)
-                    if wandb_run is not None:
-                        wandb_drop = {
+                    # Checkpoint save (after state updated)
+                    if manager is not None and (step_i % int(cfg.checkpoint.save_every) == 0):
+                        tokens_seen_ckpt = tokens_seen_host
+                        if tokens_seen_ckpt is None:
+                            tokens_seen_ckpt = int(jax.device_get(tokens_seen_device))
+                        meta = build_meta(
+                            step=step_i,
+                            config=cfg.to_dict(),
+                            data_fingerprint=data_fingerprint(
+                                cfg, tokenizer_snapshot_hash=tokenizer_hash
+                            ),
+                            tokens_seen=tokens_seen_ckpt,
+                        )
+                        save(
+                            manager,
+                            step=step_i,
+                            train_state=state,
+                            data_iter=data_it,
+                            meta=meta,
+                        )
+
+                    eval_row: dict[str, Any] = {}
+                    if should_eval:
+                        eval_row = _run_eval(state.params)
+
+                    if (
+                        gen_settings is not None
+                        and gen_stream is not None
+                        and (step_i % gen_settings.every) == 0
+                    ):
+                        _run_generation_sample(step_i, state.params)
+
+                    # Log
+                    mem_stats = _device_memory_stats_gb() if (should_log or should_console) else {}
+                    if should_log:
+                        if metrics_host is None:
+                            metrics_host, tokens_seen_host = jax.device_get(
+                                (metrics, tokens_seen_device)
+                            )
+                        if tokens_seen_host is None:
+                            tokens_seen_host = int(jax.device_get(tokens_seen_device))
+                        row = {
+                            "step": int(step_i),
+                            "loss": float(metrics_host["loss"]),
+                            "grad_norm": float(metrics_host["grad_norm"]),
+                            "lr": float(metrics_host["lr"]),
+                            "step_time_s": float(step_time_s),
+                            "tokens_per_sec": float(tokens_per_sec),
+                            "tokens_seen": int(tokens_seen_host),
+                            "wall_time_s": time.perf_counter() - t0,
+                        }
+                        if data_stats:
+                            row.update(data_stats)
+                        if eval_row:
+                            row.update(eval_row)
+                        if mem_stats:
+                            row.update(mem_stats)
+                        if step_i == (start_step + 1) and t_compile is not None:
+                            row["first_step_compile_time_s"] = float(t_compile)
+
+                        local_drop = {
                             "wall_time_s",
-                            "step",
-                            "peak_memory_gb",
                             "packing_tokens",
                             "packing_capacity",
                             "eval_tokens",
                             "device_memory_gb",
                         }
-                        row_wandb = {k: v for k, v in row.items() if k not in wandb_drop}
-                        wandb_run.log(row_wandb, step=step_i)
-                if should_console:
-                    if metrics_host is None:
-                        metrics_host = jax.device_get(metrics)
-                    eval_loss = eval_row.get("eval_loss") if eval_row else None
-                    packing_util = None
-                    if data_stats and "packing_utilization" in data_stats:
-                        packing_util = float(data_stats["packing_utilization"])
-                    device_mem = None
-                    peak_mem = None
-                    if "device_memory_gb" in mem_stats:
-                        device_mem = float(mem_stats["device_memory_gb"])
-                    if "peak_memory_gb" in mem_stats:
-                        peak_mem = float(mem_stats["peak_memory_gb"])
-                    console_line = _format_console_row(
-                        step=step_i,
-                        loss=float(metrics_host["loss"]),
-                        grad_norm=float(metrics_host["grad_norm"]),
-                        lr=float(metrics_host["lr"]),
-                        step_time_s=float(step_time_s),
-                        tokens_per_sec=float(tokens_per_sec),
-                        eval_loss=float(eval_loss) if eval_loss is not None else None,
-                        packing_util=packing_util,
-                        device_mem_gb=device_mem,
-                        peak_mem_gb=peak_mem,
-                    )
-                    tqdm.write(console_line)
+                        row_local = {k: v for k, v in row.items() if k not in local_drop}
+                        mw.write(row_local)
+                        if wandb_run is not None:
+                            wandb_drop = {
+                                "wall_time_s",
+                                "step",
+                                "peak_memory_gb",
+                                "packing_tokens",
+                                "packing_capacity",
+                                "eval_tokens",
+                                "device_memory_gb",
+                            }
+                            row_wandb = {k: v for k, v in row.items() if k not in wandb_drop}
+                            wandb_run.log(row_wandb, step=step_i)
+                    if should_console:
+                        if metrics_host is None:
+                            metrics_host = jax.device_get(metrics)
+                        eval_loss = eval_row.get("eval_loss") if eval_row else None
+                        packing_util = None
+                        if data_stats and "packing_utilization" in data_stats:
+                            packing_util = float(data_stats["packing_utilization"])
+                        device_mem = None
+                        peak_mem = None
+                        if "device_memory_gb" in mem_stats:
+                            device_mem = float(mem_stats["device_memory_gb"])
+                        if "peak_memory_gb" in mem_stats:
+                            peak_mem = float(mem_stats["peak_memory_gb"])
+                        console_line = _format_console_row(
+                            step=step_i,
+                            loss=float(metrics_host["loss"]),
+                            grad_norm=float(metrics_host["grad_norm"]),
+                            lr=float(metrics_host["lr"]),
+                            step_time_s=float(step_time_s),
+                            tokens_per_sec=float(tokens_per_sec),
+                            eval_loss=float(eval_loss) if eval_loss is not None else None,
+                            packing_util=packing_util,
+                            device_mem_gb=device_mem,
+                            peak_mem_gb=peak_mem,
+                        )
+                        tqdm.write(console_line)
+            except Exception as exc:
+                exit_code = 1
+                crash_type = type(exc).__name__
+                crash_reason = str(exc)
+                crash_step = int(host_step) + 1
+                logger.exception("Training crashed at step %s", crash_step)
+                row = {
+                    "step": int(crash_step),
+                    "crash": True,
+                    "crash_type": crash_type,
+                    "crash_reason": crash_reason,
+                    "wall_time_s": time.perf_counter() - t0,
+                }
+                with contextlib.suppress(Exception):
+                    tokens_seen_host = int(jax.device_get(tokens_seen_device))
+                    row["tokens_seen"] = tokens_seen_host
+                mw.write(row)
+                if wandb_run is not None:
+                    with contextlib.suppress(Exception):
+                        wandb_run.summary["crashed"] = True
+                        wandb_run.summary["crash_type"] = crash_type
+                        wandb_run.summary["crash_reason"] = crash_reason
+                        wandb_run.log(
+                            {
+                                "crash": True,
+                                "crash_type": crash_type,
+                                "crash_reason": crash_reason,
+                            },
+                            step=int(crash_step),
+                        )
+                _flush_loggers()
+                raise
     finally:
         if wandb_run is not None:
-            wandb_run.finish()
+            with contextlib.suppress(Exception):
+                if crash_reason is not None:
+                    wandb_run.summary["crashed"] = True
+                    wandb_run.summary["crash_type"] = crash_type
+                    wandb_run.summary["crash_reason"] = crash_reason
+                wandb_run.finish(exit_code=exit_code)
 
-    if manager is not None:
-        manager.wait_until_finished()
+        if manager is not None:
+            with contextlib.suppress(Exception):
+                manager.wait_until_finished()
 
-    if cfg.train.profile:
-        stop_trace()
+        if profile_enabled:
+            with contextlib.suppress(Exception):
+                stop_trace()
+
+        _flush_loggers()
 
     return run_dir
