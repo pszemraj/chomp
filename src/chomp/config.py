@@ -253,6 +253,7 @@ class OptimConfig:
     muon_momentum: float = 0.95
     muon_ns_steps: int = 5
     muon_nesterov: bool = True
+    muon_consistent_rms: float | None = 0.2
     muon_allow_all_2d: bool = False
     muon_allow_tied_embed: bool = False
 
@@ -650,6 +651,10 @@ def _validate_optim(cfg: Config) -> None:
         _vfail(f"optim.muon_momentum must be in (0, 1), got {cfg.optim.muon_momentum}")
     if cfg.optim.muon_ns_steps <= 0:
         _vfail(f"optim.muon_ns_steps must be positive, got {cfg.optim.muon_ns_steps}")
+    if cfg.optim.muon_consistent_rms is not None and cfg.optim.muon_consistent_rms < 0:
+        _vfail(
+            f"optim.muon_consistent_rms must be >= 0 or None, got {cfg.optim.muon_consistent_rms}"
+        )
     if cfg.optim.warmup_steps >= cfg.train.steps:
         _vfail(
             f"optim.warmup_steps ({cfg.optim.warmup_steps}) must be < train.steps "

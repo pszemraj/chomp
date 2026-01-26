@@ -185,6 +185,15 @@ def test_muon_ns_steps_must_be_positive() -> None:
         validate_config(bad)
 
 
+def test_muon_consistent_rms_must_be_non_negative() -> None:
+    """muon_consistent_rms < 0 must raise ValueError."""
+    cfg = _base_cfg()
+    bad_optim = replace(cfg.optim, muon_consistent_rms=-0.1)
+    bad = replace(cfg, optim=bad_optim)
+    with pytest.raises(ValueError, match="muon_consistent_rms"):
+        validate_config(bad)
+
+
 def test_log_file_must_be_non_empty() -> None:
     """Empty or whitespace log_file must raise ValueError."""
     cfg = _base_cfg()
