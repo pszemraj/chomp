@@ -57,6 +57,8 @@ def test_muon_param_labels_whitelist_excludes_embed() -> None:
     assert mapping["model.layers.[0].attn.wz.weight"] is True
     assert mapping["model.layers.[0].ffn.fc1.weight"] is True
     assert mapping["model.layers.[0].attn.gamma"] is False
+    assert mapping["model.layers.[0].attn.timenorm.weight"] is False
+    assert mapping["model.layers.[0].ffn.norm.weight"] is False
 
 
 def test_muon_param_labels_allow_all_2d() -> None:

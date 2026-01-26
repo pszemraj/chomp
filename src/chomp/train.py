@@ -542,7 +542,17 @@ def _weight_decay_mask(params: Any) -> Any:
     return jax.tree_util.tree_map(mask_one, params)
 
 
-_MUON_EMBED_EXCLUDE = (".embed.", ".embedding.")
+_MUON_WEIGHT_WHITELIST = (
+    ".attn.wz.weight",
+    ".attn.wv.weight",
+    ".attn.wr.weight",
+    ".attn.wh1.weight",
+    ".attn.wh2.weight",
+    ".ffn.fc1.weight",
+    ".ffn.fc2.weight",
+    ".ffn.fc3.weight",
+    ".lm_head.weight",
+)
 
 
 def _flush_loggers() -> None:
@@ -580,7 +590,36 @@ def _is_muon_weight_path(path_str: str) -> bool:
     """
     if not path_str.endswith(".weight"):
         return False
-    return not any(token in path_str for token in _MUON_EMBED_EXCLUDE)
+    return any(token in path_str for token in _MUON_WEIGHT_WHITELIST)
+
+
+def _muon_param_stats(params: Any, *, allow_all_2d: bool) -> tuple[int, int, int, int, list[str]]:
+    """Return Muon/Adam tensor counts and a sample of Muon paths.
+
+    :param Any params: Parameter pytree.
+    :param bool allow_all_2d: If True, apply Muon to all 2D tensors.
+    :return tuple: (muon_tensors, adam_tensors, muon_2d, total_2d, muon_paths).
+    """
+    flat, _ = jax.tree_util.tree_flatten_with_path(params)
+    total_tensors = 0
+    total_2d = 0
+    muon_tensors = 0
+    muon_2d = 0
+    muon_paths: list[str] = []
+    for path, leaf in flat:
+        if not hasattr(leaf, "ndim"):
+            continue
+        total_tensors += 1
+        if leaf.ndim == 2:
+            total_2d += 1
+        path_str = _path_to_str(path)
+        use_muon = leaf.ndim == 2 and (allow_all_2d or _is_muon_weight_path(path_str))
+        if use_muon:
+            muon_tensors += 1
+            muon_2d += 1
+            muon_paths.append(path_str)
+    adam_tensors = total_tensors - muon_tensors
+    return muon_tensors, adam_tensors, muon_2d, total_2d, muon_paths
 
 
 def _muon_weight_dim_numbers(params: Any, *, allow_all_2d: bool) -> Any:
@@ -662,6 +701,19 @@ def build_optimizer(
         if cfg.model.backend != "megalodon":
             allow_all_2d = True
         muon_lr_scale = float(cfg.optim.muon_lr_scale)
+        muon_tensors, adam_tensors, muon_2d, total_2d, muon_paths = _muon_param_stats(
+            params, allow_all_2d=allow_all_2d
+        )
+        logger.info(
+            "Muon param split: %s muon / %s adam tensors; 2D coverage %s/%s",
+            muon_tensors,
+            adam_tensors,
+            muon_2d,
+            total_2d,
+        )
+        if muon_paths:
+            sample = ", ".join(muon_paths[:5])
+            logger.info("Muon sample params: %s", sample)
 
         def dim_fn(tree: Any) -> Any:
             """Return muon dimension numbers for eligible parameters."""
