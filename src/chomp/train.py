@@ -646,6 +646,7 @@ def _muon_weight_dim_numbers(params: Any, *, allow_all_2d: bool, allow_embed: bo
     :param bool allow_embed: If True, allow Muon on tied embedding weights.
     :return Any: Pytree of MuonDimensionNumbers (muon) or None (adam).
     """
+    muon_dims = optax.contrib.MuonDimensionNumbers(reduction_axis=(1,), output_axis=(0,))
     flat, treedef = jax.tree_util.tree_flatten_with_path(params)
     dim_nums: list[Any] = []
     for path, leaf in flat:
@@ -653,11 +654,11 @@ def _muon_weight_dim_numbers(params: Any, *, allow_all_2d: bool, allow_embed: bo
             dim_nums.append(None)
             continue
         if allow_all_2d:
-            dim_nums.append(optax.contrib.MuonDimensionNumbers())
+            dim_nums.append(muon_dims)
             continue
         path_str = _path_to_str(path)
         dim_nums.append(
-            optax.contrib.MuonDimensionNumbers()
+            muon_dims
             if (_is_muon_weight_path(path_str) or (allow_embed and _is_embed_weight_path(path_str)))
             else None
         )

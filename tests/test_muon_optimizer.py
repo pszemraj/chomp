@@ -44,12 +44,21 @@ def _label_map(dim_nums: Any) -> dict[str, bool]:
     :param Any dim_nums: Muon dimension numbers pytree.
     :return dict[str, bool]: Map of path string to muon eligibility.
     """
+    return {path: dim is not None for path, dim in _dim_map(dim_nums).items()}
+
+
+def _dim_map(dim_nums: Any) -> dict[str, MuonDimensionNumbers | None]:
+    """Create a mapping from parameter path to Muon dimension numbers.
+
+    :param Any dim_nums: Muon dimension numbers pytree.
+    :return dict[str, MuonDimensionNumbers | None]: Map of path string to dim spec.
+    """
 
     def _is_leaf(node: Any) -> bool:
         return node is None or isinstance(node, MuonDimensionNumbers)
 
     flat_dims, _ = jax.tree_util.tree_flatten_with_path(dim_nums, is_leaf=_is_leaf)
-    return {_path_to_str(path): dim is not None for path, dim in flat_dims}
+    return {_path_to_str(path): dim for path, dim in flat_dims}
 
 
 def test_muon_param_labels_whitelist_excludes_embed() -> None:
@@ -82,6 +91,18 @@ def test_muon_param_labels_allow_tied_embed() -> None:
     mapping = _label_map(dim_nums)
 
     assert mapping["model.embed.weight"] is True
+
+
+def test_muon_dim_numbers_match_eqx_orientation() -> None:
+    """Muon dimension numbers should treat eqx Linear weights as (out, in)."""
+    params = _megalodon_params()
+    dim_nums = _muon_weight_dim_numbers(params, allow_all_2d=False)
+    dims = _dim_map(dim_nums)
+
+    spec = dims["model.layers.[0].attn.wz.weight"]
+    assert isinstance(spec, MuonDimensionNumbers)
+    assert spec.reduction_axis == (1,)
+    assert spec.output_axis == (0,)
 
 
 def test_muon_update_handles_none_leaves() -> None:
