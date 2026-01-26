@@ -694,19 +694,34 @@ def _scale_updates(mask_fn: Callable[[Any], Any], scale: float) -> optax.Gradien
     """
 
     def init_fn(params: Any) -> optax.EmptyState:
-        """Initialize stateless scaling state."""
+        """Initialize stateless scaling state.
+
+        :param Any params: Parameters passed by Optax (unused).
+        :return optax.EmptyState: Empty state for stateless transform.
+        """
         del params
         return optax.EmptyState()
 
     def update_fn(
         updates: Any, state: optax.EmptyState, params: Any | None = None
     ) -> tuple[Any, optax.EmptyState]:
-        """Scale updates for masked leaves and pass through others."""
+        """Scale updates for masked leaves and pass through others.
+
+        :param Any updates: Gradient updates.
+        :param optax.EmptyState state: Optimizer state (stateless).
+        :param Any | None params: Parameters to derive the mask from.
+        :return tuple[Any, optax.EmptyState]: Scaled updates and state.
+        """
         mask_source = params if params is not None else updates
         mask = mask_fn(mask_source)
 
         def _apply_scale(m: bool, g: Any) -> Any:
-            """Apply scaling to a single leaf if masked."""
+            """Apply scaling to a single leaf if masked.
+
+            :param bool m: Mask flag for this leaf.
+            :param Any g: Gradient leaf.
+            :return Any: Scaled gradient leaf.
+            """
             if g is None:
                 return None
             return g * scale if m else g
@@ -789,7 +804,11 @@ def build_optimizer(
             return treedef.unflatten(labels)
 
         def muon_schedule(step: jax.Array) -> jax.Array:
-            """Return the Muon learning rate schedule."""
+            """Return the Muon learning rate schedule.
+
+            :param jax.Array step: Training step.
+            :return jax.Array: Muon learning rate at step.
+            """
             return _muon_lr_from_adam(schedule(step), cfg)
 
         muon_weight_decay = cfg.optim.weight_decay * cfg.optim.muon_weight_decay_mult
