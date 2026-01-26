@@ -194,6 +194,7 @@ def save(
     data_iter: Any,
     meta: CheckpointMeta,
     enforce_size_gb: float | None = None,
+    force: bool = False,
 ) -> None:
     """Save a checkpoint.
 
@@ -210,6 +211,7 @@ def save(
     :param Any data_iter: Data iterator to checkpoint via Grain's handler.
     :param CheckpointMeta meta: Checkpoint metadata.
     :param enforce_size_gb: Optional max size in GB; raises if exceeded.
+    :param bool force: If True, force a save even if the step is off-interval.
     :raises RuntimeError: If checkpoint size exceeds enforce_size_gb.
     """
 
@@ -225,6 +227,7 @@ def save(
             data_state=gcp.CheckpointSave(_checkpoint_target(data_iter)),
             meta=ocp.args.JsonSave(meta.to_dict()),
         ),
+        force=force,
     )
 
     if enforce_size_gb is not None:

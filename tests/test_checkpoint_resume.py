@@ -129,3 +129,16 @@ def test_checkpoint_restore_allows_forward(tmp_path: Path) -> None:
     loss = training_loss(state.params, static, batch=batch, deterministic=True, key=None)
     loss_val = float(jax.device_get(loss))
     assert math.isfinite(loss_val)
+
+
+def test_checkpoint_saves_final_step(tmp_path: Path) -> None:
+    """Final step should be checkpointed even if save_every does not divide steps."""
+    cfg, config_src = _small_cfg(tmp_path)
+    cfg = replace(cfg, train=replace(cfg.train, steps=3))
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=2))
+
+    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+    ckpt_dir = default_ckpt_dir(run_dir)
+
+    assert (ckpt_dir / "2").exists(), "expected checkpoint at save interval"
+    assert (ckpt_dir / "3").exists(), "expected final checkpoint at step 3"

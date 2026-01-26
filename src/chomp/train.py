@@ -1376,7 +1376,10 @@ def run(
                         tokens_per_sec = token_sum / step_time_s if step_time_s > 0 else 0.0
 
                     # Checkpoint save (after state updated)
-                    if manager is not None and (step_i % int(cfg.checkpoint.save_every) == 0):
+                    save_every = int(cfg.checkpoint.save_every)
+                    save_interval = save_every > 0 and (step_i % save_every == 0)
+                    save_final = step_i == cfg.train.steps and not save_interval
+                    if manager is not None and (save_interval or save_final):
                         tokens_seen_ckpt = tokens_seen_host
                         if tokens_seen_ckpt is None:
                             tokens_seen_ckpt = int(jax.device_get(tokens_seen_device))
@@ -1394,6 +1397,7 @@ def run(
                             train_state=state,
                             data_iter=data_it,
                             meta=meta,
+                            force=save_final,
                         )
 
                     eval_row: dict[str, Any] = {}
