@@ -1,11 +1,27 @@
-"""Device placement and platform detection tests."""
+"""Utility tests consolidated by module.
+
+Note: global XLA/device environment setup happens in tests/conftest.py via
+configure_blackwell_xla_env() and setting XLA_PYTHON_CLIENT_PREALLOCATE.
+This file focuses on functional behavior rather than session bootstrapping.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
 
 import jax
+import jax.numpy as jnp
 import pytest
+from _pytest.logging import LogCaptureFixture
 
+from chomp.config import Config, ModelConfig, TrainConfig
+from chomp.model import build_model
+from chomp.train import _check_finite_metrics, _init_tokens_seen
 from chomp.types import Batch
-from chomp.utils import devices
+from chomp.utils import devices, xla
 from chomp.utils.devices import device_platform, validate_default_device
+from chomp.utils.tree import param_count
 
 
 def test_cpu_fails_when_disallowed() -> None:
@@ -156,3 +172,98 @@ def test_assert_batch_on_device_rejects_unknown_when_disallowed(
     monkeypatch.setattr(devices, "device_platform", lambda _: None)
     with pytest.raises(RuntimeError):
         devices.assert_batch_on_device(batch, allow_cpu=False)
+
+
+def test_dummy_init_stats_are_sane() -> None:
+    """Model parameters should be finite with positive variance."""
+    cfg = Config(model=ModelConfig(backend="dummy", vocab_size=128, d_model=32, dropout=0.0))
+    key = jax.random.PRNGKey(0)
+    params, _static = build_model(cfg, key=key)
+
+    leaves = [x for x in jax.tree_util.tree_leaves(params) if hasattr(x, "shape")]
+    assert leaves, "Expected parameter leaves for dummy model."
+
+    samples = leaves[: min(10, len(leaves))]
+    for leaf in samples:
+        arr = jnp.asarray(leaf, dtype=jnp.float32)
+        std = float(jnp.std(arr))
+        max_abs = float(jnp.max(jnp.abs(arr)))
+        assert bool(jnp.all(jnp.isfinite(arr)))
+        assert std > 0.0
+        assert max_abs > 0.0
+
+
+def test_dummy_param_count() -> None:
+    """Dummy model param count should match expected formula."""
+    cfg = Config(
+        model=ModelConfig(backend="dummy", vocab_size=128, d_model=64, dropout=0.0),
+        train=TrainConfig(allow_cpu=True),
+    )
+    key = jax.random.PRNGKey(0)
+    params, static = build_model(cfg, key=key)
+    n = param_count(params)
+    expected = 2 * cfg.model.vocab_size * cfg.model.d_model
+    assert n == expected
+
+
+def test_init_tokens_seen_dtype() -> None:
+    """Token counter should use the widest available integer dtype."""
+    counter = _init_tokens_seen(0)
+    expected = jnp.int64 if jax.config.read("jax_enable_x64") else jnp.int32
+    assert counter.dtype == expected
+
+
+def test_finite_check_rejects_nan_loss() -> None:
+    """NaN loss should raise RuntimeError."""
+    with pytest.raises(RuntimeError, match="loss"):
+        _check_finite_metrics({"loss": float("nan"), "grad_norm": 1.0}, step=3)
+
+
+def test_finite_check_rejects_inf_grad_norm() -> None:
+    """Inf grad_norm should raise RuntimeError."""
+    with pytest.raises(RuntimeError, match="grad_norm"):
+        _check_finite_metrics({"loss": 1.0, "grad_norm": float("inf")}, step=3)
+
+
+def test_configure_blackwell_sets_flags_and_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    """RTX 50xx detection should set XLA_FLAGS and warn on preallocate.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest monkeypatch fixture.
+    :param LogCaptureFixture caplog: Log capture fixture.
+    """
+    monkeypatch.setattr(xla, "_query_nvidia_gpu_names", lambda: ["NVIDIA GeForce RTX 5090"])
+    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_enable_triton_gemm=true --foo=bar")
+    monkeypatch.delenv("XLA_PYTHON_CLIENT_PREALLOCATE", raising=False)
+
+    caplog.set_level(logging.INFO)
+    changed = xla.configure_blackwell_xla_env(force=True)
+
+    assert changed is True
+    flags = os.environ.get("XLA_FLAGS", "")
+    assert "--xla_gpu_enable_triton_gemm=false" in flags
+    assert "--xla_gpu_enable_triton_gemm=true" not in flags
+    assert "--foo=bar" in flags
+    assert any(
+        rec.levelno >= logging.WARNING and "XLA_PYTHON_CLIENT_PREALLOCATE" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_configure_blackwell_skips_non_blackwell(
+    monkeypatch: pytest.MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    """Non-50xx GPUs should not modify XLA_FLAGS.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest monkeypatch fixture.
+    :param LogCaptureFixture caplog: Log capture fixture.
+    """
+    monkeypatch.setattr(xla, "_query_nvidia_gpu_names", lambda: ["NVIDIA GeForce RTX 4090"])
+    monkeypatch.setenv("XLA_FLAGS", "--keep")
+
+    caplog.set_level(logging.DEBUG)
+    changed = xla.configure_blackwell_xla_env(force=True)
+
+    assert changed is False
+    assert os.environ.get("XLA_FLAGS") == "--keep"

@@ -62,6 +62,9 @@ packages = ["src/chomp"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+  "slow: marks tests as slow (e.g., HF streaming state roundtrips)",
+]
 filterwarnings = [
   "ignore:Implicit conversion of an array to a dtype is deprecated.*:DeprecationWarning:chex._src.asserts",
 ]

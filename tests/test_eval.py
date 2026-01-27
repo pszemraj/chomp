@@ -1,17 +1,74 @@
-"""Eval text selection should prefer validation split and fall back to train."""
+"""Evaluation tests consolidated by module."""
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import pytest
 
-from chomp.config import Config, DataConfig, ModelConfig, TokenizerConfig, TrainConfig
+from chomp.config import (
+    CheckpointConfig,
+    Config,
+    DataConfig,
+    DebugConfig,
+    LoggingConfig,
+    ModelConfig,
+    OptimConfig,
+    TokenizerConfig,
+    TrainConfig,
+)
 from chomp.data import build_tokenizer, load_or_create_eval_texts
+from chomp.train import run
 
-if TYPE_CHECKING:
-    pass
+
+def test_eval_logging_writes_metrics(tmp_path: Path) -> None:
+    """Eval should write eval_loss to metrics file."""
+    run_dir = tmp_path / "run"
+    cfg = Config(
+        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
+        data=DataConfig(
+            backend="local_text",
+            repeat=True,
+            local_text="abcdefghijklmnopqrstuvwxyz" * 4,
+            max_eval_samples=3,
+            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+        ),
+        train=TrainConfig(
+            seed=0,
+            steps=2,
+            batch_size=1,
+            seq_len=8,
+            grad_accum=1,
+            jit=False,
+            deterministic=True,
+            allow_cpu=True,
+            log_every=1000,
+            eval_every=1,
+        ),
+        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
+        checkpoint=CheckpointConfig(enabled=False),
+        debug=DebugConfig(nan_check=True, check_device_every=0),
+        logging=LoggingConfig(project="chomp", run_dir=str(run_dir)),
+    )
+
+    run(cfg, config_path=None, resume="none")
+
+    metrics_path = run_dir / cfg.logging.metrics_file
+    rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
+    assert any(row.get("eval_loss") not in (None, "") for row in rows)
+    assert any("step" in row for row in rows)
+    for row in rows:
+        for key in (
+            "eval_tokens",
+            "wall_time_s",
+            "packing_tokens",
+            "packing_capacity",
+            "device_memory_gb",
+        ):
+            assert key not in row
 
 
 @dataclass
