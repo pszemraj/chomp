@@ -672,7 +672,7 @@ def _muon_lr_from_adam(lr_adam: jax.Array, cfg: Config) -> jax.Array:
     :param Config cfg: Training configuration.
     :return jax.Array: Muon learning rate (scaled).
     """
-    return lr_adam * cfg.optim.muon_lr_scale
+    return lr_adam * cfg.optim.muon.lr_scale
 
 
 def _init_tokens_seen(tokens_seen: int) -> int:
@@ -780,11 +780,13 @@ def build_optimizer(
         transforms.append(optax.clip_by_global_norm(cfg.optim.grad_clip_norm))
 
     if cfg.optim.name == "muon":
-        allow_all_2d = cfg.optim.muon_allow_all_2d
-        allow_embed = cfg.optim.muon_allow_tied_embed
+        muon_cfg = cfg.optim.muon
+        adam_cfg = cfg.optim.adam
+        allow_all_2d = muon_cfg.allow_all_2d
+        allow_embed = muon_cfg.allow_tied_embed
         if cfg.model.backend == "megalodon" and allow_all_2d:
             logger.warning(
-                "optim.muon_allow_all_2d=true will apply Muon to all 2D tensors, including "
+                "optim.muon.allow_all_2d=true will apply Muon to all 2D tensors, including "
                 "non-matmul parameters (e.g., embed.weight, attn.gamma/beta, cema.gamma_*)."
             )
         muon_tensors, adam_tensors, muon_2d, total_2d, muon_paths = _muon_param_stats(
@@ -836,7 +838,7 @@ def build_optimizer(
             """
             return _muon_lr_from_adam(schedule(step), cfg)
 
-        muon_weight_decay = cfg.optim.weight_decay * cfg.optim.muon_weight_decay_mult
+        muon_weight_decay = cfg.optim.weight_decay * muon_cfg.weight_decay_mult
 
         def muon_dim_fn(tree: Any) -> Any:
             """Return Muon dimension numbers for masked Muon parameters.
@@ -849,34 +851,35 @@ def build_optimizer(
 
         muon_tx = optax.contrib.muon(
             learning_rate=muon_schedule,
-            ns_steps=cfg.optim.muon_ns_steps,
-            beta=cfg.optim.muon_momentum,
-            nesterov=cfg.optim.muon_nesterov,
+            ns_steps=muon_cfg.ns_steps,
+            beta=muon_cfg.momentum,
+            nesterov=muon_cfg.nesterov,
             weight_decay=muon_weight_decay,
             weight_decay_mask=_weight_decay_mask,
             muon_weight_dimension_numbers=muon_dim_fn,
-            consistent_rms=cfg.optim.muon_consistent_rms,
+            consistent_rms=muon_cfg.consistent_rms,
         )
         adam_tx = optax.adamw(
             learning_rate=schedule,
-            b1=cfg.optim.adam_b1,
-            b2=cfg.optim.adam_b2,
-            eps=cfg.optim.adam_eps,
+            b1=adam_cfg.b1,
+            b2=adam_cfg.b2,
+            eps=adam_cfg.eps,
             weight_decay=cfg.optim.weight_decay,
             mask=_weight_decay_mask,
-            nesterov=cfg.optim.adam_nesterov,
+            nesterov=adam_cfg.nesterov,
         )
         transforms.append(optax.multi_transform({"muon": muon_tx, "adam": adam_tx}, label_fn))
     else:
+        adam_cfg = cfg.optim.adam
         transforms.append(
             optax.adamw(
                 learning_rate=schedule,
-                b1=cfg.optim.adam_b1,
-                b2=cfg.optim.adam_b2,
-                eps=cfg.optim.adam_eps,
+                b1=adam_cfg.b1,
+                b2=adam_cfg.b2,
+                eps=adam_cfg.eps,
                 weight_decay=cfg.optim.weight_decay,
                 mask=_weight_decay_mask,
-                nesterov=cfg.optim.adam_nesterov,
+                nesterov=adam_cfg.nesterov,
             )
         )
 

@@ -59,7 +59,7 @@ Nested fields use multiple dots:
 
 Overrides are parsed as YAML scalars. This means optional fields with `null`
 defaults can still be set to numbers or booleans (e.g.,
-`--override optim.muon_consistent_rms=0.2`). Use quotes to force a string.
+`--override optim.muon.consistent_rms=0.2`). Use quotes to force a string.
 
 ::: {.callout-note}
 Unknown keys or invalid values fail fast during validation with actionable error messages.
@@ -1467,7 +1467,9 @@ Directory for profiler traces. `null` uses a default location.
 
 ## optim (OptimConfig) {#optim}
 
-Optimizer configuration for AdamW or Muon with linear warmup and cosine decay. Contains 19 fields.
+Optimizer configuration for AdamW or Muon with linear warmup and cosine decay.
+Contains 9 top-level fields plus nested `optim.muon` and `optim.adam`
+sub-configs.
 
 #### `optim.name` {#optim.name}
 
@@ -1497,21 +1499,6 @@ Peak learning rate.
 | Constraints | Must be positive |
 | Recommended | `3e-4` (small models), `1e-4` to `6e-5` (large models) |
 
-#### `optim.muon_lr_scale` {#optim.muon_lr_scale}
-
-```yaml
-muon_lr_scale: float = 100.0
-```
-
-Multiplier applied to `optim.lr` to set Muon's peak LR. Effective Muon LR is
-`optim.lr * optim.muon_lr_scale`. The default (`100.0`) reflects the best
-1k-step Muon sweep result so far; see `docs/optimization.md` for details.
-
-| Property | Value |
-|----------|-------|
-| Required | No |
-| Constraints | Must be positive |
-
 #### `optim.weight_decay` {#optim.weight_decay}
 
 ```yaml
@@ -1523,20 +1510,6 @@ AdamW weight decay coefficient.
 | Property | Value |
 |----------|-------|
 | Required | No |
-
-#### `optim.muon_weight_decay_mult` {#optim.muon_weight_decay_mult}
-
-```yaml
-muon_weight_decay_mult: float = 1.0
-```
-
-Multiplier applied to `optim.weight_decay` for Muon parameters. Set to `0` to
-disable Muon weight decay or scale it independently from AdamW.
-
-| Property | Value |
-|----------|-------|
-| Required | No |
-| Constraints | Must be >= 0 |
 
 #### `optim.grad_clip_norm` {#optim.grad_clip_norm}
 
@@ -1604,10 +1577,59 @@ Minimum LR as a ratio of peak LR at the end of cosine decay.
 | Constraints | Must be in `[0.0, 1.0]` |
 | Recommended | `0.0` (decay to zero) or `0.1` (10% floor) |
 
-#### `optim.muon_momentum` {#optim.muon_momentum}
+#### `optim.muon` {#optim.muon}
 
 ```yaml
-muon_momentum: float = 0.95
+muon:
+  lr_scale: float = 100.0
+  weight_decay_mult: float = 1.0
+  momentum: float = 0.95
+  ns_steps: int = 5
+  nesterov: bool = true
+  consistent_rms: float | null = null
+  allow_all_2d: bool = false
+  allow_tied_embed: bool = false
+```
+
+Muon-specific settings. These are only used when `optim.name=muon`.
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+
+#### `optim.muon.lr_scale` {#optim.muon.lr_scale}
+
+```yaml
+lr_scale: float = 100.0
+```
+
+Multiplier applied to `optim.lr` to set Muon's peak LR. Effective Muon LR is
+`optim.lr * optim.muon.lr_scale`. The default (`100.0`) reflects the best
+1k-step Muon sweep result so far; see `docs/optimization.md` for details.
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Constraints | Must be positive |
+
+#### `optim.muon.weight_decay_mult` {#optim.muon.weight_decay_mult}
+
+```yaml
+weight_decay_mult: float = 1.0
+```
+
+Multiplier applied to `optim.weight_decay` for Muon parameters. Set to `0` to
+disable Muon weight decay or scale it independently from AdamW.
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Constraints | Must be >= 0 |
+
+#### `optim.muon.momentum` {#optim.muon.momentum}
+
+```yaml
+momentum: float = 0.95
 ```
 
 Muon momentum coefficient (`beta` in the Optax implementation).
@@ -1617,10 +1639,10 @@ Muon momentum coefficient (`beta` in the Optax implementation).
 | Required | No |
 | Constraints | Must be in `(0, 1)` |
 
-#### `optim.muon_ns_steps` {#optim.muon_ns_steps}
+#### `optim.muon.ns_steps` {#optim.muon.ns_steps}
 
 ```yaml
-muon_ns_steps: int = 5
+ns_steps: int = 5
 ```
 
 Number of Newton-Schulz iterations for Muon.
@@ -1630,10 +1652,10 @@ Number of Newton-Schulz iterations for Muon.
 | Required | No |
 | Constraints | Must be positive |
 
-#### `optim.muon_nesterov` {#optim.muon_nesterov}
+#### `optim.muon.nesterov` {#optim.muon.nesterov}
 
 ```yaml
-muon_nesterov: bool = true
+nesterov: bool = true
 ```
 
 Use Nesterov momentum in Muon.
@@ -1642,10 +1664,10 @@ Use Nesterov momentum in Muon.
 |----------|-------|
 | Required | No |
 
-#### `optim.muon_consistent_rms` {#optim.muon_consistent_rms}
+#### `optim.muon.consistent_rms` {#optim.muon.consistent_rms}
 
 ```yaml
-muon_consistent_rms: float | null = null
+consistent_rms: float | null = null
 ```
 
 Muon RMS scaling factor. Set to `0.2` to enable consistent RMS scaling (Optax
@@ -1656,10 +1678,10 @@ recommendation) or leave `null` to match the earlier Muon behavior.
 | Required | No |
 | Constraints | Must be >= 0 or null |
 
-#### `optim.muon_allow_all_2d` {#optim.muon_allow_all_2d}
+#### `optim.muon.allow_all_2d` {#optim.muon.allow_all_2d}
 
 ```yaml
-muon_allow_all_2d: bool = false
+allow_all_2d: bool = false
 ```
 
 Allow Muon updates on all 2D tensors (overrides the projection-weight whitelist).
@@ -1668,17 +1690,13 @@ Allow Muon updates on all 2D tensors (overrides the projection-weight whitelist)
 |----------|-------|
 | Required | No |
 
-#### `optim.muon_allow_tied_embed` {#optim.muon_allow_tied_embed}
+#### `optim.muon.allow_tied_embed` {#optim.muon.allow_tied_embed}
 
 ```yaml
-muon_allow_tied_embed: bool = false
+allow_tied_embed: bool = false
 ```
 
 Allow Muon updates on the tied token embedding matrix (`model.embed.weight`).
-
-| Property | Value |
-|----------|-------|
-| Required | No |
 If `false` (default), Muon applies to 2D weight matrices named `*.weight` and
 excludes embeddings. If `true`, Muon applies to all 2D tensors.
 
@@ -1686,24 +1704,40 @@ excludes embeddings. If `true`, Muon applies to all 2D tensors.
 |----------|-------|
 | Required | No |
 
-#### `optim.adam_b1` {#optim.adam_b1}
+#### `optim.adam` {#optim.adam}
 
 ```yaml
-adam_b1: float = 0.9
+adam:
+  b1: float = 0.9
+  b2: float = 0.999
+  eps: float = 1e-8
+  nesterov: bool = false
 ```
 
-AdamW beta1 coefficient. Applies to the full model for `optim.name=adamw` and
-to the non-Muon parameter group for `optim.name=muon`.
+AdamW-specific settings. For `optim.name=adamw`, these apply to the full model.
+For `optim.name=muon`, they apply to the non-Muon parameter group.
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+
+#### `optim.adam.b1` {#optim.adam.b1}
+
+```yaml
+b1: float = 0.9
+```
+
+AdamW beta1 coefficient.
 
 | Property | Value |
 |----------|-------|
 | Required | No |
 | Constraints | Must be in `(0, 1)` |
 
-#### `optim.adam_b2` {#optim.adam_b2}
+#### `optim.adam.b2` {#optim.adam.b2}
 
 ```yaml
-adam_b2: float = 0.999
+b2: float = 0.999
 ```
 
 AdamW beta2 coefficient.
@@ -1713,10 +1747,10 @@ AdamW beta2 coefficient.
 | Required | No |
 | Constraints | Must be in `(0, 1)` |
 
-#### `optim.adam_eps` {#optim.adam_eps}
+#### `optim.adam.eps` {#optim.adam.eps}
 
 ```yaml
-adam_eps: float = 1e-8
+eps: float = 1e-8
 ```
 
 AdamW epsilon for numerical stability.
@@ -1726,14 +1760,14 @@ AdamW epsilon for numerical stability.
 | Required | No |
 | Constraints | Must be positive |
 
-#### `optim.adam_nesterov` {#optim.adam_nesterov}
+#### `optim.adam.nesterov` {#optim.adam.nesterov}
 
 ```yaml
-adam_nesterov: bool = false
+nesterov: bool = false
 ```
 
 Enable Nesterov momentum for AdamW. This is kept independent from
-`optim.muon_nesterov` to avoid accidentally running NadamW on non-Muon params.
+`optim.muon.nesterov` to avoid accidentally running NadamW on non-Muon params.
 
 | Property | Value |
 |----------|-------|
@@ -2065,7 +2099,11 @@ All configuration fields by section:
 
 **train** (18 fields): [`seed`](#train.seed), [`steps`](#train.steps), [`batch_size`](#train.batch_size), [`seq_len`](#train.seq_len), [`grad_accum`](#train.grad_accum), [`jit`](#train.jit), [`deterministic`](#train.deterministic), [`allow_cpu`](#train.allow_cpu), [`log_every`](#train.log_every), [`eval_every`](#train.eval_every), [`generate_every`](#train.generate_every), [`generate_input_len`](#train.generate_input_len), [`generate_max_tokens`](#train.generate_max_tokens), [`generate_temperature`](#train.generate_temperature), [`generate_top_k`](#train.generate_top_k), [`generate_top_p`](#train.generate_top_p), [`profile`](#train.profile), [`profile_dir`](#train.profile_dir)
 
-**optim** (19 fields): [`name`](#optim.name), [`lr`](#optim.lr), [`muon_lr_scale`](#optim.muon_lr_scale), [`weight_decay`](#optim.weight_decay), [`muon_weight_decay_mult`](#optim.muon_weight_decay_mult), [`grad_clip_norm`](#optim.grad_clip_norm), [`warmup_steps`](#optim.warmup_steps), [`decay_steps`](#optim.decay_steps), [`min_lr_ratio`](#optim.min_lr_ratio), [`muon_momentum`](#optim.muon_momentum), [`muon_ns_steps`](#optim.muon_ns_steps), [`muon_nesterov`](#optim.muon_nesterov), [`muon_consistent_rms`](#optim.muon_consistent_rms), [`muon_allow_all_2d`](#optim.muon_allow_all_2d), [`muon_allow_tied_embed`](#optim.muon_allow_tied_embed), [`adam_b1`](#optim.adam_b1), [`adam_b2`](#optim.adam_b2), [`adam_eps`](#optim.adam_eps), [`adam_nesterov`](#optim.adam_nesterov)
+**optim** (9 fields): [`name`](#optim.name), [`lr`](#optim.lr), [`weight_decay`](#optim.weight_decay), [`grad_clip_norm`](#optim.grad_clip_norm), [`warmup_steps`](#optim.warmup_steps), [`decay_steps`](#optim.decay_steps), [`min_lr_ratio`](#optim.min_lr_ratio), [`muon`](#optim.muon), [`adam`](#optim.adam)
+
+**optim.muon** (8 fields): [`lr_scale`](#optim.muon.lr_scale), [`weight_decay_mult`](#optim.muon.weight_decay_mult), [`momentum`](#optim.muon.momentum), [`ns_steps`](#optim.muon.ns_steps), [`nesterov`](#optim.muon.nesterov), [`consistent_rms`](#optim.muon.consistent_rms), [`allow_all_2d`](#optim.muon.allow_all_2d), [`allow_tied_embed`](#optim.muon.allow_tied_embed)
+
+**optim.adam** (4 fields): [`b1`](#optim.adam.b1), [`b2`](#optim.adam.b2), [`eps`](#optim.adam.eps), [`nesterov`](#optim.adam.nesterov)
 
 **checkpoint** (5 fields): [`enabled`](#checkpoint.enabled), [`root_dir`](#checkpoint.root_dir), [`save_every`](#checkpoint.save_every), [`max_to_keep`](#checkpoint.max_to_keep), [`async_save`](#checkpoint.async_save)
 
@@ -2075,4 +2113,4 @@ All configuration fields by section:
 
 **debug** (2 fields): [`nan_check`](#debug.nan_check), [`check_device_every`](#debug.check_device_every)
 
-**Total: 107 fields**
+**Total: 109 fields**

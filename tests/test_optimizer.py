@@ -147,41 +147,39 @@ def test_muon_lr_scale_matches_schedule() -> None:
     params = _megalodon_params()
     cfg = Config()
     cfg = replace(cfg, train=replace(cfg.train, steps=10))
+    muon_cfg = replace(cfg.optim.muon, lr_scale=10.0)
     cfg = replace(
         cfg,
         optim=replace(
-            cfg.optim, name="muon", lr=1e-3, warmup_steps=2, decay_steps=8, muon_lr_scale=10.0
+            cfg.optim, name="muon", lr=1e-3, warmup_steps=2, decay_steps=8, muon=muon_cfg
         ),
     )
     _, schedule = build_optimizer(cfg, params)
     for step in (0, 1, 2, 5, 9):
         lr_adam = schedule(jnp.array(step))
         lr_muon = _muon_lr_from_adam(lr_adam, cfg)
-        assert jnp.allclose(lr_muon, lr_adam * cfg.optim.muon_lr_scale)
+        assert jnp.allclose(lr_muon, lr_adam * cfg.optim.muon.lr_scale)
 
 
 def test_muon_allow_all_2d_warns(caplog: Any) -> None:
     """Allowing all 2D params should warn for Megalodon backends."""
     params = _megalodon_params()
     cfg = Config()
-    cfg = replace(cfg, optim=replace(cfg.optim, name="muon", muon_allow_all_2d=True))
+    muon_cfg = replace(cfg.optim.muon, allow_all_2d=True)
+    cfg = replace(cfg, optim=replace(cfg.optim, name="muon", muon=muon_cfg))
     build_optimizer(cfg, params)
-    assert any("muon_allow_all_2d" in rec.message for rec in caplog.records)
+    assert any("muon.allow_all_2d" in rec.message for rec in caplog.records)
 
 
 def test_muon_non_muon_params_use_plain_adamw() -> None:
     """Non-Muon params should use AdamW even when Muon uses Nesterov."""
     params = _megalodon_params()
     cfg = Config()
+    muon_cfg = replace(cfg.optim.muon, nesterov=True, consistent_rms=None)
+    adam_cfg = replace(cfg.optim.adam, nesterov=False)
     cfg = replace(
         cfg,
-        optim=replace(
-            cfg.optim,
-            name="muon",
-            muon_nesterov=True,
-            adam_nesterov=False,
-            muon_consistent_rms=None,
-        ),
+        optim=replace(cfg.optim, name="muon", muon=muon_cfg, adam=adam_cfg),
     )
     tx, schedule = build_optimizer(cfg, params)
     opt_state = tx.init(params)
@@ -190,12 +188,12 @@ def test_muon_non_muon_params_use_plain_adamw() -> None:
 
     adam_tx = optax.adamw(
         learning_rate=schedule,
-        b1=cfg.optim.adam_b1,
-        b2=cfg.optim.adam_b2,
-        eps=cfg.optim.adam_eps,
+        b1=cfg.optim.adam.b1,
+        b2=cfg.optim.adam.b2,
+        eps=cfg.optim.adam.eps,
         weight_decay=cfg.optim.weight_decay,
         mask=_weight_decay_mask,
-        nesterov=cfg.optim.adam_nesterov,
+        nesterov=cfg.optim.adam.nesterov,
     )
     adam_state = adam_tx.init(params)
     updates_adam, _ = adam_tx.update(grads, adam_state, params)

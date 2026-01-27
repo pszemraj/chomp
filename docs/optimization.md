@@ -31,9 +31,9 @@ Muon also typically operates in a very different step-size regime than AdamW.
 In practice that means:
 
 - `optim.lr` is treated as the AdamW learning rate.
-- Muon's effective learning rate is `optim.lr * optim.muon_lr_scale`.
-- Muon-specific scaling options (like `optim.muon_consistent_rms`) can materially
-  change what `muon_lr_scale` values are stable.
+- Muon's effective learning rate is `optim.lr * optim.muon.lr_scale`.
+- Muon-specific scaling options (like `optim.muon.consistent_rms`) can materially
+  change what `optim.muon.lr_scale` values are stable.
 
 ## Muon sweep: 1000-step comparison (current state)
 
@@ -51,8 +51,8 @@ Command pattern (example):
 ```bash
 conda run --name mega-jax chomp train configs/zyda2_100m_2048.yaml \
   -o optim.name=muon \
-  -o optim.muon_lr_scale=100 \
-  -o optim.muon_consistent_rms=null \
+  -o optim.muon.lr_scale=100 \
+  -o optim.muon.consistent_rms=null \
   -o train.steps=1000 \
   -o train.eval_every=250 \
   -o logging.wandb.enabled=false \
@@ -75,7 +75,7 @@ All values below are from the final log at step 1000.
 ### Takeaways
 
 - Muon clearly beats AdamW at 1000 steps in this setup.
-- `optim.muon_consistent_rms=0.2` looks harmful right now.
+- `optim.muon.consistent_rms=0.2` looks harmful right now.
 - A Muon scale of `100` with `consistent_rms=null` is the strongest of the
   tested settings.
 
@@ -83,8 +83,8 @@ All values below are from the final log at step 1000.
 
 Based on the sweep above, the defaults are now:
 
-- `optim.muon_lr_scale: 100.0`
-- `optim.muon_consistent_rms: null`
+- `optim.muon.lr_scale: 100.0`
+- `optim.muon.consistent_rms: null`
 
 These defaults only matter when `optim.name=muon`.
 
@@ -95,18 +95,18 @@ If you want to iterate further, here are the highest-value next experiments:
 1) Sweep Muon LR scale around the new default
 
 - Try: 80, 90, 100, 110, 125, 150
-- Keep `optim.muon_consistent_rms=null` while tuning scale.
+- Keep `optim.muon.consistent_rms=null` while tuning scale.
 
 2) Revisit `consistent_rms` after scale tuning
 
 - Try enabling it (`0.2`) only after identifying a stable LR scale.
-- If you enable it, re-tune `muon_lr_scale` from scratch.
+- If you enable it, re-tune `optim.muon.lr_scale` from scratch.
 
 3) Adam-side tuning for the non-Muon group
 
 Muon runs still depend heavily on the AdamW group. Consider experimenting with:
 
-- `optim.adam_b2=0.95` (common for LLMs)
+- `optim.adam.b2=0.95` (common for LLMs)
 - Adam weight decay masking (for example, excluding embeddings)
 
 4) Repeat the sweep on a second config
@@ -122,4 +122,3 @@ Muon runs still depend heavily on the AdamW group. Consider experimenting with:
   policies, or parameter sharding strategies change.
 - If you resume from checkpoints, treat schedule horizons and effective
   optimizer settings as part of the run identity.
-

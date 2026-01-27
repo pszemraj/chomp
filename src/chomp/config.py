@@ -238,28 +238,42 @@ class TrainConfig:
 
 
 @dataclass(frozen=True)
+class MuonOptimConfig:
+    """Muon-specific optimizer configuration."""
+
+    lr_scale: float = 100.0
+    weight_decay_mult: float = 1.0
+    momentum: float = 0.95
+    ns_steps: int = 5
+    nesterov: bool = True
+    consistent_rms: float | None = None
+    allow_all_2d: bool = False
+    allow_tied_embed: bool = False
+
+
+@dataclass(frozen=True)
+class AdamOptimConfig:
+    """AdamW-specific optimizer configuration."""
+
+    b1: float = 0.9
+    b2: float = 0.999
+    eps: float = 1e-8
+    nesterov: bool = False
+
+
+@dataclass(frozen=True)
 class OptimConfig:
     """Optimizer configuration for AdamW or Muon with warmup+cosine decay."""
 
     name: Literal["adamw", "muon"] = "adamw"
     lr: float = 3e-4
-    muon_lr_scale: float = 100.0
     weight_decay: float = 0.01
-    muon_weight_decay_mult: float = 1.0
     grad_clip_norm: float = 1.0
     warmup_steps: int = 10
     decay_steps: int | None = None
     min_lr_ratio: float = 0.0
-    muon_momentum: float = 0.95
-    muon_ns_steps: int = 5
-    muon_nesterov: bool = True
-    muon_consistent_rms: float | None = None
-    muon_allow_all_2d: bool = False
-    muon_allow_tied_embed: bool = False
-    adam_b1: float = 0.9
-    adam_b2: float = 0.999
-    adam_eps: float = 1e-8
-    adam_nesterov: bool = False
+    muon: MuonOptimConfig = MuonOptimConfig()
+    adam: AdamOptimConfig = AdamOptimConfig()
 
 
 @dataclass(frozen=True)
@@ -552,7 +566,13 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
 
     model = ModelConfig(**(data.get("model") or {}))
     train = TrainConfig(**(data.get("train") or {}))
-    optim = OptimConfig(**(data.get("optim") or {}))
+    optim_d = data.get("optim") or {}
+    muon_d = optim_d.get("muon") or {}
+    adam_d = optim_d.get("adam") or {}
+    muon = MuonOptimConfig(**muon_d)
+    adam = AdamOptimConfig(**adam_d)
+    optim_d = {k: v for k, v in optim_d.items() if k not in {"muon", "adam"}}
+    optim = OptimConfig(muon=muon, adam=adam, **optim_d)
     logging_d = data.get("logging") or {}
     wandb_d = logging_d.get("wandb") or {}
     wandb = WandbConfig(**wandb_d)
@@ -651,24 +671,24 @@ def _validate_optim(cfg: Config) -> None:
         _vfail(f"optim.decay_steps must be positive when set, got {cfg.optim.decay_steps}")
     if cfg.optim.min_lr_ratio < 0 or cfg.optim.min_lr_ratio > 1:
         _vfail(f"optim.min_lr_ratio must be in [0, 1], got {cfg.optim.min_lr_ratio}")
-    if cfg.optim.muon_lr_scale <= 0:
-        _vfail(f"optim.muon_lr_scale must be positive, got {cfg.optim.muon_lr_scale}")
-    if cfg.optim.muon_weight_decay_mult < 0:
-        _vfail(f"optim.muon_weight_decay_mult must be >= 0, got {cfg.optim.muon_weight_decay_mult}")
-    if cfg.optim.muon_momentum <= 0 or cfg.optim.muon_momentum >= 1:
-        _vfail(f"optim.muon_momentum must be in (0, 1), got {cfg.optim.muon_momentum}")
-    if cfg.optim.muon_ns_steps <= 0:
-        _vfail(f"optim.muon_ns_steps must be positive, got {cfg.optim.muon_ns_steps}")
-    if cfg.optim.muon_consistent_rms is not None and cfg.optim.muon_consistent_rms < 0:
-        _vfail(
-            f"optim.muon_consistent_rms must be >= 0 or None, got {cfg.optim.muon_consistent_rms}"
-        )
-    if cfg.optim.adam_b1 <= 0 or cfg.optim.adam_b1 >= 1:
-        _vfail(f"optim.adam_b1 must be in (0, 1), got {cfg.optim.adam_b1}")
-    if cfg.optim.adam_b2 <= 0 or cfg.optim.adam_b2 >= 1:
-        _vfail(f"optim.adam_b2 must be in (0, 1), got {cfg.optim.adam_b2}")
-    if cfg.optim.adam_eps <= 0:
-        _vfail(f"optim.adam_eps must be positive, got {cfg.optim.adam_eps}")
+    muon = cfg.optim.muon
+    adam = cfg.optim.adam
+    if muon.lr_scale <= 0:
+        _vfail(f"optim.muon.lr_scale must be positive, got {muon.lr_scale}")
+    if muon.weight_decay_mult < 0:
+        _vfail(f"optim.muon.weight_decay_mult must be >= 0, got {muon.weight_decay_mult}")
+    if muon.momentum <= 0 or muon.momentum >= 1:
+        _vfail(f"optim.muon.momentum must be in (0, 1), got {muon.momentum}")
+    if muon.ns_steps <= 0:
+        _vfail(f"optim.muon.ns_steps must be positive, got {muon.ns_steps}")
+    if muon.consistent_rms is not None and muon.consistent_rms < 0:
+        _vfail(f"optim.muon.consistent_rms must be >= 0 or None, got {muon.consistent_rms}")
+    if adam.b1 <= 0 or adam.b1 >= 1:
+        _vfail(f"optim.adam.b1 must be in (0, 1), got {adam.b1}")
+    if adam.b2 <= 0 or adam.b2 >= 1:
+        _vfail(f"optim.adam.b2 must be in (0, 1), got {adam.b2}")
+    if adam.eps <= 0:
+        _vfail(f"optim.adam.eps must be positive, got {adam.eps}")
     if cfg.optim.warmup_steps >= cfg.train.steps:
         _vfail(
             f"optim.warmup_steps ({cfg.optim.warmup_steps}) must be < train.steps "

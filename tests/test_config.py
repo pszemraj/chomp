@@ -146,20 +146,20 @@ def test_min_lr_ratio_must_be_in_range() -> None:
 
 
 def test_muon_lr_scale_must_be_positive() -> None:
-    """muon_lr_scale <= 0 must raise ValueError."""
+    """optim.muon.lr_scale <= 0 must raise ValueError."""
     cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, muon_lr_scale=0.0)
+    bad_optim = replace(cfg.optim, muon=replace(cfg.optim.muon, lr_scale=0.0))
     bad = replace(cfg, optim=bad_optim)
-    with pytest.raises(ValueError, match="muon_lr_scale"):
+    with pytest.raises(ValueError, match="optim.muon.lr_scale"):
         validate_config(bad)
 
 
 def test_muon_weight_decay_mult_must_be_non_negative() -> None:
-    """muon_weight_decay_mult < 0 must raise ValueError."""
+    """optim.muon.weight_decay_mult < 0 must raise ValueError."""
     cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, muon_weight_decay_mult=-1.0)
+    bad_optim = replace(cfg.optim, muon=replace(cfg.optim.muon, weight_decay_mult=-1.0))
     bad = replace(cfg, optim=bad_optim)
-    with pytest.raises(ValueError, match="muon_weight_decay_mult"):
+    with pytest.raises(ValueError, match="optim.muon.weight_decay_mult"):
         validate_config(bad)
 
 
@@ -173,63 +173,63 @@ def test_optim_name_must_be_valid() -> None:
 
 
 def test_muon_momentum_must_be_in_range() -> None:
-    """muon_momentum outside (0, 1) must raise ValueError."""
+    """optim.muon.momentum outside (0, 1) must raise ValueError."""
     cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, muon_momentum=1.5)
+    bad_optim = replace(cfg.optim, muon=replace(cfg.optim.muon, momentum=1.5))
     bad = replace(cfg, optim=bad_optim)
-    with pytest.raises(ValueError, match="muon_momentum"):
+    with pytest.raises(ValueError, match="optim.muon.momentum"):
         validate_config(bad)
 
 
 def test_muon_ns_steps_must_be_positive() -> None:
-    """muon_ns_steps <= 0 must raise ValueError."""
+    """optim.muon.ns_steps <= 0 must raise ValueError."""
     cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, muon_ns_steps=0)
+    bad_optim = replace(cfg.optim, muon=replace(cfg.optim.muon, ns_steps=0))
     bad = replace(cfg, optim=bad_optim)
-    with pytest.raises(ValueError, match="muon_ns_steps"):
+    with pytest.raises(ValueError, match="optim.muon.ns_steps"):
         validate_config(bad)
 
 
 def test_muon_consistent_rms_must_be_non_negative() -> None:
-    """muon_consistent_rms < 0 must raise ValueError."""
+    """optim.muon.consistent_rms < 0 must raise ValueError."""
     cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, muon_consistent_rms=-0.1)
+    bad_optim = replace(cfg.optim, muon=replace(cfg.optim.muon, consistent_rms=-0.1))
     bad = replace(cfg, optim=bad_optim)
-    with pytest.raises(ValueError, match="muon_consistent_rms"):
+    with pytest.raises(ValueError, match="optim.muon.consistent_rms"):
         validate_config(bad)
 
 
 def test_muon_defaults_reflect_sweep_results() -> None:
     """Muon defaults should match the best 1k-step sweep settings."""
     cfg = _base_cfg()
-    assert cfg.optim.muon_lr_scale == pytest.approx(100.0)
-    assert cfg.optim.muon_consistent_rms is None
+    assert cfg.optim.muon.lr_scale == pytest.approx(100.0)
+    assert cfg.optim.muon.consistent_rms is None
 
 
 def test_adam_b1_must_be_in_range() -> None:
-    """adam_b1 outside (0, 1) must raise ValueError."""
+    """optim.adam.b1 outside (0, 1) must raise ValueError."""
     cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, adam_b1=1.1)
+    bad_optim = replace(cfg.optim, adam=replace(cfg.optim.adam, b1=1.1))
     bad = replace(cfg, optim=bad_optim)
-    with pytest.raises(ValueError, match="adam_b1"):
+    with pytest.raises(ValueError, match="optim.adam.b1"):
         validate_config(bad)
 
 
 def test_adam_b2_must_be_in_range() -> None:
-    """adam_b2 outside (0, 1) must raise ValueError."""
+    """optim.adam.b2 outside (0, 1) must raise ValueError."""
     cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, adam_b2=0.0)
+    bad_optim = replace(cfg.optim, adam=replace(cfg.optim.adam, b2=0.0))
     bad = replace(cfg, optim=bad_optim)
-    with pytest.raises(ValueError, match="adam_b2"):
+    with pytest.raises(ValueError, match="optim.adam.b2"):
         validate_config(bad)
 
 
 def test_adam_eps_must_be_positive() -> None:
-    """adam_eps <= 0 must raise ValueError."""
+    """optim.adam.eps <= 0 must raise ValueError."""
     cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, adam_eps=0.0)
+    bad_optim = replace(cfg.optim, adam=replace(cfg.optim.adam, eps=0.0))
     bad = replace(cfg, optim=bad_optim)
-    with pytest.raises(ValueError, match="adam_eps"):
+    with pytest.raises(ValueError, match="optim.adam.eps"):
         validate_config(bad)
 
 
@@ -719,7 +719,7 @@ optim:
 """.lstrip()
     )
 
-    cfg = load_config(config_path, overrides=["optim.muon_consistent_rms=0.2"])
+    cfg = load_config(config_path, overrides=["optim.muon.consistent_rms=0.2"])
 
-    assert isinstance(cfg.optim.muon_consistent_rms, float)
-    assert cfg.optim.muon_consistent_rms == pytest.approx(0.2)
+    assert isinstance(cfg.optim.muon.consistent_rms, float)
+    assert cfg.optim.muon.consistent_rms == pytest.approx(0.2)

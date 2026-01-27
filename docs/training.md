@@ -28,21 +28,21 @@ boundary masks.
 - `adamw` (default)
 - `muon`: applies Muon to a whitelist of projection weights
   (`attn.wz/wv/wr/wh1/wh2`, `ffn.fc1/fc2/fc3`, `lm_head`) and uses AdamW for
-  everything else. Set `optim.muon_allow_all_2d=true` to apply Muon to all 2D
-  tensors. Set `optim.muon_allow_tied_embed=true` to include the tied embedding
+  everything else. Set `optim.muon.allow_all_2d=true` to apply Muon to all 2D
+  tensors. Set `optim.muon.allow_tied_embed=true` to include the tied embedding
   matrix.
 
 Both optimizers use the same warmup+cosine schedule (`optim.lr`,
 `optim.warmup_steps`, `optim.decay_steps`, `optim.min_lr_ratio`) and the same
 weight-decay mask (matrices only).
-For Muon runs, Adam uses `optim.lr` and Muon uses `optim.lr * optim.muon_lr_scale`.
-Muon weight decay can be scaled independently via `optim.muon_weight_decay_mult`.
+For Muon runs, Adam uses `optim.lr` and Muon uses `optim.lr * optim.muon.lr_scale`.
+Muon weight decay can be scaled independently via `optim.muon.weight_decay_mult`.
 Muon and AdamW are composed via explicit partitioning, so Adam-specific knobs
-(`optim.adam_b1`, `optim.adam_b2`, `optim.adam_eps`, `optim.adam_nesterov`)
+(`optim.adam.b1`, `optim.adam.b2`, `optim.adam.eps`, `optim.adam.nesterov`)
 apply only to the non-Muon parameter group.
-`optim.muon_consistent_rms` controls Optax's Muon RMS scaling. It defaults to
-`null` and `optim.muon_lr_scale` defaults to `100.0` based on current Muon sweep
-results; set `optim.muon_consistent_rms=0.2` to enable consistent RMS scaling.
+`optim.muon.consistent_rms` controls Optax's Muon RMS scaling. It defaults to
+`null` and `optim.muon.lr_scale` defaults to `100.0` based on current Muon sweep
+results; set `optim.muon.consistent_rms=0.2` to enable consistent RMS scaling.
 See `docs/optimization.md` for the sweep details and recommended next steps.
 
 ## Determinism
