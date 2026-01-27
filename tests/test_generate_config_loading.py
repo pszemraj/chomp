@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from chomp.config import Config
+from chomp.config import Config, load_config
 from chomp.data.pipeline import build_tokenizer, resolve_tokenizer_config
 from chomp.utils.checkpoints import load_config_for_checkpoint, resolve_checkpoint_path
 
@@ -263,3 +263,51 @@ debug:
 
     # Byte tokenizer has 256 tokens, rounded up to 384 (next multiple of 128)
     assert cfg_resolved.model.vocab_size == 384
+
+
+def test_override_casts_float_when_default_none(tmp_path: Path) -> None:
+    """Optional float overrides should parse into float values."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+model:
+  backend: dummy
+  vocab_size: 256
+  d_model: 32
+  dropout: 0.0
+
+data:
+  backend: local_text
+  repeat: true
+  local_text: "hello"
+  packing_mode: sequential
+  tokenizer:
+    kind: byte
+    byte_offset: 0
+    add_bos: false
+    add_eos: false
+
+train:
+  steps: 20
+  batch_size: 1
+  seq_len: 8
+  grad_accum: 1
+  jit: false
+  deterministic: true
+  allow_cpu: true
+  log_every: 1
+  eval_every: 0
+
+logging:
+  wandb:
+    enabled: false
+
+optim:
+  warmup_steps: 0
+""".lstrip()
+    )
+
+    cfg = load_config(config_path, overrides=["optim.muon_consistent_rms=0.2"])
+
+    assert isinstance(cfg.optim.muon_consistent_rms, float)
+    assert cfg.optim.muon_consistent_rms == pytest.approx(0.2)

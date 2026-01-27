@@ -409,10 +409,14 @@ def _cast_like(old: Any, raw: str) -> Any:
     if isinstance(old, float):
         return float(raw)
     if old is None:
-        # Try some reasonable casts
         if raw.lower() in {"null", "none"}:
             return None
-        return raw
+        # When the default is None, parse YAML scalars to recover numeric/bool types.
+        try:
+            parsed = yaml.safe_load(raw)
+        except yaml.YAMLError:
+            return raw
+        return raw if parsed is None else parsed
     if isinstance(old, str):
         return raw
     # For Literal or other types, keep string; validation should catch invalid
