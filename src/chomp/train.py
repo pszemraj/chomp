@@ -551,7 +551,7 @@ _MUON_WEIGHT_WHITELIST = (
     ".ffn.fc1.weight",
     ".ffn.fc2.weight",
     ".ffn.fc3.weight",
-    ".lm_head.weight",
+    "lm_head.weight",
 )
 
 
@@ -781,8 +781,8 @@ def build_optimizer(
     )
 
     transforms = []
-    if cfg.optim.grad_clip_norm and cfg.optim.grad_clip_norm > 0:
-        transforms.append(optax.clip_by_global_norm(cfg.optim.grad_clip_norm))
+    # NOTE: grad clipping is done manually in make_train_step to avoid
+    # computing global_norm twice (once for clipping, once for logging).
 
     if cfg.optim.name == "muon":
         muon_cfg = cfg.optim.muon
@@ -935,6 +935,7 @@ def make_train_step(
 
     deterministic = derived_deterministic(cfg)
     grad_accum = int(cfg.train.grad_accum)
+    clip_norm = float(cfg.optim.grad_clip_norm) if cfg.optim.grad_clip_norm else 0.0
 
     def micro_loss(
         params: Any,
@@ -1025,6 +1026,12 @@ def make_train_step(
         grads = jax.tree_util.tree_map(lambda g: g / token_denom, grad_sum)
 
         grad_norm = optax.global_norm(grads)
+        if clip_norm > 0:
+            trigger = grad_norm > clip_norm
+            grads = jax.tree_util.tree_map(
+                lambda g: jnp.where(trigger, g * (clip_norm / jnp.maximum(grad_norm, 1e-6)), g),
+                grads,
+            )
         updates, new_opt_state = tx.update(grads, state.opt_state, state.params)
         new_params = optax.apply_updates(state.params, updates)
 
@@ -1265,7 +1272,6 @@ def run(
 
     if start_step >= target_steps:
         print(f"[chomp] start_step ({start_step}) >= target steps ({target_steps}); nothing to do")
-        return run_dir
 
     console_every = int(cfg.train.log_every)
     host_step = int(start_step)
@@ -1274,6 +1280,7 @@ def run(
     if resume_meta and resume_meta.get("tokens_seen") is not None:
         tokens_seen_base = int(resume_meta["tokens_seen"])
     tokens_seen_count = _init_tokens_seen(tokens_seen_base)
+    last_saved_step: int = -1
 
     def _run_eval(params: Any) -> dict[str, Any]:
         """Run a full eval pass over the cached eval texts.
@@ -1452,8 +1459,7 @@ def run(
                     # Checkpoint save (after state updated)
                     save_every = int(cfg.checkpoint.save_every)
                     save_interval = save_every > 0 and (step_i % save_every == 0)
-                    save_final = step_i == cfg.train.steps and not save_interval
-                    if manager is not None and (save_interval or save_final):
+                    if manager is not None and save_interval:
                         tokens_seen_ckpt = int(tokens_seen_count)
                         meta = build_meta(
                             step=step_i,
@@ -1469,8 +1475,8 @@ def run(
                             train_state=state,
                             data_iter=data_it,
                             meta=meta,
-                            force=save_final,
                         )
+                        last_saved_step = step_i
 
                     eval_row: dict[str, Any] = {}
                     if should_eval:
@@ -1597,6 +1603,24 @@ def run(
                 _flush_loggers()
                 raise
     finally:
+        # Final checkpoint: save if we did any training and the last step wasn't already saved
+        if manager is not None and step_i > start_step and step_i != last_saved_step:
+            with contextlib.suppress(Exception):
+                meta = build_meta(
+                    step=step_i,
+                    config=cfg.to_dict(),
+                    data_fingerprint=data_fingerprint(cfg, tokenizer_snapshot_hash=tokenizer_hash),
+                    tokens_seen=int(tokens_seen_count),
+                )
+                save(
+                    manager,
+                    step=step_i,
+                    train_state=state,
+                    data_iter=data_it,
+                    meta=meta,
+                    force=True,
+                )
+
         if wandb_run is not None:
             with contextlib.suppress(Exception):
                 if crash_reason is not None:
