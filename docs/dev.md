@@ -3,6 +3,11 @@
 This page covers common developer tasks: linting, formatting, running tests, and
 finding the right test file.
 
+> [!IMPORTANT]
+> Backward compatibility is **not** a requirement right now. It is acceptable to
+> break older configs, checkpoints, or resume metadata when it simplifies the
+> system or improves correctness.
+
 ## Environment
 
 All project commands should run inside the `mega-jax` conda environment.
