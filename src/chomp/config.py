@@ -243,7 +243,7 @@ class OptimConfig:
 
     name: Literal["adamw", "muon"] = "adamw"
     lr: float = 3e-4
-    muon_lr_scale: float = 200.0
+    muon_lr_scale: float = 100.0
     weight_decay: float = 0.01
     muon_weight_decay_mult: float = 1.0
     grad_clip_norm: float = 1.0

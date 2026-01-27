@@ -35,8 +35,9 @@ Muon and AdamW are composed via explicit partitioning, so Adam-specific knobs
 (`optim.adam_b1`, `optim.adam_b2`, `optim.adam_eps`, `optim.adam_nesterov`)
 apply only to the non-Muon parameter group.
 `optim.muon_consistent_rms` controls Optax's Muon RMS scaling. It defaults to
-`null` to match the earlier Muon behavior; set it to `0.2` to enable consistent
-RMS scaling.
+`null` and `optim.muon_lr_scale` defaults to `100.0` based on current Muon sweep
+results; set `optim.muon_consistent_rms=0.2` to enable consistent RMS scaling.
+See `docs/optimization.md` for the sweep details and recommended next steps.
 
 ## Determinism
 

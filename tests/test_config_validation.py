@@ -194,6 +194,13 @@ def test_muon_consistent_rms_must_be_non_negative() -> None:
         validate_config(bad)
 
 
+def test_muon_defaults_reflect_sweep_results() -> None:
+    """Muon defaults should match the best 1k-step sweep settings."""
+    cfg = _base_cfg()
+    assert cfg.optim.muon_lr_scale == pytest.approx(100.0)
+    assert cfg.optim.muon_consistent_rms is None
+
+
 def test_adam_b1_must_be_in_range() -> None:
     """adam_b1 outside (0, 1) must raise ValueError."""
     cfg = _base_cfg()
