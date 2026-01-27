@@ -1264,6 +1264,7 @@ def run(
 
     console_every = int(cfg.train.log_every)
     host_step = int(start_step)
+    step_i = int(host_step)
     tokens_seen_base = 0
     if resume_meta and resume_meta.get("tokens_seen") is not None:
         tokens_seen_base = int(resume_meta["tokens_seen"])
@@ -1385,6 +1386,7 @@ def run(
             try:
                 for _ in tqdm(range(start_step, target_steps), desc="train", dynamic_ncols=True):
                     # Fetch batch (host) and (optionally) device_put
+                    step_i = int(host_step) + 1
                     try:
                         batch = next(data_it)
                     except StopIteration:
@@ -1417,8 +1419,7 @@ def run(
                         state, metrics = train_step(state, batch)
                         tokens_seen_count += _estimate_tokens_seen_increment(cfg, data_stats)
 
-                    host_step += 1
-                    step_i = int(host_step)
+                    host_step = int(step_i)
 
                     should_eval = (
                         eval_step is not None and eval_every > 0 and (step_i % eval_every) == 0
@@ -1564,7 +1565,7 @@ def run(
                 exit_code = 1
                 crash_type = type(exc).__name__
                 crash_reason = str(exc)
-                crash_step = int(host_step) + 1
+                crash_step = int(step_i)
                 logger.exception("Training crashed at step %s", crash_step)
                 row = {
                     "step": int(crash_step),
