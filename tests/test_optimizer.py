@@ -63,6 +63,7 @@ def _dim_map(dim_nums: Any) -> dict[str, MuonDimensionNumbers | None]:
     """
 
     def _is_leaf(node: Any) -> bool:
+        """Return True when a node should be treated as a leaf in the dim tree."""
         return node is None or isinstance(node, MuonDimensionNumbers)
 
     flat_dims, _ = jax.tree_util.tree_flatten_with_path(dim_nums, is_leaf=_is_leaf)

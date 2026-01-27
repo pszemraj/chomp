@@ -468,14 +468,17 @@ class DummyWandbRun:
     """Minimal W&B stub to capture finish calls and logs."""
 
     def __init__(self) -> None:
+        """Initialize captured logs, finish calls, and summary state."""
         self.finish_calls: list[int] = []
         self.logged: list[tuple[int | None, dict[str, Any]]] = []
         self.summary: dict[str, Any] = {}
 
     def log(self, row: dict[str, Any], *, step: int | None = None) -> None:
+        """Record a metrics row and its optional step."""
         self.logged.append((step, row))
 
     def finish(self, *, exit_code: int = 0) -> None:
+        """Record the finish exit code."""
         self.finish_calls.append(exit_code)
 
 
@@ -483,6 +486,7 @@ class DummyIter:
     """Single-batch iterator for crash tests."""
 
     def __init__(self) -> None:
+        """Initialize the iterator in a not-yet-consumed state."""
         self._done = False
 
     def __iter__(self) -> DummyIter:
@@ -497,12 +501,15 @@ class DummyIter:
         return Batch(input_ids=zeros, labels=zeros, attention_mask=attn, segment_ids=zeros)
 
     def get_stats(self) -> dict[str, Any]:
+        """Return empty iterator stats for crash tests."""
         return {}
 
     def get_state(self) -> dict[str, Any]:
+        """Return empty iterator state for crash tests."""
         return {}
 
     def set_state(self, state: dict[str, Any]) -> None:
+        """Accept state restores without changing iterator behavior."""
         _ = state
 
 
@@ -517,8 +524,11 @@ def _test_training_crash_marks_wandb_failed_and_logs(
     run_dir = tmp_path / "run"
     dummy_wandb = DummyWandbRun()
 
-    def boom_make_train_step(*args: Any, **kwargs: Any):
-        def boom(state: Any, batch: Any):
+    def boom_make_train_step(*args: Any, **kwargs: Any) -> Any:
+        """Return a train step that always raises a crash error."""
+
+        def boom(state: Any, batch: Any) -> Any:
+            """Raise a deterministic crash to exercise failure handling."""
             raise RuntimeError("kaboom")
 
         return boom
@@ -610,21 +620,27 @@ class TestCheckpointing:
     """Checkpoint manager behavior and invariants."""
 
     def test_async_roundtrip(self, tmp_path: Path) -> None:
+        """Async checkpoint saves should roundtrip correctly."""
         _test_async_checkpoint_roundtrip(tmp_path)
 
     def test_latest_step_ignores_incomplete(self, tmp_path: Path) -> None:
+        """Incomplete checkpoint directories should be ignored."""
         _test_latest_step_ignores_incomplete(tmp_path)
 
     def test_corrupt_fails_restore(self, tmp_path: Path) -> None:
+        """Corrupt checkpoint metadata should fail restore."""
         _test_corrupt_checkpoint_fails_restore(tmp_path)
 
     def test_max_to_keep_prunes(self, tmp_path: Path) -> None:
+        """Checkpoint pruning should respect max_to_keep."""
         _test_max_to_keep_prunes_checkpoints(tmp_path)
 
     def test_root_dir_relative_to_run_dir(self, tmp_path: Path) -> None:
+        """Relative checkpoint roots should resolve under the run directory."""
         _test_checkpoint_root_dir_resolves_relative_to_run_dir(tmp_path)
 
     def test_saves_final_step(self, tmp_path: Path) -> None:
+        """Final steps should be checkpointed even off interval."""
         _test_checkpoint_saves_final_step(tmp_path)
 
 
@@ -632,12 +648,15 @@ class TestResume:
     """Resume semantics and safety checks."""
 
     def test_advances_step(self, tmp_path: Path) -> None:
+        """Resuming from latest should advance the checkpoint step."""
         _test_checkpoint_resume_advances_step(tmp_path)
 
     def test_restore_allows_forward(self, tmp_path: Path) -> None:
+        """Restored checkpoints should support a forward/loss pass."""
         _test_checkpoint_restore_allows_forward(tmp_path)
 
     def test_rejects_seq_len_mismatch(self, tmp_path: Path) -> None:
+        """Resume should reject changed shape-critical config like seq_len."""
         _test_resume_rejects_seq_len_mismatch(tmp_path)
 
 
@@ -645,17 +664,21 @@ class TestTrainingLoop:
     """Training loop smoke tests and failure handling."""
 
     def test_dry_run_compiles_single_step(self, tmp_path: Path) -> None:
+        """Dry runs should compile a single step and exit cleanly."""
         _test_dry_run_compiles_single_step(tmp_path)
 
     def test_deterministic_checkpointing_warns(
         self, tmp_path: Path, caplog: LogCaptureFixture
     ) -> None:
+        """Deterministic runs should warn when checkpointing is enabled."""
         _test_deterministic_checkpointing_warns(tmp_path, caplog)
 
     def test_crash_marks_wandb_failed_and_logs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Crashes should mark W&B failed and emit a metrics row."""
         _test_training_crash_marks_wandb_failed_and_logs(tmp_path, monkeypatch)
 
     def test_repeat_false_exits_cleanly(self, tmp_path: Path) -> None:
+        """Non-repeating data should exit cleanly when exhausted."""
         _test_train_repeat_false_exits_cleanly(tmp_path)
