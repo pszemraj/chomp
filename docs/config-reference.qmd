@@ -57,6 +57,10 @@ Nested fields use multiple dots:
 --override logging.wandb.enabled=true
 ```
 
+Overrides are parsed as YAML scalars. This means optional fields with `null`
+defaults can still be set to numbers or booleans (e.g.,
+`--override optim.muon_consistent_rms=0.2`). Use quotes to force a string.
+
 ::: {.callout-note}
 Unknown keys or invalid values fail fast during validation with actionable error messages.
 :::
