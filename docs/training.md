@@ -3,6 +3,12 @@
 This doc summarizes the training step behavior and the metrics logged in
 `metrics.jsonl`.
 
+## Development notes
+
+For linting, formatting, and the module-based test layout, see `docs/dev.md`.
+In particular, training-loop and checkpoint/resume behaviors now live in
+`tests/test_training.py`.
+
 ## Train step contract
 
 The compiled `train_step`:
