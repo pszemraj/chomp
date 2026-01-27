@@ -767,11 +767,16 @@ def build_optimizer(
     :return tuple: (optimizer, lr_schedule) where lr_schedule maps step to learning rate.
     """
 
+    # Optax's warmup_cosine_decay_schedule expects decay_steps to be the total
+    # schedule horizon INCLUDING warmup (cosine length is decay_steps - warmup_steps).
+    # Our config treats optim.decay_steps as the post-warmup duration, so we
+    # explicitly pass warmup + decay_duration here.
+    schedule_horizon = resolve_decay_horizon(cfg)
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
         peak_value=cfg.optim.lr,
         warmup_steps=cfg.optim.warmup_steps,
-        decay_steps=resolve_decay_horizon(cfg),
+        decay_steps=schedule_horizon,
         end_value=cfg.optim.lr * cfg.optim.min_lr_ratio,
     )
 

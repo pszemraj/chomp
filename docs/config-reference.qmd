@@ -1556,6 +1556,10 @@ Cosine decay duration (in steps) after warmup. The effective schedule horizon is
 Set explicitly if you plan to resume with a different `train.steps` but keep the
 same LR schedule.
 
+Implementation note: Optax's `warmup_cosine_decay_schedule` expects
+`decay_steps` to be the total horizon including warmup. chomp therefore passes
+`optim.warmup_steps + optim.decay_steps` to Optax.
+
 | Property | Value |
 |----------|-------|
 | Required | No |
