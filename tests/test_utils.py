@@ -17,7 +17,7 @@ from _pytest.logging import LogCaptureFixture
 
 from chomp.config import Config, ModelConfig, TrainConfig
 from chomp.model import build_model
-from chomp.train import _check_finite_metrics, _init_tokens_seen
+from chomp.train import _check_finite_metrics, _estimate_tokens_seen_increment, _init_tokens_seen
 from chomp.types import Batch
 from chomp.utils import devices, xla
 from chomp.utils.devices import device_platform, validate_default_device
@@ -206,11 +206,23 @@ def test_dummy_param_count() -> None:
     assert n == expected
 
 
-def test_init_tokens_seen_dtype() -> None:
-    """Token counter should use the widest available integer dtype."""
-    counter = _init_tokens_seen(0)
-    expected = jnp.int64 if jax.config.read("jax_enable_x64") else jnp.int32
-    assert counter.dtype == expected
+def test_init_tokens_seen_host_int() -> None:
+    """Token counter should be a host-side Python int."""
+    counter = _init_tokens_seen(123)
+    assert isinstance(counter, int)
+    assert counter == 123
+
+
+def test_estimate_tokens_seen_increment_prefers_packing_stats() -> None:
+    """Token estimates should use packing stats when available."""
+    cfg = Config(train=TrainConfig(batch_size=2, grad_accum=3, seq_len=8, allow_cpu=True))
+    sequences = int(cfg.train.batch_size) * int(cfg.train.grad_accum)
+    packing_tokens = sequences * int(cfg.train.seq_len)
+
+    inc_stats = _estimate_tokens_seen_increment(cfg, {"packing_tokens": packing_tokens})
+    inc_default = _estimate_tokens_seen_increment(cfg, None)
+
+    assert inc_stats == inc_default
 
 
 def test_finite_check_rejects_nan_loss() -> None:

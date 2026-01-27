@@ -675,14 +675,39 @@ def _muon_lr_from_adam(lr_adam: jax.Array, cfg: Config) -> jax.Array:
     return lr_adam * cfg.optim.muon_lr_scale
 
 
-def _init_tokens_seen(tokens_seen: int) -> jax.Array:
-    """Return an integer device counter for tokens seen.
+def _init_tokens_seen(tokens_seen: int) -> int:
+    """Return a host-side tokens seen counter.
+
+    We intentionally keep this as a Python int to avoid int32 overflow when
+    `jax_enable_x64` is disabled.
 
     :param int tokens_seen: Starting token count.
-    :return jax.Array: Device counter (int64 when enabled, else int32).
+    :return int: Host-side counter value.
     """
-    dtype = jnp.int64 if jax.config.read("jax_enable_x64") else jnp.int32
-    return jnp.asarray(tokens_seen, dtype=dtype)
+    return int(tokens_seen)
+
+
+def _estimate_tokens_seen_increment(cfg: Config, data_stats: dict[str, Any] | None) -> int:
+    """Estimate tokens contributing to loss for a batch without device sync.
+
+    When packing stats are available, we use `packing_tokens` (non-pad tokens)
+    and subtract one token per sequence for the causal shift. Otherwise we fall
+    back to a fixed-size estimate.
+
+    :param Config cfg: Training configuration.
+    :param dict[str, Any] | None data_stats: Latest iterator stats.
+    :return int: Estimated tokens contributing to loss for this step.
+    """
+    sequences = int(cfg.train.grad_accum) * int(cfg.train.batch_size)
+    seq_len = int(cfg.train.seq_len)
+    default_tokens = sequences * max(seq_len - 1, 0)
+    if not data_stats:
+        return default_tokens
+    packing_tokens = data_stats.get("packing_tokens")
+    if packing_tokens is None:
+        return default_tokens
+    tokens_used = int(packing_tokens)
+    return max(tokens_used - sequences, 0)
 
 
 def _scale_updates(mask_fn: Callable[[Any], Any], scale: float) -> optax.GradientTransformation:
@@ -1239,7 +1264,7 @@ def run(
     tokens_seen_base = 0
     if resume_meta and resume_meta.get("tokens_seen") is not None:
         tokens_seen_base = int(resume_meta["tokens_seen"])
-    tokens_seen_device = _init_tokens_seen(tokens_seen_base)
+    tokens_seen_count = _init_tokens_seen(tokens_seen_base)
 
     def _run_eval(params: Any) -> dict[str, Any]:
         """Run a full eval pass over the cached eval texts.
@@ -1360,7 +1385,7 @@ def run(
                     try:
                         batch = next(data_it)
                     except StopIteration:
-                        tokens_seen_host = int(jax.device_get(tokens_seen_device))
+                        tokens_seen_host = int(tokens_seen_count)
                         step_i = int(host_step)
                         row = {
                             "step": int(step_i),
@@ -1387,9 +1412,7 @@ def run(
                     with step_annotation("train_step"):
                         t1 = time.perf_counter()
                         state, metrics = train_step(state, batch)
-                        tokens_seen_device = tokens_seen_device + jnp.asarray(
-                            metrics["token_sum"], dtype=tokens_seen_device.dtype
-                        )
+                        tokens_seen_count += _estimate_tokens_seen_increment(cfg, data_stats)
 
                     host_step += 1
                     step_i = int(host_step)
@@ -1402,14 +1425,12 @@ def run(
                     should_sync = should_log or should_console or (t_compile is None)
 
                     metrics_host = None
-                    tokens_seen_host = None
+                    tokens_seen_host = int(tokens_seen_count)
                     step_time_s = None
                     tokens_per_sec = 0.0
 
                     if should_sync:
-                        metrics_host, tokens_seen_host = jax.device_get(
-                            (metrics, tokens_seen_device)
-                        )
+                        metrics_host = jax.device_get(metrics)
                         t2 = time.perf_counter()
                         step_time_s = t2 - t1
                         if t_compile is None:
@@ -1424,9 +1445,7 @@ def run(
                     save_interval = save_every > 0 and (step_i % save_every == 0)
                     save_final = step_i == cfg.train.steps and not save_interval
                     if manager is not None and (save_interval or save_final):
-                        tokens_seen_ckpt = tokens_seen_host
-                        if tokens_seen_ckpt is None:
-                            tokens_seen_ckpt = int(jax.device_get(tokens_seen_device))
+                        tokens_seen_ckpt = int(tokens_seen_count)
                         meta = build_meta(
                             step=step_i,
                             config=cfg.to_dict(),
@@ -1459,11 +1478,8 @@ def run(
                     mem_stats = _device_memory_stats_gb() if (should_log or should_console) else {}
                     if should_log:
                         if metrics_host is None:
-                            metrics_host, tokens_seen_host = jax.device_get(
-                                (metrics, tokens_seen_device)
-                            )
-                        if tokens_seen_host is None:
-                            tokens_seen_host = int(jax.device_get(tokens_seen_device))
+                            metrics_host = jax.device_get(metrics)
+                        tokens_seen_host = int(tokens_seen_count)
                         lr_adam = float(metrics_host["lr"])
                         lr_muon = (
                             _muon_lr_from_adam(lr_adam, cfg) if cfg.optim.name == "muon" else None
@@ -1554,9 +1570,7 @@ def run(
                     "crash_reason": crash_reason,
                     "wall_time_s": time.perf_counter() - t0,
                 }
-                with contextlib.suppress(Exception):
-                    tokens_seen_host = int(jax.device_get(tokens_seen_device))
-                    row["tokens_seen"] = tokens_seen_host
+                row["tokens_seen"] = int(tokens_seen_count)
                 mw.write(row)
                 if wandb_run is not None:
                     with contextlib.suppress(Exception):
