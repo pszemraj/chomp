@@ -194,6 +194,33 @@ def test_muon_consistent_rms_must_be_non_negative() -> None:
         validate_config(bad)
 
 
+def test_adam_b1_must_be_in_range() -> None:
+    """adam_b1 outside (0, 1) must raise ValueError."""
+    cfg = _base_cfg()
+    bad_optim = replace(cfg.optim, adam_b1=1.1)
+    bad = replace(cfg, optim=bad_optim)
+    with pytest.raises(ValueError, match="adam_b1"):
+        validate_config(bad)
+
+
+def test_adam_b2_must_be_in_range() -> None:
+    """adam_b2 outside (0, 1) must raise ValueError."""
+    cfg = _base_cfg()
+    bad_optim = replace(cfg.optim, adam_b2=0.0)
+    bad = replace(cfg, optim=bad_optim)
+    with pytest.raises(ValueError, match="adam_b2"):
+        validate_config(bad)
+
+
+def test_adam_eps_must_be_positive() -> None:
+    """adam_eps <= 0 must raise ValueError."""
+    cfg = _base_cfg()
+    bad_optim = replace(cfg.optim, adam_eps=0.0)
+    bad = replace(cfg, optim=bad_optim)
+    with pytest.raises(ValueError, match="adam_eps"):
+        validate_config(bad)
+
+
 def test_log_file_must_be_non_empty() -> None:
     """Empty or whitespace log_file must raise ValueError."""
     cfg = _base_cfg()

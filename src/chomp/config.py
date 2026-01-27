@@ -253,9 +253,13 @@ class OptimConfig:
     muon_momentum: float = 0.95
     muon_ns_steps: int = 5
     muon_nesterov: bool = True
-    muon_consistent_rms: float | None = 0.2
+    muon_consistent_rms: float | None = None
     muon_allow_all_2d: bool = False
     muon_allow_tied_embed: bool = False
+    adam_b1: float = 0.9
+    adam_b2: float = 0.999
+    adam_eps: float = 1e-8
+    adam_nesterov: bool = False
 
 
 @dataclass(frozen=True)
@@ -655,6 +659,12 @@ def _validate_optim(cfg: Config) -> None:
         _vfail(
             f"optim.muon_consistent_rms must be >= 0 or None, got {cfg.optim.muon_consistent_rms}"
         )
+    if cfg.optim.adam_b1 <= 0 or cfg.optim.adam_b1 >= 1:
+        _vfail(f"optim.adam_b1 must be in (0, 1), got {cfg.optim.adam_b1}")
+    if cfg.optim.adam_b2 <= 0 or cfg.optim.adam_b2 >= 1:
+        _vfail(f"optim.adam_b2 must be in (0, 1), got {cfg.optim.adam_b2}")
+    if cfg.optim.adam_eps <= 0:
+        _vfail(f"optim.adam_eps must be positive, got {cfg.optim.adam_eps}")
     if cfg.optim.warmup_steps >= cfg.train.steps:
         _vfail(
             f"optim.warmup_steps ({cfg.optim.warmup_steps}) must be < train.steps "

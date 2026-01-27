@@ -782,6 +782,27 @@ def build_optimizer(
                 "falling back to AdamW for all parameters."
             )
 
+        def label_fn(tree: Any) -> Any:
+            """Return optimizer labels for each parameter leaf.
+
+            :param Any tree: Parameter pytree.
+            :return Any: Pytree of labels ("muon" or "adam").
+            """
+            flat, treedef = jax.tree_util.tree_flatten_with_path(tree)
+            labels: list[str] = []
+            for path, leaf in flat:
+                if not hasattr(leaf, "ndim"):
+                    labels.append("adam")
+                    continue
+                path_str = _path_to_str(path)
+                use_muon = leaf.ndim == 2 and (
+                    allow_all_2d
+                    or _is_muon_weight_path(path_str)
+                    or (allow_embed and _is_embed_weight_path(path_str))
+                )
+                labels.append("muon" if use_muon else "adam")
+            return treedef.unflatten(labels)
+
         def muon_schedule(step: jax.Array) -> jax.Array:
             """Return the Muon learning rate schedule.
 
@@ -798,9 +819,8 @@ def build_optimizer(
             :param Any tree: Parameter pytree.
             :return Any: Pytree of MuonDimensionNumbers for Muon params.
             """
-            return _muon_weight_dim_numbers(
-                tree, allow_all_2d=allow_all_2d, allow_embed=allow_embed
-            )
+            # The Muon transform only sees Muon-labeled leaves, so use all-2D mode.
+            return _muon_weight_dim_numbers(tree, allow_all_2d=True, allow_embed=allow_embed)
 
         muon_tx = optax.contrib.muon(
             learning_rate=muon_schedule,
@@ -809,18 +829,29 @@ def build_optimizer(
             nesterov=cfg.optim.muon_nesterov,
             weight_decay=muon_weight_decay,
             weight_decay_mask=_weight_decay_mask,
-            adam_learning_rate=schedule,
-            adam_weight_decay=cfg.optim.weight_decay,
             muon_weight_dimension_numbers=muon_dim_fn,
             consistent_rms=cfg.optim.muon_consistent_rms,
         )
-        transforms.append(muon_tx)
+        adam_tx = optax.adamw(
+            learning_rate=schedule,
+            b1=cfg.optim.adam_b1,
+            b2=cfg.optim.adam_b2,
+            eps=cfg.optim.adam_eps,
+            weight_decay=cfg.optim.weight_decay,
+            mask=_weight_decay_mask,
+            nesterov=cfg.optim.adam_nesterov,
+        )
+        transforms.append(optax.multi_transform({"muon": muon_tx, "adam": adam_tx}, label_fn))
     else:
         transforms.append(
             optax.adamw(
                 learning_rate=schedule,
+                b1=cfg.optim.adam_b1,
+                b2=cfg.optim.adam_b2,
+                eps=cfg.optim.adam_eps,
                 weight_decay=cfg.optim.weight_decay,
                 mask=_weight_decay_mask,
+                nesterov=cfg.optim.adam_nesterov,
             )
         )
 

@@ -8,6 +8,7 @@ from typing import Any
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import optax
 from megalodon_jax.config import MegalodonConfig
 from megalodon_jax.model import MegalodonForCausalLM
 from optax.contrib import MuonDimensionNumbers
@@ -17,6 +18,7 @@ from chomp.train import (
     _muon_lr_from_adam,
     _muon_weight_dim_numbers,
     _path_to_str,
+    _weight_decay_mask,
     build_optimizer,
 )
 
@@ -59,6 +61,16 @@ def _dim_map(dim_nums: Any) -> dict[str, MuonDimensionNumbers | None]:
 
     flat_dims, _ = jax.tree_util.tree_flatten_with_path(dim_nums, is_leaf=_is_leaf)
     return {_path_to_str(path): dim for path, dim in flat_dims}
+
+
+def _leaf_map(tree: Any) -> dict[str, Any]:
+    """Create a mapping from parameter path to a leaf value.
+
+    :param Any tree: Pytree to flatten.
+    :return dict[str, Any]: Map of path string to leaf value.
+    """
+    flat, _ = jax.tree_util.tree_flatten_with_path(tree)
+    return {_path_to_str(path): leaf for path, leaf in flat}
 
 
 def test_muon_param_labels_whitelist_excludes_embed() -> None:
@@ -148,3 +160,40 @@ def test_muon_allow_all_2d_warns(caplog: Any) -> None:
     cfg = replace(cfg, optim=replace(cfg.optim, name="muon", muon_allow_all_2d=True))
     build_optimizer(cfg, params)
     assert any("muon_allow_all_2d" in rec.message for rec in caplog.records)
+
+
+def test_muon_non_muon_params_use_plain_adamw() -> None:
+    """Non-Muon params should use AdamW even when Muon uses Nesterov."""
+    params = _megalodon_params()
+    cfg = Config()
+    cfg = replace(
+        cfg,
+        optim=replace(
+            cfg.optim,
+            name="muon",
+            muon_nesterov=True,
+            adam_nesterov=False,
+            muon_consistent_rms=None,
+        ),
+    )
+    tx, schedule = build_optimizer(cfg, params)
+    opt_state = tx.init(params)
+    grads = jax.tree_util.tree_map(jnp.ones_like, params)
+    updates_muon, _ = tx.update(grads, opt_state, params)
+
+    adam_tx = optax.adamw(
+        learning_rate=schedule,
+        b1=cfg.optim.adam_b1,
+        b2=cfg.optim.adam_b2,
+        eps=cfg.optim.adam_eps,
+        weight_decay=cfg.optim.weight_decay,
+        mask=_weight_decay_mask,
+        nesterov=cfg.optim.adam_nesterov,
+    )
+    adam_state = adam_tx.init(params)
+    updates_adam, _ = adam_tx.update(grads, adam_state, params)
+
+    muon_map = _leaf_map(updates_muon)
+    adam_map = _leaf_map(updates_adam)
+    path = "model.layers.[0].attn.gamma"
+    assert jnp.allclose(muon_map[path], adam_map[path])

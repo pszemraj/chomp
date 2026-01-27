@@ -31,7 +31,12 @@ Both optimizers use the same warmup+cosine schedule (`optim.lr`,
 weight-decay mask (matrices only).
 For Muon runs, Adam uses `optim.lr` and Muon uses `optim.lr * optim.muon_lr_scale`.
 Muon weight decay can be scaled independently via `optim.muon_weight_decay_mult`.
-`optim.muon_consistent_rms` controls Optax's Muon RMS scaling (default `0.2`).
+Muon and AdamW are composed via explicit partitioning, so Adam-specific knobs
+(`optim.adam_b1`, `optim.adam_b2`, `optim.adam_eps`, `optim.adam_nesterov`)
+apply only to the non-Muon parameter group.
+`optim.muon_consistent_rms` controls Optax's Muon RMS scaling. It defaults to
+`null` to match the earlier Muon behavior; set it to `0.2` to enable consistent
+RMS scaling.
 
 ## Determinism
 
