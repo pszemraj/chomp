@@ -17,6 +17,7 @@ from chomp.config import Config, DataConfig, ModelConfig, OptimConfig, Tokenizer
 from chomp.data.pipeline import build_train_iterator
 from chomp.model import build_model, training_loss
 from chomp.train import (
+    _is_muon_weight_path,
     _muon_lr_from_adam,
     _muon_weight_dim_numbers,
     _path_to_str,
@@ -319,3 +320,15 @@ def test_grad_accum_equivalence_dummy_local_text() -> None:
     assert tree_allclose(state1.params, params_ref, rtol=rtol, atol=atol)
     assert tree_allclose(state1.opt_state, opt_state_ref, rtol=rtol, atol=atol)
     assert jnp.allclose(metrics["loss"], loss_ref)
+
+
+def test_muon_whitelist_matches_root_level_lm_head() -> None:
+    """lm_head.weight without leading dot (untied head) should be muon-eligible."""
+    # Root-level path (untied head): no leading dot
+    assert _is_muon_weight_path("lm_head.weight") is True
+    # Nested path (tied head via model prefix): still matches
+    assert _is_muon_weight_path("model.lm_head.weight") is True
+    # Non-weight suffix should not match
+    assert _is_muon_weight_path("lm_head.bias") is False
+    # Embedding should not match via this check
+    assert _is_muon_weight_path("model.embed.weight") is False
