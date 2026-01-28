@@ -40,6 +40,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
+from optax.contrib import _muon as muon_contrib
 from tqdm import tqdm
 
 from chomp.ckpt import (
@@ -864,7 +865,7 @@ def build_optimizer(
         ]
         if muon_cfg.consistent_rms is not None:
             muon_transforms.append(
-                optax.contrib.scale_by_shape(
+                muon_contrib.scale_by_shape(
                     weight_dimension_numbers=muon_dim_fn,
                     consistent_rms=muon_cfg.consistent_rms,
                 )
