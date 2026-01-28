@@ -854,16 +854,28 @@ def build_optimizer(
             # The Muon transform only sees Muon-labeled leaves, so use all-2D mode.
             return _muon_weight_dim_numbers(tree, allow_all_2d=True, allow_embed=allow_embed)
 
-        muon_tx = optax.contrib.muon(
-            learning_rate=muon_schedule,
-            ns_steps=muon_cfg.ns_steps,
-            beta=muon_cfg.momentum,
-            nesterov=muon_cfg.nesterov,
-            weight_decay=muon_weight_decay,
-            weight_decay_mask=_weight_decay_mask,
-            muon_weight_dimension_numbers=muon_dim_fn,
-            consistent_rms=muon_cfg.consistent_rms,
+        muon_transforms = [
+            optax.contrib.scale_by_muon(
+                ns_steps=muon_cfg.ns_steps,
+                beta=muon_cfg.momentum,
+                nesterov=muon_cfg.nesterov,
+                weight_dimension_numbers=muon_dim_fn,
+            )
+        ]
+        if muon_cfg.consistent_rms is not None:
+            muon_transforms.append(
+                optax.contrib.scale_by_shape(
+                    weight_dimension_numbers=muon_dim_fn,
+                    consistent_rms=muon_cfg.consistent_rms,
+                )
+            )
+        muon_transforms.extend(
+            [
+                optax.add_decayed_weights(muon_weight_decay, mask=_weight_decay_mask),
+                optax.scale_by_learning_rate(muon_schedule),
+            ]
         )
+        muon_tx = optax.chain(*muon_transforms)
         adam_tx = optax.adamw(
             learning_rate=schedule,
             b1=adam_cfg.b1,
