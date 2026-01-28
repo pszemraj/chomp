@@ -541,8 +541,12 @@ def check_resume_compat(
 
     optim_prev = meta_cfg.get("optim") or {}
     optim_cur = cur_cfg.get("optim") or {}
+    optim_name_prev = optim_prev.get("name")
+    optim_name_cur = optim_cur.get("name")
     for key in sorted(set(optim_prev) | set(optim_cur)):
         if key == "decay_steps":
+            continue
+        if key == "muon" and optim_name_prev != "muon" and optim_name_cur != "muon":
             continue
         _cmp(f"optim.{key}", optim_cur.get(key), optim_prev.get(key), severity="error")
 
