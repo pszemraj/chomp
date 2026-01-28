@@ -113,6 +113,19 @@ def test_muon_param_labels_allow_tied_embed() -> None:
     assert mapping["model.embed.weight"] is True
 
 
+def test_muon_param_labels_allow_tied_embed_root_path() -> None:
+    """allow_embed should include root-level embed weights."""
+    params = {
+        "embed": {"weight": jnp.ones((2, 2), dtype=jnp.float32)},
+        "proj": {"weight": jnp.ones((2, 2), dtype=jnp.float32)},
+    }
+    dim_nums = _muon_weight_dim_numbers(params, allow_all_2d=False, allow_embed=True)
+    mapping = _label_map(dim_nums)
+
+    assert mapping["embed.weight"] is True
+    assert mapping["proj.weight"] is False
+
+
 def test_muon_dim_numbers_match_eqx_orientation() -> None:
     """Muon dimension numbers should treat eqx Linear weights as (out, in)."""
     params = _megalodon_params()

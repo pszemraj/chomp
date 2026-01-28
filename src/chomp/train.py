@@ -600,7 +600,7 @@ def _is_embed_weight_path(path_str: str) -> bool:
     :param str path_str: Dotted parameter path.
     :return bool: True if the path is the embedding weight.
     """
-    return path_str.endswith(".embed.weight")
+    return path_str.endswith("embed.weight")
 
 
 def _muon_param_stats(
