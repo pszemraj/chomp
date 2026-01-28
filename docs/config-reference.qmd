@@ -1609,7 +1609,7 @@ lr_scale: float = 100.0
 
 Multiplier applied to `optim.lr` to set Muon's peak LR. Effective Muon LR is
 `optim.lr * optim.muon.lr_scale`. The default (`100.0`) reflects the best
-1k-step Muon sweep result so far; see `docs/optimization.md` for details.
+10k-step Muon sweep result so far; see `docs/optimization.md` for details.
 
 | Property | Value |
 |----------|-------|

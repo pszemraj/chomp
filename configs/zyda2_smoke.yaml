@@ -52,7 +52,7 @@ optim:
   warmup_steps: 2
   min_lr_ratio: 0.0
   muon:
-    lr_scale: 66.6667
+    lr_scale: 100.0
 
 checkpoint:
   enabled: true

@@ -37,49 +37,39 @@ In practice that means:
 - When `optim.muon.consistent_rms=null`, we skip Muon shape scaling
   (`scale_by_shape`) to preserve the earlier Muon-only behavior.
 
-## Muon sweep: 1000-step comparison (current state)
+## Muon sweep: 10k-step comparison (current state)
 
-To ground the defaults in something concrete, we ran a small but controlled
-sweep on `configs/zyda2_100m_2048.yaml`:
+To ground the defaults in something concrete, we ran a controlled 10k-step
+comparison on a 200M Megalodon config (see
+`configs/custom/muon-lr-scale-10k/*.yaml`):
 
-- Train steps: 1000
-- Eval every: 250
-- W&B: disabled
-- Checkpointing: disabled
-- Eval split: `train` (for fast, consistent comparisons)
+- Train steps: 10,000
+- Eval every: 1,000
+- `optim.muon.consistent_rms=null` (no shape scaling)
+- W&B project: `muon-lr-scale-10k`
 
 Command pattern (example):
 
 ```bash
-conda run --name mega-jax chomp train configs/zyda2_100m_2048.yaml \
-  -o optim.name=muon \
-  -o optim.muon.lr_scale=100 \
-  -o optim.muon.consistent_rms=null \
-  -o train.steps=1000 \
-  -o train.eval_every=250 \
-  -o logging.wandb.enabled=false \
-  -o checkpoint.enabled=false \
-  -o data.hf_eval_split=train
+conda run --name mega-jax chomp train configs/custom/muon-lr-scale-10k/muon_lr100_10k.yaml
 ```
 
 ### Results summary
 
-All values below are from the final log at step 1000.
+All values below are eval loss at step 10,000 (lower is better).
 
-| Optimizer | Muon scale | consistent_rms | Final train loss | Eval loss | Avg tokens/sec | Run dir |
-|---|---:|---:|---:|---:|---:|---|
-| AdamW | - | - | 4.8252 | 4.7304 | 59,896 | `runs/chomp/20260126_183922_zyda2_100m_2048` |
-| Muon | 200 | null | 4.4544 | 4.3743 | 53,598 | `runs/chomp/20260126_215603_zyda2_100m_2048` |
-| Muon | 100 | null | **4.3762** | **4.2914** | 53,000 | `runs/chomp/20260126_222855_zyda2_100m_2048` |
-| Muon | 200 | 0.2 | 4.8969 | 4.8033 | 52,669 | `runs/chomp/20260126_221507_zyda2_100m_2048` |
-| Muon | 100 | 0.2 | 5.4423 | 5.3353 | 53,273 | `runs/chomp/20260126_224307_zyda2_100m_2048` |
+| Optimizer | Muon scale | consistent_rms | Eval loss @ 10k |
+|---|---:|---:|---:|
+| AdamW | - | - | 3.50916 |
+| Muon | 150 | null | 3.26316 |
+| Muon | 100 | null | **3.25314** |
 
 ### Takeaways
 
-- Muon clearly beats AdamW at 1000 steps in this setup.
-- `optim.muon.consistent_rms=0.2` looks harmful right now.
-- A Muon scale of `100` with `consistent_rms=null` is the strongest of the
-  tested settings.
+- Muon clearly beats AdamW at 10k steps in this setup.
+- `optim.muon.lr_scale=100` slightly edges out `150`.
+- We continue to keep `optim.muon.consistent_rms=null` until a focused sweep
+  shows a benefit.
 
 ## Current recommended defaults
 
@@ -94,7 +84,7 @@ These defaults only matter when `optim.name=muon`.
 
 If you want to iterate further, here are the highest-value next experiments:
 
-1) Sweep Muon LR scale around the new default
+1) Sweep Muon LR scale around the new default (if you want to refine)
 
 - Try: 80, 90, 100, 110, 125, 150
 - Keep `optim.muon.consistent_rms=null` while tuning scale.
@@ -118,8 +108,8 @@ Muon runs still depend heavily on the AdamW group. Consider experimenting with:
 
 ## Notes and cautions
 
-- These are short-horizon results (1000 steps). They are useful for direction
-  finding but are not definitive pretraining conclusions.
+- These are still short-horizon results (10k steps). They are useful for
+  direction finding but are not definitive pretraining conclusions.
 - Optimizer behavior can change meaningfully when schedule horizons, packing
   policies, or parameter sharding strategies change.
 - If you resume from checkpoints, treat schedule horizons and effective
