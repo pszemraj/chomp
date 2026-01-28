@@ -3,6 +3,12 @@
 This doc summarizes the training step behavior and the metrics logged in
 `metrics.jsonl`.
 
+## Development notes
+
+For linting, formatting, and the module-based test layout, see `docs/dev.md`.
+In particular, training-loop and checkpoint/resume behaviors now live in
+`tests/test_training.py`.
+
 ## Train step contract
 
 The compiled `train_step`:
@@ -15,6 +21,33 @@ Grad accumulation is **token-weighted**: microbatch losses are scaled by the
 count of valid (non-masked) tokens to keep updates correct with padding or
 boundary masks.
 
+## Optimizer selection
+
+`optim.name` selects the optimizer:
+
+- `adamw` (default)
+- `muon`: applies Muon to a whitelist of projection weights
+  (`attn.wz/wv/wr/wh1/wh2`, `ffn.fc1/fc2/fc3`, `lm_head`) and uses AdamW for
+  everything else. Set `optim.muon.allow_all_2d=true` to apply Muon to all 2D
+  tensors. Set `optim.muon.allow_tied_embed=true` to include the tied embedding
+  matrix.
+
+Both optimizers use the same warmup+cosine schedule (`optim.lr`,
+`optim.warmup_steps`, `optim.decay_steps`, `optim.min_lr_ratio`) and the same
+weight-decay mask (matrices only).
+For Muon runs, Adam uses `optim.lr` and Muon uses `optim.lr * optim.muon.lr_scale`.
+Muon weight decay can be scaled independently via `optim.muon.weight_decay_mult`.
+Muon and AdamW are composed via explicit partitioning, so Adam-specific knobs
+(`optim.adam.b1`, `optim.adam.b2`, `optim.adam.eps`, `optim.adam.nesterov`)
+apply only to the non-Muon parameter group.
+`optim.muon.consistent_rms` controls Optax's Muon RMS scaling. It defaults to
+`null` and `optim.muon.lr_scale` defaults to `100.0` based on the current 10k-step
+Muon sweep results; set `optim.muon.consistent_rms=0.2` to enable consistent RMS
+scaling.
+When `null`, Muon shape scaling is disabled to preserve the earlier Muon-only
+behavior.
+See `docs/optimization.md` for the sweep details and recommended next steps.
+
 ## Determinism
 
 `train.deterministic` controls dropout behavior:
@@ -23,7 +56,10 @@ boundary masks.
 - `True`: force deterministic
 - `False`: force stochastic
 
-Deterministic runs are recommended for resume and regression tests.
+Deterministic runs are recommended for resume and regression tests. Note that
+in `megalodon-jax`, activation checkpointing is disabled when
+`train.deterministic=true`. If you want checkpointing with deterministic math,
+set `train.deterministic=false` and keep all dropout rates at `0.0`.
 
 ## GPU environment notes
 
@@ -80,10 +116,14 @@ Use `chomp train <config.yaml> --dry-run` to validate config, build the tokenize
 pipeline, and compile one step before exiting. W&B logging is skipped in dry-run
 mode to avoid creating noisy runs.
 
+`config_resolved.json` includes a small `derived` section; for example
+`derived.optim.decay_steps_effective` records the effective LR schedule horizon.
+
 ## Gradient checkpointing
 
 Megalodon supports activation checkpointing via `model.use_checkpoint`. This is
 orthogonal to gradient accumulation and does not change the batch contract.
+In `megalodon-jax`, checkpointing is gated on `train.deterministic=false`.
 
 ## Metrics
 
@@ -93,7 +133,8 @@ Metrics are written to `logging.metrics_file` every `train.log_every` steps
 - `loss`
 - `grad_norm`
 - `lr`
-- `tokens_seen`
+- `tokens_seen` (actual valid tokens, after masking)
+- `tokens_per_sec` (actual valid tokens / step_time_s)
 - `packing_mode`, `packing_utilization` (when iterator stats are enabled)
 - `first_step_compile_time_s` (first logged step after compile)
 - `peak_memory_gb` (best-effort, device-dependent)
@@ -107,3 +148,5 @@ Console output is throttled by `train.log_every` and prints a compact
 one-line summary (loss, grad norm, LR, step time, throughput, optional eval
 loss, packing utilization, and best-effort device memory). Full logs from
 third-party libraries are written to `logging.log_file` under the run directory.
+
+`tokens_seen` resumes from checkpoint metadata when available.

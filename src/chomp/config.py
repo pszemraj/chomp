@@ -238,14 +238,42 @@ class TrainConfig:
 
 
 @dataclass(frozen=True)
-class OptimConfig:
-    """Optimizer configuration for AdamW with linear warmup and cosine decay."""
+class MuonOptimConfig:
+    """Muon-specific optimizer configuration."""
 
+    lr_scale: float = 100.0
+    weight_decay_mult: float = 1.0
+    momentum: float = 0.95
+    ns_steps: int = 5
+    nesterov: bool = True
+    consistent_rms: float | None = None
+    allow_all_2d: bool = False
+    allow_tied_embed: bool = False
+
+
+@dataclass(frozen=True)
+class AdamOptimConfig:
+    """AdamW-specific optimizer configuration."""
+
+    b1: float = 0.9
+    b2: float = 0.999
+    eps: float = 1e-8
+    nesterov: bool = False
+
+
+@dataclass(frozen=True)
+class OptimConfig:
+    """Optimizer configuration for AdamW or Muon with warmup+cosine decay."""
+
+    name: Literal["adamw", "muon"] = "adamw"
     lr: float = 3e-4
     weight_decay: float = 0.01
     grad_clip_norm: float = 1.0
     warmup_steps: int = 10
+    decay_steps: int | None = None
     min_lr_ratio: float = 0.0
+    muon: MuonOptimConfig = MuonOptimConfig()
+    adam: AdamOptimConfig = AdamOptimConfig()
 
 
 @dataclass(frozen=True)
@@ -395,10 +423,14 @@ def _cast_like(old: Any, raw: str) -> Any:
     if isinstance(old, float):
         return float(raw)
     if old is None:
-        # Try some reasonable casts
         if raw.lower() in {"null", "none"}:
             return None
-        return raw
+        # When the default is None, parse YAML scalars to recover numeric/bool types.
+        try:
+            parsed = yaml.safe_load(raw)
+        except yaml.YAMLError:
+            return raw
+        return raw if parsed is None else parsed
     if isinstance(old, str):
         return raw
     # For Literal or other types, keep string; validation should catch invalid
@@ -534,7 +566,13 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
 
     model = ModelConfig(**(data.get("model") or {}))
     train = TrainConfig(**(data.get("train") or {}))
-    optim = OptimConfig(**(data.get("optim") or {}))
+    optim_d = data.get("optim") or {}
+    muon_d = optim_d.get("muon") or {}
+    adam_d = optim_d.get("adam") or {}
+    muon = MuonOptimConfig(**muon_d)
+    adam = AdamOptimConfig(**adam_d)
+    optim_d = {k: v for k, v in optim_d.items() if k not in {"muon", "adam"}}
+    optim = OptimConfig(muon=muon, adam=adam, **optim_d)
     logging_d = data.get("logging") or {}
     wandb_d = logging_d.get("wandb") or {}
     wandb = WandbConfig(**wandb_d)
@@ -621,14 +659,36 @@ def _validate_train(cfg: Config) -> None:
 
 def _validate_optim(cfg: Config) -> None:
     """Validate optimizer-related config fields."""
+    if cfg.optim.name not in ("adamw", "muon"):
+        _vfail(f"optim.name must be 'adamw' or 'muon', got {cfg.optim.name!r}")
     if cfg.optim.lr <= 0:
         _vfail(f"optim.lr must be positive, got {cfg.optim.lr}")
     if cfg.optim.grad_clip_norm < 0:
         _vfail(f"optim.grad_clip_norm must be >= 0, got {cfg.optim.grad_clip_norm}")
     if cfg.optim.warmup_steps < 0:
         _vfail(f"optim.warmup_steps must be >= 0, got {cfg.optim.warmup_steps}")
+    if cfg.optim.decay_steps is not None and cfg.optim.decay_steps <= 0:
+        _vfail(f"optim.decay_steps must be positive when set, got {cfg.optim.decay_steps}")
     if cfg.optim.min_lr_ratio < 0 or cfg.optim.min_lr_ratio > 1:
         _vfail(f"optim.min_lr_ratio must be in [0, 1], got {cfg.optim.min_lr_ratio}")
+    muon = cfg.optim.muon
+    adam = cfg.optim.adam
+    if muon.lr_scale <= 0:
+        _vfail(f"optim.muon.lr_scale must be positive, got {muon.lr_scale}")
+    if muon.weight_decay_mult < 0:
+        _vfail(f"optim.muon.weight_decay_mult must be >= 0, got {muon.weight_decay_mult}")
+    if muon.momentum <= 0 or muon.momentum >= 1:
+        _vfail(f"optim.muon.momentum must be in (0, 1), got {muon.momentum}")
+    if muon.ns_steps <= 0:
+        _vfail(f"optim.muon.ns_steps must be positive, got {muon.ns_steps}")
+    if muon.consistent_rms is not None and muon.consistent_rms < 0:
+        _vfail(f"optim.muon.consistent_rms must be >= 0 or None, got {muon.consistent_rms}")
+    if adam.b1 <= 0 or adam.b1 >= 1:
+        _vfail(f"optim.adam.b1 must be in (0, 1), got {adam.b1}")
+    if adam.b2 <= 0 or adam.b2 >= 1:
+        _vfail(f"optim.adam.b2 must be in (0, 1), got {adam.b2}")
+    if adam.eps <= 0:
+        _vfail(f"optim.adam.eps must be positive, got {adam.eps}")
     if cfg.optim.warmup_steps >= cfg.train.steps:
         _vfail(
             f"optim.warmup_steps ({cfg.optim.warmup_steps}) must be < train.steps "
@@ -794,8 +854,18 @@ def _validate_tokenizer(cfg: Config) -> None:
             f"data.tokenizer.vocab_size_multiple must be positive, got {tok.vocab_size_multiple}"
         )
 
-    if tok.max_doc_tokens is not None and tok.max_doc_tokens <= 0:
-        _vfail(f"data.tokenizer.max_doc_tokens must be positive when set, got {tok.max_doc_tokens}")
+    if tok.max_doc_tokens is not None and tok.max_doc_tokens == 0:
+        warnings.warn(
+            "data.tokenizer.max_doc_tokens=0 disables truncation; the tokenizer will be "
+            "resolved with no max_doc_tokens cap.",
+            stacklevel=2,
+        )
+    if tok.max_doc_tokens is not None and tok.max_doc_tokens < 0:
+        warnings.warn(
+            "data.tokenizer.max_doc_tokens < 0 disables truncation; the tokenizer will be "
+            "resolved with no max_doc_tokens cap.",
+            stacklevel=2,
+        )
 
     # Special token ids must be in range if enabled
     if tok.add_bos and not (0 <= cfg.model.bos_token_id < cfg.model.vocab_size):
@@ -835,6 +905,29 @@ def derived_deterministic(cfg: Config) -> bool:
         and cfg.model.attention_dropout == 0.0
         and cfg.model.hidden_dropout == 0.0
     )
+
+
+def resolve_decay_duration(cfg: Config) -> int:
+    """Resolve cosine decay duration (post-warmup) in steps.
+
+    If `optim.decay_steps` is unset, we default to `train.steps - optim.warmup_steps`
+    so the schedule ends at `train.steps`.
+
+    :param Config cfg: Training configuration.
+    :return int: Decay duration in steps.
+    """
+    if cfg.optim.decay_steps is None:
+        return int(cfg.train.steps) - int(cfg.optim.warmup_steps)
+    return int(cfg.optim.decay_steps)
+
+
+def resolve_decay_horizon(cfg: Config) -> int:
+    """Resolve the total schedule horizon (warmup + decay) in steps.
+
+    :param Config cfg: Training configuration.
+    :return int: Total schedule steps (warmup + decay duration).
+    """
+    return int(cfg.optim.warmup_steps) + resolve_decay_duration(cfg)
 
 
 def dtype_from_str(name: str) -> jnp.dtype:

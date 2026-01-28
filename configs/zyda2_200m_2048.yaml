@@ -56,17 +56,20 @@ train:
   seq_len: 2048
   grad_accum: 8
   jit: true
-  deterministic: true
+  deterministic: false
   allow_cpu: false
   log_every: 25
   eval_every: 2500
 
 optim:
+  name: muon
   lr: 3.0e-4
   weight_decay: 0.01
   grad_clip_norm: 1.0
   warmup_steps: 1000
   min_lr_ratio: 0.1
+  muon:
+    lr_scale: 100.0
 
 checkpoint:
   enabled: true

@@ -27,7 +27,7 @@ dependencies = [
   "jax>=0.7.0",
   "equinox>=0.12.0",
   "megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git",
-  "optax>=0.2.0",
+  "optax @ git+https://github.com/google-deepmind/optax.git@141c8d5e3746540163da8c7edf5a0072369a27c8",
   "orbax-checkpoint==0.11.31",
   "PyYAML>=6.0",
   "tqdm",
@@ -62,6 +62,9 @@ packages = ["src/chomp"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+  "slow: marks tests as slow (e.g., HF streaming state roundtrips)",
+]
 filterwarnings = [
   "ignore:Implicit conversion of an array to a dtype is deprecated.*:DeprecationWarning:chex._src.asserts",
 ]

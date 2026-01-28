@@ -52,6 +52,9 @@ Special token insertion is controlled by:
 - `data.tokenizer.add_bos`
 - `data.tokenizer.add_eos`
 
+chomp saves a tokenizer snapshot under `run_dir/tokenizer` and will prefer that
+snapshot on resume to keep tokenization reproducible.
+
 ## Packing
 
 Packer modes:
@@ -59,7 +62,7 @@ Packer modes:
 - `data.packing_mode: sequential` (stream order, rolling buffer)
 - `data.packing_mode: bin` (First-Fit-Decreasing; better utilization)
 
-Both packers emit fixed windows of length `seq_len + 1`, then split into:
+Both packers emit fixed windows of length `seq_len`, then split into:
 
 - `input_ids = tokens[0..T-1]`
 - `labels = tokens[0..T-1]` (the model shifts internally)

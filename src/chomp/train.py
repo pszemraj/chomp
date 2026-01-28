@@ -13,7 +13,7 @@ Design rules (hard-earned):
 
 Phases 0–2:
 - dummy or Megalodon model backend
-- Optax AdamW with warmup+cosine schedule
+- Optax AdamW or Muon with warmup+cosine schedule
 - scan-based grad accumulation
 
 Phase 3:
@@ -25,6 +25,7 @@ Phases 4–5:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import random
@@ -39,6 +40,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
+from optax.contrib import _muon as muon_contrib
 from tqdm import tqdm
 
 from chomp.ckpt import (
@@ -50,15 +52,17 @@ from chomp.ckpt import (
     restore_latest,
     save,
 )
-from chomp.config import Config, derived_deterministic
+from chomp.config import Config, derived_deterministic, resolve_decay_horizon
 from chomp.data import (
     build_eval_iterator,
     build_generation_text_stream,
     build_train_iterator,
     data_fingerprint,
     load_or_create_eval_texts,
+    load_tokenizer_snapshot,
     prepare_tokenizer_and_config,
     save_tokenizer_snapshot,
+    tokenizer_snapshot_hash,
 )
 from chomp.model import build_model, training_loss
 from chomp.types import IGNORE_INDEX, Batch, TrainState
@@ -183,7 +187,19 @@ def _setup_run_dir_and_tokenizer(
     :return tuple[Config, Any, Path, Path, list[list[int]], GenerationSettings | None, Any | None, jax.Array | None, random.Random | None]:
         Updated config, tokenizer, run/metrics paths, eval tokens, generation settings, stream, key, and RNG.
     """
-    cfg, tokenizer = prepare_tokenizer_and_config(cfg)
+    tokenizer = None
+    if allow_existing and cfg.logging.run_dir is not None:
+        run_dir_hint = Path(cfg.logging.run_dir)
+        tok_dir = run_dir_hint / "tokenizer"
+        if tok_dir.exists():
+            tokenizer = load_tokenizer_snapshot(run_dir_hint, cfg)
+        else:
+            logger.warning(
+                "Resume requested but tokenizer snapshot is missing at %s; rebuilding from config.",
+                tok_dir,
+            )
+
+    cfg, tokenizer = prepare_tokenizer_and_config(cfg, tokenizer=tokenizer)
 
     run_dir = create_run_dir(cfg, config_path=config_path, allow_existing=allow_existing)
     if cfg.logging.log_file is not None:
@@ -334,7 +350,8 @@ def _maybe_restore_state(
     abstract_state: Any,
     data_it: Any,
     cfg: Config,
-) -> TrainState:
+    tokenizer_hash: str | None,
+) -> tuple[TrainState, dict[str, Any] | None]:
     """Restore state if requested, otherwise return the initial state.
 
     :param Literal["none", "latest"] | int resume: Resume selector.
@@ -343,10 +360,11 @@ def _maybe_restore_state(
     :param Any abstract_state: Abstract train state for restore shape.
     :param Any data_it: Data iterator to restore.
     :param Config cfg: Training configuration.
-    :return TrainState: Restored or initial state.
+    :param str | None tokenizer_hash: Optional tokenizer snapshot hash for resume checks.
+    :return tuple: (TrainState, meta) where meta is checkpoint metadata if restored.
     """
     if resume == "none":
-        return state0
+        return state0, None
     if manager is None:
         raise RuntimeError("resume requested but checkpointing is disabled")
 
@@ -360,8 +378,8 @@ def _maybe_restore_state(
         )
 
     print(f"[chomp] resumed from checkpoint step {step_r}")
-    check_resume_compat(cfg, meta)
-    return state
+    check_resume_compat(cfg, meta, tokenizer_snapshot_hash=tokenizer_hash)
+    return state, meta
 
 
 def _trim_trailing_token(tokens: list[int], token_id: int | None) -> list[int]:
@@ -460,6 +478,7 @@ def _format_console_row(
     loss: float,
     grad_norm: float,
     lr: float,
+    lr_muon: float | None,
     step_time_s: float,
     tokens_per_sec: float,
     eval_loss: float | None,
@@ -473,6 +492,7 @@ def _format_console_row(
     :param float loss: Training loss value.
     :param float grad_norm: Gradient norm value.
     :param float lr: Learning rate value.
+    :param float | None lr_muon: Optional Muon learning rate.
     :param float step_time_s: Step wall time in seconds.
     :param float tokens_per_sec: Throughput in tokens per second.
     :param float | None eval_loss: Optional eval loss.
@@ -490,6 +510,8 @@ def _format_console_row(
         f"time {step_time_s:.3f}s",
         f"tok/s {tokens_per_sec:.0f}",
     ]
+    if lr_muon is not None:
+        parts.append(f"muon_lr {lr_muon:.2e}")
     if eval_loss is not None:
         parts.append(f"eval {eval_loss:.4f}")
     if packing_util is not None:
@@ -502,7 +524,7 @@ def _format_console_row(
 
 
 def _weight_decay_mask(params: Any) -> Any:
-    """Heuristic: apply weight decay to matrices (ndim >= 2), not to biases/scales.
+    """Apply weight decay to matrix-like parameters (ndim >= 2).
 
     :param Any params: Parameter pytree.
     :return Any: Boolean mask pytree with True for parameters that should have weight decay.
@@ -521,6 +543,221 @@ def _weight_decay_mask(params: Any) -> Any:
     return jax.tree_util.tree_map(mask_one, params)
 
 
+_MUON_WEIGHT_WHITELIST = (
+    ".attn.wz.weight",
+    ".attn.wv.weight",
+    ".attn.wr.weight",
+    ".attn.wh1.weight",
+    ".attn.wh2.weight",
+    ".ffn.fc1.weight",
+    ".ffn.fc2.weight",
+    ".ffn.fc3.weight",
+    "lm_head.weight",
+)
+
+
+def _flush_loggers() -> None:
+    """Flush all log handlers to ensure crash logs are written."""
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        with contextlib.suppress(Exception):
+            handler.flush()
+
+
+def _path_to_str(path: tuple[Any, ...]) -> str:
+    """Convert a JAX tree path to a dotted string.
+
+    :param tuple[Any, ...] path: Path elements from tree_flatten_with_path.
+    :return str: Dotted path string (with list indices in brackets).
+    """
+    parts: list[str] = []
+    for key in path:
+        if hasattr(key, "name"):
+            parts.append(str(key.name))
+        elif hasattr(key, "key"):
+            parts.append(str(key.key))
+        elif hasattr(key, "idx"):
+            parts.append(f"[{key.idx}]")
+        else:
+            parts.append(str(key))
+    return ".".join(parts)
+
+
+def _is_muon_weight_path(path_str: str) -> bool:
+    """Return True if a path refers to a muon-eligible weight matrix.
+
+    :param str path_str: Dotted parameter path.
+    :return bool: True if the path should use Muon.
+    """
+    if not path_str.endswith(".weight"):
+        return False
+    return any(token in path_str for token in _MUON_WEIGHT_WHITELIST)
+
+
+def _is_embed_weight_path(path_str: str) -> bool:
+    """Return True if a path refers to the token embedding weight.
+
+    :param str path_str: Dotted parameter path.
+    :return bool: True if the path is the embedding weight.
+    """
+    return path_str.endswith("embed.weight")
+
+
+def _muon_param_stats(
+    params: Any, *, allow_all_2d: bool, allow_embed: bool
+) -> tuple[int, int, int, int, list[str]]:
+    """Return Muon/Adam tensor counts and a sample of Muon paths.
+
+    :param Any params: Parameter pytree.
+    :param bool allow_all_2d: If True, apply Muon to all 2D tensors.
+    :param bool allow_embed: If True, allow Muon on tied embedding weights.
+    :return tuple: (muon_tensors, adam_tensors, muon_2d, total_2d, muon_paths).
+    """
+    flat, _ = jax.tree_util.tree_flatten_with_path(params)
+    total_tensors = 0
+    total_2d = 0
+    muon_tensors = 0
+    muon_2d = 0
+    muon_paths: list[str] = []
+    for path, leaf in flat:
+        if not hasattr(leaf, "ndim"):
+            continue
+        total_tensors += 1
+        if leaf.ndim == 2:
+            total_2d += 1
+        path_str = _path_to_str(path)
+        use_muon = leaf.ndim == 2 and (
+            allow_all_2d
+            or _is_muon_weight_path(path_str)
+            or (allow_embed and _is_embed_weight_path(path_str))
+        )
+        if use_muon:
+            muon_tensors += 1
+            muon_2d += 1
+            muon_paths.append(path_str)
+    adam_tensors = total_tensors - muon_tensors
+    return muon_tensors, adam_tensors, muon_2d, total_2d, muon_paths
+
+
+def _muon_weight_dim_numbers(params: Any, *, allow_all_2d: bool, allow_embed: bool = False) -> Any:
+    """Return Muon dimension specs for eligible parameters.
+
+    :param Any params: Parameter pytree.
+    :param bool allow_all_2d: If True, apply Muon to all 2D tensors.
+    :param bool allow_embed: If True, allow Muon on tied embedding weights.
+    :return Any: Pytree of MuonDimensionNumbers (muon) or None (adam).
+    """
+    muon_dims = optax.contrib.MuonDimensionNumbers(reduction_axis=(1,), output_axis=(0,))
+    flat, treedef = jax.tree_util.tree_flatten_with_path(params)
+    dim_nums: list[Any] = []
+    for path, leaf in flat:
+        if not hasattr(leaf, "ndim") or leaf.ndim != 2:
+            dim_nums.append(None)
+            continue
+        if allow_all_2d:
+            dim_nums.append(muon_dims)
+            continue
+        path_str = _path_to_str(path)
+        dim_nums.append(
+            muon_dims
+            if (_is_muon_weight_path(path_str) or (allow_embed and _is_embed_weight_path(path_str)))
+            else None
+        )
+    return treedef.unflatten(dim_nums)
+
+
+def _muon_lr_from_adam(lr_adam: jax.Array, cfg: Config) -> jax.Array:
+    """Return the Muon learning rate derived from the AdamW schedule.
+
+    :param jax.Array lr_adam: AdamW learning rate for the current step.
+    :param Config cfg: Training configuration.
+    :return jax.Array: Muon learning rate (scaled).
+    """
+    return lr_adam * cfg.optim.muon.lr_scale
+
+
+def _init_tokens_seen(tokens_seen: int) -> int:
+    """Return a host-side tokens seen counter.
+
+    We intentionally keep this as a Python int to avoid int32 overflow when
+    `jax_enable_x64` is disabled.
+
+    :param int tokens_seen: Starting token count.
+    :return int: Host-side counter value.
+    """
+    return int(tokens_seen)
+
+
+def _estimate_tokens_seen_increment(cfg: Config, data_stats: dict[str, Any] | None) -> int:
+    """Estimate tokens contributing to loss for a batch without device sync.
+
+    When packing stats are available, we use `packing_tokens` (non-pad tokens)
+    and subtract one token per sequence for the causal shift. Otherwise we fall
+    back to a fixed-size estimate.
+
+    :param Config cfg: Training configuration.
+    :param dict[str, Any] | None data_stats: Latest iterator stats.
+    :return int: Estimated tokens contributing to loss for this step.
+    """
+    sequences = int(cfg.train.grad_accum) * int(cfg.train.batch_size)
+    seq_len = int(cfg.train.seq_len)
+    default_tokens = sequences * max(seq_len - 1, 0)
+    if not data_stats:
+        return default_tokens
+    packing_tokens = data_stats.get("packing_tokens")
+    if packing_tokens is None:
+        return default_tokens
+    tokens_used = int(packing_tokens)
+    return max(tokens_used - sequences, 0)
+
+
+def _scale_updates(mask_fn: Callable[[Any], Any], scale: float) -> optax.GradientTransformation:
+    """Scale masked updates by a fixed factor.
+
+    :param Callable mask_fn: Function returning a boolean mask pytree.
+    :param float scale: Scaling factor to apply where mask is True.
+    :return optax.GradientTransformation: Stateless scaling transform.
+    """
+
+    def init_fn(params: Any) -> optax.EmptyState:
+        """Initialize stateless scaling state.
+
+        :param Any params: Parameters passed by Optax (unused).
+        :return optax.EmptyState: Empty state for stateless transform.
+        """
+        del params
+        return optax.EmptyState()
+
+    def update_fn(
+        updates: Any, state: optax.EmptyState, params: Any | None = None
+    ) -> tuple[Any, optax.EmptyState]:
+        """Scale updates for masked leaves and pass through others.
+
+        :param Any updates: Gradient updates.
+        :param optax.EmptyState state: Optimizer state (stateless).
+        :param Any | None params: Parameters to derive the mask from.
+        :return tuple[Any, optax.EmptyState]: Scaled updates and state.
+        """
+        mask_source = params if params is not None else updates
+        mask = mask_fn(mask_source)
+
+        def _apply_scale(m: bool, g: Any) -> Any:
+            """Apply scaling to a single leaf if masked.
+
+            :param bool m: Mask flag for this leaf.
+            :param Any g: Gradient leaf.
+            :return Any: Scaled gradient leaf.
+            """
+            if g is None:
+                return None
+            return g * scale if m else g
+
+        updates = jax.tree.map(_apply_scale, mask, updates, is_leaf=lambda node: node is None)
+        return updates, state
+
+    return optax.GradientTransformation(init_fn, update_fn)
+
+
 def build_optimizer(
     cfg: Config, params: Any
 ) -> tuple[optax.GradientTransformation, Callable[[jax.Array], jax.Array]]:
@@ -531,25 +768,138 @@ def build_optimizer(
     :return tuple: (optimizer, lr_schedule) where lr_schedule maps step to learning rate.
     """
 
+    # Optax's warmup_cosine_decay_schedule expects decay_steps to be the total
+    # schedule horizon INCLUDING warmup (cosine length is decay_steps - warmup_steps).
+    # Our config treats optim.decay_steps as the post-warmup duration, so we
+    # explicitly pass warmup + decay_duration here.
+    schedule_horizon = resolve_decay_horizon(cfg)
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
         peak_value=cfg.optim.lr,
         warmup_steps=cfg.optim.warmup_steps,
-        decay_steps=cfg.train.steps,
+        decay_steps=schedule_horizon,
         end_value=cfg.optim.lr * cfg.optim.min_lr_ratio,
     )
 
     transforms = []
-    if cfg.optim.grad_clip_norm and cfg.optim.grad_clip_norm > 0:
-        transforms.append(optax.clip_by_global_norm(cfg.optim.grad_clip_norm))
+    # NOTE: grad clipping is done manually in make_train_step to avoid
+    # computing global_norm twice (once for clipping, once for logging).
 
-    transforms.append(
-        optax.adamw(
-            learning_rate=schedule,
-            weight_decay=cfg.optim.weight_decay,
-            mask=_weight_decay_mask(params),
+    if cfg.optim.name == "muon":
+        muon_cfg = cfg.optim.muon
+        adam_cfg = cfg.optim.adam
+        allow_all_2d = muon_cfg.allow_all_2d
+        allow_embed = muon_cfg.allow_tied_embed
+        if cfg.model.backend == "megalodon" and allow_all_2d:
+            logger.warning(
+                "optim.muon.allow_all_2d=true will apply Muon to all 2D tensors, including "
+                "non-matmul parameters (e.g., embed.weight, attn.gamma/beta, cema.gamma_*)."
+            )
+        muon_tensors, adam_tensors, muon_2d, total_2d, muon_paths = _muon_param_stats(
+            params, allow_all_2d=allow_all_2d, allow_embed=allow_embed
         )
-    )
+        logger.info(
+            "Muon param split: %s muon / %s adam tensors; 2D coverage %s/%s",
+            muon_tensors,
+            adam_tensors,
+            muon_2d,
+            total_2d,
+        )
+        if muon_paths:
+            sample = ", ".join(muon_paths[:5])
+            logger.info("Muon sample params: %s", sample)
+
+        if muon_2d == 0:
+            logger.warning(
+                "optim.name=muon selected but no muon-eligible parameters were found; "
+                "falling back to AdamW for all parameters."
+            )
+
+        def label_fn(tree: Any) -> Any:
+            """Return optimizer labels for each parameter leaf.
+
+            :param Any tree: Parameter pytree.
+            :return Any: Pytree of labels ("muon" or "adam").
+            """
+            flat, treedef = jax.tree_util.tree_flatten_with_path(tree)
+            labels: list[str] = []
+            for path, leaf in flat:
+                if not hasattr(leaf, "ndim"):
+                    labels.append("adam")
+                    continue
+                path_str = _path_to_str(path)
+                use_muon = leaf.ndim == 2 and (
+                    allow_all_2d
+                    or _is_muon_weight_path(path_str)
+                    or (allow_embed and _is_embed_weight_path(path_str))
+                )
+                labels.append("muon" if use_muon else "adam")
+            return treedef.unflatten(labels)
+
+        def muon_schedule(step: jax.Array) -> jax.Array:
+            """Return the Muon learning rate schedule.
+
+            :param jax.Array step: Training step.
+            :return jax.Array: Muon learning rate at step.
+            """
+            return _muon_lr_from_adam(schedule(step), cfg)
+
+        muon_weight_decay = cfg.optim.weight_decay * muon_cfg.weight_decay_mult
+
+        def muon_dim_fn(tree: Any) -> Any:
+            """Return Muon dimension numbers for masked Muon parameters.
+
+            :param Any tree: Parameter pytree.
+            :return Any: Pytree of MuonDimensionNumbers for Muon params.
+            """
+            # The Muon transform only sees Muon-labeled leaves, so use all-2D mode.
+            return _muon_weight_dim_numbers(tree, allow_all_2d=True, allow_embed=allow_embed)
+
+        muon_transforms = [
+            optax.contrib.scale_by_muon(
+                ns_steps=muon_cfg.ns_steps,
+                beta=muon_cfg.momentum,
+                nesterov=muon_cfg.nesterov,
+                weight_dimension_numbers=muon_dim_fn,
+            )
+        ]
+        if muon_cfg.consistent_rms is not None:
+            muon_transforms.append(
+                muon_contrib.scale_by_shape(
+                    weight_dimension_numbers=muon_dim_fn,
+                    consistent_rms=muon_cfg.consistent_rms,
+                )
+            )
+        muon_transforms.extend(
+            [
+                optax.add_decayed_weights(muon_weight_decay, mask=_weight_decay_mask),
+                optax.scale_by_learning_rate(muon_schedule),
+            ]
+        )
+        muon_tx = optax.chain(*muon_transforms)
+        adam_tx = optax.adamw(
+            learning_rate=schedule,
+            b1=adam_cfg.b1,
+            b2=adam_cfg.b2,
+            eps=adam_cfg.eps,
+            weight_decay=cfg.optim.weight_decay,
+            mask=_weight_decay_mask,
+            nesterov=adam_cfg.nesterov,
+        )
+        transforms.append(optax.multi_transform({"muon": muon_tx, "adam": adam_tx}, label_fn))
+    else:
+        adam_cfg = cfg.optim.adam
+        transforms.append(
+            optax.adamw(
+                learning_rate=schedule,
+                b1=adam_cfg.b1,
+                b2=adam_cfg.b2,
+                eps=adam_cfg.eps,
+                weight_decay=cfg.optim.weight_decay,
+                mask=_weight_decay_mask,
+                nesterov=adam_cfg.nesterov,
+            )
+        )
 
     tx = optax.chain(*transforms)
     return tx, schedule
@@ -598,6 +948,7 @@ def make_train_step(
 
     deterministic = derived_deterministic(cfg)
     grad_accum = int(cfg.train.grad_accum)
+    clip_norm = float(cfg.optim.grad_clip_norm) if cfg.optim.grad_clip_norm else 0.0
 
     def micro_loss(
         params: Any,
@@ -688,6 +1039,12 @@ def make_train_step(
         grads = jax.tree_util.tree_map(lambda g: g / token_denom, grad_sum)
 
         grad_norm = optax.global_norm(grads)
+        if clip_norm > 0:
+            trigger = grad_norm > clip_norm
+            grads = jax.tree_util.tree_map(
+                lambda g: jnp.where(trigger, g * (clip_norm / jnp.maximum(grad_norm, 1e-6)), g),
+                grads,
+            )
         updates, new_opt_state = tx.update(grads, state.opt_state, state.params)
         new_params = optax.apply_updates(state.params, updates)
 
@@ -700,6 +1057,7 @@ def make_train_step(
             "loss": loss,
             "grad_norm": grad_norm.astype(jnp.float32),
             "lr": lr.astype(jnp.float32),
+            "token_sum": token_sum.astype(jnp.float32),
         }
         return new_state, metrics
 
@@ -816,6 +1174,13 @@ def run(
         allow_existing=allow_existing,
         dry_run=dry_run,
     )
+    if cfg.model.use_checkpoint and derived_deterministic(cfg):
+        logger.warning(
+            "train.deterministic=true disables activation checkpointing in megalodon-jax. "
+            "Set train.deterministic=false (and keep dropout at 0.0 for deterministic math) "
+            "to enable checkpointing."
+        )
+    tokenizer_hash = tokenizer_snapshot_hash(run_dir)
 
     wandb_run = _maybe_init_wandb(cfg, run_dir=run_dir, dry_run=dry_run)
     profile_enabled = _maybe_start_profile(cfg, run_dir=run_dir)
@@ -833,13 +1198,14 @@ def run(
     manager = _build_checkpoint_manager(cfg, run_dir)
 
     # Restore if requested
-    state = _maybe_restore_state(
+    state, resume_meta = _maybe_restore_state(
         resume=resume,
         manager=manager,
         state0=state0,
         abstract_state=abstract_state,
         data_it=data_it,
         cfg=cfg,
+        tokenizer_hash=tokenizer_hash,
     )
 
     train_step = make_train_step(cfg, static=static, tx=tx, lr_schedule=schedule)
@@ -869,10 +1235,10 @@ def run(
         if cfg.debug.nan_check:
             _check_finite_metrics(metrics_host, step=step_i)
 
-        tokens_per_step = (
-            int(cfg.train.grad_accum) * int(cfg.train.batch_size) * int(cfg.train.seq_len)
-        )
-        tokens_per_sec = float(tokens_per_step) / step_time_s if step_time_s > 0 else 0.0
+        token_sum = float(metrics_host.get("token_sum", 0.0))
+        tokens_per_sec = token_sum / step_time_s if step_time_s > 0 else 0.0
+        lr_adam = float(metrics_host["lr"])
+        lr_muon = _muon_lr_from_adam(lr_adam, cfg) if cfg.optim.name == "muon" else None
         mem_stats = _device_memory_stats_gb()
         packing_util = (
             float(data_stats["packing_utilization"])
@@ -885,7 +1251,8 @@ def run(
             step=step_i,
             loss=float(metrics_host["loss"]),
             grad_norm=float(metrics_host["grad_norm"]),
-            lr=float(metrics_host["lr"]),
+            lr=lr_adam,
+            lr_muon=lr_muon,
             step_time_s=float(step_time_s),
             tokens_per_sec=float(tokens_per_sec),
             eval_loss=None,
@@ -918,10 +1285,15 @@ def run(
 
     if start_step >= target_steps:
         print(f"[chomp] start_step ({start_step}) >= target steps ({target_steps}); nothing to do")
-        return run_dir
 
-    tokens_per_step = int(cfg.train.grad_accum) * int(cfg.train.batch_size) * int(cfg.train.seq_len)
     console_every = int(cfg.train.log_every)
+    host_step = int(start_step)
+    step_i = int(host_step)
+    tokens_seen_base = 0
+    if resume_meta and resume_meta.get("tokens_seen") is not None:
+        tokens_seen_base = int(resume_meta["tokens_seen"])
+    tokens_seen_count = _init_tokens_seen(tokens_seen_base)
+    last_saved_step: int = -1
 
     def _run_eval(params: Any) -> dict[str, Any]:
         """Run a full eval pass over the cached eval texts.
@@ -1029,155 +1401,265 @@ def run(
             use_rich=cfg.logging.console_use_rich,
         )
 
+    exit_code = 0
+    crash_reason = None
+    crash_type = None
+    crash_step = None
+
     try:
         with MetricsWriter(metrics_path) as mw:
-            for _ in tqdm(range(start_step, target_steps), desc="train", dynamic_ncols=True):
-                # Fetch batch (host) and (optionally) device_put
-                try:
-                    batch = next(data_it)
-                except StopIteration:
-                    step_i = int(jax.device_get(state.step))
-                    row = {
-                        "step": int(step_i),
-                        "data_exhausted": True,
-                        "tokens_seen": int(step_i) * tokens_per_step,
-                        "wall_time_s": time.perf_counter() - t0,
-                    }
-                    mw.write(row)
-                    if wandb_run is not None:
-                        wandb_run.log(row, step=step_i)
-                    print("[chomp] data exhausted; stopping early")
-                    break
-                data_stats = data_it.get_stats()
-                if not cfg.data.device_put:
-                    batch = jax.device_put(batch)
+            try:
+                for _ in tqdm(range(start_step, target_steps), desc="train", dynamic_ncols=True):
+                    # Fetch batch (host) and (optionally) device_put
+                    step_i = int(host_step) + 1
+                    try:
+                        batch = next(data_it)
+                    except StopIteration:
+                        tokens_seen_host = int(tokens_seen_count)
+                        step_i = int(host_step)
+                        row = {
+                            "step": int(step_i),
+                            "data_exhausted": True,
+                            "tokens_seen": int(tokens_seen_host),
+                            "wall_time_s": time.perf_counter() - t0,
+                        }
+                        mw.write(row)
+                        if wandb_run is not None:
+                            wandb_run.log(row, step=step_i)
+                        print("[chomp] data exhausted; stopping early")
+                        break
+                    data_stats = data_it.get_stats()
+                    if not cfg.data.device_put:
+                        batch = jax.device_put(batch)
 
-                # Batch placement validation (real check)
-                if cfg.debug.check_device_every > 0 and (
-                    int(jax.device_get(state.step)) % cfg.debug.check_device_every == 0
-                ):
-                    assert_batch_on_device(batch, allow_cpu=cfg.train.allow_cpu)
+                    # Batch placement validation (real check)
+                    if cfg.debug.check_device_every > 0 and (
+                        host_step % cfg.debug.check_device_every == 0
+                    ):
+                        assert_batch_on_device(batch, allow_cpu=cfg.train.allow_cpu)
 
-                # Step (compile happens on first call)
-                with step_annotation("train_step"):
-                    t1 = time.perf_counter()
-                    state, metrics = train_step(state, batch)
-                    # Synchronize for accurate timing
-                    metrics_host = jax.device_get(metrics)
-                    t2 = time.perf_counter()
-                step_time_s = t2 - t1
-                tokens_per_sec = float(tokens_per_step) / step_time_s if step_time_s > 0 else 0.0
+                    # Step (compile happens on first call)
+                    with step_annotation("train_step"):
+                        t1 = time.perf_counter()
+                        state, metrics = train_step(state, batch)
+                        tokens_seen_count += _estimate_tokens_seen_increment(cfg, data_stats)
 
-                if t_compile is None:
-                    t_compile = t2 - t1
+                    host_step = int(step_i)
 
-                step_i = int(jax.device_get(state.step))
-
-                # Debug NaN check
-                if cfg.debug.nan_check:
-                    _check_finite_metrics(metrics_host, step=step_i)
-
-                # Checkpoint save (after state updated)
-                if manager is not None and (step_i % int(cfg.checkpoint.save_every) == 0):
-                    meta = build_meta(
-                        step=step_i, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg)
+                    should_eval = (
+                        eval_step is not None and eval_every > 0 and (step_i % eval_every) == 0
                     )
-                    save(
-                        manager,
-                        step=step_i,
-                        train_state=state,
-                        data_iter=data_it,
-                        meta=meta,
-                    )
+                    should_log = (step_i % cfg.train.log_every) == 0 or should_eval
+                    should_console = (step_i % console_every) == 0 or should_eval
+                    should_sync = should_log or should_console or (t_compile is None)
 
-                eval_row: dict[str, Any] = {}
-                if eval_step is not None and eval_every > 0 and (step_i % eval_every) == 0:
-                    eval_row = _run_eval(state.params)
+                    metrics_host = None
+                    tokens_seen_host = int(tokens_seen_count)
+                    step_time_s = None
+                    tokens_per_sec = 0.0
 
-                if (
-                    gen_settings is not None
-                    and gen_stream is not None
-                    and (step_i % gen_settings.every) == 0
-                ):
-                    _run_generation_sample(step_i, state.params)
+                    if should_sync:
+                        metrics_host = jax.device_get(metrics)
+                        t2 = time.perf_counter()
+                        step_time_s = t2 - t1
+                        if t_compile is None:
+                            t_compile = step_time_s
+                        if cfg.debug.nan_check:
+                            _check_finite_metrics(metrics_host, step=step_i)
+                        token_sum = float(metrics_host.get("token_sum", 0.0))
+                        tokens_per_sec = token_sum / step_time_s if step_time_s > 0 else 0.0
 
-                # Log
-                should_log = (step_i % cfg.train.log_every) == 0 or bool(eval_row)
-                should_console = (step_i % console_every) == 0 or bool(eval_row)
-                mem_stats = _device_memory_stats_gb() if (should_log or should_console) else {}
-                if should_log:
-                    row = {
-                        "step": int(step_i),
-                        "loss": float(metrics_host["loss"]),
-                        "grad_norm": float(metrics_host["grad_norm"]),
-                        "lr": float(metrics_host["lr"]),
-                        "step_time_s": float(step_time_s),
-                        "tokens_per_sec": float(tokens_per_sec),
-                        "tokens_seen": int(step_i) * tokens_per_step,
-                        "wall_time_s": time.perf_counter() - t0,
-                    }
-                    if data_stats:
-                        row.update(data_stats)
-                    if eval_row:
-                        row.update(eval_row)
-                    if mem_stats:
-                        row.update(mem_stats)
-                    if step_i == (start_step + 1) and t_compile is not None:
-                        row["first_step_compile_time_s"] = float(t_compile)
+                    # Checkpoint save (after state updated)
+                    save_every = int(cfg.checkpoint.save_every)
+                    save_interval = save_every > 0 and (step_i % save_every == 0)
+                    if manager is not None and save_interval:
+                        tokens_seen_ckpt = int(tokens_seen_count)
+                        meta = build_meta(
+                            step=step_i,
+                            config=cfg.to_dict(),
+                            data_fingerprint=data_fingerprint(
+                                cfg, tokenizer_snapshot_hash=tokenizer_hash
+                            ),
+                            tokens_seen=tokens_seen_ckpt,
+                        )
+                        save(
+                            manager,
+                            step=step_i,
+                            train_state=state,
+                            data_iter=data_it,
+                            meta=meta,
+                        )
+                        last_saved_step = step_i
 
-                    local_drop = {
-                        "wall_time_s",
-                        "packing_tokens",
-                        "packing_capacity",
-                        "eval_tokens",
-                        "device_memory_gb",
-                    }
-                    row_local = {k: v for k, v in row.items() if k not in local_drop}
-                    mw.write(row_local)
-                    if wandb_run is not None:
-                        wandb_drop = {
+                    eval_row: dict[str, Any] = {}
+                    if should_eval:
+                        eval_row = _run_eval(state.params)
+
+                    if (
+                        gen_settings is not None
+                        and gen_stream is not None
+                        and (step_i % gen_settings.every) == 0
+                    ):
+                        _run_generation_sample(step_i, state.params)
+
+                    # Log
+                    mem_stats = _device_memory_stats_gb() if (should_log or should_console) else {}
+                    if should_log:
+                        if metrics_host is None:
+                            metrics_host = jax.device_get(metrics)
+                        tokens_seen_host = int(tokens_seen_count)
+                        lr_adam = float(metrics_host["lr"])
+                        lr_muon = (
+                            _muon_lr_from_adam(lr_adam, cfg) if cfg.optim.name == "muon" else None
+                        )
+                        row = {
+                            "step": int(step_i),
+                            "loss": float(metrics_host["loss"]),
+                            "grad_norm": float(metrics_host["grad_norm"]),
+                            "lr": lr_adam,
+                            "step_time_s": float(step_time_s),
+                            "tokens_per_sec": float(tokens_per_sec),
+                            "tokens_seen": int(tokens_seen_host),
+                            "wall_time_s": time.perf_counter() - t0,
+                        }
+                        if lr_muon is not None:
+                            row["lr_muon"] = float(lr_muon)
+                        if data_stats:
+                            row.update(data_stats)
+                        if eval_row:
+                            row.update(eval_row)
+                        if mem_stats:
+                            row.update(mem_stats)
+                        if step_i == (start_step + 1) and t_compile is not None:
+                            row["first_step_compile_time_s"] = float(t_compile)
+
+                        local_drop = {
                             "wall_time_s",
-                            "step",
-                            "peak_memory_gb",
                             "packing_tokens",
                             "packing_capacity",
                             "eval_tokens",
                             "device_memory_gb",
                         }
-                        row_wandb = {k: v for k, v in row.items() if k not in wandb_drop}
-                        wandb_run.log(row_wandb, step=step_i)
-                if should_console:
-                    eval_loss = eval_row.get("eval_loss") if eval_row else None
-                    packing_util = None
-                    if data_stats and "packing_utilization" in data_stats:
-                        packing_util = float(data_stats["packing_utilization"])
-                    device_mem = None
-                    peak_mem = None
-                    if "device_memory_gb" in mem_stats:
-                        device_mem = float(mem_stats["device_memory_gb"])
-                    if "peak_memory_gb" in mem_stats:
-                        peak_mem = float(mem_stats["peak_memory_gb"])
-                    console_line = _format_console_row(
-                        step=step_i,
-                        loss=float(metrics_host["loss"]),
-                        grad_norm=float(metrics_host["grad_norm"]),
-                        lr=float(metrics_host["lr"]),
-                        step_time_s=float(step_time_s),
-                        tokens_per_sec=float(tokens_per_sec),
-                        eval_loss=float(eval_loss) if eval_loss is not None else None,
-                        packing_util=packing_util,
-                        device_mem_gb=device_mem,
-                        peak_mem_gb=peak_mem,
-                    )
-                    tqdm.write(console_line)
+                        row_local = {k: v for k, v in row.items() if k not in local_drop}
+                        mw.write(row_local)
+                        if wandb_run is not None:
+                            wandb_drop = {
+                                "wall_time_s",
+                                "step",
+                                "peak_memory_gb",
+                                "packing_tokens",
+                                "packing_capacity",
+                                "eval_tokens",
+                                "device_memory_gb",
+                            }
+                            row_wandb = {k: v for k, v in row.items() if k not in wandb_drop}
+                            wandb_run.log(row_wandb, step=step_i)
+                    if should_console:
+                        if metrics_host is None:
+                            metrics_host = jax.device_get(metrics)
+                        lr_adam = float(metrics_host["lr"])
+                        lr_muon = (
+                            _muon_lr_from_adam(lr_adam, cfg) if cfg.optim.name == "muon" else None
+                        )
+                        eval_loss = eval_row.get("eval_loss") if eval_row else None
+                        packing_util = None
+                        if data_stats and "packing_utilization" in data_stats:
+                            packing_util = float(data_stats["packing_utilization"])
+                        device_mem = None
+                        peak_mem = None
+                        if "device_memory_gb" in mem_stats:
+                            device_mem = float(mem_stats["device_memory_gb"])
+                        if "peak_memory_gb" in mem_stats:
+                            peak_mem = float(mem_stats["peak_memory_gb"])
+                        console_line = _format_console_row(
+                            step=step_i,
+                            loss=float(metrics_host["loss"]),
+                            grad_norm=float(metrics_host["grad_norm"]),
+                            lr=lr_adam,
+                            lr_muon=lr_muon,
+                            step_time_s=float(step_time_s),
+                            tokens_per_sec=float(tokens_per_sec),
+                            eval_loss=float(eval_loss) if eval_loss is not None else None,
+                            packing_util=packing_util,
+                            device_mem_gb=device_mem,
+                            peak_mem_gb=peak_mem,
+                        )
+                        tqdm.write(console_line)
+            except Exception as exc:
+                exit_code = 1
+                crash_type = type(exc).__name__
+                crash_reason = str(exc)
+                crash_step = int(step_i)
+                logger.exception("Training crashed at step %s", crash_step)
+                row = {
+                    "step": int(crash_step),
+                    "crash": True,
+                    "crash_type": crash_type,
+                    "crash_reason": crash_reason,
+                    "wall_time_s": time.perf_counter() - t0,
+                }
+                row["tokens_seen"] = int(tokens_seen_count)
+                mw.write(row)
+                if wandb_run is not None:
+                    with contextlib.suppress(Exception):
+                        wandb_run.summary["crashed"] = True
+                        wandb_run.summary["crash_type"] = crash_type
+                        wandb_run.summary["crash_reason"] = crash_reason
+                        wandb_run.log(
+                            {
+                                "crash": True,
+                                "crash_type": crash_type,
+                                "crash_reason": crash_reason,
+                            },
+                            step=int(crash_step),
+                        )
+                _flush_loggers()
+                raise
     finally:
+        # Final checkpoint: save if we did any training and the last step wasn't already saved.
+        # Use state.step to avoid writing a "future" checkpoint on crashes.
+        final_step = None
+        if manager is not None:
+            with contextlib.suppress(Exception):
+                final_step = int(jax.device_get(state.step))
+        if (
+            manager is not None
+            and final_step is not None
+            and final_step > start_step
+            and final_step != last_saved_step
+        ):
+            with contextlib.suppress(Exception):
+                meta = build_meta(
+                    step=final_step,
+                    config=cfg.to_dict(),
+                    data_fingerprint=data_fingerprint(cfg, tokenizer_snapshot_hash=tokenizer_hash),
+                    tokens_seen=int(tokens_seen_count),
+                )
+                save(
+                    manager,
+                    step=final_step,
+                    train_state=state,
+                    data_iter=data_it,
+                    meta=meta,
+                    force=True,
+                )
+
         if wandb_run is not None:
-            wandb_run.finish()
+            with contextlib.suppress(Exception):
+                if crash_reason is not None:
+                    wandb_run.summary["crashed"] = True
+                    wandb_run.summary["crash_type"] = crash_type
+                    wandb_run.summary["crash_reason"] = crash_reason
+                wandb_run.finish(exit_code=exit_code)
 
-    if manager is not None:
-        manager.wait_until_finished()
+        if manager is not None:
+            with contextlib.suppress(Exception):
+                manager.wait_until_finished()
 
-    if cfg.train.profile:
-        stop_trace()
+        if profile_enabled:
+            with contextlib.suppress(Exception):
+                stop_trace()
+
+        _flush_loggers()
 
     return run_dir

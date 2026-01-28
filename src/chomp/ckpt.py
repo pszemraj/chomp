@@ -46,6 +46,7 @@ class CheckpointMeta:
 
     step: int
     timestamp: str
+    tokens_seen: int | None
 
     # Versions for debugging (not for strict gating in v0)
     python: str
@@ -83,13 +84,18 @@ def _safe_version(pkg: str) -> str | None:
 
 
 def build_meta(
-    *, step: int, config: dict[str, Any], data_fingerprint: dict[str, Any]
+    *,
+    step: int,
+    config: dict[str, Any],
+    data_fingerprint: dict[str, Any],
+    tokens_seen: int | None = None,
 ) -> CheckpointMeta:
     """Build checkpoint metadata with version info and config snapshot.
 
     :param int step: Current training step.
     :param dict[str, Any] config: Full config dict for reproducibility.
     :param dict[str, Any] data_fingerprint: Data pipeline fingerprint.
+    :param int | None tokens_seen: Optional cumulative token count for resume accounting.
     :return CheckpointMeta: Populated metadata object.
     """
     import platform
@@ -102,6 +108,7 @@ def build_meta(
         orbax=_safe_version("orbax-checkpoint"),
         chomp=_safe_version("chomp") or "0.0.0",
         megalodon_jax=_safe_version("megalodon-jax"),
+        tokens_seen=int(tokens_seen) if tokens_seen is not None else None,
         config=config,
         data_fingerprint=data_fingerprint,
     )
@@ -187,6 +194,7 @@ def save(
     data_iter: Any,
     meta: CheckpointMeta,
     enforce_size_gb: float | None = None,
+    force: bool = False,
 ) -> None:
     """Save a checkpoint.
 
@@ -203,6 +211,7 @@ def save(
     :param Any data_iter: Data iterator to checkpoint via Grain's handler.
     :param CheckpointMeta meta: Checkpoint metadata.
     :param enforce_size_gb: Optional max size in GB; raises if exceeded.
+    :param bool force: If True, force a save even if the step is off-interval.
     :raises RuntimeError: If checkpoint size exceeds enforce_size_gb.
     """
 
@@ -218,6 +227,7 @@ def save(
             data_state=gcp.CheckpointSave(_checkpoint_target(data_iter)),
             meta=ocp.args.JsonSave(meta.to_dict()),
         ),
+        force=force,
     )
 
     if enforce_size_gb is not None:
@@ -320,11 +330,14 @@ def _restore_step(
     return step, train_state, meta
 
 
-def check_resume_compat(cfg: Config, meta: dict[str, Any] | None) -> None:
+def check_resume_compat(
+    cfg: Config, meta: dict[str, Any] | None, *, tokenizer_snapshot_hash: str | None = None
+) -> None:
     """Validate checkpoint metadata against current config.
 
     :param Config cfg: Current training configuration.
     :param meta: Checkpoint metadata dict (or None if missing).
+    :param str | None tokenizer_snapshot_hash: Optional tokenizer snapshot hash for strict checks.
     :raises RuntimeError: If meta is missing or config mismatches are found.
     """
 
@@ -356,7 +369,7 @@ def check_resume_compat(cfg: Config, meta: dict[str, Any] | None) -> None:
             else:
                 warnings.append(msg)
 
-    cur_fp = data_fingerprint(cfg)
+    cur_fp = data_fingerprint(cfg, tokenizer_snapshot_hash=tokenizer_snapshot_hash)
 
     # Data source comparisons.
     src_prev = meta_fp.get("source") or {}
@@ -437,6 +450,15 @@ def check_resume_compat(cfg: Config, meta: dict[str, Any] | None) -> None:
         tok_prev.get("auto_set_special_tokens"),
         severity="error",
     )
+    snap_prev = tok_prev.get("snapshot_sha256")
+    snap_cur = tok_cur.get("snapshot_sha256")
+    if snap_prev is not None or snap_cur is not None:
+        _cmp(
+            "tokenizer.snapshot_sha256",
+            snap_cur,
+            snap_prev,
+            severity="error",
+        )
 
     # Packing/loss behavior comparisons.
     pack_prev = meta_fp.get("packing") or {}
@@ -510,6 +532,8 @@ def check_resume_compat(cfg: Config, meta: dict[str, Any] | None) -> None:
 
     # Model/optimizer comparisons.
     cur_cfg = cfg.to_dict()
+    train_prev = meta_cfg.get("train") or {}
+    train_cur = cur_cfg.get("train") or {}
     model_prev = meta_cfg.get("model") or {}
     model_cur = cur_cfg.get("model") or {}
     for key in sorted(set(model_prev) | set(model_cur)):
@@ -517,8 +541,49 @@ def check_resume_compat(cfg: Config, meta: dict[str, Any] | None) -> None:
 
     optim_prev = meta_cfg.get("optim") or {}
     optim_cur = cur_cfg.get("optim") or {}
+    optim_name_prev = optim_prev.get("name")
+    optim_name_cur = optim_cur.get("name")
     for key in sorted(set(optim_prev) | set(optim_cur)):
+        if key == "decay_steps":
+            continue
+        if key == "muon" and optim_name_prev != "muon" and optim_name_cur != "muon":
+            continue
         _cmp(f"optim.{key}", optim_cur.get(key), optim_prev.get(key), severity="error")
+
+    def _effective_decay_horizon(
+        train_cfg: dict[str, Any], optim_cfg: dict[str, Any]
+    ) -> int | None:
+        """Return the effective LR schedule horizon in steps.
+
+        :param dict[str, Any] train_cfg: Training config section.
+        :param dict[str, Any] optim_cfg: Optimizer config section.
+        :return int | None: Warmup + decay horizon, or None if unavailable.
+        """
+        warmup = optim_cfg.get("warmup_steps")
+        if warmup is None:
+            return None
+        decay = optim_cfg.get("decay_steps")
+        if decay is None:
+            steps = train_cfg.get("steps")
+            if steps is None:
+                return None
+            decay = int(steps) - int(warmup)
+        return int(warmup) + int(decay)
+
+    decay_prev = _effective_decay_horizon(train_prev, optim_prev)
+    decay_cur = _effective_decay_horizon(train_cur, optim_cur)
+    _cmp("optim.decay_steps_effective", decay_cur, decay_prev, severity="error")
+    if optim_prev.get("decay_steps") != optim_cur.get("decay_steps") and decay_cur == decay_prev:
+        warnings.append(
+            "optim.decay_steps changed but effective schedule horizon is unchanged "
+            f"(prev={optim_prev.get('decay_steps')!r}, cur={optim_cur.get('decay_steps')!r})"
+        )
+
+    if train_cur.get("steps") != train_prev.get("steps"):
+        warnings.append(
+            "train.steps mismatch (checkpoint="
+            f"{train_prev.get('steps')!r}, current={train_cur.get('steps')!r})"
+        )
 
     if warnings:
         logger.warning(

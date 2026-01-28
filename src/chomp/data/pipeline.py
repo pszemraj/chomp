@@ -335,23 +335,44 @@ def resolve_tokenizer_config(cfg: Config, tok: Tokenizer) -> Config:
         _maybe_update("eos_token_id", tok_eos)
         _maybe_update("pad_token_id", tok_pad)
 
-    updated_cfg = (
-        cfg if not model_updates else replace(cfg, model=replace(cfg.model, **model_updates))
-    )
+    updated_cfg = cfg
+    if model_updates:
+        updated_cfg = replace(updated_cfg, model=replace(updated_cfg.model, **model_updates))
+
+    tok_cfg = updated_cfg.data.tokenizer
+    if tok_cfg.max_doc_tokens is None:
+        default_max = int(updated_cfg.train.seq_len) * 4
+        logger.info(
+            "data.tokenizer.max_doc_tokens is null; defaulting to %d (4 * seq_len). "
+            "Set to 0 to disable truncation.",
+            default_max,
+        )
+        tok_cfg = replace(tok_cfg, max_doc_tokens=default_max)
+        updated_cfg = replace(updated_cfg, data=replace(updated_cfg.data, tokenizer=tok_cfg))
+    elif tok_cfg.max_doc_tokens <= 0:
+        logger.info(
+            "data.tokenizer.max_doc_tokens=%d disables truncation; storing as null.",
+            tok_cfg.max_doc_tokens,
+        )
+        tok_cfg = replace(tok_cfg, max_doc_tokens=None)
+        updated_cfg = replace(updated_cfg, data=replace(updated_cfg.data, tokenizer=tok_cfg))
 
     # Re-validate after tokenizer-derived updates (vocab rounding, special tokens).
     validate_config(updated_cfg)
     return updated_cfg
 
 
-def prepare_tokenizer_and_config(cfg: Config) -> tuple[Config, Tokenizer]:
+def prepare_tokenizer_and_config(
+    cfg: Config, *, tokenizer: Tokenizer | None = None
+) -> tuple[Config, Tokenizer]:
     """Build tokenizer and return an updated config with tokenizer-derived fields.
 
     :param Config cfg: Input configuration.
+    :param Tokenizer | None tokenizer: Optional pre-built tokenizer override.
     :return tuple: (updated_config, tokenizer) tuple.
     """
 
-    tok = build_tokenizer(cfg)
+    tok = tokenizer or build_tokenizer(cfg)
     cfg = resolve_tokenizer_config(cfg, tok)
     return cfg, tok
 
@@ -397,6 +418,59 @@ def save_tokenizer_snapshot(
         json.dumps(record, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+
+
+def load_tokenizer_snapshot(run_dir: Path, cfg: Config) -> Tokenizer:
+    """Load a tokenizer snapshot from a run directory.
+
+    :param Path run_dir: Run directory containing tokenizer snapshot.
+    :param Config cfg: Training configuration (used to pick tokenizer kind).
+    :return Tokenizer: Restored tokenizer instance.
+    :raises FileNotFoundError: If tokenizer snapshot is missing.
+    :raises RuntimeError: If snapshot is invalid or incompatible.
+    """
+    tok_dir = Path(run_dir) / "tokenizer"
+    if not tok_dir.exists():
+        raise FileNotFoundError(f"Tokenizer snapshot not found at {tok_dir}")
+
+    tok_cfg = cfg.data.tokenizer
+    if tok_cfg.kind == "byte":
+        record_path = tok_dir / "tokenizer.json"
+        if not record_path.exists():
+            raise RuntimeError(f"Byte tokenizer snapshot missing {record_path}")
+        record = json.loads(record_path.read_text(encoding="utf-8") or "{}")
+        kind = record.get("kind")
+        if kind != "byte":
+            raise RuntimeError(f"Tokenizer snapshot kind mismatch: expected 'byte', found {kind!r}")
+        return ByteTokenizer(byte_offset=int(record.get("byte_offset", 0)))
+
+    if tok_cfg.kind == "hf":
+        return HFTokenizer(
+            str(tok_dir),
+            use_fast=tok_cfg.hf_use_fast,
+            trust_remote_code=tok_cfg.hf_trust_remote_code,
+        )
+
+    raise ValueError(f"Unknown tokenizer.kind: {tok_cfg.kind!r}")
+
+
+def tokenizer_snapshot_hash(run_dir: Path) -> str | None:
+    """Compute a stable hash of the tokenizer snapshot directory.
+
+    :param Path run_dir: Run directory containing tokenizer snapshot.
+    :return str | None: SHA256 hash hex digest, or None if snapshot missing.
+    """
+    tok_dir = Path(run_dir) / "tokenizer"
+    if not tok_dir.exists():
+        return None
+
+    digest = hashlib.sha256()
+    files = [p for p in tok_dir.rglob("*") if p.is_file()]
+    for path in sorted(files, key=lambda p: p.relative_to(tok_dir).as_posix()):
+        rel = path.relative_to(tok_dir).as_posix()
+        digest.update(rel.encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def _collect_texts(stream: TextStream, max_samples: int) -> list[str]:
@@ -489,10 +563,11 @@ def build_generation_text_stream(cfg: Config, *, seed_offset: int = 1) -> TextSt
     raise ValueError(f"Unknown data.backend for generation: {cfg.data.backend!r}")
 
 
-def data_fingerprint(cfg: Config) -> dict[str, Any]:
+def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None) -> dict[str, Any]:
     """A small, stable fingerprint that we store in checkpoint meta.
 
     :param Config cfg: Training configuration.
+    :param str | None tokenizer_snapshot_hash: Optional tokenizer snapshot hash for resume checks.
     :return dict[str, Any]: Fingerprint dict with source, tokenizer, and batch shape info.
     """
 
@@ -528,6 +603,8 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
         "vocab_size_multiple": t.vocab_size_multiple,
         "auto_set_special_tokens": t.auto_set_special_tokens,
     }
+    if tokenizer_snapshot_hash is not None:
+        tok["snapshot_sha256"] = tokenizer_snapshot_hash
 
     packing = {
         "mode": d.packing_mode,
@@ -633,50 +710,51 @@ class TrainBatchIterator:
         self._packer.add_document(ids)
 
     def _next_sequence(self) -> tuple[np.ndarray, np.ndarray]:
-        """Pop the next [T+1] token/segment sequence from the packer.
+        """Pop the next [T] token/segment sequence from the packer.
 
-        :return tuple[np.ndarray, np.ndarray]: Tokens and segment IDs (length T+1).
+        :return tuple[np.ndarray, np.ndarray]: Tokens and segment IDs (length T).
         """
         while not self._packer.can_pop():
             self._push_next_document()
-        return self._packer.pop_seq_plus_one_with_segments()
+        return self._packer.pop_seq_with_segments()
 
     def _mask_labels(self, labels: np.ndarray, segs: np.ndarray) -> np.ndarray:
         """Apply boundary and EOS masking to label array.
 
         :param np.ndarray labels: Label array of length T.
-        :param np.ndarray segs: Segment IDs of length T+1.
+        :param np.ndarray segs: Segment IDs of length T.
         :return np.ndarray: Masked labels of length T.
         """
         if self._mask_boundary_loss:
             same = (segs[1:] == segs[:-1]) & (segs[1:] > 0) & (segs[:-1] > 0)
             if labels.size > 1:
-                labels[1:] = np.where(same[:-1], labels[1:], IGNORE_INDEX).astype(np.int32)
+                labels[1:] = np.where(same, labels[1:], IGNORE_INDEX).astype(np.int32)
         if not self._train_on_eos:
             labels = np.where(labels == self._eos_id, IGNORE_INDEX, labels).astype(np.int32)
         return labels
 
     def __next__(self) -> Batch:
-        seqs = []
         need = self._A * self._B
+        inps = np.empty((need, self._T), dtype=np.int32)
+        labs = np.empty((need, self._T), dtype=np.int32)
+        segs_out = np.empty((need, self._T), dtype=np.int32)
 
-        while len(seqs) < need:
-            seq, segs = self._next_sequence()  # [T+1]
+        idx = 0
+        while idx < need:
+            seq, segs = self._next_sequence()  # [T]
             # Convert to input/labels [T]. Labels align with input_ids; model shifts internally.
-            inp = np.asarray(seq[:-1], dtype=np.int32)
+            inp = np.asarray(seq, dtype=np.int32)
             lab = self._mask_labels(inp.copy(), segs)
-            seg = np.asarray(segs[:-1], dtype=np.int32)
-            seqs.append((inp, lab, seg))
-
-        # Stack -> [A*B, T]
-        inps = np.stack([x[0] for x in seqs], axis=0).astype(np.int32)
-        labs = np.stack([x[1] for x in seqs], axis=0).astype(np.int32)
-        segs = np.stack([x[2] for x in seqs], axis=0).astype(np.int32)
+            seg = np.asarray(segs, dtype=np.int32)
+            inps[idx] = inp
+            labs[idx] = lab
+            segs_out[idx] = seg
+            idx += 1
 
         # Reshape -> [A, B, T]
         inps = inps.reshape(self._A, self._B, self._T)
         labs = labs.reshape(self._A, self._B, self._T)
-        segs = segs.reshape(self._A, self._B, self._T)
+        segs = segs_out.reshape(self._A, self._B, self._T)
 
         attn = segs > 0
 
@@ -708,6 +786,15 @@ class TrainBatchIterator:
             self._text_stream.set_state(state["text"])
         if "packer" in state:
             self._packer.set_state(state["packer"])
+
+    def get_stats(self) -> dict[str, int]:
+        """Return packer-level document stats if available.
+
+        :return dict[str, int]: Stats like docs_seen/docs_truncated.
+        """
+        if hasattr(self._packer, "get_stats"):
+            return dict(self._packer.get_stats())
+        return {}
 
 
 def build_train_iterator(cfg: Config, *, tokenizer: Tokenizer | None = None) -> Any:

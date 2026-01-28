@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from chomp.config import Config
+from chomp.config import Config, resolve_decay_horizon
 
 _NOISY_CONSOLE_PREFIXES = ("orbax", "jax", "jaxlib", "absl")
 
@@ -154,13 +154,19 @@ def create_run_dir(
         run_dir.mkdir(parents=True, exist_ok=False)
 
     # Save config snapshot (avoid clobbering on resume)
+    resolved_cfg = cfg.to_dict()
+    resolved_cfg["derived"] = {
+        "optim": {
+            "decay_steps_effective": int(resolve_decay_horizon(cfg)),
+        }
+    }
     if (run_dir / "config_resolved.json").exists() and allow_existing:
         (run_dir / "config_resume.json").write_text(
-            json.dumps(cfg.to_dict(), indent=2, sort_keys=True)
+            json.dumps(resolved_cfg, indent=2, sort_keys=True)
         )
     else:
         (run_dir / "config_resolved.json").write_text(
-            json.dumps(cfg.to_dict(), indent=2, sort_keys=True)
+            json.dumps(resolved_cfg, indent=2, sort_keys=True)
         )
 
         # Also copy original config file if available
