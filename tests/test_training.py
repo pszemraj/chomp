@@ -110,6 +110,64 @@ def _test_async_checkpoint_roundtrip(tmp_path: Path) -> None:
     assert tree_allclose(restored.opt_state, state.opt_state, rtol=0.0, atol=0.0)
 
 
+def _test_checkpoint_data_state_roundtrip(tmp_path: Path) -> None:
+    """Checkpoint restore should resume the data iterator position."""
+    run_dir = tmp_path / "run_data_state"
+    cfg = _base_cfg(run_dir)
+    cfg = replace(
+        cfg,
+        train=replace(
+            cfg.train,
+            steps=2,
+            batch_size=1,
+            seq_len=8,
+            grad_accum=1,
+            jit=False,
+            deterministic=True,
+            allow_cpu=True,
+        ),
+        data=replace(
+            cfg.data,
+            packing_mode="sequential",
+            packing_buffer_docs=4,
+            grain_prefetch=0,
+        ),
+    )
+    cfg, tokenizer = prepare_tokenizer_and_config(cfg)
+
+    data_it = build_train_iterator(cfg, tokenizer=tokenizer)
+    next(data_it)
+    next(data_it)
+
+    ckpt_dir = default_ckpt_dir(run_dir)
+    mgr = make_manager(
+        ckpt_dir,
+        max_to_keep=cfg.checkpoint.max_to_keep,
+        save_every=cfg.checkpoint.save_every,
+        async_save=cfg.checkpoint.async_save,
+    )
+
+    state = TrainState(
+        step=jnp.array(2, dtype=jnp.int32),
+        params={"w": jnp.array([1.0], dtype=jnp.float32)},
+        opt_state={"m": jnp.array([0.5], dtype=jnp.float32)},
+        rng=jax.random.PRNGKey(0),
+    )
+    meta = build_meta(step=2, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg))
+    save(mgr, step=2, train_state=state, data_iter=data_it, meta=meta)
+    mgr.wait_until_finished()
+
+    expected = next(data_it)
+    data_it_restore = build_train_iterator(cfg, tokenizer=tokenizer)
+    abstract_state = abstractify_tree(state)
+    step, _restored, _meta = restore_latest(
+        mgr, abstract_train_state=abstract_state, data_iter=data_it_restore
+    )
+    assert step == 2
+    restored_batch = next(data_it_restore)
+    assert tree_allclose(expected, restored_batch, rtol=0.0, atol=0.0)
+
+
 def _test_latest_step_ignores_incomplete(tmp_path: Path) -> None:
     """Checkpoint manager should ignore incomplete checkpoint directories."""
     run_dir = tmp_path / "run_latest"
@@ -580,6 +638,59 @@ def _test_training_crash_marks_wandb_failed_and_logs(
     assert "Training crashed" in log_text
 
 
+def _test_crash_does_not_save_future_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Crashes should not write a checkpoint for the next step."""
+    run_dir = tmp_path / "run"
+
+    def boom_make_train_step(*args: Any, **kwargs: Any) -> Any:
+        """Return a train step that always raises a crash error."""
+
+        def boom(state: Any, batch: Any) -> Any:
+            """Raise a deterministic crash to exercise failure handling."""
+            raise RuntimeError("kaboom")
+
+        return boom
+
+    monkeypatch.setattr("chomp.train.make_train_step", boom_make_train_step)
+    monkeypatch.setattr("chomp.train.build_train_iterator", lambda *args, **kwargs: DummyIter())
+
+    cfg = Config(
+        model=ModelConfig(backend="dummy", vocab_size=32, d_model=8, dropout=0.0),
+        data=DataConfig(
+            backend="local_text",
+            local_text="boom",
+            repeat=True,
+            max_eval_samples=0,
+            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+        ),
+        train=TrainConfig(
+            steps=1,
+            batch_size=1,
+            seq_len=8,
+            grad_accum=1,
+            jit=False,
+            deterministic=True,
+            allow_cpu=True,
+            log_every=1,
+            eval_every=0,
+            generate_every=0,
+        ),
+        optim=OptimConfig(warmup_steps=0),
+        checkpoint=CheckpointConfig(enabled=True, save_every=1, max_to_keep=2, async_save=False),
+        logging=LoggingConfig(run_dir=str(run_dir)),
+        debug=DebugConfig(nan_check=False, check_device_every=0),
+    )
+
+    with pytest.raises(RuntimeError, match="kaboom"):
+        run(cfg, config_path=None, resume="none", dry_run=False, max_steps=1)
+
+    ckpt_dir = default_ckpt_dir(run_dir)
+    assert ckpt_dir.exists()
+    assert not (ckpt_dir / "1").exists()
+
+
 def _test_train_repeat_false_exits_cleanly(tmp_path: Path) -> None:
     """Training should exit cleanly and log data_exhausted when data ends."""
     cfg = Config(
@@ -622,6 +733,10 @@ class TestCheckpointing:
     def test_async_roundtrip(self, tmp_path: Path) -> None:
         """Async checkpoint saves should roundtrip correctly."""
         _test_async_checkpoint_roundtrip(tmp_path)
+
+    def test_data_state_roundtrip(self, tmp_path: Path) -> None:
+        """Checkpoint restore should resume data iterator position."""
+        _test_checkpoint_data_state_roundtrip(tmp_path)
 
     def test_latest_step_ignores_incomplete(self, tmp_path: Path) -> None:
         """Incomplete checkpoint directories should be ignored."""
@@ -678,6 +793,12 @@ class TestTrainingLoop:
     ) -> None:
         """Crashes should mark W&B failed and emit a metrics row."""
         _test_training_crash_marks_wandb_failed_and_logs(tmp_path, monkeypatch)
+
+    def test_crash_does_not_save_future_checkpoint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Crashes should not emit a future-step checkpoint."""
+        _test_crash_does_not_save_future_checkpoint(tmp_path, monkeypatch)
 
     def test_repeat_false_exits_cleanly(self, tmp_path: Path) -> None:
         """Non-repeating data should exit cleanly when exhausted."""

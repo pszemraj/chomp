@@ -1616,18 +1616,20 @@ def run(
                 _flush_loggers()
                 raise
     finally:
-        # Final checkpoint: save if we did any training and the last step wasn't already saved
-        if manager is not None and step_i > start_step and step_i != last_saved_step:
+        # Final checkpoint: save if we did any training and the last step wasn't already saved.
+        # Use state.step to avoid writing a "future" checkpoint on crashes.
+        final_step = int(jax.device_get(state.step))
+        if manager is not None and final_step > start_step and final_step != last_saved_step:
             with contextlib.suppress(Exception):
                 meta = build_meta(
-                    step=step_i,
+                    step=final_step,
                     config=cfg.to_dict(),
                     data_fingerprint=data_fingerprint(cfg, tokenizer_snapshot_hash=tokenizer_hash),
                     tokens_seen=int(tokens_seen_count),
                 )
                 save(
                     manager,
-                    step=step_i,
+                    step=final_step,
                     train_state=state,
                     data_iter=data_it,
                     meta=meta,
