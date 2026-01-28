@@ -1618,8 +1618,16 @@ def run(
     finally:
         # Final checkpoint: save if we did any training and the last step wasn't already saved.
         # Use state.step to avoid writing a "future" checkpoint on crashes.
-        final_step = int(jax.device_get(state.step))
-        if manager is not None and final_step > start_step and final_step != last_saved_step:
+        final_step = None
+        if manager is not None:
+            with contextlib.suppress(Exception):
+                final_step = int(jax.device_get(state.step))
+        if (
+            manager is not None
+            and final_step is not None
+            and final_step > start_step
+            and final_step != last_saved_step
+        ):
             with contextlib.suppress(Exception):
                 meta = build_meta(
                     step=final_step,
