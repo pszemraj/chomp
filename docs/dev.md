@@ -75,3 +75,10 @@ High-risk invariants remain isolated for visibility:
 - `tests/test_compile_stability.py`
 - `tests/test_cache_policy.py`
 - `tests/test_gpu_smoke.py`
+
+## Nice-to-Haves (Later)
+
+- Make `tokens_seen` exact when iterator stats are missing (e.g., `device_put=True`),
+  by accumulating `token_sum` in-step or storing a counter in `TrainState`.
+- Optional perf knob: skip grad-norm computation when clipping is disabled and
+  grad-norm logging is off.
