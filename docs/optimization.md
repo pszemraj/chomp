@@ -34,6 +34,8 @@ In practice that means:
 - Muon's effective learning rate is `optim.lr * optim.muon.lr_scale`.
 - Muon-specific scaling options (like `optim.muon.consistent_rms`) can materially
   change what `optim.muon.lr_scale` values are stable.
+- When `optim.muon.consistent_rms=null`, we skip Muon shape scaling
+  (`scale_by_shape`) to preserve the earlier Muon-only behavior.
 
 ## Muon sweep: 1000-step comparison (current state)
 

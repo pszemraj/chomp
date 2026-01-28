@@ -43,6 +43,8 @@ apply only to the non-Muon parameter group.
 `optim.muon.consistent_rms` controls Optax's Muon RMS scaling. It defaults to
 `null` and `optim.muon.lr_scale` defaults to `100.0` based on current Muon sweep
 results; set `optim.muon.consistent_rms=0.2` to enable consistent RMS scaling.
+When `null`, Muon shape scaling is disabled to preserve the earlier Muon-only
+behavior.
 See `docs/optimization.md` for the sweep details and recommended next steps.
 
 ## Determinism

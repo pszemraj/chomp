@@ -1675,7 +1675,8 @@ consistent_rms: float | null = null
 ```
 
 Muon RMS scaling factor. Set to `0.2` to enable consistent RMS scaling (Optax
-recommendation) or leave `null` to match the earlier Muon behavior.
+recommendation) or leave `null` to disable shape scaling and match the earlier
+Muon behavior.
 
 | Property | Value |
 |----------|-------|
