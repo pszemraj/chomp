@@ -1039,13 +1039,20 @@ def make_train_step(
         grads = jax.tree_util.tree_map(lambda g: g / token_denom, grad_sum)
 
         grad_norm = optax.global_norm(grads)
+        pre_clip_grad_norm = grad_norm
+        clip_frac = jnp.array(0.0, dtype=jnp.float32)
         if clip_norm > 0:
             trigger = grad_norm > clip_norm
+            clip_frac = trigger.astype(jnp.float32)
             grads = jax.tree_util.tree_map(
                 lambda g: jnp.where(trigger, g * (clip_norm / jnp.maximum(grad_norm, 1e-6)), g),
                 grads,
             )
+        post_clip_grad_norm = optax.global_norm(grads)
         updates, new_opt_state = tx.update(grads, state.opt_state, state.params)
+        param_norm = optax.global_norm(state.params)
+        update_norm = optax.global_norm(updates)
+        update_ratio = update_norm / jnp.maximum(param_norm, 1e-8)
         new_params = optax.apply_updates(state.params, updates)
 
         new_state = TrainState(
@@ -1056,6 +1063,12 @@ def make_train_step(
         metrics = {
             "loss": loss,
             "grad_norm": grad_norm.astype(jnp.float32),
+            "grad_norm_pre_clip": pre_clip_grad_norm.astype(jnp.float32),
+            "grad_norm_post_clip": post_clip_grad_norm.astype(jnp.float32),
+            "clip_frac": clip_frac,
+            "param_norm": param_norm.astype(jnp.float32),
+            "update_norm": update_norm.astype(jnp.float32),
+            "update_ratio": update_ratio.astype(jnp.float32),
             "lr": lr.astype(jnp.float32),
             "token_sum": token_sum.astype(jnp.float32),
         }
@@ -1516,6 +1529,12 @@ def run(
                             "step": int(step_i),
                             "loss": float(metrics_host["loss"]),
                             "grad_norm": float(metrics_host["grad_norm"]),
+                            "grad_norm_pre_clip": float(metrics_host["grad_norm_pre_clip"]),
+                            "grad_norm_post_clip": float(metrics_host["grad_norm_post_clip"]),
+                            "clip_frac": float(metrics_host["clip_frac"]),
+                            "param_norm": float(metrics_host["param_norm"]),
+                            "update_norm": float(metrics_host["update_norm"]),
+                            "update_ratio": float(metrics_host["update_ratio"]),
                             "lr": lr_adam,
                             "step_time_s": float(step_time_s),
                             "tokens_per_sec": float(tokens_per_sec),

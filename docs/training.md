@@ -131,7 +131,13 @@ Metrics are written to `logging.metrics_file` every `train.log_every` steps
 (and on eval steps) and include:
 
 - `loss`
-- `grad_norm`
+- `grad_norm` (pre-clip global norm)
+- `grad_norm_pre_clip`
+- `grad_norm_post_clip`
+- `clip_frac` (1.0 when clipping is active for the step, else 0.0)
+- `param_norm` (global norm of parameters)
+- `update_norm` (global norm of optimizer updates)
+- `update_ratio` (`update_norm / param_norm`)
 - `lr`
 - `tokens_seen` (actual valid tokens, after masking)
 - `tokens_per_sec` (actual valid tokens / step_time_s)
