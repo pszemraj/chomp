@@ -156,3 +156,7 @@ loss, packing utilization, and best-effort device memory). Full logs from
 third-party libraries are written to `logging.log_file` under the run directory.
 
 `tokens_seen` resumes from checkpoint metadata when available.
+
+## Run analyses
+
+- `docs/run-analysis-20260128_215038_zyda2_200m_2k-cema16-20k-gnorm.md`: Muon + gnorm diagnostics run (2026-01-28).
