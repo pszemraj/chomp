@@ -90,6 +90,28 @@ def test_max_eval_samples_must_be_non_negative() -> None:
         validate_config(bad)
 
 
+def test_hf_eval_split_allows_null() -> None:
+    """hf_eval_split=None should validate and imply train-split eval fallback."""
+    cfg = _base_cfg()
+    hf_data = DataConfig(
+        backend="hf",
+        hf_dataset="dummy",
+        hf_name="dummy",
+        hf_split="train",
+        hf_eval_split=None,
+        text_key="text",
+        shuffle=False,
+        repeat=True,
+        tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+    )
+    validate_config(replace(cfg, data=hf_data))
+
+
+def test_hf_eval_split_default_is_null() -> None:
+    """DataConfig should default hf_eval_split to None for train-only corpora."""
+    assert DataConfig().hf_eval_split is None
+
+
 def test_eval_every_must_be_non_negative() -> None:
     """Negative eval_every must raise ValueError."""
     cfg = _base_cfg()

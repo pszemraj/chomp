@@ -750,15 +750,16 @@ Dataset split for training.
 #### `data.hf_eval_split` {#data.hf_eval_split}
 
 ```yaml
-hf_eval_split: str = "validation"
+hf_eval_split: str | null = null
 ```
 
 Preferred split for evaluation. Falls back to train split if missing.
+Set to `null` to skip eval-split lookup and always derive eval texts from train.
 
 | Property | Value |
 |----------|-------|
-| Required | Yes (when `backend: hf`) |
-| Constraints | Must be non-empty |
+| Required | No |
+| Constraints | Must be `null` or non-empty |
 
 #### `data.text_key` {#data.text_key}
 
@@ -789,7 +790,8 @@ Maximum examples to use for evaluation.
 ::: {.callout-note}
 Evaluation texts are selected once at run start and reused for the entire run. If the
 evaluation split is missing, chomp uses the first `max_eval_samples` examples from the
-shuffled training stream.
+shuffled training stream. For this train-split fallback path, if `data.seed: 0`
+(default) and `train.seed` is non-zero, the shuffle seed defaults to `train.seed`.
 :::
 
 ---

@@ -99,12 +99,15 @@ or re-streaming.
 
 chomp builds a fixed validation set at startup:
 
-- If the HF dataset has a `validation` split, it takes the first
-  `data.max_eval_samples` examples from that split.
+- If `data.hf_eval_split` is set and the HF dataset has that split, it takes the
+  first `data.max_eval_samples` examples from that split.
 - Otherwise it takes the first `data.max_eval_samples` examples from the
   (shuffled) training split.
+- Set `data.hf_eval_split: null` to skip eval-split lookup and always use train.
+- For train-split fallback, if `data.seed` is left at `0` and `train.seed` is
+  non-zero, the shuffle seed defaults to `train.seed`.
 
-The selected texts are derived at run start (validation split preferred,
+The selected texts are derived at run start (configured eval split preferred,
 fallback to train) and are not cached on disk.
 
 ## Key config knobs
