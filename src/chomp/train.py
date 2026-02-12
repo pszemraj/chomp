@@ -1038,7 +1038,7 @@ def make_train_step(
         loss = loss_sum / token_denom
         grads = jax.tree_util.tree_map(lambda g: g / token_denom, grad_sum)
 
-        grad_norm = optax.global_norm(grads)
+        grad_norm = optax.tree.norm(grads)
         if clip_norm > 0:
             trigger = grad_norm > clip_norm
             grads = jax.tree_util.tree_map(
