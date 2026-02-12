@@ -57,24 +57,24 @@ conda run --name mega-jax pytest -q -m "not slow"
 
 Tests are organized by source module (not by micro-feature):
 
-- `tests/test_config.py`: config validation, variables, tokenizer-derived updates,
+- [`tests/test_config.py`](../tests/test_config.py): config validation, variables, tokenizer-derived updates,
   and generate-time config loading
-- `tests/test_data_pipeline.py`: packing, segment IDs, HF streaming/state,
+- [`tests/test_data_pipeline.py`](../tests/test_data_pipeline.py): packing, segment IDs, HF streaming/state,
   tokenizer decode, and tokenizer snapshot behavior
-- `tests/test_training.py`: training loop behavior, crash handling, dry-run,
+- [`tests/test_training.py`](../tests/test_training.py): training loop behavior, crash handling, dry-run,
   checkpointing, and resume behavior
-- `tests/test_optimizer.py`: Muon optimizer labeling and grad accumulation
+- [`tests/test_optimizer.py`](../tests/test_optimizer.py): Muon optimizer labeling and grad accumulation
   equivalence
-- `tests/test_utils.py`: device placement, init sanity, param counting,
+- [`tests/test_utils.py`](../tests/test_utils.py): device placement, init sanity, param counting,
   token counters, finite-metric checks, and XLA env helpers
-- `tests/test_cli.py`: CLI banner and generate command behavior
-- `tests/test_eval.py`: eval logging and eval text selection
+- [`tests/test_cli.py`](../tests/test_cli.py): CLI banner and generate command behavior
+- [`tests/test_eval.py`](../tests/test_eval.py): eval logging and eval text selection
 
 High-risk invariants remain isolated for visibility:
 
-- `tests/test_compile_stability.py`
-- `tests/test_cache_policy.py`
-- `tests/test_gpu_smoke.py`
+- [`tests/test_compile_stability.py`](../tests/test_compile_stability.py)
+- [`tests/test_cache_policy.py`](../tests/test_cache_policy.py)
+- [`tests/test_gpu_smoke.py`](../tests/test_gpu_smoke.py)
 
 ## Nice-to-Haves (Later)
 

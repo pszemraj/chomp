@@ -55,11 +55,11 @@ defaults, and constraints.
 
 For conceptual/runtime behavior, use the topic docs:
 
-- Training runtime: `docs/training.md`
-- Data stream and eval-set construction: `docs/data_pipeline.md`
-- Packing and boundary semantics: `docs/packing.md`
-- Optimizer behavior and sweeps: `docs/optimization.md`
-- Checkpoint/resume contract: `docs/checkpointing.md`
+- Training runtime: [Training Loop](training.md)
+- Data stream and eval-set construction: [Data Pipeline](data_pipeline.md)
+- Packing and boundary semantics: [Packing and Boundary Semantics](packing.md)
+- Optimizer behavior and sweeps: [Optimization and Optimizers](optimization.md)
+- Checkpoint/resume contract: [Checkpointing and Resume](checkpointing.md)
 
 <a id="variables"></a>
 ## Variables and interpolation
@@ -91,8 +91,9 @@ Variables can be nested (dot paths are supported). Resolution happens before
 CLI overrides are applied, and missing/circular references raise a validation
 error.
 
-Store personal experiment configs under `configs/custom/`. The directory is tracked
-via `.gitkeep`, but `configs/custom/*.yaml` and `configs/custom/*.yml` are ignored.
+Store personal experiment configs under
+[`configs/custom/`](../configs/custom/). The directory is tracked via `.gitkeep`,
+but `configs/custom/*.yaml` and `configs/custom/*.yml` are ignored.
 ---
 
 <a id="model"></a>
@@ -1529,7 +1530,8 @@ lr_scale: float = 100.0
 
 Multiplier applied to `optim.lr` to set Muon's peak LR. Effective Muon LR is
 `optim.lr * optim.muon.lr_scale`. The default (`100.0`) reflects the best
-10k-step Muon sweep result so far; see `docs/optimization.md` for details.
+10k-step Muon sweep result so far; see [Optimization and Optimizers](optimization.md)
+for details.
 
 | Property | Value |
 |----------|-------|

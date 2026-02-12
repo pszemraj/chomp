@@ -7,9 +7,9 @@ contract that the trainer relies on.
 
 This page is the home for stream-to-batch flow and eval-set construction.
 
-- For field-level defaults/types: `docs/config-reference.md` (`data.*`)
-- For packing strategy and masking semantics: `docs/packing.md`
-- For how batches are consumed during training: `docs/training.md`
+- For field-level defaults/types: [Config Reference](config-reference.md) (`data.*`)
+- For packing strategy and masking semantics: [Packing and Boundary Semantics](packing.md)
+- For how batches are consumed during training: [Training Loop](training.md)
 
 ## Overview
 
@@ -51,7 +51,7 @@ to `[B, T]` views.
 
 When using `hf`, chomp resolves tokenizer-dependent model settings
 (`model.vocab_size`, special token IDs) before training starts.
-Tokenizer knobs are defined in `docs/config-reference.md` under
+Tokenizer knobs are defined in [Config Reference](config-reference.md) under
 `data.tokenizer.*`.
 
 chomp saves a tokenizer snapshot under `run_dir/tokenizer` and will prefer that
@@ -62,7 +62,7 @@ snapshot on resume to keep tokenization reproducible.
 The pipeline supports `sequential` and `bin` packing modes and always emits
 fixed windows of length `seq_len` before batching.
 Packing trade-offs and boundary-masking behavior are documented in
-`docs/packing.md`.
+[Packing and Boundary Semantics](packing.md).
 
 ## Grain iterator
 
@@ -102,7 +102,7 @@ fallback to train) and are not cached on disk.
 
 ## Key config knobs
 
-Use `docs/config-reference.md` as the canonical source for `data.*` and related
+Use [Config Reference](config-reference.md) as the canonical source for `data.*` and related
 `train.*` shape knobs. The most operationally important fields for this page
 are:
 

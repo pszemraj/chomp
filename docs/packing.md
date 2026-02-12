@@ -7,8 +7,8 @@ training sequences and how boundary-related loss masking works.
 
 This page is the home for packing strategy and boundary-masking behavior.
 
-- For where packing sits in the end-to-end data path: `docs/data_pipeline.md`
-- For field-level defaults/types: `docs/config-reference.md` (`data.packing_*`,
+- For where packing sits in the end-to-end data path: [Data Pipeline](data_pipeline.md)
+- For field-level defaults/types: [Config Reference](config-reference.md) (`data.packing_*`,
   `data.mask_boundary_loss`, `data.train_on_eos`)
 
 ## Packing modes

@@ -7,17 +7,17 @@ This doc summarizes the training step behavior and the metrics logged in
 
 This page is the home for runtime training-loop behavior.
 
-- For field-by-field config defaults and types: `docs/config-reference.md`
-- For optimizer internals and sweep guidance: `docs/optimization.md`
-- For data stream, packing, and eval-set construction: `docs/data_pipeline.md`
-- For boundary masking semantics: `docs/packing.md`
-- For save/restore/resume policy: `docs/checkpointing.md`
+- For field-by-field config defaults and types: [Config Reference](config-reference.md)
+- For optimizer internals and sweep guidance: [Optimization and Optimizers](optimization.md)
+- For data stream, packing, and eval-set construction: [Data Pipeline](data_pipeline.md)
+- For boundary masking semantics: [Packing and Boundary Semantics](packing.md)
+- For save/restore/resume policy: [Checkpointing and Resume](checkpointing.md)
 
 ## Development notes
 
-For linting, formatting, and the module-based test layout, see `docs/dev.md`.
+For linting, formatting, and the module-based test layout, see [Development Guide](dev.md).
 In particular, training-loop and checkpoint/resume behaviors now live in
-`tests/test_training.py`.
+[`tests/test_training.py`](../tests/test_training.py).
 
 ## Train step contract
 
@@ -40,8 +40,8 @@ boundary masks.
 
 The train loop treats both as one optimizer step per outer iteration; details
 about Muon parameter partitioning, `optim.muon.*` behavior, and sweep-backed
-defaults live in `docs/optimization.md`.
-For exact knob definitions, see `docs/config-reference.md` (`optim.*`).
+defaults live in [Optimization and Optimizers](optimization.md).
+For exact knob definitions, see [Config Reference](config-reference.md) (`optim.*`).
 
 ## Determinism
 
@@ -73,14 +73,14 @@ stays quiet (debug log only).
 
 The training step consumes already-packed fixed-shape batches. Stream semantics,
 segment IDs, and boundary-related masking behavior are defined in
-`docs/packing.md`, and their placement in the data path is defined in
-`docs/data_pipeline.md`.
+[Packing and Boundary Semantics](packing.md), and their placement in the data
+path is defined in [Data Pipeline](data_pipeline.md).
 
 ## Evaluation
 
 If `train.eval_every > 0`, chomp runs a full pass over the validation texts
 selected at run start and logs `eval_loss`. Eval text selection policy (eval
-split vs train fallback) is documented in `docs/data_pipeline.md`.
+split vs train fallback) is documented in [Data Pipeline](data_pipeline.md).
 
 ## Generation samples
 

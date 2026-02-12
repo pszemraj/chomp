@@ -7,9 +7,9 @@ Resume is treated as a contract, not a best-effort feature.
 
 This page is the home for save/restore/resume semantics.
 
-- For checkpoint field defaults/types: `docs/config-reference.md` (`checkpoint.*`)
-- For training-loop runtime behavior after resume: `docs/training.md`
-- For data iterator state details: `docs/data_pipeline.md`
+- For checkpoint field defaults/types: [Config Reference](config-reference.md) (`checkpoint.*`)
+- For training-loop runtime behavior after resume: [Training Loop](training.md)
+- For data iterator state details: [Data Pipeline](data_pipeline.md)
 
 ## What is saved
 
