@@ -756,8 +756,15 @@ def _validate_data(cfg: Config) -> None:
             _vfail("data.hf_name must be non-empty when data.backend='hf' (use named configs)")
         if not cfg.data.hf_split:
             _vfail("data.hf_split must be non-empty when data.backend='hf'")
-        if cfg.data.hf_eval_split is not None and not str(cfg.data.hf_eval_split).strip():
-            _vfail("data.hf_eval_split must be null or a non-empty string when data.backend='hf'")
+        if cfg.data.hf_eval_split is not None:
+            if not isinstance(cfg.data.hf_eval_split, str):
+                _vfail(
+                    "data.hf_eval_split must be null or a non-empty string when data.backend='hf'"
+                )
+            if not cfg.data.hf_eval_split.strip():
+                _vfail(
+                    "data.hf_eval_split must be null or a non-empty string when data.backend='hf'"
+                )
         if not cfg.data.text_key:
             _vfail("data.text_key must be non-empty")
         if cfg.data.shuffle and cfg.data.shuffle_buffer_size <= 0:

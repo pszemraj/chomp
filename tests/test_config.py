@@ -112,6 +112,25 @@ def test_hf_eval_split_default_is_null() -> None:
     assert DataConfig().hf_eval_split is None
 
 
+@pytest.mark.parametrize("bad_split", [False, 0, 1.5, [], {}])
+def test_hf_eval_split_rejects_non_string_types(bad_split: object) -> None:
+    """hf_eval_split must be either None or a non-empty string."""
+    cfg = _base_cfg()
+    hf_data = DataConfig(
+        backend="hf",
+        hf_dataset="dummy",
+        hf_name="dummy",
+        hf_split="train",
+        hf_eval_split=bad_split,  # type: ignore[arg-type]
+        text_key="text",
+        shuffle=False,
+        repeat=True,
+        tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+    )
+    with pytest.raises(ValueError, match="hf_eval_split"):
+        validate_config(replace(cfg, data=hf_data))
+
+
 def test_eval_every_must_be_non_negative() -> None:
     """Negative eval_every must raise ValueError."""
     cfg = _base_cfg()
