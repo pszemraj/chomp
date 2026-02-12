@@ -69,6 +69,13 @@ Tests are organized by source module (not by micro-feature):
   token counters, finite-metric checks, and XLA env helpers
 - [`tests/test_cli.py`](../tests/test_cli.py): CLI banner and generate command behavior
 - [`tests/test_eval.py`](../tests/test_eval.py): eval logging and eval text selection
+- [`tests/test_checkpoints.py`](../tests/test_checkpoints.py): checkpoint path/config resolution
+
+Shared helper modules:
+
+- [`tests/helpers/config_factories.py`](../tests/helpers/config_factories.py): reusable tiny
+  train/checkpoint configs
+- [`tests/helpers/hf_fakes.py`](../tests/helpers/hf_fakes.py): reusable fake HF streaming iterables
 
 High-risk invariants remain isolated for visibility:
 

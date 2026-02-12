@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -19,14 +19,11 @@ from chomp.config import (
     validate_config,
 )
 from chomp.data.pipeline import build_tokenizer, resolve_tokenizer_config
-from chomp.utils.checkpoints import load_config_for_checkpoint, resolve_checkpoint_path
+from chomp.utils.checkpoints import load_config_for_checkpoint
 
 
 def _base_cfg() -> Config:
-    """Create a base config for validation tests.
-
-    :return Config: Base configuration for validation tests.
-    """
+    """Create a base config for validation tests."""
     return Config(
         model=ModelConfig(backend="megalodon", model_dim=128, num_heads=8, chunk_size=16),
         data=DataConfig(
@@ -39,55 +36,136 @@ def _base_cfg() -> Config:
     )
 
 
-def test_chunk_size_must_not_exceed_seq_len() -> None:
-    """Chunk size exceeding seq_len must raise ValueError."""
-    cfg = _base_cfg()
-    bad = replace(cfg, model=replace(cfg.model, chunk_size=32))
-    with pytest.raises(ValueError, match="chunk_size"):
-        validate_config(bad)
+def test_model_and_train_validation_rejects_invalid_values() -> None:
+    """Model/train validation should fail with actionable errors."""
+    cases: list[tuple[Callable[[Config], Config], str]] = [
+        (lambda cfg: replace(cfg, model=replace(cfg.model, chunk_size=32)), "chunk_size"),
+        (lambda cfg: replace(cfg, model=replace(cfg.model, chunk_size=10)), "divisible"),
+        (
+            lambda cfg: replace(cfg, model=replace(cfg.model, model_dim=130, num_heads=8)),
+            "model_dim",
+        ),
+        (lambda cfg: replace(cfg, train=replace(cfg.train, eval_every=-1)), "eval_every"),
+        (lambda cfg: replace(cfg, train=replace(cfg.train, generate_every=-1)), "generate_every"),
+        (
+            lambda cfg: replace(cfg, train=replace(cfg.train, generate_input_len=0)),
+            "generate_input_len",
+        ),
+        (
+            lambda cfg: replace(cfg, train=replace(cfg.train, generate_input_len=1024)),
+            "generate_input_len",
+        ),
+        (
+            lambda cfg: replace(cfg, train=replace(cfg.train, generate_top_p=1.5)),
+            "generate_top_p",
+        ),
+        (
+            lambda cfg: replace(
+                cfg,
+                optim=replace(cfg.optim, warmup_steps=10),
+                train=replace(cfg.train, steps=5),
+            ),
+            "warmup_steps",
+        ),
+    ]
+
+    for mutate, match in cases:
+        with pytest.raises(ValueError, match=match):
+            validate_config(mutate(_base_cfg()))
 
 
-def test_chunk_size_must_divide_seq_len() -> None:
-    """Chunk size not dividing seq_len must raise ValueError."""
-    cfg = _base_cfg()
-    bad = replace(cfg, model=replace(cfg.model, chunk_size=10))
-    with pytest.raises(ValueError, match="divisible"):
-        validate_config(bad)
+def test_optim_validation_rejects_invalid_values() -> None:
+    """Optimizer validation should fail for out-of-range settings."""
+    cases: list[tuple[Callable[[Config], Config], str]] = [
+        (lambda cfg: replace(cfg, optim=replace(cfg.optim, min_lr_ratio=1.5)), "min_lr_ratio"),
+        (
+            lambda cfg: replace(
+                cfg, optim=replace(cfg.optim, muon=replace(cfg.optim.muon, lr_scale=0.0))
+            ),
+            "optim.muon.lr_scale",
+        ),
+        (
+            lambda cfg: replace(
+                cfg,
+                optim=replace(cfg.optim, muon=replace(cfg.optim.muon, weight_decay_mult=-1.0)),
+            ),
+            "optim.muon.weight_decay_mult",
+        ),
+        (lambda cfg: replace(cfg, optim=replace(cfg.optim, name="sgd")), "optim.name"),
+        (
+            lambda cfg: replace(
+                cfg,
+                optim=replace(cfg.optim, muon=replace(cfg.optim.muon, momentum=1.5)),
+            ),
+            "optim.muon.momentum",
+        ),
+        (
+            lambda cfg: replace(
+                cfg,
+                optim=replace(cfg.optim, muon=replace(cfg.optim.muon, ns_steps=0)),
+            ),
+            "optim.muon.ns_steps",
+        ),
+        (
+            lambda cfg: replace(
+                cfg,
+                optim=replace(cfg.optim, muon=replace(cfg.optim.muon, consistent_rms=-0.1)),
+            ),
+            "optim.muon.consistent_rms",
+        ),
+        (
+            lambda cfg: replace(
+                cfg, optim=replace(cfg.optim, adam=replace(cfg.optim.adam, b1=1.1))
+            ),
+            "optim.adam.b1",
+        ),
+        (
+            lambda cfg: replace(
+                cfg, optim=replace(cfg.optim, adam=replace(cfg.optim.adam, b2=0.0))
+            ),
+            "optim.adam.b2",
+        ),
+        (
+            lambda cfg: replace(
+                cfg, optim=replace(cfg.optim, adam=replace(cfg.optim.adam, eps=0.0))
+            ),
+            "optim.adam.eps",
+        ),
+    ]
+
+    for mutate, match in cases:
+        with pytest.raises(ValueError, match=match):
+            validate_config(mutate(_base_cfg()))
 
 
-def test_model_dim_divisible_by_num_heads() -> None:
-    """Model dim not divisible by num_heads must raise ValueError."""
-    cfg = _base_cfg()
-    bad = replace(cfg, model=replace(cfg.model, model_dim=130, num_heads=8))
-    with pytest.raises(ValueError, match="model_dim"):
-        validate_config(bad)
+def test_data_and_logging_validation_rejects_invalid_values() -> None:
+    """Data/logging validation should reject invalid configuration values."""
+    cases: list[tuple[Callable[[Config], Config], str]] = [
+        (
+            lambda cfg: replace(
+                cfg,
+                data=replace(cfg.data, packing_mode="bin", packing_buffer_docs=1),
+            ),
+            "packing_buffer_docs",
+        ),
+        (lambda cfg: replace(cfg, data=replace(cfg.data, packing_mode="unknown")), "packing_mode"),
+        (
+            lambda cfg: replace(cfg, data=replace(cfg.data, max_eval_samples=-1)),
+            "max_eval_samples",
+        ),
+        (
+            lambda cfg: replace(
+                cfg,
+                logging=replace(cfg.logging, wandb=replace(cfg.logging.wandb, mode="bogus")),
+            ),
+            "wandb.mode",
+        ),
+        (lambda cfg: replace(cfg, logging=replace(cfg.logging, log_file=" ")), "log_file"),
+    ]
 
-
-def test_bin_packing_buffer_requires_min_docs() -> None:
-    """Bin packing with buffer_docs < 2 must raise ValueError."""
-    cfg = _base_cfg()
-    bad_data = replace(cfg.data, packing_mode="bin", packing_buffer_docs=1)
-    bad = replace(cfg, data=bad_data)
-    with pytest.raises(ValueError, match="packing_buffer_docs"):
-        validate_config(bad)
-
-
-def test_invalid_packing_mode() -> None:
-    """Unknown packing_mode must raise ValueError."""
-    cfg = _base_cfg()
-    bad_data = replace(cfg.data, packing_mode="unknown")
-    bad = replace(cfg, data=bad_data)
-    with pytest.raises(ValueError, match="packing_mode"):
-        validate_config(bad)
-
-
-def test_max_eval_samples_must_be_non_negative() -> None:
-    """Negative max_eval_samples must raise ValueError."""
-    cfg = _base_cfg()
-    bad_data = replace(cfg.data, max_eval_samples=-1)
-    bad = replace(cfg, data=bad_data)
-    with pytest.raises(ValueError, match="max_eval_samples"):
-        validate_config(bad)
+    for mutate, match in cases:
+        with pytest.raises(ValueError, match=match):
+            validate_config(mutate(_base_cfg()))
 
 
 def test_hf_eval_split_allows_null() -> None:
@@ -112,132 +190,23 @@ def test_hf_eval_split_default_is_null() -> None:
     assert DataConfig().hf_eval_split is None
 
 
-@pytest.mark.parametrize("bad_split", [False, 0, 1.5, [], {}])
-def test_hf_eval_split_rejects_non_string_types(bad_split: object) -> None:
+def test_hf_eval_split_rejects_non_string_types() -> None:
     """hf_eval_split must be either None or a non-empty string."""
-    cfg = _base_cfg()
-    hf_data = DataConfig(
-        backend="hf",
-        hf_dataset="dummy",
-        hf_name="dummy",
-        hf_split="train",
-        hf_eval_split=bad_split,  # type: ignore[arg-type]
-        text_key="text",
-        shuffle=False,
-        repeat=True,
-        tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
-    )
-    with pytest.raises(ValueError, match="hf_eval_split"):
-        validate_config(replace(cfg, data=hf_data))
-
-
-def test_eval_every_must_be_non_negative() -> None:
-    """Negative eval_every must raise ValueError."""
-    cfg = _base_cfg()
-    bad_train = replace(cfg.train, eval_every=-1)
-    bad = replace(cfg, train=bad_train)
-    with pytest.raises(ValueError, match="eval_every"):
-        validate_config(bad)
-
-
-def test_generate_every_must_be_non_negative() -> None:
-    """Negative generate_every must raise ValueError."""
-    cfg = _base_cfg()
-    bad_train = replace(cfg.train, generate_every=-1)
-    bad = replace(cfg, train=bad_train)
-    with pytest.raises(ValueError, match="generate_every"):
-        validate_config(bad)
-
-
-def test_generate_input_len_must_be_valid() -> None:
-    """generate_input_len must be positive and <= seq_len."""
-    cfg = _base_cfg()
-    bad_small = replace(cfg.train, generate_input_len=0)
-    with pytest.raises(ValueError, match="generate_input_len"):
-        validate_config(replace(cfg, train=bad_small))
-    bad_large = replace(cfg.train, generate_input_len=1024)
-    with pytest.raises(ValueError, match="generate_input_len"):
-        validate_config(replace(cfg, train=bad_large))
-
-
-def test_generate_top_p_must_be_in_range() -> None:
-    """generate_top_p outside (0,1] must raise ValueError."""
-    cfg = _base_cfg()
-    bad_train = replace(cfg.train, generate_top_p=1.5)
-    with pytest.raises(ValueError, match="generate_top_p"):
-        validate_config(replace(cfg, train=bad_train))
-
-
-def test_wandb_mode_must_be_valid() -> None:
-    """Invalid wandb mode must raise ValueError."""
-    cfg = _base_cfg()
-    bad_logging = replace(cfg.logging, wandb=replace(cfg.logging.wandb, mode="bogus"))
-    bad = replace(cfg, logging=bad_logging)
-    with pytest.raises(ValueError, match="wandb.mode"):
-        validate_config(bad)
-
-
-def test_min_lr_ratio_must_be_in_range() -> None:
-    """min_lr_ratio outside [0, 1] must raise ValueError."""
-    cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, min_lr_ratio=1.5)
-    bad = replace(cfg, optim=bad_optim)
-    with pytest.raises(ValueError, match="min_lr_ratio"):
-        validate_config(bad)
-
-
-def test_muon_lr_scale_must_be_positive() -> None:
-    """optim.muon.lr_scale <= 0 must raise ValueError."""
-    cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, muon=replace(cfg.optim.muon, lr_scale=0.0))
-    bad = replace(cfg, optim=bad_optim)
-    with pytest.raises(ValueError, match="optim.muon.lr_scale"):
-        validate_config(bad)
-
-
-def test_muon_weight_decay_mult_must_be_non_negative() -> None:
-    """optim.muon.weight_decay_mult < 0 must raise ValueError."""
-    cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, muon=replace(cfg.optim.muon, weight_decay_mult=-1.0))
-    bad = replace(cfg, optim=bad_optim)
-    with pytest.raises(ValueError, match="optim.muon.weight_decay_mult"):
-        validate_config(bad)
-
-
-def test_optim_name_must_be_valid() -> None:
-    """Unknown optim.name must raise ValueError."""
-    cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, name="sgd")
-    bad = replace(cfg, optim=bad_optim)
-    with pytest.raises(ValueError, match="optim.name"):
-        validate_config(bad)
-
-
-def test_muon_momentum_must_be_in_range() -> None:
-    """optim.muon.momentum outside (0, 1) must raise ValueError."""
-    cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, muon=replace(cfg.optim.muon, momentum=1.5))
-    bad = replace(cfg, optim=bad_optim)
-    with pytest.raises(ValueError, match="optim.muon.momentum"):
-        validate_config(bad)
-
-
-def test_muon_ns_steps_must_be_positive() -> None:
-    """optim.muon.ns_steps <= 0 must raise ValueError."""
-    cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, muon=replace(cfg.optim.muon, ns_steps=0))
-    bad = replace(cfg, optim=bad_optim)
-    with pytest.raises(ValueError, match="optim.muon.ns_steps"):
-        validate_config(bad)
-
-
-def test_muon_consistent_rms_must_be_non_negative() -> None:
-    """optim.muon.consistent_rms < 0 must raise ValueError."""
-    cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, muon=replace(cfg.optim.muon, consistent_rms=-0.1))
-    bad = replace(cfg, optim=bad_optim)
-    with pytest.raises(ValueError, match="optim.muon.consistent_rms"):
-        validate_config(bad)
+    for bad_split in [False, 0, 1.5, [], {}]:
+        cfg = _base_cfg()
+        hf_data = DataConfig(
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_split="train",
+            hf_eval_split=bad_split,  # type: ignore[arg-type]
+            text_key="text",
+            shuffle=False,
+            repeat=True,
+            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+        )
+        with pytest.raises(ValueError, match="hf_eval_split"):
+            validate_config(replace(cfg, data=hf_data))
 
 
 def test_muon_defaults_reflect_sweep_results() -> None:
@@ -245,42 +214,6 @@ def test_muon_defaults_reflect_sweep_results() -> None:
     cfg = _base_cfg()
     assert cfg.optim.muon.lr_scale == pytest.approx(100.0)
     assert cfg.optim.muon.consistent_rms is None
-
-
-def test_adam_b1_must_be_in_range() -> None:
-    """optim.adam.b1 outside (0, 1) must raise ValueError."""
-    cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, adam=replace(cfg.optim.adam, b1=1.1))
-    bad = replace(cfg, optim=bad_optim)
-    with pytest.raises(ValueError, match="optim.adam.b1"):
-        validate_config(bad)
-
-
-def test_adam_b2_must_be_in_range() -> None:
-    """optim.adam.b2 outside (0, 1) must raise ValueError."""
-    cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, adam=replace(cfg.optim.adam, b2=0.0))
-    bad = replace(cfg, optim=bad_optim)
-    with pytest.raises(ValueError, match="optim.adam.b2"):
-        validate_config(bad)
-
-
-def test_adam_eps_must_be_positive() -> None:
-    """optim.adam.eps <= 0 must raise ValueError."""
-    cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, adam=replace(cfg.optim.adam, eps=0.0))
-    bad = replace(cfg, optim=bad_optim)
-    with pytest.raises(ValueError, match="optim.adam.eps"):
-        validate_config(bad)
-
-
-def test_log_file_must_be_non_empty() -> None:
-    """Empty or whitespace log_file must raise ValueError."""
-    cfg = _base_cfg()
-    bad_logging = replace(cfg.logging, log_file=" ")
-    bad = replace(cfg, logging=bad_logging)
-    with pytest.raises(ValueError, match="log_file"):
-        validate_config(bad)
 
 
 def test_default_init_mode_is_he() -> None:
@@ -298,26 +231,10 @@ def test_pad_token_id_equal_to_eos_warns() -> None:
         validate_config(bad)
 
 
-def test_warmup_steps_must_not_exceed_train_steps() -> None:
-    """warmup_steps exceeding train.steps must raise ValueError."""
-    cfg = _base_cfg()
-    bad_optim = replace(cfg.optim, warmup_steps=10)
-    bad = replace(cfg, optim=bad_optim, train=replace(cfg.train, steps=5))
-    with pytest.raises(ValueError, match="warmup_steps"):
-        validate_config(bad)
-
-
 class _DummyTokenizer:
     """Mock tokenizer with configurable special tokens."""
 
     def __init__(self, size: int, *, bos: int | None, eos: int | None, pad: int | None) -> None:
-        """Initialize mock tokenizer.
-
-        :param int size: Tokenizer vocab size.
-        :param int | None bos: BOS token id.
-        :param int | None eos: EOS token id.
-        :param int | None pad: PAD token id.
-        """
         self._size = int(size)
         self._bos = bos
         self._eos = eos
@@ -328,26 +245,14 @@ class _DummyTokenizer:
 
     @property
     def bos_token_id(self) -> int | None:
-        """Return BOS token ID.
-
-        :return int | None: BOS token id.
-        """
         return self._bos
 
     @property
     def eos_token_id(self) -> int | None:
-        """Return EOS token ID.
-
-        :return int | None: EOS token id.
-        """
         return self._eos
 
     @property
     def pad_token_id(self) -> int | None:
-        """Return pad token ID.
-
-        :return int | None: PAD token id.
-        """
         return self._pad
 
 
@@ -535,120 +440,9 @@ debug:
     assert cfg.train.seq_len == 64
 
 
-def test_resolve_checkpoint_root_dir_relative_to_run(tmp_path: Path) -> None:
-    """Relative checkpoint.root_dir should resolve against the run directory."""
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-
-    cfg = Config()
-    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, root_dir="relative_ckpts"))
-    (run_dir / "config_resolved.json").write_text(json.dumps(cfg.to_dict(), indent=2))
-
-    step_dir = run_dir / "relative_ckpts" / "1"
-    (step_dir / "train_state").mkdir(parents=True)
-
-    found_step, found_run = resolve_checkpoint_path(str(run_dir))
-
-    assert found_run == run_dir
-    assert found_step == step_dir
-
-
-def test_resolve_checkpoint_ignores_cwd_shadow(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Relative root_dir should resolve against run_dir even if CWD has same-named dir.
-
-    :param Path tmp_path: Temporary directory for test artifacts.
-    :param pytest.MonkeyPatch monkeypatch: Pytest monkeypatch fixture.
-    """
-    # Create run directory with checkpoints
-    run_dir = tmp_path / "runs" / "my_run"
-    run_dir.mkdir(parents=True)
-
-    cfg = Config()
-    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, root_dir="ckpts"))
-    (run_dir / "config_resolved.json").write_text(json.dumps(cfg.to_dict(), indent=2))
-
-    correct_step_dir = run_dir / "ckpts" / "100"
-    (correct_step_dir / "train_state").mkdir(parents=True)
-
-    # Create a shadow "ckpts" directory in a different location (simulating CWD)
-    shadow_dir = tmp_path / "ckpts" / "999"
-    shadow_dir.mkdir(parents=True)
-
-    # Change CWD to tmp_path where shadow exists
-    monkeypatch.chdir(tmp_path)
-
-    # Should find run's checkpoint, not the CWD shadow
-    found_step, found_run = resolve_checkpoint_path(str(run_dir))
-
-    assert found_run == run_dir
-    assert found_step == correct_step_dir
-    assert "999" not in str(found_step)  # Ensure we didn't pick up shadow
-
-
-def test_resolve_step_dir_external_root_uses_meta(tmp_path: Path) -> None:
-    """Step directories under external roots should resolve config via metadata."""
-    run_dir = tmp_path / "run"
-    run_dir.mkdir(parents=True)
-
-    cfg = Config()
-    cfg = replace(cfg, logging=replace(cfg.logging, run_dir=str(run_dir)))
-
-    step_dir = tmp_path / "external_ckpts" / "100"
-    (step_dir / "train_state").mkdir(parents=True)
-    meta_dir = step_dir / "meta"
-    meta_dir.mkdir(parents=True)
-    (meta_dir / "metadata").write_text(json.dumps({"config": cfg.to_dict()}, indent=2))
-
-    found_step, found_run = resolve_checkpoint_path(str(step_dir))
-
-    assert found_step == step_dir
-    assert found_run == run_dir
-
-    loaded = load_config_for_checkpoint(step_dir=step_dir, run_dir=None, config_override=None)
-    assert loaded.logging.run_dir == str(run_dir)
-
-
-def test_run_dir_uses_resolved_config_for_ckpt_root(tmp_path: Path) -> None:
-    """Run dir resolution should use config_resolved.json for checkpoint root."""
-    run_dir = tmp_path / "run"
-    run_dir.mkdir(parents=True)
-
-    ckpt_root = tmp_path / "external_ckpts"
-    step_dir = ckpt_root / "5" / "train_state"
-    step_dir.mkdir(parents=True)
-
-    cfg = Config()
-    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, root_dir=str(ckpt_root)))
-    (run_dir / "config_resolved.json").write_text(json.dumps(cfg.to_dict(), indent=2))
-
-    override_path = tmp_path / "override.yaml"
-    override_path.write_text(
-        """
-model:
-  backend: dummy
-""".lstrip()
-    )
-
-    found_step, found_run = resolve_checkpoint_path(
-        str(run_dir), config_override=str(override_path)
-    )
-
-    assert found_run == run_dir
-    assert found_step.parent == ckpt_root
-    assert found_step.name == "5"
-
-
 def test_generate_config_applies_tokenizer_derived_fields(tmp_path: Path) -> None:
-    """Generate config loading should round vocab_size via resolve_tokenizer_config.
-
-    This test verifies that when loading a config for generation, the tokenizer-
-    derived fields (vocab_size rounding, special tokens) are applied. Without
-    calling resolve_tokenizer_config, model shapes would mismatch the checkpoint.
-    """
+    """Generate config loading should apply tokenizer-derived fields."""
     config_path = tmp_path / "config.yaml"
-    # Create config with vocab_size=300 which should round up to 384 (multiple of 128)
     config_path.write_text(
         """
 model:
@@ -702,19 +496,14 @@ debug:
 """.lstrip()
     )
 
-    # Load config (simulating what generate CLI does)
     cfg = load_config_for_checkpoint(
         step_dir=tmp_path, run_dir=None, config_override=str(config_path)
     )
 
-    # Before tokenizer resolution, vocab_size is 300
     assert cfg.model.vocab_size == 300
 
-    # After building tokenizer and resolving, vocab_size should be 384
     tokenizer = build_tokenizer(cfg)
     cfg_resolved = resolve_tokenizer_config(cfg, tokenizer)
-
-    # Byte tokenizer has 256 tokens, rounded up to 384 (next multiple of 128)
     assert cfg_resolved.model.vocab_size == 384
 
 

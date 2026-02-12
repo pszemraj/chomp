@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -24,6 +23,7 @@ from chomp.config import (
 from chomp.data.hf import HFStreamingTextStream, HFStreamSpec
 from chomp.data.pipeline import BinPacker, ByteTokenizer, build_train_iterator
 from chomp.train import run
+from tests.helpers.hf_fakes import FakeHFIterable, FakeHFStateIterable
 
 if TYPE_CHECKING:
     from chomp.types import Batch
@@ -340,53 +340,6 @@ def test_pipeline_bin_packing_segment_ids() -> None:
     assert stats["packing_utilization"] == expected_util
 
 
-@dataclass
-class _FakeHFPipelineIterable:
-    """Mock HF iterable dataset for testing."""
-
-    items: list[dict[str, Any]]
-    index: int = 0
-
-    def select_columns(self, _columns: list[str]) -> _FakeHFPipelineIterable:
-        """Return self (columns not used in tests).
-
-        :param list[str] _columns: Column names to select.
-        :return _FakeHFPipelineIterable: Self for chaining.
-        """
-        return self
-
-    def shuffle(self, *, seed: int, buffer_size: int) -> _FakeHFPipelineIterable:
-        """Return self (shuffle not used in tests).
-
-        :param int seed: Shuffle seed.
-        :param int buffer_size: Shuffle buffer size.
-        :return _FakeHFPipelineIterable: Self for chaining.
-        """
-        _ = (seed, buffer_size)
-        return self
-
-    def state_dict(self) -> dict[str, Any]:
-        """Return iterator state.
-
-        :return dict[str, Any]: State dictionary.
-        """
-        return {"index": int(self.index)}
-
-    def load_state_dict(self, state: dict[str, Any]) -> None:
-        """Restore iterator state."""
-        self.index = int(state["index"])
-
-    def __iter__(self) -> _FakeHFPipelineIterable:
-        return self
-
-    def __next__(self) -> dict[str, Any]:
-        if self.index >= len(self.items):
-            raise StopIteration
-        item = self.items[self.index]
-        self.index += 1
-        return item
-
-
 def test_hf_pipeline_segment_ids_and_label_mask(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -398,19 +351,17 @@ def test_hf_pipeline_segment_ids_and_label_mask(
         {"text": "sup"},
     ]
 
-    def _load_dataset(
-        dataset: str, *, name: str, split: str, streaming: bool
-    ) -> _FakeHFPipelineIterable:
+    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> FakeHFIterable:
         """Mock load_dataset returning fake iterable.
 
         :param str dataset: Dataset name.
         :param str name: Config name.
         :param str split: Split name.
         :param bool streaming: Streaming flag.
-        :return _FakeHFPipelineIterable: Fake dataset iterable.
+        :return FakeHFIterable: Fake dataset iterable.
         """
         _ = (dataset, name, split, streaming)
-        return _FakeHFPipelineIterable(items=items)
+        return FakeHFIterable(items=items)
 
     import datasets
 
@@ -458,77 +409,6 @@ def test_hf_pipeline_segment_ids_and_label_mask(
     assert np.all(masked_labels == -100)
 
 
-@dataclass
-class _FakeHFStateIterable:
-    """Mock HF iterable dataset with optional failure injection."""
-
-    items: list[dict[str, Any]]
-    index: int = 0
-    fail_at: int | None = None
-    record: dict[str, Any] | None = None
-
-    def select_columns(self, _columns: list[str]) -> _FakeHFStateIterable:
-        """Return self (columns not used in tests).
-
-        :param list[str] _columns: Column names to select.
-        :return _FakeHFStateIterable: Self for chaining.
-        """
-        return self
-
-    def shuffle(self, *, seed: int, buffer_size: int) -> _FakeHFStateIterable:
-        """Return self (shuffle not used in tests).
-
-        :param int seed: Shuffle seed.
-        :param int buffer_size: Shuffle buffer size.
-        :return _FakeHFStateIterable: Self for chaining.
-        """
-        _ = (seed, buffer_size)
-        return self
-
-    def state_dict(self) -> dict[str, Any]:
-        """Return iterator state.
-
-        :return dict[str, Any]: State dictionary.
-        """
-        return {"index": int(self.index)}
-
-    def load_state_dict(self, state: dict[str, Any]) -> None:
-        """Restore iterator state and record load calls."""
-        self.index = int(state["index"])
-        if self.record is not None:
-            self.record["load_calls"] = self.record.get("load_calls", 0) + 1
-            self.record["last_loaded"] = dict(state)
-
-    def __iter__(self) -> Iterator[dict[str, Any]]:
-        return _FakeHFStateIterator(self)
-
-
-class _FakeHFStateIterator:
-    """Mock HF iterator with optional failure injection."""
-
-    def __init__(self, ds: _FakeHFStateIterable) -> None:
-        """Initialize iterator from dataset."""
-        self._ds = ds
-        self._i = int(ds.index)
-
-    def __iter__(self) -> _FakeHFStateIterator:
-        return self
-
-    def __next__(self) -> dict[str, Any]:
-        if self._ds.fail_at is not None and self._i == self._ds.fail_at:
-            rec = self._ds.record
-            if rec is None or not rec.get("fail_consumed", False):
-                if rec is not None:
-                    rec["fail_consumed"] = True
-                raise RuntimeError("transient failure")
-        if self._i >= len(self._ds.items):
-            raise StopIteration
-        item = self._ds.items[self._i]
-        self._i += 1
-        self._ds.index = self._i
-        return item
-
-
 @pytest.mark.slow
 def test_hf_state_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
     """HF stream should resume to same position after state roundtrip."""
@@ -536,17 +416,17 @@ def test_hf_state_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def _load_dataset(
         dataset: str, *, name: str, split: str, streaming: bool
-    ) -> _FakeHFStateIterable:
+    ) -> FakeHFStateIterable:
         """Mock load_dataset returning fake iterable.
 
         :param str dataset: Dataset name.
         :param str name: Config name.
         :param str split: Split name.
         :param bool streaming: Streaming flag.
-        :return _FakeHFStateIterable: Fake dataset iterable.
+        :return FakeHFStateIterable: Fake dataset iterable.
         """
         _ = (dataset, name, split, streaming)
-        return _FakeHFStateIterable(items=items)
+        return FakeHFStateIterable(items=items)
 
     import datasets
 
@@ -585,18 +465,18 @@ def test_hf_retry_rebuild_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def _load_dataset(
         dataset: str, *, name: str, split: str, streaming: bool
-    ) -> _FakeHFStateIterable:
+    ) -> FakeHFStateIterable:
         """Mock load_dataset with failure injection.
 
         :param str dataset: Dataset name.
         :param str name: Config name.
         :param str split: Split name.
         :param bool streaming: Streaming flag.
-        :return _FakeHFStateIterable: Fake dataset iterable.
+        :return FakeHFStateIterable: Fake dataset iterable.
         """
         _ = (dataset, name, split, streaming)
         record["builds"] += 1
-        return _FakeHFStateIterable(items=items, fail_at=1, record=record)
+        return FakeHFStateIterable(items=items, fail_at=1, record=record)
 
     import datasets
 
