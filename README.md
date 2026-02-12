@@ -50,7 +50,7 @@ Local configs go in `configs/custom/` (gitignored).
 
 ## Docs
 
-- [Config Reference](docs/config-reference.qmd) - full field-by-field reference
+- [Config Reference](docs/config-reference.md) - full field-by-field reference
 - [Data Pipeline](docs/data_pipeline.md) - HF streaming and Grain batching
 - [Packing](docs/packing.md) - packing modes and loss masking
 - [Checkpointing](docs/checkpointing.md) - save/restore and resume
