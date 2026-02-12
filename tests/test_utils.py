@@ -46,84 +46,55 @@ def test_device_platform_detects_array() -> None:
     assert isinstance(plat, str) and plat
 
 
-def test_device_platform_handles_device_property() -> None:
-    """device_platform should handle arrays with .device property."""
+class _Dev:
+    """Mock device with platform attribute."""
 
-    class _Dev:
-        """Mock device with platform attribute."""
+    def __init__(self, platform: str) -> None:
+        self.platform = platform
 
-        def __init__(self, platform: str) -> None:
-            """Initialize mock device."""
-            self.platform = platform
+
+def _arr_with_device_property(platform: str) -> object:
+    """Build a mock array exposing a .device property."""
 
     class _Arr:
-        """Mock array with device property."""
-
         def __init__(self) -> None:
-            """Initialize mock array."""
-            self.device = _Dev("gpu")
+            self.device = _Dev(platform)
 
-    assert device_platform(_Arr()) == "gpu"  # type: ignore[arg-type]
+    return _Arr()
 
 
-def test_device_platform_handles_device_method() -> None:
-    """device_platform should handle arrays with .device() method."""
-
-    class _Dev:
-        """Mock device with platform attribute."""
-
-        def __init__(self, platform: str) -> None:
-            """Initialize mock device."""
-            self.platform = platform
+def _arr_with_device_method(platform: str) -> object:
+    """Build a mock array exposing a .device() method."""
 
     class _Arr:
-        """Mock array with device method."""
-
         def device(self) -> _Dev:
-            """Return mock device.
+            return _Dev(platform)
 
-            :return _Dev: Mock device.
-            """
-            return _Dev("cpu")
-
-    assert device_platform(_Arr()) == "cpu"  # type: ignore[arg-type]
+    return _Arr()
 
 
-def test_device_platform_handles_device_buffer() -> None:
-    """device_platform should handle arrays with device_buffer attribute."""
-
-    class _Dev:
-        """Mock device with platform attribute."""
-
-        def __init__(self, platform: str) -> None:
-            """Initialize mock device."""
-            self.platform = platform
+def _arr_with_device_buffer(platform: str) -> object:
+    """Build a mock array exposing a .device_buffer.device() path."""
 
     class _Buffer:
-        """Mock buffer with device method."""
-
         def device(self) -> _Dev:
-            """Return mock device.
-
-            :return _Dev: Mock device.
-            """
-            return _Dev("gpu")
+            return _Dev(platform)
 
     class _Arr:
-        """Mock array with device_buffer attribute."""
-
         device_buffer = _Buffer()
 
-    assert device_platform(_Arr()) == "gpu"  # type: ignore[arg-type]
+    return _Arr()
 
 
-def test_device_platform_returns_none_when_unknown() -> None:
-    """device_platform should return None for unknown array types."""
-
-    class _Arr:
-        """Mock array without device info."""
-
-    assert device_platform(_Arr()) is None  # type: ignore[arg-type]
+def test_device_platform_handles_supported_object_shapes() -> None:
+    """device_platform should handle property/method/buffer and unknown object forms."""
+    for arr, expected in [
+        (_arr_with_device_property("gpu"), "gpu"),
+        (_arr_with_device_method("cpu"), "cpu"),
+        (_arr_with_device_buffer("gpu"), "gpu"),
+        (object(), None),
+    ]:
+        assert device_platform(arr) == expected  # type: ignore[arg-type]
 
 
 def _make_batch() -> Batch:
@@ -140,38 +111,21 @@ def _make_batch() -> Batch:
     )
 
 
-def test_assert_batch_on_device_accepts_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
-    """assert_batch_on_device should accept GPU batches."""
+def test_assert_batch_on_device_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """assert_batch_on_device should enforce platform checks across key combinations."""
     batch = _make_batch()
-    monkeypatch.setattr(devices, "device_platform", lambda _: "gpu")
-    devices.assert_batch_on_device(batch, allow_cpu=False)
-
-
-def test_assert_batch_on_device_rejects_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
-    """assert_batch_on_device should reject CPU batches when disallowed."""
-    batch = _make_batch()
-    monkeypatch.setattr(devices, "device_platform", lambda _: "cpu")
-    with pytest.raises(RuntimeError):
-        devices.assert_batch_on_device(batch, allow_cpu=False)
-
-
-def test_assert_batch_on_device_allows_unknown_when_configured(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """assert_batch_on_device should allow unknown platform when allow_cpu=True."""
-    batch = _make_batch()
-    monkeypatch.setattr(devices, "device_platform", lambda _: None)
-    devices.assert_batch_on_device(batch, allow_cpu=True)
-
-
-def test_assert_batch_on_device_rejects_unknown_when_disallowed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """assert_batch_on_device should reject unknown platform when allow_cpu=False."""
-    batch = _make_batch()
-    monkeypatch.setattr(devices, "device_platform", lambda _: None)
-    with pytest.raises(RuntimeError):
-        devices.assert_batch_on_device(batch, allow_cpu=False)
+    for platform, allow_cpu, should_raise in [
+        ("gpu", False, False),
+        ("cpu", False, True),
+        (None, True, False),
+        (None, False, True),
+    ]:
+        monkeypatch.setattr(devices, "device_platform", lambda _, p=platform: p)
+        if should_raise:
+            with pytest.raises(RuntimeError):
+                devices.assert_batch_on_device(batch, allow_cpu=allow_cpu)
+        else:
+            devices.assert_batch_on_device(batch, allow_cpu=allow_cpu)
 
 
 def test_dummy_init_stats_are_sane() -> None:
