@@ -3,6 +3,14 @@
 This document describes the streaming data path and the fixed-shape batch
 contract that the trainer relies on.
 
+## Scope
+
+This page is the home for stream-to-batch flow and eval-set construction.
+
+- For field-level defaults/types: `docs/config-reference.md` (`data.*`)
+- For packing strategy and masking semantics: `docs/packing.md`
+- For how batches are consumed during training: `docs/training.md`
+
 ## Overview
 
 chomp always uses the same data path, even in debug mode:
@@ -41,38 +49,20 @@ to `[B, T]` views.
 - `hf`: `transformers.AutoTokenizer` (default)
 - `byte`: a simple byte-level tokenizer for infrastructure bring-up
 
-When using `hf`, chomp:
-
-- detects the tokenizer vocab size
-- rounds `model.vocab_size` up to `data.tokenizer.vocab_size_multiple`
-- optionally updates `model.{bos,eos,pad}_token_id` from tokenizer metadata
-
-Special token insertion is controlled by:
-
-- `data.tokenizer.add_bos`
-- `data.tokenizer.add_eos`
+When using `hf`, chomp resolves tokenizer-dependent model settings
+(`model.vocab_size`, special token IDs) before training starts.
+Tokenizer knobs are defined in `docs/config-reference.md` under
+`data.tokenizer.*`.
 
 chomp saves a tokenizer snapshot under `run_dir/tokenizer` and will prefer that
 snapshot on resume to keep tokenization reproducible.
 
 ## Packing
 
-Packer modes:
-
-- `data.packing_mode: sequential` (stream order, rolling buffer)
-- `data.packing_mode: bin` (First-Fit-Decreasing; better utilization)
-
-Both packers emit fixed windows of length `seq_len`, then split into:
-
-- `input_ids = tokens[0..T-1]`
-- `labels = tokens[0..T-1]` (the model shifts internally)
-
-Segment IDs are emitted for each token to support boundary loss masking.
-
-Loss masking controls:
-
-- `data.mask_boundary_loss`: mask labels at segment boundaries
-- `data.train_on_eos`: mask labels that equal `model.eos_token_id`
+The pipeline supports `sequential` and `bin` packing modes and always emits
+fixed windows of length `seq_len` before batching.
+Packing trade-offs and boundary-masking behavior are documented in
+`docs/packing.md`.
 
 ## Grain iterator
 
@@ -112,14 +102,12 @@ fallback to train) and are not cached on disk.
 
 ## Key config knobs
 
-- `data.backend`: `hf` or `local_text`
-- `data.hf_dataset`, `data.hf_name`, `data.hf_split`, `data.text_key`
+Use `docs/config-reference.md` as the canonical source for `data.*` and related
+`train.*` shape knobs. The most operationally important fields for this page
+are:
+
+- `data.backend`, `data.hf_*`, `data.text_key`
 - `data.hf_eval_split`, `data.max_eval_samples`
 - `data.shuffle`, `data.shuffle_buffer_size`, `data.seed`, `data.repeat`
-- `data.state_update_interval`, `data.max_retries`, `data.retry_delay_sec`
-- `data.tokenizer.*`
-- `data.packing_mode`, `data.packing_buffer_docs`,
-  `data.packing_max_docs_per_bin`
-- `data.mask_boundary_loss`, `data.train_on_eos`
-- `data.grain_prefetch`
+- `data.packing_mode`, `data.packing_buffer_docs`, `data.packing_max_docs_per_bin`
 - `train.seq_len`, `train.batch_size`, `train.grad_accum`

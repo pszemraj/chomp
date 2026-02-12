@@ -3,6 +3,14 @@
 This document describes how chomp packs variable-length documents into fixed
 training sequences and how boundary-related loss masking works.
 
+## Scope
+
+This page is the home for packing strategy and boundary-masking behavior.
+
+- For where packing sits in the end-to-end data path: `docs/data_pipeline.md`
+- For field-level defaults/types: `docs/config-reference.md` (`data.packing_*`,
+  `data.mask_boundary_loss`, `data.train_on_eos`)
+
 ## Packing modes
 
 chomp uses a Grain-backed input pipeline and supports two packing strategies,

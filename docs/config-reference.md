@@ -47,6 +47,20 @@ defaults can still be set to numbers or booleans (e.g.,
 
 > [!NOTE]
 > Unknown keys or invalid values fail fast during validation with actionable error messages.
+
+## Scope
+
+This page is the canonical reference for config schema: field names, types,
+defaults, and constraints.
+
+For conceptual/runtime behavior, use the topic docs:
+
+- Training runtime: `docs/training.md`
+- Data stream and eval-set construction: `docs/data_pipeline.md`
+- Packing and boundary semantics: `docs/packing.md`
+- Optimizer behavior and sweeps: `docs/optimization.md`
+- Checkpoint/resume contract: `docs/checkpointing.md`
+
 <a id="variables"></a>
 ## Variables and interpolation
 Define reusable values under a top-level `variables` section and reference them
@@ -506,7 +520,7 @@ Token ID used for padding.
 | Required | No |
 | Constraints | Should differ from `eos_token_id` (recommended) |
 
-## pad_token_id should differ from eos_token_id
+**pad_token_id should differ from eos_token_id**
 
 Megalodon zero-masks pad embeddings and the training loop masks pad positions in loss.
 If `pad_token_id == eos_token_id`, EOS tokens may be treated as padding depending on the
@@ -1964,29 +1978,11 @@ chomp validates all configuration at load time with actionable error messages.
 
 ### Critical Gotchas
 
-## Never Use fp16
-
-Megalodon's CEMA and normalization layers are numerically unstable with fp16.
-Always use the recommended precision policy:
-
-```yaml
-model:
-  param_dtype: float32
-  compute_dtype: bfloat16
-  accum_dtype: float32
-  softmax_dtype: float32
-```
-## pad_token_id Should Differ from eos_token_id
-
-If your tokenizer uses the same ID for padding and EOS (common with GPT-2 style tokenizers),
-chomp emits a warning after tokenizer resolution. Prefer a tokenizer with distinct pad/eos, or
-disable `data.tokenizer.auto_set_special_tokens` and override `model.pad_token_id` explicitly:
-
-```yaml
-model:
-  pad_token_id: 3   # Different from eos_token_id
-  eos_token_id: 2
-```
+- **Do not use `fp16`**. Use the dtype policy described at
+  [`model.param_dtype`](#model.param_dtype), [`model.compute_dtype`](#model.compute_dtype),
+  [`model.accum_dtype`](#model.accum_dtype), and [`model.softmax_dtype`](#model.softmax_dtype).
+- Keep `pad_token_id` different from `eos_token_id`; see
+  [`model.pad_token_id`](#model.pad_token_id) and [`model.eos_token_id`](#model.eos_token_id).
 ---
 
 <a id="index"></a>
@@ -2015,4 +2011,4 @@ All configuration fields by section:
 
 **debug** (2 fields): [`nan_check`](#debug.nan_check), [`check_device_every`](#debug.check_device_every)
 
-**Total: 109 fields**
+**Total: 127 fields**
