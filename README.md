@@ -35,9 +35,9 @@ chomp generate runs/my_run --prompt "Hello world" --max-tokens 64
 
 | Config                         | Description                |
 | ------------------------------ | -------------------------- |
-| `configs/debug_smoke.yaml`     | Tiny local-text smoke test |
-| `configs/zyda2_100m_2048.yaml` | 100M Megalodon on Zyda-2   |
-| `configs/zyda2_200m_2048.yaml` | 200M Megalodon on Zyda-2   |
+| [`configs/debug_smoke.yaml`](configs/debug_smoke.yaml)     | Tiny local-text smoke test |
+| [`configs/zyda2_100m_2048.yaml`](configs/zyda2_100m_2048.yaml) | 100M Megalodon on Zyda-2   |
+| [`configs/zyda2_200m_2048.yaml`](configs/zyda2_200m_2048.yaml) | 200M Megalodon on Zyda-2   |
 
 Local configs go in `configs/custom/` (gitignored).
 
@@ -50,8 +50,10 @@ Local configs go in `configs/custom/` (gitignored).
 
 ## Docs
 
-- [Config Reference](docs/config-reference.qmd) - full field-by-field reference
-- [Data Pipeline](docs/data_pipeline.md) - HF streaming and Grain batching
-- [Packing](docs/packing.md) - packing modes and loss masking
-- [Checkpointing](docs/checkpointing.md) - save/restore and resume
-- [Training](docs/training.md) - train loop and metrics
+- [Config Reference](docs/config-reference.md) - canonical field/type/default reference
+- [Training](docs/training.md) - train step behavior, generation, and metrics
+- [Data Pipeline](docs/data_pipeline.md) - stream-to-batch path and eval-set construction
+- [Packing](docs/packing.md) - packing strategy and boundary-masking semantics
+- [Optimization](docs/optimization.md) - optimizer behavior and Muon sweep guidance
+- [Checkpointing](docs/checkpointing.md) - save/restore/resume contract
+- [Development Guide](docs/dev.md) - lint, format, test workflow

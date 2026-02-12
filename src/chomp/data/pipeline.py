@@ -233,7 +233,12 @@ def build_tokenizer(cfg: Config) -> Tokenizer:
 
 
 def _build_hf_stream(
-    cfg: Config, *, split: str, repeat: bool, seed_offset: int = 0
+    cfg: Config,
+    *,
+    split: str,
+    repeat: bool,
+    seed_offset: int = 0,
+    seed_override: int | None = None,
 ) -> HFStreamingTextStream:
     """Build an HF streaming text stream from config.
 
@@ -241,8 +246,10 @@ def _build_hf_stream(
     :param str split: Dataset split name.
     :param bool repeat: Whether to repeat the stream when exhausted.
     :param int seed_offset: Optional seed offset for independent streams.
+    :param int | None seed_override: Optional base shuffle seed override.
     :return HFStreamingTextStream: Streaming text stream wrapper.
     """
+    base_seed = int(cfg.data.seed) if seed_override is None else int(seed_override)
     spec = HFStreamSpec(
         dataset=cfg.data.hf_dataset,
         name=cfg.data.hf_name,
@@ -250,7 +257,7 @@ def _build_hf_stream(
         text_key=cfg.data.text_key,
         shuffle=cfg.data.shuffle,
         shuffle_buffer_size=cfg.data.shuffle_buffer_size,
-        seed=int(cfg.data.seed) + int(seed_offset),
+        seed=base_seed + int(seed_offset),
         repeat=repeat,
         max_retries=cfg.data.max_retries,
         retry_delay_sec=cfg.data.retry_delay_sec,
@@ -511,24 +518,49 @@ def load_or_create_eval_texts(cfg: Config, *, tokenizer: Tokenizer) -> list[list
         return []
 
     texts: list[str] = []
-    split_used = None
+    split_used: str | None = None
 
     if cfg.data.backend == "hf":
+        split_candidates: list[str] = []
         eval_split = cfg.data.hf_eval_split
-        split_candidates = [eval_split]
-        if eval_split != cfg.data.hf_split:
+        if eval_split is not None and str(eval_split).strip():
+            split_candidates.append(str(eval_split))
+        if cfg.data.hf_split not in split_candidates:
             split_candidates.append(cfg.data.hf_split)
+
+        split_errors: list[str] = []
         for split in split_candidates:
             try:
-                stream = _build_hf_stream(cfg, split=split, repeat=False)
+                seed_override = None
+                if (
+                    split == cfg.data.hf_split
+                    and int(cfg.data.seed) == 0
+                    and int(cfg.train.seed) != 0
+                ):
+                    # Keep eval-train fallback deterministic across runs by defaulting
+                    # to train.seed when data.seed is left at its default 0.
+                    seed_override = int(cfg.train.seed)
+                    logger.info(
+                        "Using train.seed=%d for eval train-split shuffle (data.seed=0).",
+                        cfg.train.seed,
+                    )
+
+                stream = _build_hf_stream(
+                    cfg, split=split, repeat=False, seed_override=seed_override
+                )
                 texts = _collect_texts(stream, max_samples)
                 split_used = split
                 break
             except Exception as exc:
+                split_errors.append(f"{split!r}: {type(exc).__name__}: {exc}")
                 logger.warning("Eval split %r unavailable: %s", split, exc)
                 continue
         if split_used is None:
-            raise RuntimeError("Failed to build eval dataset from HF streaming splits.")
+            details = "; ".join(split_errors) if split_errors else "no split candidates"
+            raise RuntimeError(
+                "Failed to build eval dataset from HF streaming splits. "
+                f"Tried: {split_candidates}. Errors: {details}"
+            )
     elif cfg.data.backend == "local_text":
         texts = [cfg.data.local_text] * max_samples
         split_used = "local_text"

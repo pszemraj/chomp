@@ -153,7 +153,7 @@ class DataConfig:
     where A=grad_accum, B=batch_size, T=seq_len.
 
     Validation behavior:
-    - If an HF validation split exists, we take its first max_eval_samples examples.
+    - If an HF eval split is configured and exists, we take its first max_eval_samples examples.
     - Otherwise we take the first max_eval_samples examples from the (shuffled) train split.
     """
 
@@ -165,7 +165,8 @@ class DataConfig:
     hf_name: str = "sample-100BT"
     hf_split: str = "train"
     # Preferred eval split; fallback to train if missing.
-    hf_eval_split: str = "validation"
+    # Default None: derive eval texts from the train split.
+    hf_eval_split: str | None = None
     text_key: str = "text"
 
     shuffle: bool = True
@@ -755,8 +756,15 @@ def _validate_data(cfg: Config) -> None:
             _vfail("data.hf_name must be non-empty when data.backend='hf' (use named configs)")
         if not cfg.data.hf_split:
             _vfail("data.hf_split must be non-empty when data.backend='hf'")
-        if not cfg.data.hf_eval_split:
-            _vfail("data.hf_eval_split must be non-empty when data.backend='hf'")
+        if cfg.data.hf_eval_split is not None:
+            if not isinstance(cfg.data.hf_eval_split, str):
+                _vfail(
+                    "data.hf_eval_split must be null or a non-empty string when data.backend='hf'"
+                )
+            if not cfg.data.hf_eval_split.strip():
+                _vfail(
+                    "data.hf_eval_split must be null or a non-empty string when data.backend='hf'"
+                )
         if not cfg.data.text_key:
             _vfail("data.text_key must be non-empty")
         if cfg.data.shuffle and cfg.data.shuffle_buffer_size <= 0:

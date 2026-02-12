@@ -3,11 +3,21 @@
 This doc summarizes the training step behavior and the metrics logged in
 `metrics.jsonl`.
 
+## Scope
+
+This page is the home for runtime training-loop behavior.
+
+- For field-by-field config defaults and types: [Config Reference](config-reference.md)
+- For optimizer internals and sweep guidance: [Optimization and Optimizers](optimization.md)
+- For data stream, packing, and eval-set construction: [Data Pipeline](data_pipeline.md)
+- For boundary masking semantics: [Packing and Boundary Semantics](packing.md)
+- For save/restore/resume policy: [Checkpointing and Resume](checkpointing.md)
+
 ## Development notes
 
-For linting, formatting, and the module-based test layout, see `docs/dev.md`.
+For linting, formatting, and the module-based test layout, see [Development Guide](dev.md).
 In particular, training-loop and checkpoint/resume behaviors now live in
-`tests/test_training.py`.
+[`tests/test_training.py`](../tests/test_training.py).
 
 ## Train step contract
 
@@ -26,27 +36,12 @@ boundary masks.
 `optim.name` selects the optimizer:
 
 - `adamw` (default)
-- `muon`: applies Muon to a whitelist of projection weights
-  (`attn.wz/wv/wr/wh1/wh2`, `ffn.fc1/fc2/fc3`, `lm_head`) and uses AdamW for
-  everything else. Set `optim.muon.allow_all_2d=true` to apply Muon to all 2D
-  tensors. Set `optim.muon.allow_tied_embed=true` to include the tied embedding
-  matrix.
+- `muon`: applies Muon to selected matrix parameters and AdamW elsewhere.
 
-Both optimizers use the same warmup+cosine schedule (`optim.lr`,
-`optim.warmup_steps`, `optim.decay_steps`, `optim.min_lr_ratio`) and the same
-weight-decay mask (matrices only).
-For Muon runs, Adam uses `optim.lr` and Muon uses `optim.lr * optim.muon.lr_scale`.
-Muon weight decay can be scaled independently via `optim.muon.weight_decay_mult`.
-Muon and AdamW are composed via explicit partitioning, so Adam-specific knobs
-(`optim.adam.b1`, `optim.adam.b2`, `optim.adam.eps`, `optim.adam.nesterov`)
-apply only to the non-Muon parameter group.
-`optim.muon.consistent_rms` controls Optax's Muon RMS scaling. It defaults to
-`null` and `optim.muon.lr_scale` defaults to `100.0` based on the current 10k-step
-Muon sweep results; set `optim.muon.consistent_rms=0.2` to enable consistent RMS
-scaling.
-When `null`, Muon shape scaling is disabled to preserve the earlier Muon-only
-behavior.
-See `docs/optimization.md` for the sweep details and recommended next steps.
+The train loop treats both as one optimizer step per outer iteration; details
+about Muon parameter partitioning, `optim.muon.*` behavior, and sweep-backed
+defaults live in [Optimization and Optimizers](optimization.md).
+For exact knob definitions, see [Config Reference](config-reference.md) (`optim.*`).
 
 ## Determinism
 
@@ -76,19 +71,16 @@ stays quiet (debug log only).
 
 ## Attention and loss masking
 
-chomp uses **stream semantics**, treating the corpus as a continuous token
-stream. This is standard for simple pretraining. Segment IDs are still emitted
-for boundary loss masking but are not used to alter attention.
-
-Loss masking is handled in the data pipeline:
-
-- `data.mask_boundary_loss`: mask labels at segment boundaries
-- `data.train_on_eos`: mask EOS labels if desired
+The training step consumes already-packed fixed-shape batches. Stream semantics,
+segment IDs, and boundary-related masking behavior are defined in
+[Packing and Boundary Semantics](packing.md), and their placement in the data
+path is defined in [Data Pipeline](data_pipeline.md).
 
 ## Evaluation
 
 If `train.eval_every > 0`, chomp runs a full pass over the validation texts
-selected at run start and logs `eval_loss`.
+selected at run start and logs `eval_loss`. Eval text selection policy (eval
+split vs train fallback) is documented in [Data Pipeline](data_pipeline.md).
 
 ## Generation samples
 

@@ -3,6 +3,14 @@
 chomp uses Orbax to checkpoint **both** training state and data iterator state.
 Resume is treated as a contract, not a best-effort feature.
 
+## Scope
+
+This page is the home for save/restore/resume semantics.
+
+- For checkpoint field defaults/types: [Config Reference](config-reference.md) (`checkpoint.*`)
+- For training-loop runtime behavior after resume: [Training Loop](training.md)
+- For data iterator state details: [Data Pipeline](data_pipeline.md)
+
 ## What is saved
 
 Each checkpoint stores three items:

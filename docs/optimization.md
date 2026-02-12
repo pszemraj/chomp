@@ -3,6 +3,13 @@
 This document focuses on optimizer behavior in the training harness, with a
 special emphasis on Muon support and recent sweep results.
 
+## Scope
+
+This page is the home for optimizer behavior and tuning guidance.
+
+- For field-level defaults/types: [Config Reference](config-reference.md) (`optim.*`)
+- For train-step runtime behavior and metrics: [Training Loop](training.md)
+
 ## Supported optimizers
 
 `optim.name` selects the optimizer:
@@ -41,7 +48,7 @@ In practice that means:
 
 To ground the defaults in something concrete, we ran a controlled 10k-step
 comparison on a 200M Megalodon config (see
-`configs/custom/muon-lr-scale-10k/*.yaml`):
+[`configs/custom/muon-lr-scale-10k/`](../configs/custom/muon-lr-scale-10k/)):
 
 - Train steps: 10,000
 - Eval every: 1,000

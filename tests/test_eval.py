@@ -231,3 +231,65 @@ def test_eval_empty_when_disabled() -> None:
     cfg = replace(cfg, data=replace(cfg.data, max_eval_samples=0))
     tok = build_tokenizer(cfg)
     assert load_or_create_eval_texts(cfg, tokenizer=tok) == []
+
+
+def test_eval_null_split_uses_train_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """hf_eval_split=None should skip validation and read eval texts from train."""
+    requested_splits: list[str] = []
+    train_items = [{"text": "train-a"}, {"text": "train-b"}]
+
+    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> _FakeHFIterable:
+        _ = (dataset, name, streaming)
+        requested_splits.append(split)
+        if split == "train":
+            return _FakeHFIterable(items=train_items)
+        raise AssertionError(f"Unexpected split requested: {split!r}")
+
+    import datasets
+
+    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
+
+    cfg = _base_cfg()
+    cfg = replace(cfg, data=replace(cfg.data, hf_eval_split=None))
+    tok = build_tokenizer(cfg)
+    tokens = load_or_create_eval_texts(cfg, tokenizer=tok)
+    assert tokens == [tok.encode("train-a"), tok.encode("train-b")]
+    assert requested_splits == ["train"]
+
+
+def test_eval_train_fallback_uses_train_seed_when_data_seed_is_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Train fallback should shuffle with train.seed when data.seed=0."""
+
+    class _SeedCaptureHFIterable(_FakeHFIterable):
+        def shuffle(self, *, seed: int, buffer_size: int) -> _SeedCaptureHFIterable:
+            seen["seed"] = int(seed)
+            seen["buffer_size"] = int(buffer_size)
+            return self
+
+    seen: dict[str, int] = {}
+    train_items = [{"text": "train-a"}, {"text": "train-b"}]
+
+    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> _FakeHFIterable:
+        _ = (dataset, name, streaming)
+        if split == "train":
+            return _SeedCaptureHFIterable(items=train_items)
+        raise FileNotFoundError("no validation split")
+
+    import datasets
+
+    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
+
+    cfg = _base_cfg()
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, hf_eval_split=None, shuffle=True, seed=0),
+        train=replace(cfg.train, seed=69),
+    )
+    tok = build_tokenizer(cfg)
+    tokens = load_or_create_eval_texts(cfg, tokenizer=tok)
+
+    assert tokens == [tok.encode("train-a"), tok.encode("train-b")]
+    assert seen["seed"] == 69
+    assert seen["buffer_size"] == cfg.data.shuffle_buffer_size
