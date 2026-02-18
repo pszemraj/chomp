@@ -65,12 +65,12 @@ conda run --name mega-jax chomp train scratch/local_stability/comma_stability_D.
 
 ## Pilot Results (step 100)
 
-| Variant | loss | grad_norm | loss_tokens | boundary_transitions | docs_per_seq_mean | tokens/sec |
-|---|---:|---:|---:|---:|---:|---:|
-| A | 4.7158 | 0.9802 | 130856 | 152 | 3.3750 | 46287.9 |
-| B | 4.7180 | 0.9803 | 131008 | 152 | 3.3750 | 46232.0 |
-| C | 4.6834 | 1.3681 | 130860 | 148 | 3.3125 | 46178.4 |
-| D | 4.6851 | 1.4087 | 131008 | 148 | 3.3125 | 43862.3 |
+| Variant |   loss | grad_norm | loss_tokens | boundary_transitions | docs_per_seq_mean | tokens/sec |
+| ------- | -----: | --------: | ----------: | -------------------: | ----------------: | ---------: |
+| A       | 4.7158 |    0.9802 |      130856 |                  152 |            3.3750 |    46287.9 |
+| B       | 4.7180 |    0.9803 |      131008 |                  152 |            3.3750 |    46232.0 |
+| C       | 4.6834 |    1.3681 |      130860 |                  148 |            3.3125 |    46178.4 |
+| D       | 4.6851 |    1.4087 |      131008 |                  148 |            3.3125 |    43862.3 |
 
 Run IDs:
 
