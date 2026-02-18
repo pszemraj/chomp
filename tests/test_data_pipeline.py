@@ -21,6 +21,7 @@ from chomp.config import (
     TrainConfig,
 )
 from chomp.data.hf import HFStreamingTextStream, HFStreamSpec
+from chomp.data.pack import TokenPacker
 from chomp.data.pipeline import BinPacker, ByteTokenizer, build_train_iterator
 from chomp.train import run
 from tests.helpers.hf_fakes import FakeHFIterable, FakeHFStateIterable
@@ -112,6 +113,54 @@ def test_bin_packer_state_roundtrip() -> None:
 
     np.testing.assert_array_equal(seq_b[0], seq_b2[0])
     np.testing.assert_array_equal(seq_b[1], seq_b2[1])
+
+
+def test_token_packer_legacy_state_normalizes_large_segment_ids() -> None:
+    """TokenPacker should accept legacy large segment IDs and preserve boundaries."""
+    packer = TokenPacker(
+        seq_len=8,
+        add_bos=False,
+        add_eos=False,
+        bos_id=1,
+        eos_id=2,
+        max_doc_tokens=None,
+    )
+
+    legacy_state = {
+        "remaining_tokens": [10, 11, 12, 20, 21, 30, 31, 32],
+        "remaining_segments": [
+            2_147_483_600,
+            2_147_483_600,
+            2_147_483_600,
+            2_147_483_601,
+            2_147_483_601,
+            2_147_483_602,
+            2_147_483_602,
+            2_147_483_602,
+        ],
+        "next_segment_id": 2_147_483_603,
+    }
+    packer.set_state(legacy_state)
+
+    assert packer.can_pop()
+    _, segs = packer.pop_seq_with_segments()
+    assert segs.dtype == np.int32
+    assert np.all(segs > 0)
+
+    boundary = segs[1:] != segs[:-1]
+    np.testing.assert_array_equal(
+        boundary,
+        np.asarray([False, False, True, False, True, False, False], dtype=bool),
+    )
+
+    # Adding a new document after restore should remain safe and deterministic.
+    packer.add_document([41, 42, 43, 44, 45, 46, 47, 48])
+    seq2, segs2 = packer.pop_seq_with_segments()
+    assert seq2.shape == (8,)
+    np.testing.assert_array_equal(segs2, np.ones((8,), dtype=np.int32))
+
+    state = packer.get_state()
+    assert int(state["next_segment_id"]) in (1, 2)
 
 
 def test_grain_iterator_state_roundtrip() -> None:

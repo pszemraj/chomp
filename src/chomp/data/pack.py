@@ -255,6 +255,71 @@ class TokenPacker:
         self._docs_seen = 0
         self._docs_truncated = 0
 
+    @staticmethod
+    def _flip_segment_id(segment_id: int) -> int:
+        """Flip between the two internal segment IDs used for streaming state.
+
+        :param int segment_id: Current segment ID.
+        :return int: The opposite internal segment ID.
+        """
+        return 2 if int(segment_id) == 1 else 1
+
+    @classmethod
+    def _normalize_state_segments(
+        cls, segments: list[int], next_segment_id: int
+    ) -> tuple[list[int], int]:
+        """Normalize restored segment IDs while preserving boundary transitions.
+
+        Legacy checkpoints may store very large monotonically increasing segment IDs.
+        We collapse those IDs to an internal {1,2} representation to avoid int32
+        overflow while preserving every segment transition.
+
+        :param list[int] segments: Restored segment IDs aligned with remaining tokens.
+        :param int next_segment_id: Restored next segment ID.
+        :return tuple[list[int], int]: Normalized segments and next internal segment ID.
+        """
+        if not segments:
+            if int(next_segment_id) in (1, 2):
+                return [], int(next_segment_id)
+            return [], 1
+
+        normalized = [1]
+        current = 1
+        prev = int(segments[0])
+        for raw in segments[1:]:
+            raw_int = int(raw)
+            if raw_int != prev:
+                current = cls._flip_segment_id(current)
+            normalized.append(current)
+            prev = raw_int
+
+        return normalized, cls._flip_segment_id(current)
+
+    @staticmethod
+    def _reindex_popped_segments(segs: np.ndarray) -> np.ndarray:
+        """Reindex one output window to compact positive segment IDs.
+
+        Segment IDs only need to be unique within the emitted sequence window.
+        This keeps output deterministic and avoids exposing internal ID choices.
+
+        :param np.ndarray segs: Internal segment IDs for one sequence window.
+        :return np.ndarray: Compacted segment IDs, starting at 1.
+        """
+        if segs.size == 0:
+            return segs.astype(np.int32, copy=False)
+
+        out = np.empty_like(segs, dtype=np.int32)
+        out_id = 1
+        out[0] = out_id
+        prev = int(segs[0])
+        for i in range(1, int(segs.size)):
+            cur = int(segs[i])
+            if cur != prev:
+                out_id += 1
+            out[i] = out_id
+            prev = cur
+        return out
+
     def add_document(self, tokens: Iterable[int]) -> None:
         """Add a tokenized document to the packer buffer.
 
@@ -276,7 +341,7 @@ class TokenPacker:
         segment_id = int(self._next_segment_id)
         self._token_buf.append(doc)
         self._segment_buf.append(np.full((doc.size,), segment_id, dtype=np.int32))
-        self._next_segment_id += 1
+        self._next_segment_id = self._flip_segment_id(segment_id)
 
     def can_pop(self) -> bool:
         """Check if buffer has enough tokens for one sequence.
@@ -306,7 +371,7 @@ class TokenPacker:
         if self._token_buf.size != self._segment_buf.size:
             raise RuntimeError("token/segment buffers are misaligned")
         tokens = self._token_buf.take(self.seq_len)
-        segs = self._segment_buf.take(self.seq_len)
+        segs = self._reindex_popped_segments(self._segment_buf.take(self.seq_len))
         return tokens, segs
 
     def get_state(self) -> dict[str, Any]:
@@ -329,8 +394,11 @@ class TokenPacker:
         """
         st = PackerState.from_dict(state)
         self._token_buf.load_remaining(st.remaining_tokens)
-        self._segment_buf.load_remaining(st.remaining_segments)
-        self._next_segment_id = int(st.next_segment_id)
+        normalized_segments, next_segment_id = self._normalize_state_segments(
+            st.remaining_segments, int(st.next_segment_id)
+        )
+        self._segment_buf.load_remaining(normalized_segments)
+        self._next_segment_id = int(next_segment_id)
 
     def get_stats(self) -> dict[str, int]:
         """Return basic document stats.
