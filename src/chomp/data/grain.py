@@ -8,7 +8,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from chomp.config import Config
-from chomp.types import Batch
+from chomp.types import IGNORE_INDEX, Batch
 
 logger = logging.getLogger(__name__)
 
@@ -51,15 +51,38 @@ class GrainTrainBatchIterator:
         if not self._enable_stats:
             self._last_stats = {}
             return batch
-        attn = batch.attention_mask
+        attn = np.asarray(batch.attention_mask, dtype=bool)
+        labels = np.asarray(batch.labels)
+        segs = np.asarray(batch.segment_ids)
+
         tokens_used = int(np.count_nonzero(attn))
         capacity = int(attn.size)
         utilization = float(tokens_used / capacity) if capacity > 0 else 0.0
+        valid_loss = labels[..., 1:] != int(IGNORE_INDEX)
+        valid_loss = valid_loss & attn[..., 1:]
+        loss_tokens_host = int(np.count_nonzero(valid_loss))
+
+        boundary = (segs[..., 1:] != segs[..., :-1]) & (segs[..., 1:] > 0) & (segs[..., :-1] > 0)
+        boundary_transitions = int(np.count_nonzero(boundary))
+
+        flat_segs = segs.reshape(-1, segs.shape[-1])
+        has_tokens = np.any(flat_segs > 0, axis=1)
+        seq_boundary = (
+            (flat_segs[:, 1:] != flat_segs[:, :-1])
+            & (flat_segs[:, 1:] > 0)
+            & (flat_segs[:, :-1] > 0)
+        )
+        docs_per_seq = np.where(has_tokens, 1 + seq_boundary.sum(axis=1), 0).astype(np.int32)
         self._last_stats = {
             "packing_mode": self._packing_mode,
             "packing_tokens": tokens_used,
             "packing_capacity": capacity,
             "packing_utilization": utilization,
+            "loss_tokens_host": loss_tokens_host,
+            "boundary_transitions": boundary_transitions,
+            "docs_per_seq_mean": float(np.mean(docs_per_seq)),
+            "docs_per_seq_min": int(np.min(docs_per_seq)),
+            "docs_per_seq_max": int(np.max(docs_per_seq)),
         }
         return batch
 

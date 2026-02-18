@@ -388,6 +388,30 @@ def test_pipeline_bin_packing_segment_ids() -> None:
     expected_util = float(np.count_nonzero(batch.attention_mask) / batch.attention_mask.size)
     assert stats["packing_utilization"] == expected_util
 
+    labels = np.asarray(batch.labels)
+    attn = np.asarray(batch.attention_mask, dtype=bool)
+    valid_loss = labels[..., 1:] != -100
+    valid_loss = valid_loss & attn[..., 1:]
+    assert stats["loss_tokens_host"] == int(np.count_nonzero(valid_loss))
+
+    segs_all = np.asarray(batch.segment_ids)
+    boundary = (
+        (segs_all[..., 1:] != segs_all[..., :-1])
+        & (segs_all[..., 1:] > 0)
+        & (segs_all[..., :-1] > 0)
+    )
+    assert stats["boundary_transitions"] == int(np.count_nonzero(boundary))
+
+    flat_segs = segs_all.reshape(-1, segs_all.shape[-1])
+    has_tokens = np.any(flat_segs > 0, axis=1)
+    seq_boundary = (
+        (flat_segs[:, 1:] != flat_segs[:, :-1]) & (flat_segs[:, 1:] > 0) & (flat_segs[:, :-1] > 0)
+    )
+    docs_per_seq = np.where(has_tokens, 1 + seq_boundary.sum(axis=1), 0).astype(np.int32)
+    assert stats["docs_per_seq_mean"] == float(np.mean(docs_per_seq))
+    assert stats["docs_per_seq_min"] == int(np.min(docs_per_seq))
+    assert stats["docs_per_seq_max"] == int(np.max(docs_per_seq))
+
 
 def test_hf_pipeline_segment_ids_and_label_mask(
     monkeypatch: pytest.MonkeyPatch,
