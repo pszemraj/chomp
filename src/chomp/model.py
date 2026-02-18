@@ -19,6 +19,7 @@ Backends:
 
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING, Any
 
 import equinox as eqx
@@ -84,6 +85,8 @@ class DummyLM(eqx.Module):
         input_ids: jax.Array,
         labels: jax.Array,
         attention_mask: jax.Array | None = None,
+        segment_ids: jax.Array | None = None,
+        position_ids: jax.Array | None = None,
         *,
         ignore_index: int = -100,
         deterministic: bool = True,
@@ -94,11 +97,14 @@ class DummyLM(eqx.Module):
         :param jax.Array input_ids: Input token IDs of shape [B, T].
         :param jax.Array labels: Label token IDs of shape [B, T].
         :param attention_mask: Optional mask of shape [B, T].
+        :param segment_ids: Optional segment IDs of shape [B, T].
+        :param position_ids: Optional position IDs of shape [B, T].
         :param int ignore_index: Label value to ignore in loss.
         :param bool deterministic: If False, apply dropout.
         :param key: PRNG key required when deterministic=False.
         :return jax.Array: Scalar mean cross-entropy loss.
         """
+        del segment_ids, position_ids
         logits = self(input_ids, attention_mask, deterministic=deterministic, key=key)
 
         # Shift for causal LM
@@ -214,6 +220,7 @@ def training_loss(
     batch: Batch,
     deterministic: bool,
     key: jax.Array | None,
+    use_packed_attention: bool = False,
 ) -> jax.Array:
     """Compute training loss.
 
@@ -224,9 +231,10 @@ def training_loss(
 
     :param Any params: Model parameters from eqx.partition.
     :param Any static: Static model components from eqx.partition.
-    :param Batch batch: Batch with input_ids, labels, attention_mask.
+    :param Batch batch: Batch with input_ids, labels, attention_mask, and packed metadata.
     :param bool deterministic: If False, apply dropout.
     :param key: PRNG key required when deterministic=False.
+    :param bool use_packed_attention: Whether to pass segment_ids/position_ids to backend loss.
     :return jax.Array: Scalar loss value.
     """
 
@@ -239,8 +247,30 @@ def training_loss(
         "deterministic": deterministic,
         "key": key,
     }
+    if use_packed_attention:
+        kwargs["segment_ids"] = batch.segment_ids
+        kwargs["position_ids"] = batch.position_ids
     return model.compute_loss(  # type: ignore[attr-defined]
         batch.input_ids,
         batch.labels,
         **kwargs,
     )
+
+
+def supports_packed_attention(params: Any, static: Any) -> bool:
+    """Return True if the model compute_loss supports packed metadata kwargs.
+
+    :param Any params: Model parameters.
+    :param Any static: Static model components.
+    :return bool: True when compute_loss accepts segment_ids and position_ids.
+    """
+    model = eqx.combine(params, static)
+    compute_loss = getattr(model, "compute_loss", None)
+    if not callable(compute_loss):
+        return False
+    try:
+        sig = inspect.signature(compute_loss)
+    except (TypeError, ValueError):
+        return False
+    params_map = sig.parameters
+    return "segment_ids" in params_map and "position_ids" in params_map

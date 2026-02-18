@@ -108,6 +108,7 @@ def _make_batch() -> Batch:
         labels=arr,
         attention_mask=arr.astype(bool),
         segment_ids=arr,
+        position_ids=arr,
     )
 
 

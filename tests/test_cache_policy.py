@@ -28,11 +28,13 @@ def test_training_loss_rejects_cache_kwarg() -> None:
     labels = jnp.zeros((1, 8), dtype=jnp.int32)
     attention = jnp.ones((1, 8), dtype=jnp.bool_)
     segment_ids = jnp.ones((1, 8), dtype=jnp.int32)
+    position_ids = jnp.zeros((1, 8), dtype=jnp.int32)
     batch = Batch(
         input_ids=input_ids,
         labels=labels,
         attention_mask=attention,
         segment_ids=segment_ids,
+        position_ids=position_ids,
     )
 
     with pytest.raises(TypeError):
@@ -56,11 +58,13 @@ def test_training_loss_default_omits_extra_kwargs(monkeypatch: pytest.MonkeyPatc
     labels = jnp.zeros((1, 4), dtype=jnp.int32)
     attention = jnp.ones((1, 4), dtype=jnp.bool_)
     segment_ids = jnp.ones((1, 4), dtype=jnp.int32)
+    position_ids = jnp.zeros((1, 4), dtype=jnp.int32)
     batch = Batch(
         input_ids=input_ids,
         labels=labels,
         attention_mask=attention,
         segment_ids=segment_ids,
+        position_ids=position_ids,
     )
 
     seen: dict[str, dict[str, object]] = {}

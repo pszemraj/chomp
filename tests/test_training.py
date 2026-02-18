@@ -304,7 +304,14 @@ def test_checkpoint_restore_allows_forward(tmp_path: Path) -> None:
     labels = input_ids.copy()
     attn = jnp.ones((bsz, seq_len), dtype=bool)
     segs = jnp.ones((bsz, seq_len), dtype=jnp.int32)
-    batch = Batch(input_ids=input_ids, labels=labels, attention_mask=attn, segment_ids=segs)
+    pos = jnp.zeros((bsz, seq_len), dtype=jnp.int32)
+    batch = Batch(
+        input_ids=input_ids,
+        labels=labels,
+        attention_mask=attn,
+        segment_ids=segs,
+        position_ids=pos,
+    )
 
     loss = training_loss(state.params, static, batch=batch, deterministic=True, key=None)
     loss_val = float(jax.device_get(loss))
@@ -497,7 +504,13 @@ class DummyIter:
         self._done = True
         zeros = jnp.zeros((1, 1, 8), dtype=jnp.int32)
         attn = jnp.ones((1, 1, 8), dtype=bool)
-        return Batch(input_ids=zeros, labels=zeros, attention_mask=attn, segment_ids=zeros)
+        return Batch(
+            input_ids=zeros,
+            labels=zeros,
+            attention_mask=attn,
+            segment_ids=zeros,
+            position_ids=zeros,
+        )
 
     def get_stats(self) -> dict[str, Any]:
         """Return empty iterator stats for crash tests."""
@@ -711,3 +724,42 @@ def test_tokens_seen_matches_exact_loss_tokens(tmp_path: Path) -> None:
         assert loss_tokens > 0
         cumulative += loss_tokens
         assert int(row["tokens_seen"]) == cumulative
+
+
+def test_strict_multipack_guard_raises_when_backend_unsupported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Strict multipack mode should fail fast when backend support is unavailable."""
+    cfg = Config(
+        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
+        data=DataConfig(
+            backend="local_text",
+            repeat=True,
+            local_text="strict multipack guard\n",
+            packing_mode="multipack",
+            packing_group_docs=2,
+            packing_strict_attention=True,
+            max_eval_samples=0,
+            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+        ),
+        train=TrainConfig(
+            seed=0,
+            steps=1,
+            batch_size=1,
+            seq_len=8,
+            grad_accum=1,
+            jit=False,
+            deterministic=True,
+            allow_cpu=True,
+            log_every=1,
+            eval_every=0,
+        ),
+        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
+        checkpoint=CheckpointConfig(enabled=False),
+        debug=DebugConfig(nan_check=True, check_device_every=0),
+        logging=LoggingConfig(project="chomp", run_dir=str(tmp_path / "run_guard")),
+    )
+
+    monkeypatch.setattr("chomp.train.supports_packed_attention", lambda params, static: False)
+    with pytest.raises(RuntimeError, match="Strict multipack attention"):
+        run(cfg, config_path=None, resume="none")

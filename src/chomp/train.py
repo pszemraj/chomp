@@ -64,7 +64,7 @@ from chomp.data import (
     save_tokenizer_snapshot,
     tokenizer_snapshot_hash,
 )
-from chomp.model import build_model, training_loss
+from chomp.model import build_model, supports_packed_attention, training_loss
 from chomp.types import IGNORE_INDEX, Batch, TrainState
 from chomp.utils.devices import assert_batch_on_device
 from chomp.utils.io import MetricsWriter, add_file_logging, create_run_dir
@@ -391,10 +391,33 @@ def _trim_trailing_token(tokens: list[int], token_id: int | None) -> list[int]:
     """
     if token_id is None:
         return tokens
-    end = len(tokens)
-    while end > 0 and tokens[end - 1] == token_id:
-        end -= 1
-    return tokens[:end]
+    out = list(tokens)
+    while out and out[-1] == token_id:
+        out.pop()
+    return out
+
+
+def _validate_packing_capabilities(cfg: Config, *, params: Any, static: Any) -> None:
+    """Fail fast when strict multipack semantics are requested but unsupported.
+
+    :param Config cfg: Training configuration.
+    :param Any params: Model parameters.
+    :param Any static: Static model components.
+    :raises RuntimeError: If strict multipack attention is requested but unavailable.
+    """
+    strict_multipack = bool(
+        cfg.data.packing_mode == "multipack" and cfg.data.packing_strict_attention
+    )
+    if not strict_multipack:
+        return
+    if supports_packed_attention(params, static):
+        return
+    raise RuntimeError(
+        "Strict multipack attention was requested but the model backend does not "
+        "support packed metadata arguments (segment_ids, position_ids). "
+        "Set data.packing_strict_attention=false to run in non-strict mode or "
+        "upgrade megalodon-jax to a strict-packing-capable version."
+    )
 
 
 def _select_prompt_tokens(
@@ -949,6 +972,9 @@ def make_train_step(
     deterministic = derived_deterministic(cfg)
     grad_accum = int(cfg.train.grad_accum)
     clip_norm = float(cfg.optim.grad_clip_norm) if cfg.optim.grad_clip_norm else 0.0
+    use_packed_attention = bool(
+        cfg.data.packing_mode == "multipack" and cfg.data.packing_strict_attention
+    )
 
     def micro_loss(
         params: Any,
@@ -956,6 +982,7 @@ def make_train_step(
         labels: jax.Array,
         attn: jax.Array,
         segs: jax.Array,
+        pos_ids: jax.Array,
         key: jax.Array | None,
         token_count: jax.Array,
     ) -> jax.Array:
@@ -966,6 +993,7 @@ def make_train_step(
         :param jax.Array labels: Label token IDs [B, T].
         :param jax.Array attn: Attention mask [B, T].
         :param jax.Array segs: Segment IDs [B, T].
+        :param jax.Array pos_ids: Position IDs [B, T].
         :param key: PRNG key for dropout, or None if deterministic.
         :param jax.Array token_count: Number of valid tokens for weighting.
         :return jax.Array: Weighted loss scalar.
@@ -975,6 +1003,7 @@ def make_train_step(
             labels=labels,
             attention_mask=attn.astype(bool),
             segment_ids=segs.astype(jnp.int32),
+            position_ids=pos_ids.astype(jnp.int32),
         )
         loss = training_loss(
             params,
@@ -982,6 +1011,7 @@ def make_train_step(
             batch=micro,
             deterministic=deterministic,
             key=key,
+            use_packed_attention=use_packed_attention,
         )
         return loss * token_count
 
@@ -1005,18 +1035,20 @@ def make_train_step(
 
         def body(
             carry: tuple[jax.Array, Any, jax.Array],
-            inputs: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
+            inputs: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
         ) -> tuple[tuple[jax.Array, Any, jax.Array], None]:
             """Scan body: accumulate loss and gradients for one micro-batch.
 
             :param tuple carry: (loss_sum, grad_sum, token_sum) accumulators.
-            :param tuple inputs: (input_ids, labels, attn, segs, key) for one micro-batch.
+            :param tuple inputs: (input_ids, labels, attn, segs, pos_ids, key) for one micro-batch.
             :return tuple: (updated_carry, None).
             """
             loss_sum, grad_sum, token_sum = carry
-            in_ids, labs, attn, segs, k = inputs
+            in_ids, labs, attn, segs, pos_ids, k = inputs
             token_count = _count_tokens(labs, attn).astype(jnp.float32)
-            loss, grads = loss_and_grad(state.params, in_ids, labs, attn, segs, k, token_count)
+            loss, grads = loss_and_grad(
+                state.params, in_ids, labs, attn, segs, pos_ids, k, token_count
+            )
             loss_sum = loss_sum + loss.astype(jnp.float32)
             grad_sum = jax.tree_util.tree_map(lambda a, b: a + b, grad_sum, grads)
             token_sum = token_sum + token_count
@@ -1030,6 +1062,7 @@ def make_train_step(
                 batch.labels,
                 batch.attention_mask,
                 batch.segment_ids,
+                batch.position_ids,
                 micro_keys,
             ),
         )
@@ -1083,6 +1116,9 @@ def make_eval_step(
         :param Batch batch: Input batch of shape [A, B, T].
         :return tuple: (loss_sum, token_sum) for the batch.
         """
+        use_packed_attention = bool(
+            cfg.data.packing_mode == "multipack" and cfg.data.packing_strict_attention
+        )
         loss0 = jnp.zeros((), dtype=jnp.float32)
         token0 = jnp.zeros((), dtype=jnp.float32)
 
@@ -1092,16 +1128,17 @@ def make_eval_step(
             """Scan body that accumulates loss and token counts for eval.
 
             :param tuple carry: (loss_sum, token_sum) accumulators.
-            :param tuple xs: (input_ids, labels, attn, segs) microbatch inputs.
+            :param tuple xs: (input_ids, labels, attn, segs, pos_ids) microbatch inputs.
             :return tuple: (updated_carry, None).
             """
             loss_sum, token_sum = carry
-            input_ids, labels, attn, segs = xs
+            input_ids, labels, attn, segs, pos_ids = xs
             micro = Batch(
                 input_ids=input_ids,
                 labels=labels,
                 attention_mask=attn.astype(bool),
                 segment_ids=segs.astype(jnp.int32),
+                position_ids=pos_ids.astype(jnp.int32),
             )
             token_count = _count_tokens(labels, attn).astype(jnp.float32)
             loss = training_loss(
@@ -1110,6 +1147,7 @@ def make_eval_step(
                 batch=micro,
                 deterministic=True,
                 key=None,
+                use_packed_attention=use_packed_attention,
             )
             return (loss_sum + loss * token_count, token_sum + token_count), None
 
@@ -1121,6 +1159,7 @@ def make_eval_step(
                 batch.labels,
                 batch.attention_mask,
                 batch.segment_ids,
+                batch.position_ids,
             ),
         )
         return loss_sum, token_sum
@@ -1186,6 +1225,7 @@ def run(
     profile_enabled = _maybe_start_profile(cfg, run_dir=run_dir)
 
     params, static, tx, schedule, state0, abstract_state = _build_model_state(cfg)
+    _validate_packing_capabilities(cfg, params=params, static=static)
 
     # Log param count once
     n_params = param_count(params)
