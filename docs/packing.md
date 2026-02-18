@@ -56,6 +56,10 @@ attention behavior and matches common pretraining setups.
 Segment IDs are still emitted by the data pipeline for boundary loss masking,
 but they are not used to alter attention.
 
+For sequential packing internals, segment IDs are normalized to bounded values
+and reindexed per emitted window. Boundary semantics are unchanged, and this
+avoids long-run integer overflow hazards.
+
 ## Boundary-aware loss masking
 
 Two config knobs control loss behavior at packed boundaries:

@@ -82,6 +82,10 @@ If `train.eval_every > 0`, chomp runs a full pass over the validation texts
 selected at run start and logs `eval_loss`. Eval text selection policy (eval
 split vs train fallback) is documented in [Data Pipeline](data_pipeline.md).
 
+For bin packing, eval now fails fast if the eval iterator cannot emit even a
+single batch (for example, too few eval docs vs `data.packing_buffer_docs`).
+This avoids silent `eval_loss: null` runs.
+
 ## Generation samples
 
 If `train.generate_every > 0`, chomp periodically samples a prompt from a
@@ -125,9 +129,13 @@ Metrics are written to `logging.metrics_file` every `train.log_every` steps
 - `loss`
 - `grad_norm`
 - `lr`
-- `tokens_seen` (actual valid tokens, after masking)
+- `loss_tokens` (exact compiled `token_sum` for that step)
+- `tokens_seen` (cumulative exact compiled `token_sum`)
 - `tokens_per_sec` (actual valid tokens / step_time_s)
 - `packing_mode`, `packing_utilization` (when iterator stats are enabled)
+- `loss_tokens_host` (host recomputed valid-loss tokens from labels + masks)
+- `boundary_transitions` (count of in-batch segment transitions)
+- `docs_per_seq_mean`, `docs_per_seq_min`, `docs_per_seq_max` (document-density summary)
 - `first_step_compile_time_s` (first logged step after compile)
 - `peak_memory_gb` (best-effort, device-dependent)
 - `eval_loss` (only when eval runs)

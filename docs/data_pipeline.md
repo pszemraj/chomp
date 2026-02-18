@@ -71,9 +71,17 @@ The Grain wrapper provides:
 - deterministic iteration
 - optional threaded prefetch (`data.grain_prefetch`)
 - a checkpointable iterator state (`get_state` / `set_state`)
+- host-side packing diagnostics per emitted batch (`get_stats`)
 
 The packing iterator itself remains a small, explicit Python object; Grain only
 wraps it for performance and checkpoint integration.
+
+When stats are enabled (`data.device_put: false`), iterator stats include:
+
+- `packing_tokens`, `packing_capacity`, `packing_utilization`
+- `loss_tokens_host` (valid shifted labels after masking)
+- `boundary_transitions` (segment boundary count)
+- `docs_per_seq_mean`, `docs_per_seq_min`, `docs_per_seq_max`
 
 ## Iterator state and resume
 
@@ -99,6 +107,10 @@ chomp builds a fixed validation set at startup:
 
 The selected texts are derived at run start (configured eval split preferred,
 fallback to train) and are not cached on disk.
+
+If eval cannot emit any batch (for example with bin packing and too few eval
+documents), training now raises a runtime error instead of silently emitting a
+null eval loss.
 
 ## Key config knobs
 
