@@ -13,8 +13,8 @@ This page is the home for packing strategy and boundary-masking behavior.
 
 ## Packing modes
 
-chomp uses a Grain-backed input pipeline and supports two packing strategies,
-both emitting fixed-length windows of `seq_len`:
+chomp uses a Grain-backed input pipeline and supports three packing strategies,
+all emitting fixed-length windows of `seq_len`:
 
 1) **Sequential packer** (`data.packing_mode: sequential`, default)
    - Appends tokenized documents into a rolling buffer and emits windows in
@@ -25,11 +25,18 @@ both emitting fixed-length windows of `seq_len`:
      pack documents into bins of size `seq_len`.
    - Useful for higher utilization when documents are short or variable length.
 
+3) **Multipack packer** (`data.packing_mode: multipack`)
+   - Uses grouped First-Fit-Decreasing packing over `data.packing_group_docs`
+     candidates and emits `A*B` packed sequences per cycle.
+   - Emits per-segment `position_ids` (reset to `0` at each packed segment).
+   - Intended for strict packed training semantics with segment-aware attention.
+
 From each window we derive:
 
 - `input_ids`: tokens `[0..T-1]`
 - `labels`: tokens `[0..T-1]` (model shifts internally)
 - `segment_ids`: packed document IDs for each token
+- `position_ids`: per-segment position IDs
 - `attention_mask`: `True` for real tokens, `False` for padding
 
 The bin packer pads to fixed length; pad positions use `model.pad_token_id` and
@@ -40,21 +47,25 @@ Key bin-packing knobs:
 - `data.packing_buffer_docs`: number of documents to buffer before packing.
 - `data.packing_max_docs_per_bin`: optional cap on documents per bin.
 
-## Stream Semantics
+Key multipack knobs:
 
-chomp treats the corpus as a continuous token stream. This is the only supported
-attention behavior and matches common pretraining setups.
+- `data.packing_group_docs`: grouped lookahead size for multipack packing.
+- `data.packing_strict_attention`: require strict segment-aware attention path.
+- `data.packing_max_docs_per_bin`: optional cap on packed segments per sequence.
 
-**Rationale:**
+## Attention Semantics
 
-- Attention-only segment masking would still leak across documents via
-  Megalodon's ComplexEMA and TimestepNorm ("expensive partial correctness").
-- Boundary loss masking (via `data.mask_boundary_loss`) handles the most
-  important document-boundary concern by preventing cross-document loss.
-- Stream semantics keeps the system minimal and predictable.
+`sequential` and `bin` modes keep stream semantics by default: segment IDs are
+used for loss masking and diagnostics, but attention remains stream-like.
 
-Segment IDs are still emitted by the data pipeline for boundary loss masking,
-but they are not used to alter attention.
+`multipack` with `data.packing_strict_attention: true` enables strict packed
+semantics:
+
+- segment-isolated attention (no cross-segment query-key links),
+- per-segment RoPE position resets via explicit `position_ids`.
+
+If strict packed semantics are requested but unsupported by the backend,
+training fails fast.
 
 For sequential packing internals, segment IDs are normalized to bounded values
 and reindexed per emitted window. Boundary semantics are unchanged, and this
@@ -79,18 +90,13 @@ affect shapes.
 
 ## Position IDs
 
-chomp does not emit position IDs today. Megalodon relies on RoPE internally and
-does not accept explicit position IDs in its public API. If/when we add support
-for position ID reset at segment boundaries, it will be gated by a new config
-flag and will preserve the fixed-shape batch contract.
-
-> [!NOTE]
-> Packing quality today refers to segment IDs + boundary masking. Position ID
-> resets remain deferred until Megalodon exposes a stable API for them.
+The batch contract now includes `position_ids` for all packing modes.
+For `multipack`, they are consumed by strict attention mode to reset positions
+at each packed segment boundary. For non-strict modes, they are informational.
 
 ## Future work
 
 Near-term packing work focuses on:
 
-- position ID resets at segment boundaries (if/when Megalodon exposes this)
-- improving utilization stats and diagnostics
+- further multipack efficiency tuning and diagnostics
+- expanding strict packed semantics to additional backend paths

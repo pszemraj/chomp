@@ -32,6 +32,7 @@ All batches have **fixed shapes**:
 - `labels`: `[A, B, T]` int32 (aligned with `input_ids`)
 - `attention_mask`: `[A, B, T]` bool
 - `segment_ids`: `[A, B, T]` int32
+- `position_ids`: `[A, B, T]` int32
 
 Where:
 
@@ -59,8 +60,8 @@ snapshot on resume to keep tokenization reproducible.
 
 ## Packing
 
-The pipeline supports `sequential` and `bin` packing modes and always emits
-fixed windows of length `seq_len` before batching.
+The pipeline supports `sequential`, `bin`, and `multipack` packing modes and
+always emits fixed windows of length `seq_len` before batching.
 Packing trade-offs and boundary-masking behavior are documented in
 [Packing and Boundary Semantics](packing.md).
 
@@ -108,9 +109,9 @@ chomp builds a fixed validation set at startup:
 The selected texts are derived at run start (configured eval split preferred,
 fallback to train) and are not cached on disk.
 
-If eval cannot emit any batch (for example with bin packing and too few eval
-documents), training now raises a runtime error instead of silently emitting a
-null eval loss.
+If eval cannot emit any batch (for example with `bin`/`multipack` and too few
+eval documents for packer thresholds), training now raises a runtime error
+instead of silently emitting a null eval loss.
 
 ## Key config knobs
 
@@ -121,5 +122,6 @@ are:
 - `data.backend`, `data.hf_*`, `data.text_key`
 - `data.hf_eval_split`, `data.max_eval_samples`
 - `data.shuffle`, `data.shuffle_buffer_size`, `data.seed`, `data.repeat`
-- `data.packing_mode`, `data.packing_buffer_docs`, `data.packing_max_docs_per_bin`
+- `data.packing_mode`, `data.packing_buffer_docs`, `data.packing_group_docs`
+- `data.packing_max_docs_per_bin`, `data.packing_strict_attention`
 - `train.seq_len`, `train.batch_size`, `train.grad_accum`

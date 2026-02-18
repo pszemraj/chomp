@@ -76,14 +76,18 @@ segment IDs, and boundary-related masking behavior are defined in
 [Packing and Boundary Semantics](packing.md), and their placement in the data
 path is defined in [Data Pipeline](data_pipeline.md).
 
+When `data.packing_mode=multipack` and `data.packing_strict_attention=true`,
+the step also forwards `segment_ids` and `position_ids` into the backend model
+for strict packed semantics (segment-isolated attention + position reset).
+
 ## Evaluation
 
 If `train.eval_every > 0`, chomp runs a full pass over the validation texts
 selected at run start and logs `eval_loss`. Eval text selection policy (eval
 split vs train fallback) is documented in [Data Pipeline](data_pipeline.md).
 
-For bin packing, eval now fails fast if the eval iterator cannot emit even a
-single batch (for example, too few eval docs vs `data.packing_buffer_docs`).
+For `bin` and `multipack`, eval now fails fast if the eval iterator cannot emit
+even a single batch (for example, too few eval docs for packer thresholds).
 This avoids silent `eval_loss: null` runs.
 
 ## Generation samples
