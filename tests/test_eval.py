@@ -108,6 +108,42 @@ def test_eval_fails_fast_when_bin_packer_emits_zero_batches(tmp_path: Path) -> N
         run(cfg, config_path=None, resume="none")
 
 
+def test_eval_fails_fast_when_multipack_emits_zero_batches(tmp_path: Path) -> None:
+    """Eval should raise when multipack cannot produce any batch."""
+    run_dir = tmp_path / "run_multipack"
+    cfg = Config(
+        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
+        data=DataConfig(
+            backend="local_text",
+            repeat=True,
+            local_text="x",
+            packing_mode="multipack",
+            packing_group_docs=4,
+            max_eval_samples=3,
+            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+        ),
+        train=TrainConfig(
+            seed=0,
+            steps=1,
+            batch_size=1,
+            seq_len=8,
+            grad_accum=1,
+            jit=False,
+            deterministic=True,
+            allow_cpu=True,
+            log_every=1000,
+            eval_every=1,
+        ),
+        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
+        checkpoint=CheckpointConfig(enabled=False),
+        debug=DebugConfig(nan_check=True, check_device_every=0),
+        logging=LoggingConfig(project="chomp", run_dir=str(run_dir)),
+    )
+
+    with pytest.raises(RuntimeError, match="Evaluation produced zero batches"):
+        run(cfg, config_path=None, resume="none")
+
+
 def _base_cfg() -> Config:
     """Create a base config for eval text selection tests."""
     return Config(

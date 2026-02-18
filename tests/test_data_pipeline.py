@@ -21,7 +21,7 @@ from chomp.config import (
     TrainConfig,
 )
 from chomp.data.hf import HFStreamingTextStream, HFStreamSpec
-from chomp.data.pack import TokenPacker
+from chomp.data.pack import MultipackPacker, TokenPacker
 from chomp.data.pipeline import BinPacker, ByteTokenizer, build_train_iterator
 from chomp.train import run
 from tests.helpers.hf_fakes import FakeHFIterable, FakeHFStateIterable
@@ -113,6 +113,73 @@ def test_bin_packer_state_roundtrip() -> None:
 
     np.testing.assert_array_equal(seq_b[0], seq_b2[0])
     np.testing.assert_array_equal(seq_b[1], seq_b2[1])
+
+
+def test_multipack_packer_emits_segment_local_positions() -> None:
+    """MultipackPacker should emit segment IDs and per-segment position IDs."""
+    packer = MultipackPacker(
+        seq_len=8,
+        add_bos=False,
+        add_eos=False,
+        bos_id=1,
+        eos_id=2,
+        max_doc_tokens=None,
+        bins_per_pack=1,
+        group_docs=2,
+        max_docs_per_bin=None,
+        pad_id=0,
+    )
+
+    packer.add_document([10, 11, 12])
+    packer.add_document([20, 21])
+    assert packer.can_pop()
+    toks, segs, pos = packer.pop_seq_with_metadata()
+
+    np.testing.assert_array_equal(toks[:5], np.asarray([10, 11, 12, 20, 21], dtype=np.int32))
+    np.testing.assert_array_equal(segs[:5], np.asarray([1, 1, 1, 2, 2], dtype=np.int32))
+    np.testing.assert_array_equal(pos[:5], np.asarray([0, 1, 2, 0, 1], dtype=np.int32))
+    assert np.all(segs[5:] == 0)
+    assert np.all(pos[5:] == 0)
+
+
+def test_multipack_packer_state_roundtrip() -> None:
+    """Multipack packer state should roundtrip via get/set_state."""
+    packer = MultipackPacker(
+        seq_len=8,
+        add_bos=False,
+        add_eos=False,
+        bos_id=1,
+        eos_id=2,
+        max_doc_tokens=None,
+        bins_per_pack=1,
+        group_docs=2,
+        max_docs_per_bin=None,
+        pad_id=0,
+    )
+    packer.add_document([31, 32, 33])
+    packer.add_document([41, 42])
+
+    state = packer.get_state()
+    seq_a = packer.pop_seq_with_metadata()
+
+    restored = MultipackPacker(
+        seq_len=8,
+        add_bos=False,
+        add_eos=False,
+        bos_id=1,
+        eos_id=2,
+        max_doc_tokens=None,
+        bins_per_pack=1,
+        group_docs=2,
+        max_docs_per_bin=None,
+        pad_id=0,
+    )
+    restored.set_state(state)
+    seq_b = restored.pop_seq_with_metadata()
+
+    np.testing.assert_array_equal(seq_a[0], seq_b[0])
+    np.testing.assert_array_equal(seq_a[1], seq_b[1])
+    np.testing.assert_array_equal(seq_a[2], seq_b[2])
 
 
 def test_token_packer_legacy_state_normalizes_large_segment_ids() -> None:
@@ -411,6 +478,54 @@ def test_pipeline_bin_packing_segment_ids() -> None:
     assert stats["docs_per_seq_mean"] == float(np.mean(docs_per_seq))
     assert stats["docs_per_seq_min"] == int(np.min(docs_per_seq))
     assert stats["docs_per_seq_max"] == int(np.max(docs_per_seq))
+
+
+def test_pipeline_multipack_position_ids_and_stats() -> None:
+    """Multipack mode should emit per-segment position IDs and packing stats."""
+    cfg = Config(
+        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
+        data=DataConfig(
+            backend="local_text",
+            repeat=True,
+            local_text="hi",
+            packing_mode="multipack",
+            packing_group_docs=4,
+            packing_max_docs_per_bin=None,
+            mask_boundary_loss=True,
+            train_on_eos=True,
+            tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
+        ),
+        train=TrainConfig(
+            steps=1,
+            batch_size=1,
+            seq_len=8,
+            grad_accum=1,
+            jit=False,
+            deterministic=True,
+            allow_cpu=True,
+        ),
+        optim=OptimConfig(warmup_steps=0),
+    )
+
+    it = build_train_iterator(cfg)
+    batch = next(it)
+    segs = np.asarray(batch.segment_ids[0, 0], dtype=np.int32)
+    pos = np.asarray(batch.position_ids[0, 0], dtype=np.int32)
+    attn = np.asarray(batch.attention_mask[0, 0], dtype=bool)
+
+    assert np.array_equal(batch.attention_mask, batch.segment_ids > 0)
+    assert np.all(pos[~attn] == 0)
+    for idx in range(int(segs.size)):
+        if segs[idx] <= 0:
+            continue
+        if idx == 0 or segs[idx] != segs[idx - 1]:
+            assert pos[idx] == 0
+        else:
+            assert pos[idx] == pos[idx - 1] + 1
+
+    stats = it.get_stats()
+    assert stats["packing_mode"] == "multipack"
+    assert stats["packing_capacity"] == batch.segment_ids.size
 
 
 def test_hf_pipeline_segment_ids_and_label_mask(

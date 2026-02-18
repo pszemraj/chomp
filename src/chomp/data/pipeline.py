@@ -35,7 +35,7 @@ from chomp.config import Config, validate_config
 from chomp.types import IGNORE_INDEX, Batch
 
 from .hf import HFStreamingTextStream, HFStreamSpec, ListTokenStream, LocalTextStream
-from .pack import BinPacker, TokenPacker
+from .pack import BinPacker, MultipackPacker, TokenPacker
 
 
 class Tokenizer(Protocol):
@@ -642,6 +642,8 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
         "mode": d.packing_mode,
         "buffer_docs": d.packing_buffer_docs,
         "max_docs_per_bin": d.packing_max_docs_per_bin,
+        "group_docs": d.packing_group_docs,
+        "strict_attention": d.packing_strict_attention,
         "mask_boundary_loss": d.mask_boundary_loss,
         "train_on_eos": d.train_on_eos,
         "grain_prefetch": d.grain_prefetch,
@@ -708,6 +710,19 @@ class TrainBatchIterator:
                 max_docs_per_bin=cfg.data.packing_max_docs_per_bin,
                 pad_id=cfg.model.pad_token_id,
             )
+        elif cfg.data.packing_mode == "multipack":
+            self._packer = MultipackPacker(
+                seq_len=cfg.train.seq_len,
+                add_bos=cfg.data.tokenizer.add_bos,
+                add_eos=cfg.data.tokenizer.add_eos,
+                bos_id=cfg.model.bos_token_id,
+                eos_id=cfg.model.eos_token_id,
+                max_doc_tokens=cfg.data.tokenizer.max_doc_tokens,
+                bins_per_pack=int(cfg.train.grad_accum) * int(cfg.train.batch_size),
+                group_docs=cfg.data.packing_group_docs,
+                max_docs_per_bin=cfg.data.packing_max_docs_per_bin,
+                pad_id=cfg.model.pad_token_id,
+            )
         else:
             self._packer = TokenPacker(
                 seq_len=cfg.train.seq_len,
@@ -741,14 +756,52 @@ class TrainBatchIterator:
             ids = list(item)
         self._packer.add_document(ids)
 
-    def _next_sequence(self) -> tuple[np.ndarray, np.ndarray]:
-        """Pop the next [T] token/segment sequence from the packer.
+    @staticmethod
+    def _position_ids_from_segments(segs: np.ndarray) -> np.ndarray:
+        """Build per-segment position IDs from segment IDs.
 
-        :return tuple[np.ndarray, np.ndarray]: Tokens and segment IDs (length T).
+        :param np.ndarray segs: Segment IDs of length T.
+        :return np.ndarray: Position IDs of length T.
+        """
+        pos = np.zeros_like(segs, dtype=np.int32)
+        cur_seg = 0
+        cur_pos = 0
+        for i in range(int(segs.size)):
+            seg_id = int(segs[i])
+            if seg_id <= 0:
+                pos[i] = 0
+                cur_seg = 0
+                cur_pos = 0
+                continue
+            if seg_id != cur_seg:
+                cur_seg = seg_id
+                cur_pos = 0
+            pos[i] = cur_pos
+            cur_pos += 1
+        return pos
+
+    def _next_sequence(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Pop the next [T] token/segment/position sequence from the packer.
+
+        :return tuple[np.ndarray, np.ndarray, np.ndarray]: Tokens, segment IDs, position IDs.
         """
         while not self._packer.can_pop():
             self._push_next_document()
-        return self._packer.pop_seq_with_segments()
+        pop_with_metadata = getattr(self._packer, "pop_seq_with_metadata", None)
+        if callable(pop_with_metadata):
+            seq, segs, pos = pop_with_metadata()
+            return (
+                np.asarray(seq, dtype=np.int32),
+                np.asarray(segs, dtype=np.int32),
+                np.asarray(pos, dtype=np.int32),
+            )
+        seq, segs = self._packer.pop_seq_with_segments()
+        segs_arr = np.asarray(segs, dtype=np.int32)
+        return (
+            np.asarray(seq, dtype=np.int32),
+            segs_arr,
+            self._position_ids_from_segments(segs_arr),
+        )
 
     def _mask_labels(self, labels: np.ndarray, segs: np.ndarray) -> np.ndarray:
         """Apply boundary and EOS masking to label array.
@@ -770,27 +823,37 @@ class TrainBatchIterator:
         inps = np.empty((need, self._T), dtype=np.int32)
         labs = np.empty((need, self._T), dtype=np.int32)
         segs_out = np.empty((need, self._T), dtype=np.int32)
+        pos_out = np.empty((need, self._T), dtype=np.int32)
 
         idx = 0
         while idx < need:
-            seq, segs = self._next_sequence()  # [T]
+            seq, segs, pos_ids = self._next_sequence()  # [T]
             # Convert to input/labels [T]. Labels align with input_ids; model shifts internally.
             inp = np.asarray(seq, dtype=np.int32)
             lab = self._mask_labels(inp.copy(), segs)
             seg = np.asarray(segs, dtype=np.int32)
+            pos = np.asarray(pos_ids, dtype=np.int32)
             inps[idx] = inp
             labs[idx] = lab
             segs_out[idx] = seg
+            pos_out[idx] = pos
             idx += 1
 
         # Reshape -> [A, B, T]
         inps = inps.reshape(self._A, self._B, self._T)
         labs = labs.reshape(self._A, self._B, self._T)
         segs = segs_out.reshape(self._A, self._B, self._T)
+        pos = pos_out.reshape(self._A, self._B, self._T)
 
         attn = segs > 0
 
-        batch = Batch(input_ids=inps, labels=labs, attention_mask=attn, segment_ids=segs)
+        batch = Batch(
+            input_ids=inps,
+            labels=labs,
+            attention_mask=attn,
+            segment_ids=segs,
+            position_ids=pos,
+        )
         if self._device_put:
             import jax  # imported lazily to keep iterator usable in non-JAX contexts
 

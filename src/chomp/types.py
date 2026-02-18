@@ -14,6 +14,7 @@ chomp standardizes on fixed shapes:
   labels:         [A, B, T]
   attention_mask: [A, B, T] boolean
   segment_ids:    [A, B, T] int32
+  position_ids:   [A, B, T] int32
 where:
   A = grad_accum (microbatches per optimizer update)
   B = batch_size
@@ -48,6 +49,7 @@ class Batch(eqx.Module):
     labels: jax.Array
     attention_mask: jax.Array
     segment_ids: jax.Array
+    position_ids: jax.Array
 
 
 class TrainState(eqx.Module):

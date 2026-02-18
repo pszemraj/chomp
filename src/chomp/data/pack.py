@@ -703,3 +703,265 @@ class BinPacker:
             seg_id += 1
 
         return tokens, segs
+
+
+@dataclass(frozen=True)
+class MultipackPackerState:
+    """JSON-serializable state for the multipack packer."""
+
+    pending_docs: list[list[int]]
+    ready_tokens: list[list[int]]
+    ready_segments: list[list[int]]
+    ready_positions: list[list[int]]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to a JSON-serializable dictionary.
+
+        :return dict[str, Any]: State as a dict.
+        """
+        return {
+            "pending_docs": self.pending_docs,
+            "ready_tokens": self.ready_tokens,
+            "ready_segments": self.ready_segments,
+            "ready_positions": self.ready_positions,
+        }
+
+    @staticmethod
+    def from_dict(d: dict[str, Any]) -> MultipackPackerState:
+        """Construct MultipackPackerState from a dictionary.
+
+        :param dict[str, Any] d: State dict from to_dict().
+        :raises ValueError: If ready component lengths differ.
+        :return MultipackPackerState: Reconstructed state.
+        """
+        pending = d.get("pending_docs") or []
+        ready_tokens = d.get("ready_tokens") or []
+        ready_segments = d.get("ready_segments") or []
+        ready_positions = d.get("ready_positions") or []
+        if not (len(ready_tokens) == len(ready_segments) == len(ready_positions)):
+            raise ValueError(
+                "ready_tokens, ready_segments, and ready_positions must have matching lengths "
+                f"({len(ready_tokens)}, {len(ready_segments)}, {len(ready_positions)})"
+            )
+        return MultipackPackerState(
+            pending_docs=[list(x) for x in pending],
+            ready_tokens=[list(x) for x in ready_tokens],
+            ready_segments=[list(x) for x in ready_segments],
+            ready_positions=[list(x) for x in ready_positions],
+        )
+
+
+class MultipackPacker:
+    """Groupwise FFD sample packer with segment-local position IDs."""
+
+    def __init__(
+        self,
+        *,
+        seq_len: int,
+        add_bos: bool,
+        add_eos: bool,
+        bos_id: int,
+        eos_id: int,
+        max_doc_tokens: int | None,
+        bins_per_pack: int,
+        group_docs: int,
+        max_docs_per_bin: int | None,
+        pad_id: int,
+    ):
+        """Initialize the multipack packer.
+
+        :param int seq_len: Fixed sequence length.
+        :param bool add_bos: Whether to prepend BOS token to each document.
+        :param bool add_eos: Whether to append EOS token to each document.
+        :param int bos_id: BOS token ID.
+        :param int eos_id: EOS token ID.
+        :param max_doc_tokens: Optional max tokens per document before truncation.
+        :param int bins_per_pack: Number of output sequences produced per pack cycle.
+        :param int group_docs: Number of candidate documents to consider per cycle.
+        :param max_docs_per_bin: Optional cap on docs packed into a single sequence.
+        :param int pad_id: Padding token ID.
+        :raises ValueError: If an input argument is invalid.
+        """
+        if seq_len < 8:
+            raise ValueError(f"seq_len must be >=8, got {seq_len}")
+        if bins_per_pack <= 0:
+            raise ValueError(f"bins_per_pack must be positive, got {bins_per_pack}")
+        if group_docs <= 0:
+            raise ValueError(f"group_docs must be positive, got {group_docs}")
+        if max_docs_per_bin is not None and max_docs_per_bin <= 0:
+            raise ValueError(f"max_docs_per_bin must be positive when set, got {max_docs_per_bin}")
+
+        self.seq_len = int(seq_len)
+        self._capacity = int(seq_len)
+        self.add_bos = bool(add_bos)
+        self.add_eos = bool(add_eos)
+        self.bos_id = int(bos_id)
+        self.eos_id = int(eos_id)
+        self.max_doc_tokens = None if max_doc_tokens is None else int(max_doc_tokens)
+        self._bins_per_pack = int(bins_per_pack)
+        self._group_docs = int(group_docs)
+        self._max_docs_per_bin = None if max_docs_per_bin is None else int(max_docs_per_bin)
+        self._pad_id = int(pad_id)
+
+        self._pending_docs: deque[np.ndarray] = deque()
+        self._ready: deque[tuple[np.ndarray, np.ndarray, np.ndarray]] = deque()
+        self._docs_seen = 0
+        self._docs_truncated = 0
+
+    def add_document(self, tokens: Iterable[int]) -> None:
+        """Add a tokenized document to the multipack buffer.
+
+        :param tokens: Iterable of token IDs for the document.
+        """
+        doc, truncated = _prepare_doc_tokens(
+            tokens,
+            add_bos=self.add_bos,
+            add_eos=self.add_eos,
+            bos_id=self.bos_id,
+            eos_id=self.eos_id,
+            max_doc_tokens=self.max_doc_tokens,
+        )
+        self._docs_seen += 1
+        if truncated:
+            self._docs_truncated += 1
+        if doc.size == 0:
+            return
+
+        if doc.size > self._capacity:
+            for start in range(0, doc.size, self._capacity):
+                chunk = doc[start : start + self._capacity]
+                if chunk.size:
+                    self._pending_docs.append(chunk)
+        else:
+            self._pending_docs.append(doc)
+
+    def can_pop(self) -> bool:
+        """Check if we can pop a packed sequence.
+
+        :return bool: True if a sequence is ready.
+        """
+        if self._ready:
+            return True
+        threshold = max(self._bins_per_pack, self._group_docs)
+        if len(self._pending_docs) < threshold:
+            return False
+        self._pack_group()
+        return bool(self._ready)
+
+    def pop_seq_with_segments(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return ([seq_len] tokens, [seq_len] segment_ids).
+
+        :raises RuntimeError: If called before any sequence is ready.
+        :return tuple[np.ndarray, np.ndarray]: Token and segment arrays.
+        """
+        tokens, segs, _ = self.pop_seq_with_metadata()
+        return tokens, segs
+
+    def pop_seq_with_metadata(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return ([seq_len] tokens, [seq_len] segment_ids, [seq_len] position_ids).
+
+        :raises RuntimeError: If called before any sequence is ready.
+        :return tuple[np.ndarray, np.ndarray, np.ndarray]: Token, segment, and position arrays.
+        """
+        if not self.can_pop():
+            raise RuntimeError("multipack packer has no ready sequences")
+        tokens, segs, pos = self._ready.popleft()
+        return tokens, segs, pos
+
+    def get_state(self) -> dict[str, Any]:
+        """Capture packer state for checkpointing.
+
+        :return dict[str, Any]: Serializable state dict.
+        """
+        st = MultipackPackerState(
+            pending_docs=[x.tolist() for x in self._pending_docs],
+            ready_tokens=[x.tolist() for x, _, _ in self._ready],
+            ready_segments=[x.tolist() for _, x, _ in self._ready],
+            ready_positions=[x.tolist() for _, _, x in self._ready],
+        )
+        return st.to_dict()
+
+    def set_state(self, state: dict[str, Any]) -> None:
+        """Restore packer state from a checkpoint.
+
+        :param dict[str, Any] state: State dict from get_state().
+        """
+        st = MultipackPackerState.from_dict(state)
+        self._pending_docs = deque(np.asarray(x, dtype=np.int32) for x in st.pending_docs)
+        self._ready = deque(
+            [
+                (
+                    np.asarray(tokens, dtype=np.int32),
+                    np.asarray(segs, dtype=np.int32),
+                    np.asarray(pos, dtype=np.int32),
+                )
+                for tokens, segs, pos in zip(
+                    st.ready_tokens, st.ready_segments, st.ready_positions, strict=True
+                )
+            ]
+        )
+
+    def get_stats(self) -> dict[str, int]:
+        """Return basic document stats.
+
+        :return dict[str, int]: docs_seen and docs_truncated counts.
+        """
+        return {
+            "docs_seen": int(self._docs_seen),
+            "docs_truncated": int(self._docs_truncated),
+        }
+
+    def _pack_group(self) -> None:
+        """Pack one candidate group into ready sequences."""
+        if len(self._pending_docs) < self._bins_per_pack:
+            return
+        group_n = min(len(self._pending_docs), max(self._bins_per_pack, self._group_docs))
+        candidates = [self._pending_docs.popleft() for _ in range(group_n)]
+        segments = sorted(candidates, key=lambda x: int(x.size), reverse=True)
+
+        bins = [
+            _Bin(capacity=self._capacity, max_docs=self._max_docs_per_bin)
+            for _ in range(self._bins_per_pack)
+        ]
+        for idx in range(self._bins_per_pack):
+            bins[idx].add(segments[idx])
+
+        leftovers: list[np.ndarray] = []
+        for seg in segments[self._bins_per_pack :]:
+            placed = False
+            for b in bins:
+                if b.can_fit(seg):
+                    b.add(seg)
+                    placed = True
+                    break
+            if not placed:
+                leftovers.append(seg)
+
+        for seg in reversed(leftovers):
+            self._pending_docs.appendleft(seg)
+
+        for b in bins:
+            self._ready.append(self._render_bin(b))
+
+    def _render_bin(self, b: _Bin) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Render a bin into (tokens, segment_ids, position_ids) arrays.
+
+        :param _Bin b: Bin with packed segments.
+        :return tuple[np.ndarray, np.ndarray, np.ndarray]: Arrays of length seq_len.
+        """
+        tokens = np.full((self._capacity,), self._pad_id, dtype=np.int32)
+        segs = np.zeros((self._capacity,), dtype=np.int32)
+        pos_ids = np.zeros((self._capacity,), dtype=np.int32)
+
+        pos = 0
+        seg_id = 1
+        for seg in b.segments:
+            length = int(seg.size)
+            end = pos + length
+            tokens[pos:end] = seg
+            segs[pos:end] = seg_id
+            pos_ids[pos:end] = np.arange(length, dtype=np.int32)
+            pos = end
+            seg_id += 1
+
+        return tokens, segs, pos_ids
