@@ -1455,7 +1455,8 @@ def run(
                     with step_annotation("train_step"):
                         t1 = time.perf_counter()
                         state, metrics = train_step(state, batch)
-                        tokens_seen_count += _estimate_tokens_seen_increment(cfg, data_stats)
+                        step_loss_tokens = int(jax.device_get(metrics["token_sum"]))
+                        tokens_seen_count += step_loss_tokens
 
                     host_step = int(step_i)
 
@@ -1530,6 +1531,7 @@ def run(
                             "loss": float(metrics_host["loss"]),
                             "grad_norm": float(metrics_host["grad_norm"]),
                             "lr": lr_adam,
+                            "loss_tokens": int(step_loss_tokens),
                             "step_time_s": float(step_time_s),
                             "tokens_per_sec": float(tokens_per_sec),
                             "tokens_seen": int(tokens_seen_host),

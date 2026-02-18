@@ -666,3 +666,48 @@ def test_train_repeat_false_exits_cleanly(tmp_path: Path) -> None:
     metrics_path = Path(cfg.logging.run_dir) / cfg.logging.metrics_file
     rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
     assert any(row.get("data_exhausted") for row in rows)
+
+
+def test_tokens_seen_matches_exact_loss_tokens(tmp_path: Path) -> None:
+    """tokens_seen should equal cumulative exact loss_tokens from compiled metrics."""
+    cfg = Config(
+        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
+        data=DataConfig(
+            backend="local_text",
+            repeat=True,
+            local_text="token accounting check\n",
+            mask_boundary_loss=True,
+            train_on_eos=True,
+            tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
+        ),
+        train=TrainConfig(
+            seed=0,
+            steps=4,
+            batch_size=1,
+            seq_len=8,
+            grad_accum=2,
+            jit=False,
+            deterministic=True,
+            allow_cpu=True,
+            log_every=1,
+            eval_every=0,
+        ),
+        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
+        checkpoint=CheckpointConfig(enabled=False),
+        debug=DebugConfig(nan_check=True, check_device_every=0),
+        logging=LoggingConfig(project="chomp", run_dir=str(tmp_path / "run")),
+    )
+
+    run(cfg, config_path=None, resume="none")
+
+    metrics_path = Path(cfg.logging.run_dir) / cfg.logging.metrics_file
+    rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
+    train_rows = [row for row in rows if "loss_tokens" in row]
+    assert len(train_rows) == cfg.train.steps
+
+    cumulative = 0
+    for row in train_rows:
+        loss_tokens = int(row["loss_tokens"])
+        assert loss_tokens > 0
+        cumulative += loss_tokens
+        assert int(row["tokens_seen"]) == cumulative
