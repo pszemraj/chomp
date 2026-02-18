@@ -1305,18 +1305,31 @@ def run(
             return {}
         total_loss = 0.0
         total_tokens = 0.0
+        batch_count = 0
         eval_it = build_eval_iterator(cfg, tokens=eval_tokens, tokenizer=tokenizer)
         while True:
             try:
                 eval_batch = next(eval_it)
             except StopIteration:
                 break
+            batch_count += 1
             if not cfg.data.device_put:
                 eval_batch = jax.device_put(eval_batch)
             loss_sum, token_sum = eval_step(params, eval_batch)
             loss_sum_host, token_sum_host = jax.device_get((loss_sum, token_sum))
             total_loss += float(loss_sum_host)
             total_tokens += float(token_sum_host)
+
+        if batch_count == 0:
+            bins_per_pack = int(cfg.train.grad_accum) * int(cfg.train.batch_size)
+            raise RuntimeError(
+                "Evaluation produced zero batches. "
+                f"packing_mode={cfg.data.packing_mode!r}, "
+                f"packing_buffer_docs={int(cfg.data.packing_buffer_docs)}, "
+                f"bins_per_pack={bins_per_pack}, "
+                f"eval_doc_count={len(eval_tokens)}. "
+                "Increase eval samples, reduce packing_buffer_docs, or use sequential packing."
+            )
 
         if total_tokens <= 0:
             return {"eval_loss": None, "eval_tokens": 0}
