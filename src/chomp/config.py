@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 Backend = Literal["dummy", "megalodon"]
 DatasetBackend = Literal["hf", "local_text"]
 TokenizerKind = Literal["byte", "hf"]
-PackingMode = Literal["sequential", "bin"]
+PackingMode = Literal["sequential", "bin", "multipack"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 
 
@@ -185,12 +185,16 @@ class DataConfig:
     # Debug-only local text source (exercises tokenize+pack path, not synthetic ids)
     local_text: str = "Hello from chomp.\n"
 
-    # Packing mode: sequential stream packer or bin-packing (FFD).
+    # Packing mode: sequential stream packer, bin-packing (FFD), or multipack.
     packing_mode: PackingMode = "sequential"
     # Bin-packing buffer size (documents). Must be >= batch_size * grad_accum.
     packing_buffer_docs: int = 128
     # Optional cap on how many documents may be packed into a single bin.
     packing_max_docs_per_bin: int | None = None
+    # Multipack lookahead group size (documents).
+    packing_group_docs: int = 100_000
+    # Require strict segment-aware attention semantics when using multipack.
+    packing_strict_attention: bool = True
 
     # Packed-doc loss behavior
     mask_boundary_loss: bool = True
@@ -778,8 +782,11 @@ def _validate_data(cfg: Config) -> None:
     else:
         _vfail(f"data.backend must be 'hf' or 'local_text', got {cfg.data.backend!r}")
 
-    if cfg.data.packing_mode not in ("sequential", "bin"):
-        _vfail(f"data.packing_mode must be 'sequential' or 'bin', got {cfg.data.packing_mode!r}")
+    if cfg.data.packing_mode not in ("sequential", "bin", "multipack"):
+        _vfail(
+            "data.packing_mode must be 'sequential', 'bin', or 'multipack', "
+            f"got {cfg.data.packing_mode!r}"
+        )
     if cfg.data.packing_mode == "bin":
         if cfg.data.packing_buffer_docs <= 0:
             _vfail(
@@ -797,6 +804,11 @@ def _validate_data(cfg: Config) -> None:
                 "data.packing_max_docs_per_bin must be positive when set, "
                 f"got {cfg.data.packing_max_docs_per_bin}"
             )
+    if cfg.data.packing_mode == "multipack" and cfg.data.packing_group_docs <= 0:
+        _vfail(
+            "data.packing_group_docs must be positive when packing_mode='multipack', "
+            f"got {cfg.data.packing_group_docs}"
+        )
 
     if cfg.data.grain_prefetch < 0:
         _vfail(f"data.grain_prefetch must be >=0, got {cfg.data.grain_prefetch}")
