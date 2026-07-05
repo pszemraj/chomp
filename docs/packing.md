@@ -67,9 +67,53 @@ semantics:
 If strict packed semantics are requested but unsupported by the backend,
 training fails fast.
 
+### Known limitation: CEMA/TimestepNorm state leakage
+
+Even under `multipack` + `packing_strict_attention: true`, Megalodon's
+`ComplexEMA` and `TimestepNorm` layers never receive segment boundaries and
+keep accumulating recurrent/normalization state across packed document
+boundaries. Attention-only segment masking still leaks across documents via
+Megalodon's ComplexEMA and TimestepNorm ("expensive partial correctness").
+"Strict packed semantics" in this codebase currently means *attention-isolated
+with per-segment RoPE*, not *fully segment-isolated*. True segment reset would
+require plumbing `segment_ids` into `megalodon_jax/layers/complex_ema.py` and
+`megalodon_jax/layers/timestep_norm.py` (tracked under Future work; out of
+scope here). This leakage applies identically to all packing modes and
+datasets.
+
 For sequential packing internals, segment IDs are normalized to bounded values
 and reindexed per emitted window. Boundary semantics are unchanged, and this
 avoids long-run integer overflow hazards.
+
+## Window shuffling (batch decorrelation)
+
+Independent of packing mode, every batch used to be assembled from *consecutive*
+packer output: all `A*B` rows of a step were adjacent slices of one document
+stream. On long-document corpora (e.g. Common Pile), a single document spanning
+hundreds of `seq_len` windows would dominate several consecutive optimizer
+steps, producing near-single-document batches, choppy train loss, and
+quasi-online memorization (train loss diving below eval loss).
+
+`data.window_shuffle_windows` (default `4096`, `0` disables) inserts a seeded,
+deterministic shuffle of packed `[T]` windows between the packer and batch
+assembly. Disjoint blocks of that many windows are permuted, so a
+244-window document contributes a few rows per batch instead of every row.
+Resume remains exact: the shuffle checkpoints only the upstream state at the
+window start plus two counters and replays deterministically. Eval batches are
+never shuffled.
+
+Guidance:
+
+- Long-document corpora: `sequential` + `window_shuffle_windows` (default) +
+  a large `shuffle_buffer_size` (e.g. `200_000`). The document-level shuffle
+  buffer fights domain ordering of the source stream; the window shuffle
+  fights single-document batch homogeneity. They are complementary.
+- `bin`/`multipack` mainly improve utilization on short-document mixes
+  (Zyda-2, SmolLM2-style); on long-document corpora most windows are
+  full-capacity chunks and bin packing adds no utilization benefit.
+- Watch `docs_added_this_batch` in the metrics: it collapses toward 0 when a
+  single giant document is draining through consecutive batches (the failure
+  mode window shuffling removes), and is bursty-but-nonzero when healthy.
 
 ## Boundary-aware loss masking
 
@@ -100,3 +144,7 @@ Near-term packing work focuses on:
 
 - further multipack efficiency tuning and diagnostics
 - expanding strict packed semantics to additional backend paths
+- true segment-isolated recurrence: plumb `segment_ids` into
+  `megalodon_jax/layers/complex_ema.py` and
+  `megalodon_jax/layers/timestep_norm.py` so CEMA/TimestepNorm state resets at
+  packed document boundaries (see Known limitation above)

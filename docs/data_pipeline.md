@@ -65,9 +65,16 @@ always emits fixed windows of length `seq_len` before batching.
 Packing trade-offs and boundary-masking behavior are documented in
 [Packing and Boundary Semantics](packing.md).
 
+Between the packer and batch assembly, packed windows pass through a seeded
+window shuffle (`data.window_shuffle_windows`, train iterator only) so batches
+are decorrelated from raw stream order; see
+[Window shuffling](packing.md#window-shuffling-batch-decorrelation).
+
 ## Grain iterator
 
-The Grain wrapper provides:
+The Grain pipeline is composed as: sequence producer (text stream + packer)
+-> optional packed-window shuffle -> batch assembly -> optional prefetch.
+The wrapper provides:
 
 - deterministic iteration
 - optional threaded prefetch (`data.grain_prefetch`)
@@ -83,6 +90,8 @@ When stats are enabled (`data.device_put: false`), iterator stats include:
 - `loss_tokens_host` (valid shifted labels after masking)
 - `boundary_transitions` (segment boundary count)
 - `docs_per_seq_mean`, `docs_per_seq_min`, `docs_per_seq_max`
+- `docs_added_this_batch` (fresh stream documents consumed per batch; collapses
+  toward 0 while one giant document drains through consecutive batches)
 
 ## Iterator state and resume
 
@@ -122,6 +131,7 @@ are:
 - `data.backend`, `data.hf_*`, `data.text_key`
 - `data.hf_eval_split`, `data.max_eval_samples`
 - `data.shuffle`, `data.shuffle_buffer_size`, `data.seed`, `data.repeat`
+- `data.window_shuffle_windows`
 - `data.packing_mode`, `data.packing_buffer_docs`, `data.packing_group_docs`
 - `data.packing_max_docs_per_bin`, `data.packing_strict_attention`
 - `train.seq_len`, `train.batch_size`, `train.grad_accum`

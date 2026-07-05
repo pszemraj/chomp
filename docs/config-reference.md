@@ -784,7 +784,7 @@ Buffer size for shuffle operation.
 <a id="data.window_shuffle_windows"></a>
 #### `data.window_shuffle_windows`
 ```yaml
-window_shuffle_windows: int = 0
+window_shuffle_windows: int = 4096
 ```
 
 Number of packed `[T]` windows to buffer and shuffle (disjoint blocks, seeded)
