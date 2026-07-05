@@ -160,11 +160,12 @@ def _packer_stats_from_chain(it: Any) -> dict[str, Any]:
     return {}
 
 
-def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any]]:
+def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any]]:
     """Create Grain dataset classes without importing grain at module import time.
 
     :param grain: Imported grain module.
-    :return tuple[type[Any], type[Any]]: Sequence-level and batch-assembly IterDatasets.
+    :return tuple[type[Any], type[Any], type[Any]]: Sequence-level, batch-assembly,
+        and resume-safe window-shuffle IterDatasets.
     """
 
     class _TrainSequenceDatasetIterator(grain.DatasetIterator):  # type: ignore[misc]
@@ -217,6 +218,30 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any]]:
 
         def __iter__(self) -> grain.DatasetIterator:
             return _TrainSequenceDatasetIterator(cfg=self._cfg, tokenizer=self._tokenizer)
+
+    class _ResumeSafeWindowShuffleIterDataset(  # type: ignore[misc]
+        grain.experimental.WindowShuffleIterDataset
+    ):
+        """WindowShuffleIterDataset with an exact-resume fix.
+
+        Upstream `_WindowShuffleDatasetIterator.set_state` leaves the
+        iterator's `_init` flag True, so the first window refill after a
+        restore skips the window_index increment and replays the previous
+        window's permutation seed, diverging from the continuous run.
+        `set_state` itself fills the current window, so every later refill
+        must increment: clearing `_init` after restore is always correct.
+        """
+
+        def __iter__(self) -> Any:
+            it = super().__iter__()
+            original_set_state = it.set_state
+
+            def _set_state(state: dict[str, Any]) -> None:
+                original_set_state(state)
+                it._init = False
+
+            it.set_state = _set_state
+            return it
 
     class _BatchAssembleDatasetIterator(grain.DatasetIterator):  # type: ignore[misc]
         """Assembles [A, B, T] Batch objects from a stream of packed windows.
@@ -311,7 +336,7 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any]]:
         def __iter__(self) -> grain.DatasetIterator:
             return _BatchAssembleDatasetIterator(self._parent.__iter__(), cfg=self._cfg)
 
-    return _TrainSequenceIterDataset, _BatchAssembleIterDataset
+    return _TrainSequenceIterDataset, _BatchAssembleIterDataset, _ResumeSafeWindowShuffleIterDataset
 
 
 def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchIterator:
@@ -331,11 +356,13 @@ def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchItera
     except Exception as exc:  # pragma: no cover - missing dependency
         raise RuntimeError("Grain is not installed. Install with `pip install grain`.") from exc
 
-    _TrainSequenceIterDataset, _BatchAssembleIterDataset = _make_grain_iter_classes(grain)
+    _TrainSequenceIterDataset, _BatchAssembleIterDataset, _WindowShuffle = _make_grain_iter_classes(
+        grain
+    )
     ds = _TrainSequenceIterDataset(cfg=cfg, tokenizer=tokenizer)
 
     if cfg.data.window_shuffle_windows > 0:
-        ds = grain.experimental.WindowShuffleIterDataset(
+        ds = _WindowShuffle(
             ds,
             window_size=int(cfg.data.window_shuffle_windows),
             seed=int(cfg.data.seed) + _WINDOW_SHUFFLE_SEED_OFFSET,

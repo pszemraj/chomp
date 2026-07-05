@@ -386,6 +386,45 @@ def test_window_shuffle_permutes_within_window(monkeypatch: pytest.MonkeyPatch) 
     assert seen != expected_window  # order actually changed
 
 
+def test_window_shuffle_state_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resume with W>0 must reproduce the continuous run exactly.
+
+    Snapshots mid-window (3 batches = 6 of 8 window slots consumed) so the
+    restored iterator must replay the parent to the window start, re-apply the
+    same permutation, fast-forward, and then cross a window boundary.
+    """
+    items = _distinct_docs(60)
+
+    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> FakeHFIterable:
+        _ = (dataset, name, split, streaming)
+        return FakeHFIterable(items=items)
+
+    import datasets
+
+    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
+
+    cfg = _window_shuffle_cfg(window=8)
+    cfg = replace(cfg, data=replace(cfg.data, grain_prefetch=2))
+
+    it = build_train_iterator(cfg)
+    for _ in range(3):
+        _ = next(it)
+    state = it.get_state()
+
+    followups_a = [next(it) for _ in range(3)]
+
+    it2 = build_train_iterator(cfg)
+    it2.set_state(state)
+    followups_b = [next(it2) for _ in range(3)]
+
+    for a, b in zip(followups_a, followups_b, strict=True):
+        np.testing.assert_array_equal(a.input_ids, b.input_ids)
+        np.testing.assert_array_equal(a.labels, b.labels)
+        np.testing.assert_array_equal(a.attention_mask, b.attention_mask)
+        np.testing.assert_array_equal(a.segment_ids, b.segment_ids)
+        np.testing.assert_array_equal(a.position_ids, b.position_ids)
+
+
 def test_eval_iterator_never_shuffles() -> None:
     """Eval batches must come out in strict document order regardless of W."""
     cfg = _window_shuffle_cfg(window=4096)
