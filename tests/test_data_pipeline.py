@@ -870,6 +870,8 @@ def test_packer_alignment_after_restore() -> None:
             backend="local_text",
             repeat=True,
             local_text="abcde",
+            # Raw packer-state layout is only exposed without window shuffling.
+            window_shuffle_windows=0,
             tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
         ),
         train=TrainConfig(

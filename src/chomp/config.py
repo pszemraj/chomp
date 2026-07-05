@@ -203,8 +203,8 @@ class DataConfig:
     # Number of packed [T] windows to buffer and shuffle before batch assembly.
     # 0 disables. Without this, every batch is a contiguous slice of packer
     # output, so a single long document can dominate consecutive batches
-    # (not recommended for long-document corpora).
-    window_shuffle_windows: int = 0
+    # (0 is not recommended for long-document corpora).
+    window_shuffle_windows: int = 4096
 
     # Grain pipeline settings.
     grain_prefetch: int = 0
