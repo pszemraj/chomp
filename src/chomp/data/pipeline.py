@@ -664,24 +664,74 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
     }
 
 
-class TrainBatchIterator:
-    """An iterator that yields fixed-shape `Batch` objects.
+def _position_ids_from_segments(segs: np.ndarray) -> np.ndarray:
+    """Build per-segment position IDs from segment IDs.
 
-    This is the data side of the compile-once contract:
-    - Every `__next__` yields arrays of exactly the same shape & dtype.
+    :param np.ndarray segs: Segment IDs of length T.
+    :return np.ndarray: Position IDs of length T.
+    """
+    pos = np.zeros_like(segs, dtype=np.int32)
+    cur_seg = 0
+    cur_pos = 0
+    for i in range(int(segs.size)):
+        seg_id = int(segs[i])
+        if seg_id <= 0:
+            pos[i] = 0
+            cur_seg = 0
+            cur_pos = 0
+            continue
+        if seg_id != cur_seg:
+            cur_seg = seg_id
+            cur_pos = 0
+        pos[i] = cur_pos
+        cur_pos += 1
+    return pos
 
-    It also implements `get_state`/`set_state` for resume correctness.
+
+def _mask_labels(
+    labels: np.ndarray,
+    segs: np.ndarray,
+    *,
+    mask_boundary_loss: bool,
+    train_on_eos: bool,
+    eos_id: int,
+) -> np.ndarray:
+    """Apply boundary and EOS masking to label array.
+
+    :param np.ndarray labels: Label array of length T.
+    :param np.ndarray segs: Segment IDs of length T.
+    :param bool mask_boundary_loss: Mask labels at segment transitions.
+    :param bool train_on_eos: Keep EOS positions in the loss.
+    :param int eos_id: EOS token id used when train_on_eos is False.
+    :return np.ndarray: Masked labels of length T.
+    """
+    if mask_boundary_loss:
+        same = (segs[1:] == segs[:-1]) & (segs[1:] > 0) & (segs[:-1] > 0)
+        if labels.size > 1:
+            labels[1:] = np.where(same, labels[1:], IGNORE_INDEX).astype(np.int32)
+    if not train_on_eos:
+        labels = np.where(labels == eos_id, IGNORE_INDEX, labels).astype(np.int32)
+    return labels
+
+
+class _SequenceProducer:
+    """Produces packed [T] windows from a text stream + packer.
+
+    This is the single source of data-order truth: one text stream feeding one
+    packer, popped one `[T]` window at a time. Batch assembly (and any window
+    shuffling between the two) lives elsewhere.
+
+    Implements `get_state`/`set_state` for resume correctness.
     """
 
     def __init__(self, cfg: Config, *, tokenizer: Tokenizer, text_stream: TextStream | None = None):
-        """Initialize the training batch iterator.
+        """Initialize the sequence producer.
 
         :param Config cfg: Training configuration.
         :param Tokenizer tokenizer: Tokenizer for encoding text.
         :param text_stream: Optional text stream override (used for eval datasets).
         :raises ValueError: If data.backend is unknown.
         """
-        self._cfg = cfg
         self._tok = tokenizer
 
         # Text stream
@@ -733,18 +783,6 @@ class TrainBatchIterator:
                 max_doc_tokens=cfg.data.tokenizer.max_doc_tokens,
             )
 
-        # Batch shape
-        self._A = int(cfg.train.grad_accum)
-        self._B = int(cfg.train.batch_size)
-        self._T = int(cfg.train.seq_len)
-        self._device_put = bool(cfg.data.device_put)
-        self._mask_boundary_loss = bool(cfg.data.mask_boundary_loss)
-        self._train_on_eos = bool(cfg.data.train_on_eos)
-        self._eos_id = int(cfg.model.eos_token_id)
-
-    def __iter__(self) -> TrainBatchIterator:
-        return self
-
     def _push_next_document(self) -> None:
         """Fetch one item from the text stream and add it to the packer."""
         item = next(self._text_stream)
@@ -756,31 +794,7 @@ class TrainBatchIterator:
             ids = list(item)
         self._packer.add_document(ids)
 
-    @staticmethod
-    def _position_ids_from_segments(segs: np.ndarray) -> np.ndarray:
-        """Build per-segment position IDs from segment IDs.
-
-        :param np.ndarray segs: Segment IDs of length T.
-        :return np.ndarray: Position IDs of length T.
-        """
-        pos = np.zeros_like(segs, dtype=np.int32)
-        cur_seg = 0
-        cur_pos = 0
-        for i in range(int(segs.size)):
-            seg_id = int(segs[i])
-            if seg_id <= 0:
-                pos[i] = 0
-                cur_seg = 0
-                cur_pos = 0
-                continue
-            if seg_id != cur_seg:
-                cur_seg = seg_id
-                cur_pos = 0
-            pos[i] = cur_pos
-            cur_pos += 1
-        return pos
-
-    def _next_sequence(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def next_window(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Pop the next [T] token/segment/position sequence from the packer.
 
         :return tuple[np.ndarray, np.ndarray, np.ndarray]: Tokens, segment IDs, position IDs.
@@ -800,23 +814,74 @@ class TrainBatchIterator:
         return (
             np.asarray(seq, dtype=np.int32),
             segs_arr,
-            self._position_ids_from_segments(segs_arr),
+            _position_ids_from_segments(segs_arr),
         )
 
-    def _mask_labels(self, labels: np.ndarray, segs: np.ndarray) -> np.ndarray:
-        """Apply boundary and EOS masking to label array.
+    # -------- checkpoint hooks --------
 
-        :param np.ndarray labels: Label array of length T.
-        :param np.ndarray segs: Segment IDs of length T.
-        :return np.ndarray: Masked labels of length T.
+    def get_state(self) -> dict[str, Any]:
+        """Capture current producer state for checkpointing.
+
+        :return dict[str, Any]: State dict with text stream and packer state.
         """
-        if self._mask_boundary_loss:
-            same = (segs[1:] == segs[:-1]) & (segs[1:] > 0) & (segs[:-1] > 0)
-            if labels.size > 1:
-                labels[1:] = np.where(same, labels[1:], IGNORE_INDEX).astype(np.int32)
-        if not self._train_on_eos:
-            labels = np.where(labels == self._eos_id, IGNORE_INDEX, labels).astype(np.int32)
-        return labels
+        return {
+            "text": self._text_stream.get_state(),
+            "packer": self._packer.get_state(),
+        }
+
+    def set_state(self, state: dict[str, Any]) -> None:
+        """Restore producer state from a checkpoint.
+
+        :param dict[str, Any] state: State dict from get_state().
+        """
+        if "text" in state:
+            self._text_stream.set_state(state["text"])
+        if "packer" in state:
+            self._packer.set_state(state["packer"])
+
+    def get_stats(self) -> dict[str, int]:
+        """Return packer-level document stats if available.
+
+        :return dict[str, int]: Stats like docs_seen/docs_truncated.
+        """
+        if hasattr(self._packer, "get_stats"):
+            return dict(self._packer.get_stats())
+        return {}
+
+
+class TrainBatchIterator:
+    """An iterator that yields fixed-shape `Batch` objects.
+
+    This is the data side of the compile-once contract:
+    - Every `__next__` yields arrays of exactly the same shape & dtype.
+
+    Batches are assembled directly from `_SequenceProducer` output order (no
+    shuffling); eval relies on this via `build_eval_iterator`.
+
+    It also implements `get_state`/`set_state` for resume correctness.
+    """
+
+    def __init__(self, cfg: Config, *, tokenizer: Tokenizer, text_stream: TextStream | None = None):
+        """Initialize the training batch iterator.
+
+        :param Config cfg: Training configuration.
+        :param Tokenizer tokenizer: Tokenizer for encoding text.
+        :param text_stream: Optional text stream override (used for eval datasets).
+        :raises ValueError: If data.backend is unknown.
+        """
+        self._producer = _SequenceProducer(cfg, tokenizer=tokenizer, text_stream=text_stream)
+
+        # Batch shape
+        self._A = int(cfg.train.grad_accum)
+        self._B = int(cfg.train.batch_size)
+        self._T = int(cfg.train.seq_len)
+        self._device_put = bool(cfg.data.device_put)
+        self._mask_boundary_loss = bool(cfg.data.mask_boundary_loss)
+        self._train_on_eos = bool(cfg.data.train_on_eos)
+        self._eos_id = int(cfg.model.eos_token_id)
+
+    def __iter__(self) -> TrainBatchIterator:
+        return self
 
     def __next__(self) -> Batch:
         need = self._A * self._B
@@ -827,10 +892,16 @@ class TrainBatchIterator:
 
         idx = 0
         while idx < need:
-            seq, segs, pos_ids = self._next_sequence()  # [T]
+            seq, segs, pos_ids = self._producer.next_window()  # [T]
             # Convert to input/labels [T]. Labels align with input_ids; model shifts internally.
             inp = np.asarray(seq, dtype=np.int32)
-            lab = self._mask_labels(inp.copy(), segs)
+            lab = _mask_labels(
+                inp.copy(),
+                segs,
+                mask_boundary_loss=self._mask_boundary_loss,
+                train_on_eos=self._train_on_eos,
+                eos_id=self._eos_id,
+            )
             seg = np.asarray(segs, dtype=np.int32)
             pos = np.asarray(pos_ids, dtype=np.int32)
             inps[idx] = inp
@@ -867,29 +938,21 @@ class TrainBatchIterator:
 
         :return dict[str, Any]: State dict with text stream and packer state.
         """
-        return {
-            "text": self._text_stream.get_state(),
-            "packer": self._packer.get_state(),
-        }
+        return self._producer.get_state()
 
     def set_state(self, state: dict[str, Any]) -> None:
         """Restore iterator state from a checkpoint.
 
         :param dict[str, Any] state: State dict from get_state().
         """
-        if "text" in state:
-            self._text_stream.set_state(state["text"])
-        if "packer" in state:
-            self._packer.set_state(state["packer"])
+        self._producer.set_state(state)
 
     def get_stats(self) -> dict[str, int]:
         """Return packer-level document stats if available.
 
         :return dict[str, int]: Stats like docs_seen/docs_truncated.
         """
-        if hasattr(self._packer, "get_stats"):
-            return dict(self._packer.get_stats())
-        return {}
+        return self._producer.get_stats()
 
 
 def build_train_iterator(cfg: Config, *, tokenizer: Tokenizer | None = None) -> Any:
