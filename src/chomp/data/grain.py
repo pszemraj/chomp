@@ -12,6 +12,10 @@ from chomp.types import IGNORE_INDEX, Batch
 
 logger = logging.getLogger(__name__)
 
+# Seed offset for the packed-window shuffle so it is decoupled from the HF
+# document-shuffle seed (which uses data.seed directly).
+_WINDOW_SHUFFLE_SEED_OFFSET = 104_729
+
 
 class _IteratorProtocol(Protocol):
     """Protocol for Grain dataset iterators."""
@@ -47,6 +51,7 @@ class GrainTrainBatchIterator:
         return self
 
     def __next__(self) -> Batch:
+        docs_seen_before = self._docs_seen() if self._enable_stats else None
         batch = next(self._it)
         if not self._enable_stats:
             self._last_stats = {}
@@ -84,7 +89,22 @@ class GrainTrainBatchIterator:
             "docs_per_seq_min": int(np.min(docs_per_seq)),
             "docs_per_seq_max": int(np.max(docs_per_seq)),
         }
+        docs_seen_after = self._docs_seen()
+        if docs_seen_before is not None and docs_seen_after is not None:
+            # Fresh documents pulled from the stream while producing this batch.
+            # Collapses toward 0 while a single giant document drains through
+            # consecutive batches; bursty when a shuffle window refills.
+            self._last_stats["docs_added_this_batch"] = int(docs_seen_after - docs_seen_before)
         return batch
+
+    def _docs_seen(self) -> int | None:
+        """Read the packer's docs_seen counter from the iterator chain.
+
+        :return int | None: docs_seen if packer stats are reachable, else None.
+        """
+        stats = _packer_stats_from_chain(self._it)
+        value = stats.get("docs_seen")
+        return int(value) if value is not None else None
 
     def get_state(self) -> dict[str, Any]:
         """Return iterator state for checkpointing.
@@ -113,63 +133,77 @@ class GrainTrainBatchIterator:
         if not self._enable_stats:
             return {}
         stats: dict[str, float | int | str] = dict(self._last_stats)
-        get_stats = getattr(self._it, "get_stats", None)
+        extra = _packer_stats_from_chain(self._it)
+        if extra:
+            stats.update(extra)
+        return stats
+
+
+def _packer_stats_from_chain(it: Any) -> dict[str, Any]:
+    """Walk a Grain iterator chain to the first node exposing get_stats().
+
+    Intermediate nodes (window shuffle, prefetch) don't expose packer stats;
+    the sequence-producer iterator at the bottom of the chain does.
+
+    :param it: Outermost Grain DatasetIterator.
+    :return dict[str, Any]: Packer stats, or an empty dict if unreachable.
+    """
+    node = it
+    while node is not None:
+        get_stats = getattr(node, "get_stats", None)
         if callable(get_stats):
             try:
-                extra = get_stats()
+                return dict(get_stats())
             except Exception:
-                extra = {}
-            if extra:
-                stats.update(extra)
-        return stats
+                return {}
+        node = getattr(node, "_parent", None)
+    return {}
 
 
 def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any]]:
     """Create Grain dataset classes without importing grain at module import time.
 
     :param grain: Imported grain module.
-    :return tuple[type[Any], type[Any]]: Iterator and dataset classes.
+    :return tuple[type[Any], type[Any]]: Sequence-level and batch-assembly IterDatasets.
     """
 
-    class _TrainBatchDatasetIterator(grain.DatasetIterator):  # type: ignore[misc]
-        """DatasetIterator that delegates to TrainBatchIterator."""
+    class _TrainSequenceDatasetIterator(grain.DatasetIterator):  # type: ignore[misc]
+        """Source DatasetIterator yielding packed [T] windows from _SequenceProducer."""
 
         def __init__(self, *, cfg: Config, tokenizer: Any) -> None:
-            """Initialize the dataset iterator.
+            """Initialize the sequence iterator.
 
             :param Config cfg: Training configuration.
             :param tokenizer: Tokenizer instance for encoding text.
             """
             super().__init__()
-            from chomp.data.pipeline import TrainBatchIterator
+            from chomp.data.pipeline import _SequenceProducer
 
-            self._it = TrainBatchIterator(cfg, tokenizer=tokenizer)
+            self._producer = _SequenceProducer(cfg, tokenizer=tokenizer)
 
-        def __next__(self) -> Batch:
-            return next(self._it)
+        def __next__(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+            return self._producer.next_window()
 
         def get_state(self) -> dict[str, Any]:
-            """Return iterator state for checkpointing.
+            """Return producer state for checkpointing.
 
-            :return dict[str, Any]: Serializable iterator state.
+            :return dict[str, Any]: Serializable producer state.
             """
-            return self._it.get_state()
+            return self._producer.get_state()
 
         def set_state(self, state: dict[str, Any]) -> None:
-            """Restore iterator state from checkpoint."""
-            self._it.set_state(state)
+            """Restore producer state from checkpoint."""
+            self._producer.set_state(state)
 
         def get_stats(self) -> dict[str, int]:
-            """Return packer-level document stats if available.
+            """Return packer-level document stats.
 
             :return dict[str, int]: Packer stats, or an empty dict if unavailable.
             """
-            if hasattr(self._it, "get_stats"):
-                return dict(self._it.get_stats())
-            return {}
+            return self._producer.get_stats()
 
-    class _TrainBatchIterDataset(grain.IterDataset):  # type: ignore[misc]
-        """IterDataset that yields chomp Batch objects."""
+    class _TrainSequenceIterDataset(grain.IterDataset):  # type: ignore[misc]
+        """IterDataset yielding packed [T] windows."""
 
         def __init__(self, *, cfg: Config, tokenizer: Any) -> None:
             """Initialize the dataset.
@@ -182,13 +216,110 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any]]:
             self._tokenizer = tokenizer
 
         def __iter__(self) -> grain.DatasetIterator:
-            return _TrainBatchDatasetIterator(cfg=self._cfg, tokenizer=self._tokenizer)
+            return _TrainSequenceDatasetIterator(cfg=self._cfg, tokenizer=self._tokenizer)
 
-    return _TrainBatchDatasetIterator, _TrainBatchIterDataset
+    class _BatchAssembleDatasetIterator(grain.DatasetIterator):  # type: ignore[misc]
+        """Assembles [A, B, T] Batch objects from a stream of packed windows.
+
+        Holds no state of its own: it fully drains exactly A*B windows per
+        __next__, and checkpointing only happens between batches, so state
+        forwards 1:1 to the parent iterator. Deliberately does NOT define
+        get_stats so _packer_stats_from_chain walks past it to the sequence
+        iterator.
+        """
+
+        def __init__(self, parent: Any, *, cfg: Config) -> None:
+            """Initialize the batch assembler.
+
+            :param parent: Parent DatasetIterator yielding packed windows.
+            :param Config cfg: Training configuration.
+            """
+            super().__init__(parent)
+            self._A = int(cfg.train.grad_accum)
+            self._B = int(cfg.train.batch_size)
+            self._T = int(cfg.train.seq_len)
+            self._device_put = bool(cfg.data.device_put)
+            self._mask_boundary_loss = bool(cfg.data.mask_boundary_loss)
+            self._train_on_eos = bool(cfg.data.train_on_eos)
+            self._eos_id = int(cfg.model.eos_token_id)
+
+        def __next__(self) -> Batch:
+            from chomp.data.pipeline import _mask_labels
+
+            need = self._A * self._B
+            inps = np.empty((need, self._T), dtype=np.int32)
+            labs = np.empty((need, self._T), dtype=np.int32)
+            segs_out = np.empty((need, self._T), dtype=np.int32)
+            pos_out = np.empty((need, self._T), dtype=np.int32)
+
+            for idx in range(need):
+                seq, segs, pos_ids = next(self._parent)  # [T]
+                inp = np.asarray(seq, dtype=np.int32)
+                lab = _mask_labels(
+                    inp.copy(),
+                    segs,
+                    mask_boundary_loss=self._mask_boundary_loss,
+                    train_on_eos=self._train_on_eos,
+                    eos_id=self._eos_id,
+                )
+                inps[idx] = inp
+                labs[idx] = lab
+                segs_out[idx] = np.asarray(segs, dtype=np.int32)
+                pos_out[idx] = np.asarray(pos_ids, dtype=np.int32)
+
+            inps = inps.reshape(self._A, self._B, self._T)
+            labs = labs.reshape(self._A, self._B, self._T)
+            segs = segs_out.reshape(self._A, self._B, self._T)
+            pos = pos_out.reshape(self._A, self._B, self._T)
+
+            batch = Batch(
+                input_ids=inps,
+                labels=labs,
+                attention_mask=segs > 0,
+                segment_ids=segs,
+                position_ids=pos,
+            )
+            if self._device_put:
+                import jax  # imported lazily to keep iterator usable in non-JAX contexts
+
+                batch = jax.device_put(batch)
+            return batch
+
+        def get_state(self) -> dict[str, Any]:
+            """Return parent iterator state for checkpointing.
+
+            :return dict[str, Any]: Serializable iterator state.
+            """
+            return self._parent.get_state()
+
+        def set_state(self, state: dict[str, Any]) -> None:
+            """Restore parent iterator state from checkpoint."""
+            self._parent.set_state(state)
+
+    class _BatchAssembleIterDataset(grain.IterDataset):  # type: ignore[misc]
+        """IterDataset that yields chomp Batch objects."""
+
+        def __init__(self, parent: Any, *, cfg: Config) -> None:
+            """Initialize the dataset.
+
+            :param parent: Parent IterDataset yielding packed windows.
+            :param Config cfg: Training configuration.
+            """
+            super().__init__(parent)
+            self._cfg = cfg
+
+        def __iter__(self) -> grain.DatasetIterator:
+            return _BatchAssembleDatasetIterator(self._parent.__iter__(), cfg=self._cfg)
+
+    return _TrainSequenceIterDataset, _BatchAssembleIterDataset
 
 
 def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchIterator:
     """Build a Grain-backed batch iterator.
+
+    Pipeline: sequence producer -> optional packed-window shuffle -> batch
+    assembly -> optional thread prefetch. The window shuffle decorrelates
+    batches from raw packer-output order (data.window_shuffle_windows).
 
     :param Config cfg: Training configuration.
     :param tokenizer: Tokenizer instance for encoding text.
@@ -200,8 +331,17 @@ def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchItera
     except Exception as exc:  # pragma: no cover - missing dependency
         raise RuntimeError("Grain is not installed. Install with `pip install grain`.") from exc
 
-    _TrainBatchDatasetIterator, _TrainBatchIterDataset = _make_grain_iter_classes(grain)
-    ds = _TrainBatchIterDataset(cfg=cfg, tokenizer=tokenizer)
+    _TrainSequenceIterDataset, _BatchAssembleIterDataset = _make_grain_iter_classes(grain)
+    ds = _TrainSequenceIterDataset(cfg=cfg, tokenizer=tokenizer)
+
+    if cfg.data.window_shuffle_windows > 0:
+        ds = grain.experimental.WindowShuffleIterDataset(
+            ds,
+            window_size=int(cfg.data.window_shuffle_windows),
+            seed=int(cfg.data.seed) + _WINDOW_SHUFFLE_SEED_OFFSET,
+        )
+
+    ds = _BatchAssembleIterDataset(ds, cfg=cfg)
 
     if cfg.data.device_put and cfg.data.grain_prefetch > 0:
         logger.warning(

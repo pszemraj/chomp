@@ -22,7 +22,12 @@ from chomp.config import (
 )
 from chomp.data.hf import HFStreamingTextStream, HFStreamSpec
 from chomp.data.pack import MultipackPacker, TokenPacker
-from chomp.data.pipeline import BinPacker, ByteTokenizer, build_train_iterator
+from chomp.data.pipeline import (
+    BinPacker,
+    ByteTokenizer,
+    build_eval_iterator,
+    build_train_iterator,
+)
 from chomp.train import run
 from tests.helpers.hf_fakes import FakeHFIterable, FakeHFStateIterable
 
@@ -274,6 +279,122 @@ def test_grain_iterator_state_roundtrip() -> None:
     np.testing.assert_array_equal(next_a.labels, next_b.labels)
     np.testing.assert_array_equal(next_a.attention_mask, next_b.attention_mask)
     np.testing.assert_array_equal(next_a.segment_ids, next_b.segment_ids)
+
+
+def _window_shuffle_cfg(*, window: int, repeat: bool = False) -> Config:
+    """Build an HF-backed config for window-shuffle tests.
+
+    Each fake document tokenizes (byte, offset 4, BOS/EOS) to exactly seq_len=8,
+    so every packed row is one whole document and row identity is readable from
+    its second token.
+
+    :param int window: data.window_shuffle_windows value.
+    :param bool repeat: Whether to repeat the stream.
+    :return Config: Test configuration.
+    """
+    return Config(
+        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
+        data=DataConfig(
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_split="train",
+            text_key="text",
+            shuffle=False,
+            shuffle_buffer_size=8,
+            seed=0,
+            repeat=repeat,
+            packing_mode="sequential",
+            mask_boundary_loss=True,
+            train_on_eos=True,
+            window_shuffle_windows=window,
+            tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
+        ),
+        train=TrainConfig(
+            steps=1,
+            batch_size=2,
+            seq_len=8,
+            grad_accum=1,
+            jit=False,
+            deterministic=True,
+            allow_cpu=True,
+        ),
+        optim=OptimConfig(warmup_steps=0),
+    )
+
+
+def _distinct_docs(count: int) -> list[dict[str, str]]:
+    """Create fake HF items with distinct, identifiable 6-char texts.
+
+    :param int count: Number of documents.
+    :return list[dict[str, str]]: Items usable by FakeHFIterable.
+    """
+    return [{"text": chr(ord("A") + i % 50) * 6} for i in range(count)]
+
+
+def _row_doc_tokens(batch: Batch) -> list[int]:
+    """Extract each row's document-identifying token (position 1, after BOS).
+
+    :param Batch batch: Batch of packed rows.
+    :return list[int]: One token value per row.
+    """
+    rows = np.asarray(batch.input_ids).reshape(-1, batch.input_ids.shape[-1])
+    return [int(r[1]) for r in rows]
+
+
+def test_window_shuffle_disabled_matches_unshuffled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """window_shuffle_windows=0 must preserve raw packer output order."""
+    items = _distinct_docs(20)
+
+    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> FakeHFIterable:
+        _ = (dataset, name, split, streaming)
+        return FakeHFIterable(items=items)
+
+    import datasets
+
+    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
+
+    cfg = _window_shuffle_cfg(window=0)
+    it = build_train_iterator(cfg)
+    seen = _row_doc_tokens(next(it)) + _row_doc_tokens(next(it))
+
+    expected = [ord(item["text"][0]) + 4 for item in items[: len(seen)]]
+    assert seen == expected
+
+
+def test_window_shuffle_permutes_within_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """W>0 must permute rows within each window without loss or duplication."""
+    items = _distinct_docs(20)
+
+    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> FakeHFIterable:
+        _ = (dataset, name, split, streaming)
+        return FakeHFIterable(items=items)
+
+    import datasets
+
+    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
+
+    window = 8
+    cfg = _window_shuffle_cfg(window=window)
+    it = build_train_iterator(cfg)
+    seen = []
+    for _ in range(window // 2):  # batch_size=2, grad_accum=1 -> 2 rows per batch
+        seen.extend(_row_doc_tokens(next(it)))
+
+    expected_window = [ord(item["text"][0]) + 4 for item in items[:window]]
+    assert sorted(seen) == sorted(expected_window)  # same multiset: nothing lost/duplicated
+    assert seen != expected_window  # order actually changed
+
+
+def test_eval_iterator_never_shuffles() -> None:
+    """Eval batches must come out in strict document order regardless of W."""
+    cfg = _window_shuffle_cfg(window=4096)
+    tokens = [[100 + i] * 6 for i in range(8)]
+    tokenizer = ByteTokenizer(byte_offset=4)
+    it = build_eval_iterator(cfg, tokens=tokens, tokenizer=tokenizer)
+
+    seen = _row_doc_tokens(next(it)) + _row_doc_tokens(next(it))
+    assert seen == [100, 101, 102, 103]
 
 
 def test_grain_iterator_stats_disabled_with_device_put() -> None:
