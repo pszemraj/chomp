@@ -1362,13 +1362,22 @@ def run(
 
         if batch_count == 0:
             bins_per_pack = int(cfg.train.grad_accum) * int(cfg.train.batch_size)
+            if cfg.data.packing_mode == "multipack":
+                threshold_hint = (
+                    f"packing_group_docs={int(cfg.data.packing_group_docs)} "
+                    "(multipack emits nothing until this many pending docs accumulate; "
+                    "it must be well below the eval doc count)"
+                )
+            else:
+                threshold_hint = f"packing_buffer_docs={int(cfg.data.packing_buffer_docs)}"
             raise RuntimeError(
                 "Evaluation produced zero batches. "
                 f"packing_mode={cfg.data.packing_mode!r}, "
-                f"packing_buffer_docs={int(cfg.data.packing_buffer_docs)}, "
+                f"{threshold_hint}, "
                 f"bins_per_pack={bins_per_pack}, "
                 f"eval_doc_count={len(eval_tokens)}. "
-                "Increase eval samples, reduce packing_buffer_docs, or use sequential packing."
+                "Increase eval samples, reduce the packing threshold, or use "
+                "sequential packing."
             )
 
         if total_tokens <= 0:

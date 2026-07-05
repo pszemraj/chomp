@@ -191,8 +191,11 @@ class DataConfig:
     packing_buffer_docs: int = 128
     # Optional cap on how many documents may be packed into a single bin.
     packing_max_docs_per_bin: int | None = None
-    # Multipack lookahead group size (documents).
-    packing_group_docs: int = 100_000
+    # Multipack lookahead group size (documents). Nothing is emitted until this
+    # many pending docs/chunks accumulate, and the whole pool is sorted each
+    # pack cycle — keep it modest, and well below max_eval_samples or eval
+    # can never emit a batch.
+    packing_group_docs: int = 2048
     # Require strict segment-aware attention semantics when using multipack.
     packing_strict_attention: bool = True
 
@@ -810,11 +813,21 @@ def _validate_data(cfg: Config) -> None:
                 "data.packing_max_docs_per_bin must be positive when set, "
                 f"got {cfg.data.packing_max_docs_per_bin}"
             )
-    if cfg.data.packing_mode == "multipack" and cfg.data.packing_group_docs <= 0:
-        _vfail(
-            "data.packing_group_docs must be positive when packing_mode='multipack', "
-            f"got {cfg.data.packing_group_docs}"
-        )
+    if cfg.data.packing_mode == "multipack":
+        if cfg.data.packing_group_docs <= 0:
+            _vfail(
+                "data.packing_group_docs must be positive when packing_mode='multipack', "
+                f"got {cfg.data.packing_group_docs}"
+            )
+        if 0 < cfg.data.max_eval_samples < cfg.data.packing_group_docs:
+            warnings.warn(
+                f"data.max_eval_samples ({cfg.data.max_eval_samples}) is smaller than "
+                f"data.packing_group_docs ({cfg.data.packing_group_docs}); multipack "
+                "emits nothing until packing_group_docs pending docs accumulate, so "
+                "evaluation will fail with zero batches. Lower packing_group_docs or "
+                "raise max_eval_samples.",
+                stacklevel=2,
+            )
 
     if cfg.data.window_shuffle_windows < 0:
         _vfail(f"data.window_shuffle_windows must be >=0, got {cfg.data.window_shuffle_windows}")
