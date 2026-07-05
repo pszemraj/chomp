@@ -200,6 +200,12 @@ class DataConfig:
     mask_boundary_loss: bool = True
     train_on_eos: bool = True
 
+    # Number of packed [T] windows to buffer and shuffle before batch assembly.
+    # 0 disables. Without this, every batch is a contiguous slice of packer
+    # output, so a single long document can dominate consecutive batches
+    # (not recommended for long-document corpora).
+    window_shuffle_windows: int = 0
+
     # Grain pipeline settings.
     grain_prefetch: int = 0
 
@@ -808,6 +814,18 @@ def _validate_data(cfg: Config) -> None:
         _vfail(
             "data.packing_group_docs must be positive when packing_mode='multipack', "
             f"got {cfg.data.packing_group_docs}"
+        )
+
+    if cfg.data.window_shuffle_windows < 0:
+        _vfail(f"data.window_shuffle_windows must be >=0, got {cfg.data.window_shuffle_windows}")
+    rows_per_batch = cfg.train.batch_size * cfg.train.grad_accum
+    if 0 < cfg.data.window_shuffle_windows < rows_per_batch:
+        warnings.warn(
+            "data.window_shuffle_windows "
+            f"({cfg.data.window_shuffle_windows}) is smaller than one batch "
+            f"({rows_per_batch} rows); this cannot decorrelate a batch from itself. "
+            "Use 0 to disable or a multiple of the batch row count.",
+            stacklevel=2,
         )
 
     if cfg.data.grain_prefetch < 0:

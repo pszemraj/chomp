@@ -647,6 +647,7 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
         "mask_boundary_loss": d.mask_boundary_loss,
         "train_on_eos": d.train_on_eos,
         "grain_prefetch": d.grain_prefetch,
+        "window_shuffle_windows": d.window_shuffle_windows,
     }
     eval_cfg = {
         "max_eval_samples": d.max_eval_samples,

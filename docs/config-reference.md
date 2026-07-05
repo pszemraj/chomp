@@ -781,6 +781,23 @@ Buffer size for shuffle operation.
 | Required | No |
 | Constraints | Must be positive when `shuffle: true` |
 
+<a id="data.window_shuffle_windows"></a>
+#### `data.window_shuffle_windows`
+```yaml
+window_shuffle_windows: int = 0
+```
+
+Number of packed `[T]` windows to buffer and shuffle (disjoint blocks, seeded)
+between the packer and batch assembly. `0` disables. Without it, every batch is
+a contiguous slice of packer output, so one long document can dominate several
+consecutive batches on long-document corpora. Applies to the train iterator
+only; eval batches are never shuffled.
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Constraints | Must be >= 0; warns if smaller than one batch (`batch_size * grad_accum`) |
+
 <a id="data.seed"></a>
 #### `data.seed`
 ```yaml
