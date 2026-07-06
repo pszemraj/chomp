@@ -95,3 +95,30 @@ Until full 5k matrix comparison is complete:
 - Track `loss_tokens` and `boundary_transitions` alongside loss to avoid misattributing objective-density shifts to optimizer instability.
 - Start from larger shuffle (`shuffle_buffer_size=200000`) when memory allows to reduce local composition correlation.
 - Make `mask_boundary_loss` an explicit experiment axis; do not treat it as a silent default.
+
+## Resolution (2026-07)
+
+The full 5k A–D matrix plus a follow-up window-shuffle ablation closed this
+investigation. Findings:
+
+- `mask_boundary_loss` has no measurable effect on stability (A≈B, C≈D over 5k
+  steps).
+- `shuffle_buffer_size` 10k→200k cuts post-warmup loss std 0.31→0.20. Root
+  cause of the large slow excursions is **domain marching**: HF streaming
+  walks the corpus source-by-source and a 10k-doc buffer cannot mix across
+  domain blocks. This also produced the train-loss-below-eval memorization
+  signature on Comma/Common Pile. (`max_doc_tokens: 8192` was active in all
+  runs, ruling out single-giant-document batch domination as the mechanism.)
+- The remaining fast oscillation came from batches being contiguous,
+  unshuffled slices of packer output. Fixed by `data.window_shuffle_windows`
+  (default 4096): in a 5k WS0-vs-WS4096 pair (both `shuffle_buffer_size:
+  200000`, run dirs `runs/dataset-tests/100m-comma-stability-WS*-sb200k-5k-
+  20260705_231323`), window shuffle cut step-to-step |Δloss| 31% (p95 −38%),
+  worst grad-norm spike 19.6→4.1, improved final eval (3.137→3.113), at zero
+  throughput cost.
+
+**Final recipe for Comma-like (domain-ordered, long-tail) corpora:**
+`packing_mode: sequential` + `window_shuffle_windows: 4096` +
+`shuffle_buffer_size: 200000`. See [Training — Loss-stability
+recipe](training.md#loss-stability-recipe) and
+[Packing — Window shuffling](packing.md#window-shuffling-batch-decorrelation).

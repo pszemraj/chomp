@@ -891,15 +891,16 @@ Fixed text content for `local_text` backend.
 <a id="data.packing_mode"></a>
 #### `data.packing_mode`
 ```yaml
-packing_mode: "sequential" | "bin" = "sequential"
+packing_mode: "sequential" | "bin" | "multipack" = "sequential"
 ```
 
-Token packing strategy.
+Token packing strategy. See [Packing and Boundary Semantics](packing.md) for
+trade-offs and guidance by corpus type.
 
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Valid values | `"sequential"`, `"bin"` |
+| Valid values | `"sequential"`, `"bin"`, `"multipack"` |
 
 ##### sequential
 
@@ -908,6 +909,13 @@ Stream documents and concatenate tokens sequentially. Simple and deterministic.
 ##### bin
 
 First-fit-decreasing bin packing. Better packing efficiency but requires buffering documents.
+
+##### multipack
+
+Grouped first-fit-decreasing packing over a `packing_group_docs` lookahead
+pool, emitting segment-local `position_ids`. With
+`packing_strict_attention: true`, enables segment-isolated attention with
+per-segment RoPE resets (fails fast if the backend lacks support).
 <a id="data.packing_buffer_docs"></a>
 #### `data.packing_buffer_docs`
 ```yaml
@@ -937,6 +945,40 @@ Maximum documents per packed sequence. `null` means unlimited.
 |----------|-------|
 | Required | No |
 | Constraints | Must be positive when set |
+
+<a id="data.packing_group_docs"></a>
+#### `data.packing_group_docs`
+```yaml
+packing_group_docs: int = 512
+```
+
+Multipack lookahead group size (documents/chunks). Nothing is emitted until
+this many pending items accumulate, and the whole pool is sorted each pack
+cycle — keep it modest, and below `max_eval_samples` or evaluation cannot emit
+a batch (a hard validation error when eval is enabled).
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Constraints | Must be positive when `packing_mode: multipack`; must be ≤ `max_eval_samples` when eval is enabled |
+
+**Related:** [`data.max_eval_samples`](#data.max_eval_samples)
+
+<a id="data.packing_strict_attention"></a>
+#### `data.packing_strict_attention`
+```yaml
+packing_strict_attention: bool = true
+```
+
+When `packing_mode: multipack`, forward `segment_ids`/`position_ids` to the
+model for segment-isolated attention and per-segment RoPE resets. Training
+fails fast if the backend does not support these parameters. Note: this
+isolates attention only — Megalodon's CEMA/TimestepNorm state still crosses
+packed document boundaries (see [Packing](packing.md)).
+
+| Property | Value |
+|----------|-------|
+| Required | No |
 
 ---
 
