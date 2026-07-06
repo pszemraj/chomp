@@ -80,6 +80,27 @@ When `data.packing_mode=multipack` and `data.packing_strict_attention=true`,
 the step also forwards `segment_ids` and `position_ids` into the backend model
 for strict packed semantics (segment-isolated attention + position reset).
 
+## Loss-stability recipe
+
+Validated on Comma (2026-07, 100m 5k-step ablation; see
+[Packing — Window shuffling](packing.md#window-shuffling-batch-decorrelation)):
+
+- `data.window_shuffle_windows: 4096` (the default) — decorrelates batches from
+  raw packer order; cut step-to-step |Δloss| ~31% and worst grad-norm spikes
+  ~5x, at zero throughput cost.
+- `data.shuffle_buffer_size: 200000` — fights domain ordering of the source
+  stream; this is what removes the train-loss-below-eval memorization
+  signature on domain-ordered corpora (Common Pile family). Pre-mixed corpora
+  (Zyda-2, SmolLM2 mixes) are healthy even at 10k, but the large buffer is
+  cheap insurance.
+- Watch `docs_added_this_batch` and per-interval `docs_seen` deltas in
+  metrics.jsonl; sustained near-zero pulls mean the stream is draining
+  buffered content from few documents.
+
+Smoke configs intentionally keep a small `shuffle_buffer_size`: the HF shuffle
+buffer must fill before the first batch, so 200k docs would dominate smoke-test
+startup time.
+
 ## Evaluation
 
 If `train.eval_every > 0`, chomp runs a full pass over the validation texts
