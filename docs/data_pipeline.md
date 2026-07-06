@@ -90,8 +90,11 @@ When stats are enabled (`data.device_put: false`), iterator stats include:
 - `loss_tokens_host` (valid shifted labels after masking)
 - `boundary_transitions` (segment boundary count)
 - `docs_per_seq_mean`, `docs_per_seq_min`, `docs_per_seq_max`
-- `docs_added_this_batch` (fresh stream documents consumed per batch; collapses
-  toward 0 while one giant document drains through consecutive batches)
+- `docs_added_this_batch` (fresh stream documents consumed per assembled batch;
+  collapses toward 0 while already-buffered content drains, bursty when a
+  shuffle window refills. Measured below the prefetch layer, so with
+  `data.grain_prefetch > 0` the value may belong to a batch up to
+  prefetch-depth ahead of the one just consumed)
 
 ## Iterator state and resume
 

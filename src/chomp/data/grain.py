@@ -51,7 +51,6 @@ class GrainTrainBatchIterator:
         return self
 
     def __next__(self) -> Batch:
-        docs_seen_before = self._docs_seen() if self._enable_stats else None
         batch = next(self._it)
         if not self._enable_stats:
             self._last_stats = {}
@@ -89,22 +88,7 @@ class GrainTrainBatchIterator:
             "docs_per_seq_min": int(np.min(docs_per_seq)),
             "docs_per_seq_max": int(np.max(docs_per_seq)),
         }
-        docs_seen_after = self._docs_seen()
-        if docs_seen_before is not None and docs_seen_after is not None:
-            # Fresh documents pulled from the stream while producing this batch.
-            # Collapses toward 0 while a single giant document drains through
-            # consecutive batches; bursty when a shuffle window refills.
-            self._last_stats["docs_added_this_batch"] = int(docs_seen_after - docs_seen_before)
         return batch
-
-    def _docs_seen(self) -> int | None:
-        """Read the packer's docs_seen counter from the iterator chain.
-
-        :return int | None: docs_seen if packer stats are reachable, else None.
-        """
-        stats = _packer_stats_from_chain(self._it)
-        value = stats.get("docs_seen")
-        return int(value) if value is not None else None
 
     def get_state(self) -> dict[str, Any]:
         """Return iterator state for checkpointing.
@@ -246,11 +230,14 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
     class _BatchAssembleDatasetIterator(grain.DatasetIterator):  # type: ignore[misc]
         """Assembles [A, B, T] Batch objects from a stream of packed windows.
 
-        Holds no state of its own: it fully drains exactly A*B windows per
-        __next__, and checkpointing only happens between batches, so state
-        forwards 1:1 to the parent iterator. Deliberately does NOT define
-        get_stats so _packer_stats_from_chain walks past it to the sequence
-        iterator.
+        Holds no checkpoint state of its own: it fully drains exactly A*B
+        windows per __next__, and checkpointing only happens between batches,
+        so state forwards 1:1 to the parent iterator.
+
+        docs_added_this_batch is measured here, below any prefetch layer, so
+        it reflects actual stream pulls for the assembled batch rather than
+        prefetch-thread timing. With prefetch enabled the reported value may
+        belong to a batch up to prefetch-depth ahead of the one just consumed.
         """
 
         def __init__(self, parent: Any, *, cfg: Config) -> None:
@@ -267,10 +254,20 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
             self._mask_boundary_loss = bool(cfg.data.mask_boundary_loss)
             self._train_on_eos = bool(cfg.data.train_on_eos)
             self._eos_id = int(cfg.model.eos_token_id)
+            self._docs_added_last_batch: int | None = None
+
+        def _docs_seen(self) -> int | None:
+            """Read the packer's docs_seen counter from the parent chain.
+
+            :return int | None: docs_seen if reachable, else None.
+            """
+            value = _packer_stats_from_chain(self._parent).get("docs_seen")
+            return int(value) if value is not None else None
 
         def __next__(self) -> Batch:
             from chomp.data.pipeline import _mask_labels
 
+            docs_seen_before = self._docs_seen()
             need = self._A * self._B
             inps = np.empty((need, self._T), dtype=np.int32)
             labs = np.empty((need, self._T), dtype=np.int32)
@@ -308,6 +305,12 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
                 import jax  # imported lazily to keep iterator usable in non-JAX contexts
 
                 batch = jax.device_put(batch)
+            docs_seen_after = self._docs_seen()
+            if docs_seen_before is not None and docs_seen_after is not None:
+                # Fresh documents pulled from the stream while assembling this
+                # batch. Collapses toward 0 while already-buffered content
+                # drains; bursty when a shuffle window refills.
+                self._docs_added_last_batch = int(docs_seen_after - docs_seen_before)
             return batch
 
         def get_state(self) -> dict[str, Any]:
@@ -320,6 +323,17 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
         def set_state(self, state: dict[str, Any]) -> None:
             """Restore parent iterator state from checkpoint."""
             self._parent.set_state(state)
+            self._docs_added_last_batch = None
+
+        def get_stats(self) -> dict[str, Any]:
+            """Return packer stats plus batch-assembly diagnostics.
+
+            :return dict[str, Any]: Packer stats merged with docs_added_this_batch.
+            """
+            stats = _packer_stats_from_chain(self._parent)
+            if self._docs_added_last_batch is not None:
+                stats["docs_added_this_batch"] = self._docs_added_last_batch
+            return stats
 
     class _BatchAssembleIterDataset(grain.IterDataset):  # type: ignore[misc]
         """IterDataset that yields chomp Batch objects."""

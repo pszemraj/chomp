@@ -425,6 +425,33 @@ def test_window_shuffle_state_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None
         np.testing.assert_array_equal(a.position_ids, b.position_ids)
 
 
+def test_docs_added_this_batch_accounts_for_all_pulls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sum of docs_added_this_batch must equal the packer's docs_seen counter."""
+    items = _distinct_docs(64)
+
+    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> FakeHFIterable:
+        _ = (dataset, name, split, streaming)
+        return FakeHFIterable(items=items)
+
+    import datasets
+
+    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
+
+    cfg = _window_shuffle_cfg(window=8)
+    it = build_train_iterator(cfg)
+
+    total = 0
+    for _ in range(4):
+        _ = next(it)
+        stats = it.get_stats()
+        added = stats.get("docs_added_this_batch")
+        assert added is not None and added >= 0
+        total += added
+    assert total == it.get_stats().get("docs_seen")
+
+
 def test_eval_iterator_never_shuffles() -> None:
     """Eval batches must come out in strict document order regardless of W."""
     cfg = _window_shuffle_cfg(window=4096)
