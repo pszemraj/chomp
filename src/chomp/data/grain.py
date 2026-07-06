@@ -218,6 +218,15 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
 
         def __iter__(self) -> Any:
             it = super().__iter__()
+            if not hasattr(it, "_init"):
+                # Fail fast: silently skipping the patch would resurrect the
+                # upstream resume bug with no signal, breaking exact resume.
+                raise RuntimeError(
+                    "grain's _WindowShuffleDatasetIterator no longer has an _init "
+                    "attribute; the resume-exactness workaround in "
+                    "_ResumeSafeWindowShuffleIterDataset must be re-verified against "
+                    "this grain version (see chomp docs/packing.md, window shuffling)."
+                )
             original_set_state = it.set_state
 
             def _set_state(state: dict[str, Any]) -> None:
@@ -238,6 +247,12 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
         it reflects actual stream pulls for the assembled batch rather than
         prefetch-thread timing. With prefetch enabled the reported value may
         belong to a batch up to prefetch-depth ahead of the one just consumed.
+
+        Thread safety: with prefetch, __next__ runs on the prefetch thread
+        while get_stats is called from the consumer thread. All packer/producer
+        access happens inside __next__; the finished stats dict is published
+        via a single attribute assignment (atomic under the GIL) and get_stats
+        only reads that snapshot — it never walks into producer-owned objects.
         """
 
         def __init__(self, parent: Any, *, cfg: Config) -> None:
@@ -254,7 +269,7 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
             self._mask_boundary_loss = bool(cfg.data.mask_boundary_loss)
             self._train_on_eos = bool(cfg.data.train_on_eos)
             self._eos_id = int(cfg.model.eos_token_id)
-            self._docs_added_last_batch: int | None = None
+            self._stats_snapshot: dict[str, Any] = {}
 
         def _docs_seen(self) -> int | None:
             """Read the packer's docs_seen counter from the parent chain.
@@ -305,12 +320,15 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
                 import jax  # imported lazily to keep iterator usable in non-JAX contexts
 
                 batch = jax.device_put(batch)
-            docs_seen_after = self._docs_seen()
+            stats = _packer_stats_from_chain(self._parent)
+            docs_seen_after = stats.get("docs_seen")
             if docs_seen_before is not None and docs_seen_after is not None:
                 # Fresh documents pulled from the stream while assembling this
                 # batch. Collapses toward 0 while already-buffered content
                 # drains; bursty when a shuffle window refills.
-                self._docs_added_last_batch = int(docs_seen_after - docs_seen_before)
+                stats["docs_added_this_batch"] = int(docs_seen_after) - docs_seen_before
+            # Single-assignment publish; never mutated afterwards.
+            self._stats_snapshot = stats
             return batch
 
         def get_state(self) -> dict[str, Any]:
@@ -323,17 +341,17 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
         def set_state(self, state: dict[str, Any]) -> None:
             """Restore parent iterator state from checkpoint."""
             self._parent.set_state(state)
-            self._docs_added_last_batch = None
+            self._stats_snapshot = {}
 
         def get_stats(self) -> dict[str, Any]:
-            """Return packer stats plus batch-assembly diagnostics.
+            """Return the stats snapshot published by the last assembled batch.
+
+            Safe to call from the consumer thread under prefetch: reads a
+            reference published atomically by __next__, never producer state.
 
             :return dict[str, Any]: Packer stats merged with docs_added_this_batch.
             """
-            stats = _packer_stats_from_chain(self._parent)
-            if self._docs_added_last_batch is not None:
-                stats["docs_added_this_batch"] = self._docs_added_last_batch
-            return stats
+            return dict(self._stats_snapshot)
 
     class _BatchAssembleIterDataset(grain.IterDataset):  # type: ignore[misc]
         """IterDataset that yields chomp Batch objects."""

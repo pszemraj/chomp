@@ -499,6 +499,15 @@ def check_resume_compat(
         pack_prev.get("train_on_eos"),
         severity="error",
     )
+    # Changing this alters the iterator-state shape (window-shuffle layer is
+    # config-gated), so a mismatched resume would KeyError or silently skip
+    # the data-state restore.
+    _cmp(
+        "data.window_shuffle_windows",
+        pack_cur.get("window_shuffle_windows"),
+        pack_prev.get("window_shuffle_windows"),
+        severity="error",
+    )
 
     eval_prev = meta_fp.get("eval") or {}
     eval_cur = cur_fp.get("eval") or {}

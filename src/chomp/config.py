@@ -193,9 +193,9 @@ class DataConfig:
     packing_max_docs_per_bin: int | None = None
     # Multipack lookahead group size (documents). Nothing is emitted until this
     # many pending docs/chunks accumulate, and the whole pool is sorted each
-    # pack cycle — keep it modest, and well below max_eval_samples or eval
+    # pack cycle — keep it modest, and below max_eval_samples or eval
     # can never emit a batch.
-    packing_group_docs: int = 2048
+    packing_group_docs: int = 512
     # Require strict segment-aware attention semantics when using multipack.
     packing_strict_attention: bool = True
 
@@ -820,14 +820,16 @@ def _validate_data(cfg: Config) -> None:
                 f"got {cfg.data.packing_group_docs}"
             )
         if 0 < cfg.data.max_eval_samples < cfg.data.packing_group_docs:
-            warnings.warn(
+            msg = (
                 f"data.max_eval_samples ({cfg.data.max_eval_samples}) is smaller than "
                 f"data.packing_group_docs ({cfg.data.packing_group_docs}); multipack "
                 "emits nothing until packing_group_docs pending docs accumulate, so "
                 "evaluation will fail with zero batches. Lower packing_group_docs or "
-                "raise max_eval_samples.",
-                stacklevel=2,
+                "raise max_eval_samples."
             )
+            if cfg.train.eval_every > 0:
+                _vfail(msg)
+            warnings.warn(msg, stacklevel=2)
 
     if cfg.data.window_shuffle_windows < 0:
         _vfail(f"data.window_shuffle_windows must be >=0, got {cfg.data.window_shuffle_windows}")

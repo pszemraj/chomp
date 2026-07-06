@@ -108,18 +108,40 @@ def test_eval_fails_fast_when_bin_packer_emits_zero_batches(tmp_path: Path) -> N
         run(cfg, config_path=None, resume="none")
 
 
-def test_eval_fails_fast_when_multipack_emits_zero_batches(tmp_path: Path) -> None:
-    """Eval should raise when multipack cannot produce any batch."""
+def test_eval_fails_fast_when_multipack_emits_zero_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Eval should raise when multipack cannot produce any batch.
+
+    Config validation now rejects max_eval_samples < packing_group_docs
+    outright, so the runtime guard is exercised via its remaining real-world
+    trigger: an eval split that yields fewer documents than max_eval_samples.
+    """
+    train_items = [{"text": "xxxx"} for _ in range(64)]
+    eval_items = [{"text": "yy"}, {"text": "zz"}]  # 2 docs < packing_group_docs=8
+
+    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> FakeHFIterable:
+        _ = (dataset, name, streaming)
+        return FakeHFIterable(items=eval_items if split == "validation" else train_items)
+
+    import datasets
+
+    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
+
     run_dir = tmp_path / "run_multipack"
     cfg = Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
         data=DataConfig(
-            backend="local_text",
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_split="train",
+            hf_eval_split="validation",
+            shuffle=False,
             repeat=True,
-            local_text="x",
             packing_mode="multipack",
-            packing_group_docs=4,
-            max_eval_samples=3,
+            packing_group_docs=8,
+            max_eval_samples=8,
             tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
         ),
         train=TrainConfig(
