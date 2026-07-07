@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -691,6 +692,69 @@ def _mask_labels(
     return labels
 
 
+def _assemble_batch(
+    next_window: Callable[[], tuple[np.ndarray, np.ndarray, np.ndarray]],
+    *,
+    grad_accum: int,
+    batch_size: int,
+    seq_len: int,
+    mask_boundary_loss: bool,
+    train_on_eos: bool,
+    eos_id: int,
+    device_put: bool,
+) -> Batch:
+    """Assemble one fixed-shape [A, B, T] Batch from packed [T] windows.
+
+    Single source of truth for batch assembly semantics (label masking,
+    attention mask from segment IDs, reshape, optional device transfer);
+    used by both the Grain train path and the eval iterator.
+
+    :param next_window: Callable yielding (tokens, segment_ids, position_ids) [T] arrays.
+    :param int grad_accum: Number of microbatches (A).
+    :param int batch_size: Microbatch size (B).
+    :param int seq_len: Sequence length (T).
+    :param bool mask_boundary_loss: Mask labels at segment transitions.
+    :param bool train_on_eos: Keep EOS positions in the loss.
+    :param int eos_id: EOS token id used when train_on_eos is False.
+    :param bool device_put: Transfer the batch to device before returning.
+    :return Batch: Fixed-shape batch of [A, B, T] arrays.
+    """
+    need = grad_accum * batch_size
+    inps = np.empty((need, seq_len), dtype=np.int32)
+    labs = np.empty((need, seq_len), dtype=np.int32)
+    segs_out = np.empty((need, seq_len), dtype=np.int32)
+    pos_out = np.empty((need, seq_len), dtype=np.int32)
+
+    for idx in range(need):
+        seq, segs, pos_ids = next_window()  # [T]
+        # Labels align with input_ids; the model shifts internally.
+        inp = np.asarray(seq, dtype=np.int32)
+        labs[idx] = _mask_labels(
+            inp.copy(),
+            segs,
+            mask_boundary_loss=mask_boundary_loss,
+            train_on_eos=train_on_eos,
+            eos_id=eos_id,
+        )
+        inps[idx] = inp
+        segs_out[idx] = np.asarray(segs, dtype=np.int32)
+        pos_out[idx] = np.asarray(pos_ids, dtype=np.int32)
+
+    segs_abt = segs_out.reshape(grad_accum, batch_size, seq_len)
+    batch = Batch(
+        input_ids=inps.reshape(grad_accum, batch_size, seq_len),
+        labels=labs.reshape(grad_accum, batch_size, seq_len),
+        attention_mask=segs_abt > 0,
+        segment_ids=segs_abt,
+        position_ids=pos_out.reshape(grad_accum, batch_size, seq_len),
+    )
+    if device_put:
+        import jax  # imported lazily to keep iterator usable in non-JAX contexts
+
+        batch = jax.device_put(batch)
+    return batch
+
+
 class _SequenceProducer:
     """Produces packed [T] windows from a text stream + packer.
 
@@ -852,52 +916,16 @@ class TrainBatchIterator:
         return self
 
     def __next__(self) -> Batch:
-        need = self._A * self._B
-        inps = np.empty((need, self._T), dtype=np.int32)
-        labs = np.empty((need, self._T), dtype=np.int32)
-        segs_out = np.empty((need, self._T), dtype=np.int32)
-        pos_out = np.empty((need, self._T), dtype=np.int32)
-
-        idx = 0
-        while idx < need:
-            seq, segs, pos_ids = self._producer.next_window()  # [T]
-            # Convert to input/labels [T]. Labels align with input_ids; model shifts internally.
-            inp = np.asarray(seq, dtype=np.int32)
-            lab = _mask_labels(
-                inp.copy(),
-                segs,
-                mask_boundary_loss=self._mask_boundary_loss,
-                train_on_eos=self._train_on_eos,
-                eos_id=self._eos_id,
-            )
-            seg = np.asarray(segs, dtype=np.int32)
-            pos = np.asarray(pos_ids, dtype=np.int32)
-            inps[idx] = inp
-            labs[idx] = lab
-            segs_out[idx] = seg
-            pos_out[idx] = pos
-            idx += 1
-
-        # Reshape -> [A, B, T]
-        inps = inps.reshape(self._A, self._B, self._T)
-        labs = labs.reshape(self._A, self._B, self._T)
-        segs = segs_out.reshape(self._A, self._B, self._T)
-        pos = pos_out.reshape(self._A, self._B, self._T)
-
-        attn = segs > 0
-
-        batch = Batch(
-            input_ids=inps,
-            labels=labs,
-            attention_mask=attn,
-            segment_ids=segs,
-            position_ids=pos,
+        return _assemble_batch(
+            self._producer.next_window,
+            grad_accum=self._A,
+            batch_size=self._B,
+            seq_len=self._T,
+            mask_boundary_loss=self._mask_boundary_loss,
+            train_on_eos=self._train_on_eos,
+            eos_id=self._eos_id,
+            device_put=self._device_put,
         )
-        if self._device_put:
-            import jax  # imported lazily to keep iterator usable in non-JAX contexts
-
-            batch = jax.device_put(batch)
-        return batch
 
     # -------- checkpoint hooks --------
 

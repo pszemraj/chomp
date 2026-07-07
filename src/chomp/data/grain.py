@@ -280,46 +280,19 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
             return int(value) if value is not None else None
 
         def __next__(self) -> Batch:
-            from chomp.data.pipeline import _mask_labels
+            from chomp.data.pipeline import _assemble_batch
 
             docs_seen_before = self._docs_seen()
-            need = self._A * self._B
-            inps = np.empty((need, self._T), dtype=np.int32)
-            labs = np.empty((need, self._T), dtype=np.int32)
-            segs_out = np.empty((need, self._T), dtype=np.int32)
-            pos_out = np.empty((need, self._T), dtype=np.int32)
-
-            for idx in range(need):
-                seq, segs, pos_ids = next(self._parent)  # [T]
-                inp = np.asarray(seq, dtype=np.int32)
-                lab = _mask_labels(
-                    inp.copy(),
-                    segs,
-                    mask_boundary_loss=self._mask_boundary_loss,
-                    train_on_eos=self._train_on_eos,
-                    eos_id=self._eos_id,
-                )
-                inps[idx] = inp
-                labs[idx] = lab
-                segs_out[idx] = np.asarray(segs, dtype=np.int32)
-                pos_out[idx] = np.asarray(pos_ids, dtype=np.int32)
-
-            inps = inps.reshape(self._A, self._B, self._T)
-            labs = labs.reshape(self._A, self._B, self._T)
-            segs = segs_out.reshape(self._A, self._B, self._T)
-            pos = pos_out.reshape(self._A, self._B, self._T)
-
-            batch = Batch(
-                input_ids=inps,
-                labels=labs,
-                attention_mask=segs > 0,
-                segment_ids=segs,
-                position_ids=pos,
+            batch = _assemble_batch(
+                lambda: next(self._parent),
+                grad_accum=self._A,
+                batch_size=self._B,
+                seq_len=self._T,
+                mask_boundary_loss=self._mask_boundary_loss,
+                train_on_eos=self._train_on_eos,
+                eos_id=self._eos_id,
+                device_put=self._device_put,
             )
-            if self._device_put:
-                import jax  # imported lazily to keep iterator usable in non-JAX contexts
-
-                batch = jax.device_put(batch)
             stats = _packer_stats_from_chain(self._parent)
             docs_seen_after = stats.get("docs_seen")
             if docs_seen_before is not None and docs_seen_after is not None:
