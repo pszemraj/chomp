@@ -55,7 +55,8 @@ class HFStreamingTextStream:
       2) load_state_dict
       3) create iterator (`iter(ds)`)
 
-    We have an explicit test for this ordering (see tests/test_hf_state_roundtrip.py).
+    We have an explicit test for this ordering (see the HF state roundtrip
+    test in tests/test_data_pipeline.py).
     """
 
     def __init__(self, spec: HFStreamSpec, *, epoch0: int = 0):
