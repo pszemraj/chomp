@@ -175,6 +175,29 @@ def test_data_and_logging_validation_rejects_invalid_values() -> None:
             validate_config(mutate(_base_cfg()))
 
 
+def test_strict_multipack_warns_when_boundary_masking_disabled() -> None:
+    """Strict multipack with mask_boundary_loss=false should warn about count skew.
+
+    The backend excludes cross-segment label pairs whenever segment_ids are
+    passed (megalodon-jax >= 0.1.2), so disabling chomp's pre-masking only
+    desyncs host-side token counts from the model's loss denominator.
+    """
+    cfg = _base_cfg()
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            packing_mode="multipack",
+            packing_group_docs=2,
+            packing_strict_attention=True,
+            mask_boundary_loss=False,
+            max_eval_samples=0,
+        ),
+    )
+    with pytest.warns(UserWarning, match="mask_boundary_loss"):
+        validate_config(cfg)
+
+
 def test_hf_eval_split_allows_null() -> None:
     """hf_eval_split=None should validate and imply train-split eval fallback."""
     cfg = _base_cfg()

@@ -414,9 +414,10 @@ def _validate_packing_capabilities(cfg: Config, *, params: Any, static: Any) -> 
         return
     raise RuntimeError(
         "Strict multipack attention was requested but the model backend does not "
-        "support packed metadata arguments (segment_ids, position_ids). "
-        "Set data.packing_strict_attention=false to run in non-strict mode or "
-        "upgrade megalodon-jax to a strict-packing-capable version."
+        "advertise full segment isolation (supports_segment_reset capability flag, "
+        "megalodon-jax >= 0.1.2: attention + ComplexEMA + TimestepNorm reset at "
+        "packed document boundaries). Set data.packing_strict_attention=false to "
+        "run in non-strict mode or upgrade megalodon-jax."
     )
 
 

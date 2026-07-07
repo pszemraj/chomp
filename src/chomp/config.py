@@ -86,6 +86,11 @@ class ModelConfig:
     init_mode: Literal["gaussian", "xavier", "he", "bert", "none"] = "he"
     use_checkpoint: bool = False
     output_size: int = -1
+    # Segmented CEMA path selection for strict packed training (megalodon-jax
+    # >= 0.1.2). True = parallel associative scan (fast, higher peak memory);
+    # False = sequential lax.scan fallback (O(1) memory). Ignored unless
+    # segment_ids reach the model (multipack + packing_strict_attention).
+    use_associative_segment_scan: bool = True
 
     # Dtype policy (strings so YAML is clean; converted at runtime)
     param_dtype: Literal["float32", "bfloat16"] = "float32"
@@ -830,6 +835,16 @@ def _validate_data(cfg: Config) -> None:
             if cfg.train.eval_every > 0:
                 _vfail(msg)
             warnings.warn(msg, stacklevel=2)
+        if cfg.data.packing_strict_attention and not cfg.data.mask_boundary_loss:
+            warnings.warn(
+                "data.mask_boundary_loss=false has no effect on the objective under "
+                "strict multipack: the backend excludes cross-segment label pairs "
+                "from the loss whenever segment_ids are passed (megalodon-jax >= "
+                "0.1.2). Host-side token counts will include those pairs, slightly "
+                "skewing token-weighted grad accumulation and loss_tokens metrics. "
+                "Keep mask_boundary_loss=true so host counts match the model.",
+                stacklevel=2,
+            )
 
     if cfg.data.window_shuffle_windows < 0:
         _vfail(f"data.window_shuffle_windows must be >=0, got {cfg.data.window_shuffle_windows}")

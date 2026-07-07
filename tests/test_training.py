@@ -38,7 +38,7 @@ from chomp.config import (
     WandbConfig,
 )
 from chomp.data import build_train_iterator, data_fingerprint, prepare_tokenizer_and_config
-from chomp.model import build_model, training_loss
+from chomp.model import build_model, supports_packed_attention, training_loss
 from chomp.train import _build_checkpoint_manager, build_optimizer, init_train_state, run
 from chomp.types import Batch, TrainState
 from chomp.utils.tree import abstractify_tree, tree_allclose
@@ -763,3 +763,58 @@ def test_strict_multipack_guard_raises_when_backend_unsupported(
     monkeypatch.setattr("chomp.train.supports_packed_attention", lambda params, static: False)
     with pytest.raises(RuntimeError, match="Strict multipack attention"):
         run(cfg, config_path=None, resume="none")
+
+
+def test_supports_packed_attention_requires_capability_flag() -> None:
+    """Capability check keys on supports_segment_reset, not compute_loss signature.
+
+    A backend that accepts segment_ids/position_ids but does not advertise the
+    flag (megalodon-jax < 0.1.2: attention-only isolation, CEMA/TimestepNorm
+    state leaking across packed boundaries) must be rejected.
+    """
+    import equinox as eqx
+
+    cfg = Config(model=ModelConfig(backend="dummy", vocab_size=64, d_model=16, dropout=0.0))
+    params, static = build_model(cfg, key=jax.random.PRNGKey(0))
+    assert supports_packed_attention(params, static)
+
+    class _LegacyLM(eqx.Module):
+        """Pre-0.1.2 shape: packed kwargs in the signature, no capability flag."""
+
+        w: jax.Array
+
+        def compute_loss(
+            self,
+            input_ids: jax.Array,
+            labels: jax.Array,
+            attention_mask: jax.Array | None = None,
+            segment_ids: jax.Array | None = None,
+            position_ids: jax.Array | None = None,
+        ) -> jax.Array:
+            _ = (input_ids, labels, attention_mask, segment_ids, position_ids)
+            return jnp.zeros(())
+
+    legacy_params, legacy_static = eqx.partition(_LegacyLM(w=jnp.zeros(1)), eqx.is_array)
+    assert not supports_packed_attention(legacy_params, legacy_static)
+
+
+def test_megalodon_backend_advertises_segment_reset() -> None:
+    """The installed megalodon-jax must expose the full-isolation capability flag."""
+    pytest.importorskip("megalodon_jax")
+    cfg = Config(
+        model=ModelConfig(
+            backend="megalodon",
+            vocab_size=64,
+            model_dim=32,
+            num_layers=1,
+            num_heads=1,
+            z_dim=16,
+            value_dim=32,
+            ffn_hidden_dim=64,
+            cema_ndim=4,
+            chunk_size=8,
+            norm_num_groups=4,
+        )
+    )
+    params, static = build_model(cfg, key=jax.random.PRNGKey(0))
+    assert supports_packed_attention(params, static)

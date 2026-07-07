@@ -19,8 +19,7 @@ Backends:
 
 from __future__ import annotations
 
-import inspect
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import equinox as eqx
 import jax
@@ -49,6 +48,11 @@ class DummyLM(eqx.Module):
     proj: eqx.nn.Linear
     dropout: eqx.nn.Dropout
     vocab_size: int = eqx.field(static=True)
+
+    # DummyLM carries no recurrent or cross-token state, so segment isolation
+    # holds trivially; this keeps strict-multipack smoke tests on the dummy
+    # backend passing the capability gate.
+    supports_segment_reset: ClassVar[bool] = True
 
     def __init__(self, *, vocab_size: int, d_model: int, dropout: float, key: jax.Array):
         """Initialize the dummy language model.
@@ -195,6 +199,7 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
             init_mode=cfg.model.init_mode,
             use_checkpoint=cfg.model.use_checkpoint,
             output_size=cfg.model.output_size,
+            use_associative_segment_scan=cfg.model.use_associative_segment_scan,
             param_dtype=dtype_from_str(cfg.model.param_dtype),
             compute_dtype=dtype_from_str(cfg.model.compute_dtype),
             accum_dtype=dtype_from_str(cfg.model.accum_dtype),
@@ -258,19 +263,18 @@ def training_loss(
 
 
 def supports_packed_attention(params: Any, static: Any) -> bool:
-    """Return True if the model compute_loss supports packed metadata kwargs.
+    """Return True if the model backend supports full packed-segment isolation.
+
+    Checks the ``supports_segment_reset`` capability flag introduced in
+    megalodon-jax 0.1.2. Signature introspection of ``compute_loss`` is not
+    sufficient: older versions accepted segment_ids/position_ids but only
+    isolated attention, leaking ComplexEMA and TimestepNorm state across
+    packed document boundaries.
 
     :param Any params: Model parameters.
     :param Any static: Static model components.
-    :return bool: True when compute_loss accepts segment_ids and position_ids.
+    :return bool: True when the backend resets all recurrent state
+        (attention, CEMA, TimestepNorm) at segment boundaries.
     """
     model = eqx.combine(params, static)
-    compute_loss = getattr(model, "compute_loss", None)
-    if not callable(compute_loss):
-        return False
-    try:
-        sig = inspect.signature(compute_loss)
-    except (TypeError, ValueError):
-        return False
-    params_map = sig.parameters
-    return "segment_ids" in params_map and "position_ids" in params_map
+    return bool(getattr(model, "supports_segment_reset", False))
