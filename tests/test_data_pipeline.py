@@ -64,8 +64,8 @@ def test_bin_packer_packs_multiple_docs() -> None:
         packer.add_document(_doc(tok, length))
 
     assert packer.can_pop()
-    seq1, seg1 = packer.pop_seq_with_segments()
-    seq2, seg2 = packer.pop_seq_with_segments()
+    seq1, seg1, _ = packer.pop_seq_with_metadata()
+    seq2, seg2, _ = packer.pop_seq_with_metadata()
 
     assert seq1.shape == (8,)
     assert seq2.shape == (8,)
@@ -97,9 +97,9 @@ def test_bin_packer_state_roundtrip() -> None:
     for tok, length in [(21, 6), (22, 2), (23, 6), (24, 2)]:
         packer.add_document(_doc(tok, length))
 
-    _ = packer.pop_seq_with_segments()
+    _ = packer.pop_seq_with_metadata()
     state = packer.get_state()
-    seq_b = packer.pop_seq_with_segments()
+    seq_b = packer.pop_seq_with_metadata()
 
     restored = BinPacker(
         seq_len=8,
@@ -114,10 +114,11 @@ def test_bin_packer_state_roundtrip() -> None:
         pad_id=0,
     )
     restored.set_state(state)
-    seq_b2 = restored.pop_seq_with_segments()
+    seq_b2 = restored.pop_seq_with_metadata()
 
     np.testing.assert_array_equal(seq_b[0], seq_b2[0])
     np.testing.assert_array_equal(seq_b[1], seq_b2[1])
+    np.testing.assert_array_equal(seq_b[2], seq_b2[2])
 
 
 def test_multipack_packer_emits_segment_local_positions() -> None:
@@ -215,7 +216,7 @@ def test_token_packer_legacy_state_normalizes_large_segment_ids() -> None:
     packer.set_state(legacy_state)
 
     assert packer.can_pop()
-    _, segs = packer.pop_seq_with_segments()
+    _, segs, _ = packer.pop_seq_with_metadata()
     assert segs.dtype == np.int32
     assert np.all(segs > 0)
 
@@ -227,7 +228,7 @@ def test_token_packer_legacy_state_normalizes_large_segment_ids() -> None:
 
     # Adding a new document after restore should remain safe and deterministic.
     packer.add_document([41, 42, 43, 44, 45, 46, 47, 48])
-    seq2, segs2 = packer.pop_seq_with_segments()
+    seq2, segs2, _ = packer.pop_seq_with_metadata()
     assert seq2.shape == (8,)
     np.testing.assert_array_equal(segs2, np.ones((8,), dtype=np.int32))
 

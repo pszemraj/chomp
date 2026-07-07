@@ -71,6 +71,30 @@ def _prepare_doc_tokens(
     return np.concatenate(pieces, axis=0), truncated
 
 
+def _positions_from_segments(segs: np.ndarray) -> np.ndarray:
+    """Derive per-segment position IDs from segment IDs (vectorized).
+
+    Positions restart at 0 at every contiguous segment-ID run and are 0 on
+    padding (segment id <= 0). Positions are always a pure function of the
+    emitted segment IDs, so they are computed here in exactly one place
+    rather than stored or re-derived by consumers.
+
+    :param np.ndarray segs: Segment IDs of length T.
+    :return np.ndarray: Position IDs of length T (int32).
+    """
+    n = int(segs.size)
+    if n == 0:
+        return np.zeros((0,), dtype=np.int32)
+    idx = np.arange(n, dtype=np.int64)
+    boundary = np.empty(n, dtype=bool)
+    boundary[0] = True
+    boundary[1:] = segs[1:] != segs[:-1]
+    run_starts = idx[boundary]
+    pos = (idx - run_starts[np.cumsum(boundary) - 1]).astype(np.int32)
+    pos[segs <= 0] = 0
+    return pos
+
+
 class _ChunkedIntBuffer:
     """A chunked 1D int32 buffer with efficient take()."""
 
@@ -353,26 +377,22 @@ class TokenPacker:
             raise RuntimeError("token/segment buffers are misaligned")
         return self._token_buf.size >= self.seq_len
 
-    def pop_seq(self) -> np.ndarray:
-        """Return [seq_len] tokens.
+    def pop_seq_with_metadata(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return ([seq_len] tokens, [seq_len] segment_ids, [seq_len] position_ids).
 
-        :return np.ndarray: Array of shape [seq_len] containing token IDs.
-        """
-        tokens, _segs = self.pop_seq_with_segments()
-        return tokens
-
-    def pop_seq_with_segments(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return ([seq_len] tokens, [seq_len] segment_ids).
+        Position IDs restart at each window: a document spanning multiple
+        windows restarts at 0 in every window. They are informational for
+        stream-semantics modes (never consumed by the model).
 
         :raises RuntimeError: If token/segment buffers are misaligned.
-        :return tuple: (tokens, segment_ids) arrays of shape [seq_len].
+        :return tuple: (tokens, segment_ids, position_ids) arrays of shape [seq_len].
         """
 
         if self._token_buf.size != self._segment_buf.size:
             raise RuntimeError("token/segment buffers are misaligned")
         tokens = self._token_buf.take(self.seq_len)
         segs = self._reindex_popped_segments(self._segment_buf.take(self.seq_len))
-        return tokens, segs
+        return tokens, segs, _positions_from_segments(segs)
 
     def get_state(self) -> dict[str, Any]:
         """Capture packer state for checkpointing.
@@ -584,16 +604,16 @@ class BinPacker:
         self._pack_bins()
         return bool(self._ready)
 
-    def pop_seq_with_segments(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return ([seq_len] tokens, [seq_len] segment_ids).
+    def pop_seq_with_metadata(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return ([seq_len] tokens, [seq_len] segment_ids, [seq_len] position_ids).
 
         :raises RuntimeError: If called before any sequences are ready.
-        :return tuple: (tokens, segment_ids) arrays of shape [seq_len].
+        :return tuple: (tokens, segment_ids, position_ids) arrays of shape [seq_len].
         """
         if not self.can_pop():
             raise RuntimeError("bin packer has no ready sequences")
         tokens, segs = self._ready.popleft()
-        return tokens, segs
+        return tokens, segs, _positions_from_segments(segs)
 
     def get_state(self) -> dict[str, Any]:
         """Capture packer state for checkpointing.
@@ -847,15 +867,6 @@ class MultipackPacker:
             return False
         self._pack_group()
         return bool(self._ready)
-
-    def pop_seq_with_segments(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return ([seq_len] tokens, [seq_len] segment_ids).
-
-        :raises RuntimeError: If called before any sequence is ready.
-        :return tuple[np.ndarray, np.ndarray]: Token and segment arrays.
-        """
-        tokens, segs, _ = self.pop_seq_with_metadata()
-        return tokens, segs
 
     def pop_seq_with_metadata(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Return ([seq_len] tokens, [seq_len] segment_ids, [seq_len] position_ids).

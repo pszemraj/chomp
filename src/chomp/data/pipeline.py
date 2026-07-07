@@ -665,30 +665,6 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
     }
 
 
-def _position_ids_from_segments(segs: np.ndarray) -> np.ndarray:
-    """Build per-segment position IDs from segment IDs.
-
-    :param np.ndarray segs: Segment IDs of length T.
-    :return np.ndarray: Position IDs of length T.
-    """
-    pos = np.zeros_like(segs, dtype=np.int32)
-    cur_seg = 0
-    cur_pos = 0
-    for i in range(int(segs.size)):
-        seg_id = int(segs[i])
-        if seg_id <= 0:
-            pos[i] = 0
-            cur_seg = 0
-            cur_pos = 0
-            continue
-        if seg_id != cur_seg:
-            cur_seg = seg_id
-            cur_pos = 0
-        pos[i] = cur_pos
-        cur_pos += 1
-    return pos
-
-
 def _mask_labels(
     labels: np.ndarray,
     segs: np.ndarray,
@@ -802,20 +778,11 @@ class _SequenceProducer:
         """
         while not self._packer.can_pop():
             self._push_next_document()
-        pop_with_metadata = getattr(self._packer, "pop_seq_with_metadata", None)
-        if callable(pop_with_metadata):
-            seq, segs, pos = pop_with_metadata()
-            return (
-                np.asarray(seq, dtype=np.int32),
-                np.asarray(segs, dtype=np.int32),
-                np.asarray(pos, dtype=np.int32),
-            )
-        seq, segs = self._packer.pop_seq_with_segments()
-        segs_arr = np.asarray(segs, dtype=np.int32)
+        seq, segs, pos = self._packer.pop_seq_with_metadata()
         return (
             np.asarray(seq, dtype=np.int32),
-            segs_arr,
-            _position_ids_from_segments(segs_arr),
+            np.asarray(segs, dtype=np.int32),
+            np.asarray(pos, dtype=np.int32),
         )
 
     # -------- checkpoint hooks --------
