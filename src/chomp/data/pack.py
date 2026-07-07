@@ -432,8 +432,12 @@ class TokenPacker:
 
 
 @dataclass(frozen=True)
-class BinPackerState:
-    """JSON-serializable state for the bin packer."""
+class FFDPackerState:
+    """JSON-serializable state shared by the FFD packers (bin, multipack).
+
+    Position IDs are a pure function of segment IDs and are derived at pop
+    time, so they are deliberately not part of the state.
+    """
 
     pending_docs: list[list[int]]
     ready_tokens: list[list[int]]
@@ -451,12 +455,12 @@ class BinPackerState:
         }
 
     @staticmethod
-    def from_dict(d: dict[str, Any]) -> BinPackerState:
-        """Construct BinPackerState from a dictionary.
+    def from_dict(d: dict[str, Any]) -> FFDPackerState:
+        """Construct FFDPackerState from a dictionary.
 
         :param dict[str, Any] d: State dict from to_dict().
         :raises ValueError: If ready_tokens/ready_segments lengths differ.
-        :return BinPackerState: Reconstructed state.
+        :return FFDPackerState: Reconstructed state.
         """
         pending = d.get("pending_docs") or []
         ready_tokens = d.get("ready_tokens") or []
@@ -466,7 +470,7 @@ class BinPackerState:
                 "ready_tokens and ready_segments must have the same length "
                 f"({len(ready_tokens)} != {len(ready_segments)})"
             )
-        return BinPackerState(
+        return FFDPackerState(
             pending_docs=[list(x) for x in pending],
             ready_tokens=[list(x) for x in ready_tokens],
             ready_segments=[list(x) for x in ready_segments],
@@ -509,8 +513,234 @@ class _Bin:
         self.remaining -= int(seg.size)
 
 
-class BinPacker:
-    """Bin-pack documents into fixed-length sequences (FFD heuristic)."""
+def _chunk_to_capacity(doc: np.ndarray, capacity: int) -> list[np.ndarray]:
+    """Split a document into capacity-sized chunks (last chunk may be short).
+
+    :param np.ndarray doc: Document token array.
+    :param int capacity: Maximum chunk length.
+    :return list[np.ndarray]: Non-empty chunks in document order.
+    """
+    if doc.size <= capacity:
+        return [doc]
+    return [doc[start : start + capacity] for start in range(0, int(doc.size), capacity)]
+
+
+def _ffd_pack(
+    candidates: list[np.ndarray],
+    *,
+    bins_per_pack: int,
+    capacity: int,
+    max_docs: int | None,
+) -> tuple[list[_Bin], list[np.ndarray]]:
+    """First-fit-decreasing pack candidates into bins_per_pack bins.
+
+    Sorts candidates by size (descending, stable), seeds each bin with one of
+    the largest segments, then first-fit places the rest. Requires
+    len(candidates) >= bins_per_pack and every candidate <= capacity.
+
+    :param list[np.ndarray] candidates: Candidate segments to pack.
+    :param int bins_per_pack: Number of bins to produce.
+    :param int capacity: Bin capacity in tokens.
+    :param max_docs: Optional cap on segments per bin.
+    :return tuple[list[_Bin], list[np.ndarray]]: Filled bins and leftover
+        segments in descending-size order.
+    """
+    segments = sorted(candidates, key=lambda x: int(x.size), reverse=True)
+    bins = [_Bin(capacity=capacity, max_docs=max_docs) for _ in range(bins_per_pack)]
+    for idx in range(bins_per_pack):
+        bins[idx].add(segments[idx])
+
+    leftover: list[np.ndarray] = []
+    for seg in segments[bins_per_pack:]:
+        for b in bins:
+            if b.can_fit(seg):
+                b.add(seg)
+                break
+        else:
+            leftover.append(seg)
+    return bins, leftover
+
+
+def _render_bin(b: _Bin, *, capacity: int, pad_id: int) -> tuple[np.ndarray, np.ndarray]:
+    """Render a bin into (tokens, segment_ids) arrays of length capacity.
+
+    :param _Bin b: Bin with packed segments.
+    :param int capacity: Output sequence length.
+    :param int pad_id: Padding token ID for the tail.
+    :return tuple[np.ndarray, np.ndarray]: Token and segment arrays.
+    """
+    tokens = np.full((capacity,), pad_id, dtype=np.int32)
+    segs = np.zeros((capacity,), dtype=np.int32)
+
+    pos = 0
+    seg_id = 1
+    for seg in b.segments:
+        end = pos + int(seg.size)
+        tokens[pos:end] = seg
+        segs[pos:end] = seg_id
+        pos = end
+        seg_id += 1
+
+    return tokens, segs
+
+
+class _FFDPackerBase:
+    """Shared machinery for the FFD-based packers (bin, multipack).
+
+    Subclasses define the packing trigger (`_pack_threshold`) and how a pack
+    cycle consumes the pending queue (`_pack`).
+    """
+
+    _mode_name = "ffd"
+
+    def __init__(
+        self,
+        *,
+        seq_len: int,
+        add_bos: bool,
+        add_eos: bool,
+        bos_id: int,
+        eos_id: int,
+        max_doc_tokens: int | None,
+        bins_per_pack: int,
+        max_docs_per_bin: int | None,
+        pad_id: int,
+    ):
+        """Initialize shared FFD packer state.
+
+        :param int seq_len: Fixed sequence length (T) for output.
+        :param bool add_bos: Whether to prepend BOS token to each document.
+        :param bool add_eos: Whether to append EOS token to each document.
+        :param int bos_id: BOS token ID.
+        :param int eos_id: EOS token ID.
+        :param max_doc_tokens: Optional max tokens per document before truncation.
+        :param int bins_per_pack: Number of sequences to pack per cycle.
+        :param max_docs_per_bin: Optional cap on docs per bin.
+        :param int pad_id: Padding token ID.
+        :raises ValueError: If an input argument is invalid.
+        """
+        if seq_len < 8:
+            raise ValueError(f"seq_len must be >=8, got {seq_len}")
+        if bins_per_pack <= 0:
+            raise ValueError(f"bins_per_pack must be positive, got {bins_per_pack}")
+        if max_docs_per_bin is not None and max_docs_per_bin <= 0:
+            raise ValueError(f"max_docs_per_bin must be positive when set, got {max_docs_per_bin}")
+
+        self.seq_len = int(seq_len)
+        self._capacity = int(seq_len)
+        self.add_bos = bool(add_bos)
+        self.add_eos = bool(add_eos)
+        self.bos_id = int(bos_id)
+        self.eos_id = int(eos_id)
+        self.max_doc_tokens = None if max_doc_tokens is None else int(max_doc_tokens)
+        self._bins_per_pack = int(bins_per_pack)
+        self._max_docs_per_bin = None if max_docs_per_bin is None else int(max_docs_per_bin)
+        self._pad_id = int(pad_id)
+
+        self._pending_docs: deque[np.ndarray] = deque()
+        self._ready: deque[tuple[np.ndarray, np.ndarray]] = deque()
+        self._docs_seen = 0
+        self._docs_truncated = 0
+
+    def _pack_threshold(self) -> int:
+        """Return the pending-doc count that triggers a pack cycle."""
+        raise NotImplementedError
+
+    def _pack(self) -> None:
+        """Run one pack cycle over the pending queue, filling self._ready."""
+        raise NotImplementedError
+
+    def add_document(self, tokens: Iterable[int]) -> None:
+        """Add a tokenized document to the pending queue.
+
+        Oversized documents are split into capacity-sized chunks first.
+
+        :param tokens: Iterable of token IDs for the document.
+        """
+        doc, truncated = _prepare_doc_tokens(
+            tokens,
+            add_bos=self.add_bos,
+            add_eos=self.add_eos,
+            bos_id=self.bos_id,
+            eos_id=self.eos_id,
+            max_doc_tokens=self.max_doc_tokens,
+        )
+        self._docs_seen += 1
+        if truncated:
+            self._docs_truncated += 1
+        if doc.size == 0:
+            return
+        self._pending_docs.extend(_chunk_to_capacity(doc, self._capacity))
+
+    def can_pop(self) -> bool:
+        """Check if we can pop a packed sequence.
+
+        :return bool: True if a sequence is ready.
+        """
+        if self._ready:
+            return True
+        if len(self._pending_docs) < self._pack_threshold():
+            return False
+        self._pack()
+        return bool(self._ready)
+
+    def pop_seq_with_metadata(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return ([seq_len] tokens, [seq_len] segment_ids, [seq_len] position_ids).
+
+        :raises RuntimeError: If called before any sequences are ready.
+        :return tuple: (tokens, segment_ids, position_ids) arrays of shape [seq_len].
+        """
+        if not self.can_pop():
+            raise RuntimeError(f"{self._mode_name} packer has no ready sequences")
+        tokens, segs = self._ready.popleft()
+        return tokens, segs, _positions_from_segments(segs)
+
+    def get_state(self) -> dict[str, Any]:
+        """Capture packer state for checkpointing.
+
+        :return dict[str, Any]: Serializable state dict.
+        """
+        st = FFDPackerState(
+            pending_docs=[x.tolist() for x in self._pending_docs],
+            ready_tokens=[x.tolist() for x, _ in self._ready],
+            ready_segments=[x.tolist() for _, x in self._ready],
+        )
+        return st.to_dict()
+
+    def set_state(self, state: dict[str, Any]) -> None:
+        """Restore packer state from a checkpoint.
+
+        :param dict[str, Any] state: State dict from get_state().
+        """
+        st = FFDPackerState.from_dict(state)
+        self._pending_docs = deque(np.asarray(x, dtype=np.int32) for x in st.pending_docs)
+        self._ready = deque(
+            (
+                np.asarray(tokens, dtype=np.int32),
+                np.asarray(segs, dtype=np.int32),
+            )
+            for tokens, segs in zip(st.ready_tokens, st.ready_segments, strict=True)
+        )
+
+    def get_stats(self) -> dict[str, int]:
+        """Return basic document stats.
+
+        :return dict[str, int]: docs_seen and docs_truncated counts.
+        """
+        return {
+            "docs_seen": int(self._docs_seen),
+            "docs_truncated": int(self._docs_truncated),
+        }
+
+
+class BinPacker(_FFDPackerBase):
+    """Bin-pack documents into fixed-length sequences (FFD heuristic).
+
+    Buffers at least `buffer_docs` documents, then FFD-packs the entire
+    pending pool each cycle; leftovers stay pending for the next cycle.
+    """
+
+    _mode_name = "bin"
 
     def __init__(
         self,
@@ -528,251 +758,52 @@ class BinPacker:
     ):
         """Initialize the bin packer.
 
-        :param int seq_len: Fixed sequence length (T) for output.
-        :param bool add_bos: Whether to prepend BOS token to each document.
-        :param bool add_eos: Whether to append EOS token to each document.
-        :param int bos_id: BOS token ID.
-        :param int eos_id: EOS token ID.
-        :param max_doc_tokens: Optional max tokens per document before truncation.
-        :param int bins_per_pack: Number of sequences to pack per call.
         :param int buffer_docs: Minimum docs to buffer before packing.
-        :param max_docs_per_bin: Optional cap on docs per bin.
-        :param int pad_id: Padding token ID.
-        :raises ValueError: If seq_len < 8 or bins_per_pack <= 0.
+        :raises ValueError: If an input argument is invalid.
+
+        See :class:`_FFDPackerBase` for the shared parameters.
         """
-        if seq_len < 8:
-            raise ValueError(f"seq_len must be >=8, got {seq_len}")
-        if bins_per_pack <= 0:
-            raise ValueError(f"bins_per_pack must be positive, got {bins_per_pack}")
+        super().__init__(
+            seq_len=seq_len,
+            add_bos=add_bos,
+            add_eos=add_eos,
+            bos_id=bos_id,
+            eos_id=eos_id,
+            max_doc_tokens=max_doc_tokens,
+            bins_per_pack=bins_per_pack,
+            max_docs_per_bin=max_docs_per_bin,
+            pad_id=pad_id,
+        )
         if buffer_docs <= 0:
             raise ValueError(f"buffer_docs must be positive, got {buffer_docs}")
-
-        self.seq_len = int(seq_len)
-        self._capacity = int(seq_len)
-        self.add_bos = bool(add_bos)
-        self.add_eos = bool(add_eos)
-        self.bos_id = int(bos_id)
-        self.eos_id = int(eos_id)
-        self.max_doc_tokens = None if max_doc_tokens is None else int(max_doc_tokens)
-        self._bins_per_pack = int(bins_per_pack)
         self._buffer_docs = int(buffer_docs)
-        self._max_docs_per_bin = None if max_docs_per_bin is None else int(max_docs_per_bin)
-        self._pad_id = int(pad_id)
 
-        self._pending_docs: list[np.ndarray] = []
-        self._ready: deque[tuple[np.ndarray, np.ndarray]] = deque()
-        self._docs_seen = 0
-        self._docs_truncated = 0
+    def _pack_threshold(self) -> int:
+        return max(self._bins_per_pack, self._buffer_docs)
 
-    def add_document(self, tokens: Iterable[int]) -> None:
-        """Add a tokenized document to the bin packer buffer.
-
-        :param tokens: Iterable of token IDs for the document.
-        """
-        doc, truncated = _prepare_doc_tokens(
-            tokens,
-            add_bos=self.add_bos,
-            add_eos=self.add_eos,
-            bos_id=self.bos_id,
-            eos_id=self.eos_id,
-            max_doc_tokens=self.max_doc_tokens,
+    def _pack(self) -> None:
+        """FFD-pack the entire pending pool; leftovers remain pending."""
+        candidates = list(self._pending_docs)
+        self._pending_docs.clear()
+        bins, leftover = _ffd_pack(
+            candidates,
+            bins_per_pack=self._bins_per_pack,
+            capacity=self._capacity,
+            max_docs=self._max_docs_per_bin,
         )
-        self._docs_seen += 1
-        if truncated:
-            self._docs_truncated += 1
-        if doc.size == 0:
-            return
-
-        # Split oversized docs into capacity-sized chunks.
-        if doc.size > self._capacity:
-            for start in range(0, doc.size, self._capacity):
-                chunk = doc[start : start + self._capacity]
-                if chunk.size:
-                    self._pending_docs.append(chunk)
-        else:
-            self._pending_docs.append(doc)
-
-    def can_pop(self) -> bool:
-        """Check if we can pop a packed sequence.
-
-        :return bool: True if a sequence is ready.
-        """
-        if self._ready:
-            return True
-        if len(self._pending_docs) < max(self._bins_per_pack, self._buffer_docs):
-            return False
-        self._pack_bins()
-        return bool(self._ready)
-
-    def pop_seq_with_metadata(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return ([seq_len] tokens, [seq_len] segment_ids, [seq_len] position_ids).
-
-        :raises RuntimeError: If called before any sequences are ready.
-        :return tuple: (tokens, segment_ids, position_ids) arrays of shape [seq_len].
-        """
-        if not self.can_pop():
-            raise RuntimeError("bin packer has no ready sequences")
-        tokens, segs = self._ready.popleft()
-        return tokens, segs, _positions_from_segments(segs)
-
-    def get_state(self) -> dict[str, Any]:
-        """Capture packer state for checkpointing.
-
-        :return dict[str, Any]: Serializable state dict.
-        """
-        st = BinPackerState(
-            pending_docs=[x.tolist() for x in self._pending_docs],
-            ready_tokens=[x.tolist() for x, _ in self._ready],
-            ready_segments=[x.tolist() for _, x in self._ready],
-        )
-        return st.to_dict()
-
-    def set_state(self, state: dict[str, Any]) -> None:
-        """Restore packer state from a checkpoint.
-
-        :param dict[str, Any] state: State dict from get_state().
-        """
-        st = BinPackerState.from_dict(state)
-        self._pending_docs = [np.asarray(x, dtype=np.int32) for x in st.pending_docs]
-        self._ready = deque(
-            [
-                (
-                    np.asarray(tokens, dtype=np.int32),
-                    np.asarray(segs, dtype=np.int32),
-                )
-                for tokens, segs in zip(st.ready_tokens, st.ready_segments, strict=True)
-            ]
-        )
-
-    def get_stats(self) -> dict[str, int]:
-        """Return basic document stats.
-
-        :return dict[str, int]: docs_seen and docs_truncated counts.
-        """
-        return {
-            "docs_seen": int(self._docs_seen),
-            "docs_truncated": int(self._docs_truncated),
-        }
-
-    def _pack_bins(self) -> None:
-        """Pack buffered documents into ready sequences."""
-        if len(self._pending_docs) < self._bins_per_pack:
-            return
-
-        segments = sorted(self._pending_docs, key=lambda x: int(x.size), reverse=True)
-        bins, remaining = self._seed_bins(segments)
-        leftover = self._place_remaining(bins, remaining)
-        self._pending_docs = leftover
-        self._enqueue_bins(bins)
-
-    def _seed_bins(self, segments: list[np.ndarray]) -> tuple[list[_Bin], list[np.ndarray]]:
-        """Create bins and seed them with the largest segments.
-
-        :param list[np.ndarray] segments: Sorted segments (largest first).
-        :return tuple[list[_Bin], list[np.ndarray]]: Seeded bins and leftover segments.
-        """
-        bins = [
-            _Bin(capacity=self._capacity, max_docs=self._max_docs_per_bin)
-            for _ in range(self._bins_per_pack)
-        ]
-        for idx in range(self._bins_per_pack):
-            bins[idx].add(segments[idx])
-        return bins, segments[self._bins_per_pack :]
-
-    def _place_remaining(self, bins: list[_Bin], remaining: list[np.ndarray]) -> list[np.ndarray]:
-        """Place remaining segments into bins, returning leftovers.
-
-        :param list[_Bin] bins: Bins to fill.
-        :param list[np.ndarray] remaining: Segments to place.
-        :return list[np.ndarray]: Segments that did not fit in any bin.
-        """
-        leftover: list[np.ndarray] = []
-        for seg in remaining:
-            placed = False
-            for b in bins:
-                if b.can_fit(seg):
-                    b.add(seg)
-                    placed = True
-                    break
-            if not placed:
-                leftover.append(seg)
-        return leftover
-
-    def _enqueue_bins(self, bins: list[_Bin]) -> None:
-        """Render all bins into ready sequences."""
+        self._pending_docs.extend(leftover)
         for b in bins:
-            tokens, segs = self._render_bin(b)
-            self._ready.append((tokens, segs))
-
-    def _render_bin(self, b: _Bin) -> tuple[np.ndarray, np.ndarray]:
-        """Render a bin into (tokens, segment_ids) arrays.
-
-        :param _Bin b: Bin with packed segments.
-        :return tuple[np.ndarray, np.ndarray]: Token and segment arrays of length seq_len.
-        """
-        tokens = np.full((self._capacity,), self._pad_id, dtype=np.int32)
-        segs = np.zeros((self._capacity,), dtype=np.int32)
-
-        pos = 0
-        seg_id = 1
-        for seg in b.segments:
-            end = pos + int(seg.size)
-            tokens[pos:end] = seg
-            segs[pos:end] = seg_id
-            pos = end
-            seg_id += 1
-
-        return tokens, segs
+            self._ready.append(_render_bin(b, capacity=self._capacity, pad_id=self._pad_id))
 
 
-@dataclass(frozen=True)
-class MultipackPackerState:
-    """JSON-serializable state for the multipack packer."""
+class MultipackPacker(_FFDPackerBase):
+    """Groupwise FFD sample packer with segment-local position IDs.
 
-    pending_docs: list[list[int]]
-    ready_tokens: list[list[int]]
-    ready_segments: list[list[int]]
-    ready_positions: list[list[int]]
+    FFD-packs a bounded FIFO group of `group_docs` candidates per cycle;
+    leftovers return to the front of the queue to preserve stream locality.
+    """
 
-    def to_dict(self) -> dict[str, Any]:
-        """Convert to a JSON-serializable dictionary.
-
-        :return dict[str, Any]: State as a dict.
-        """
-        return {
-            "pending_docs": self.pending_docs,
-            "ready_tokens": self.ready_tokens,
-            "ready_segments": self.ready_segments,
-            "ready_positions": self.ready_positions,
-        }
-
-    @staticmethod
-    def from_dict(d: dict[str, Any]) -> MultipackPackerState:
-        """Construct MultipackPackerState from a dictionary.
-
-        :param dict[str, Any] d: State dict from to_dict().
-        :raises ValueError: If ready component lengths differ.
-        :return MultipackPackerState: Reconstructed state.
-        """
-        pending = d.get("pending_docs") or []
-        ready_tokens = d.get("ready_tokens") or []
-        ready_segments = d.get("ready_segments") or []
-        ready_positions = d.get("ready_positions") or []
-        if not (len(ready_tokens) == len(ready_segments) == len(ready_positions)):
-            raise ValueError(
-                "ready_tokens, ready_segments, and ready_positions must have matching lengths "
-                f"({len(ready_tokens)}, {len(ready_segments)}, {len(ready_positions)})"
-            )
-        return MultipackPackerState(
-            pending_docs=[list(x) for x in pending],
-            ready_tokens=[list(x) for x in ready_tokens],
-            ready_segments=[list(x) for x in ready_segments],
-            ready_positions=[list(x) for x in ready_positions],
-        )
-
-
-class MultipackPacker:
-    """Groupwise FFD sample packer with segment-local position IDs."""
+    _mode_name = "multipack"
 
     def __init__(
         self,
@@ -790,189 +821,40 @@ class MultipackPacker:
     ):
         """Initialize the multipack packer.
 
-        :param int seq_len: Fixed sequence length.
-        :param bool add_bos: Whether to prepend BOS token to each document.
-        :param bool add_eos: Whether to append EOS token to each document.
-        :param int bos_id: BOS token ID.
-        :param int eos_id: EOS token ID.
-        :param max_doc_tokens: Optional max tokens per document before truncation.
-        :param int bins_per_pack: Number of output sequences produced per pack cycle.
         :param int group_docs: Number of candidate documents to consider per cycle.
-        :param max_docs_per_bin: Optional cap on docs packed into a single sequence.
-        :param int pad_id: Padding token ID.
         :raises ValueError: If an input argument is invalid.
+
+        See :class:`_FFDPackerBase` for the shared parameters.
         """
-        if seq_len < 8:
-            raise ValueError(f"seq_len must be >=8, got {seq_len}")
-        if bins_per_pack <= 0:
-            raise ValueError(f"bins_per_pack must be positive, got {bins_per_pack}")
+        super().__init__(
+            seq_len=seq_len,
+            add_bos=add_bos,
+            add_eos=add_eos,
+            bos_id=bos_id,
+            eos_id=eos_id,
+            max_doc_tokens=max_doc_tokens,
+            bins_per_pack=bins_per_pack,
+            max_docs_per_bin=max_docs_per_bin,
+            pad_id=pad_id,
+        )
         if group_docs <= 0:
             raise ValueError(f"group_docs must be positive, got {group_docs}")
-        if max_docs_per_bin is not None and max_docs_per_bin <= 0:
-            raise ValueError(f"max_docs_per_bin must be positive when set, got {max_docs_per_bin}")
-
-        self.seq_len = int(seq_len)
-        self._capacity = int(seq_len)
-        self.add_bos = bool(add_bos)
-        self.add_eos = bool(add_eos)
-        self.bos_id = int(bos_id)
-        self.eos_id = int(eos_id)
-        self.max_doc_tokens = None if max_doc_tokens is None else int(max_doc_tokens)
-        self._bins_per_pack = int(bins_per_pack)
         self._group_docs = int(group_docs)
-        self._max_docs_per_bin = None if max_docs_per_bin is None else int(max_docs_per_bin)
-        self._pad_id = int(pad_id)
 
-        self._pending_docs: deque[np.ndarray] = deque()
-        self._ready: deque[tuple[np.ndarray, np.ndarray, np.ndarray]] = deque()
-        self._docs_seen = 0
-        self._docs_truncated = 0
+    def _pack_threshold(self) -> int:
+        return max(self._bins_per_pack, self._group_docs)
 
-    def add_document(self, tokens: Iterable[int]) -> None:
-        """Add a tokenized document to the multipack buffer.
-
-        :param tokens: Iterable of token IDs for the document.
-        """
-        doc, truncated = _prepare_doc_tokens(
-            tokens,
-            add_bos=self.add_bos,
-            add_eos=self.add_eos,
-            bos_id=self.bos_id,
-            eos_id=self.eos_id,
-            max_doc_tokens=self.max_doc_tokens,
-        )
-        self._docs_seen += 1
-        if truncated:
-            self._docs_truncated += 1
-        if doc.size == 0:
-            return
-
-        if doc.size > self._capacity:
-            for start in range(0, doc.size, self._capacity):
-                chunk = doc[start : start + self._capacity]
-                if chunk.size:
-                    self._pending_docs.append(chunk)
-        else:
-            self._pending_docs.append(doc)
-
-    def can_pop(self) -> bool:
-        """Check if we can pop a packed sequence.
-
-        :return bool: True if a sequence is ready.
-        """
-        if self._ready:
-            return True
-        threshold = max(self._bins_per_pack, self._group_docs)
-        if len(self._pending_docs) < threshold:
-            return False
-        self._pack_group()
-        return bool(self._ready)
-
-    def pop_seq_with_metadata(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return ([seq_len] tokens, [seq_len] segment_ids, [seq_len] position_ids).
-
-        :raises RuntimeError: If called before any sequence is ready.
-        :return tuple[np.ndarray, np.ndarray, np.ndarray]: Token, segment, and position arrays.
-        """
-        if not self.can_pop():
-            raise RuntimeError("multipack packer has no ready sequences")
-        tokens, segs, pos = self._ready.popleft()
-        return tokens, segs, pos
-
-    def get_state(self) -> dict[str, Any]:
-        """Capture packer state for checkpointing.
-
-        :return dict[str, Any]: Serializable state dict.
-        """
-        st = MultipackPackerState(
-            pending_docs=[x.tolist() for x in self._pending_docs],
-            ready_tokens=[x.tolist() for x, _, _ in self._ready],
-            ready_segments=[x.tolist() for _, x, _ in self._ready],
-            ready_positions=[x.tolist() for _, _, x in self._ready],
-        )
-        return st.to_dict()
-
-    def set_state(self, state: dict[str, Any]) -> None:
-        """Restore packer state from a checkpoint.
-
-        :param dict[str, Any] state: State dict from get_state().
-        """
-        st = MultipackPackerState.from_dict(state)
-        self._pending_docs = deque(np.asarray(x, dtype=np.int32) for x in st.pending_docs)
-        self._ready = deque(
-            [
-                (
-                    np.asarray(tokens, dtype=np.int32),
-                    np.asarray(segs, dtype=np.int32),
-                    np.asarray(pos, dtype=np.int32),
-                )
-                for tokens, segs, pos in zip(
-                    st.ready_tokens, st.ready_segments, st.ready_positions, strict=True
-                )
-            ]
-        )
-
-    def get_stats(self) -> dict[str, int]:
-        """Return basic document stats.
-
-        :return dict[str, int]: docs_seen and docs_truncated counts.
-        """
-        return {
-            "docs_seen": int(self._docs_seen),
-            "docs_truncated": int(self._docs_truncated),
-        }
-
-    def _pack_group(self) -> None:
-        """Pack one candidate group into ready sequences."""
-        if len(self._pending_docs) < self._bins_per_pack:
-            return
-        group_n = min(len(self._pending_docs), max(self._bins_per_pack, self._group_docs))
+    def _pack(self) -> None:
+        """FFD-pack one FIFO group; leftovers return to the queue front."""
+        group_n = min(len(self._pending_docs), self._pack_threshold())
         candidates = [self._pending_docs.popleft() for _ in range(group_n)]
-        segments = sorted(candidates, key=lambda x: int(x.size), reverse=True)
-
-        bins = [
-            _Bin(capacity=self._capacity, max_docs=self._max_docs_per_bin)
-            for _ in range(self._bins_per_pack)
-        ]
-        for idx in range(self._bins_per_pack):
-            bins[idx].add(segments[idx])
-
-        leftovers: list[np.ndarray] = []
-        for seg in segments[self._bins_per_pack :]:
-            placed = False
-            for b in bins:
-                if b.can_fit(seg):
-                    b.add(seg)
-                    placed = True
-                    break
-            if not placed:
-                leftovers.append(seg)
-
-        for seg in reversed(leftovers):
+        bins, leftover = _ffd_pack(
+            candidates,
+            bins_per_pack=self._bins_per_pack,
+            capacity=self._capacity,
+            max_docs=self._max_docs_per_bin,
+        )
+        for seg in reversed(leftover):
             self._pending_docs.appendleft(seg)
-
         for b in bins:
-            self._ready.append(self._render_bin(b))
-
-    def _render_bin(self, b: _Bin) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Render a bin into (tokens, segment_ids, position_ids) arrays.
-
-        :param _Bin b: Bin with packed segments.
-        :return tuple[np.ndarray, np.ndarray, np.ndarray]: Arrays of length seq_len.
-        """
-        tokens = np.full((self._capacity,), self._pad_id, dtype=np.int32)
-        segs = np.zeros((self._capacity,), dtype=np.int32)
-        pos_ids = np.zeros((self._capacity,), dtype=np.int32)
-
-        pos = 0
-        seg_id = 1
-        for seg in b.segments:
-            length = int(seg.size)
-            end = pos + length
-            tokens[pos:end] = seg
-            segs[pos:end] = seg_id
-            pos_ids[pos:end] = np.arange(length, dtype=np.int32)
-            pos = end
-            seg_id += 1
-
-        return tokens, segs, pos_ids
+            self._ready.append(_render_bin(b, capacity=self._capacity, pad_id=self._pad_id))
