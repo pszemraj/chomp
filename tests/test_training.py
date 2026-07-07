@@ -19,6 +19,7 @@ from _pytest.logging import LogCaptureFixture
 
 from chomp.ckpt import (
     build_meta,
+    check_resume_compat,
     default_ckpt_dir,
     make_manager,
     restore_at_step,
@@ -763,6 +764,36 @@ def test_strict_multipack_guard_raises_when_backend_unsupported(
     monkeypatch.setattr("chomp.train.supports_packed_attention", lambda params, static: False)
     with pytest.raises(RuntimeError, match="Strict multipack attention"):
         run(cfg, config_path=None, resume="none")
+
+
+def test_resume_compat_rejects_multipack_knob_changes(tmp_path: Path) -> None:
+    """Resume must reject changed packing_group_docs / packing_strict_attention.
+
+    group_docs changes which documents each multipack cycle packs (data-order
+    divergence); strict_attention silently changes the training objective.
+    """
+    cfg = _base_cfg(tmp_path / "run_compat")
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            packing_mode="multipack",
+            packing_group_docs=8,
+            packing_strict_attention=True,
+            max_eval_samples=0,
+        ),
+    )
+    meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
+
+    check_resume_compat(cfg, meta)  # identical config resumes cleanly
+
+    changed_group = replace(cfg, data=replace(cfg.data, packing_group_docs=16))
+    with pytest.raises(RuntimeError, match="packing_group_docs"):
+        check_resume_compat(changed_group, meta)
+
+    changed_strict = replace(cfg, data=replace(cfg.data, packing_strict_attention=False))
+    with pytest.raises(RuntimeError, match="packing_strict_attention"):
+        check_resume_compat(changed_strict, meta)
 
 
 def test_supports_packed_attention_requires_capability_flag() -> None:

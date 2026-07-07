@@ -481,6 +481,22 @@ def check_resume_compat(
         pack_prev.get("max_docs_per_bin"),
         severity="error",
     )
+    # Changing group_docs alters which documents each multipack cycle packs,
+    # so a resumed run would diverge from the continuous one.
+    _cmp(
+        "data.packing_group_docs",
+        pack_cur.get("group_docs"),
+        pack_prev.get("group_docs"),
+        severity="error",
+    )
+    # Changing strict_attention silently changes the training objective
+    # (segment isolation + backend boundary masking) mid-run.
+    _cmp(
+        "data.packing_strict_attention",
+        pack_cur.get("strict_attention"),
+        pack_prev.get("strict_attention"),
+        severity="error",
+    )
     _cmp(
         "data.grain_prefetch",
         pack_cur.get("grain_prefetch"),
