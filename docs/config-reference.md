@@ -504,6 +504,27 @@ Override output projection size. `-1` uses `vocab_size`.
 | Required | No |
 | Backend | `megalodon` only |
 
+<a id="model.use_associative_segment_scan"></a>
+#### `model.use_associative_segment_scan`
+```yaml
+use_associative_segment_scan: bool = true
+```
+
+Selects the segmented ComplexEMA implementation used for strict packed
+training (megalodon-jax ≥ 0.1.2). `true` runs a parallel associative scan
+(fast, but materializes `(L, B, D, N)` complex64 intermediates); `false`
+falls back to a sequential `lax.scan` with O(1) memory. Only consulted when
+`segment_ids` reach the model, i.e. `data.packing_mode: multipack` with
+`data.packing_strict_attention: true`; inert otherwise.
+
+| Property | Value |
+|----------|-------|
+| Required | No |
+| Backend | `megalodon` only |
+| Recommended | `false` only if the associative path OOMs |
+
+**Related:** [`data.packing_strict_attention`](#data.packing_strict_attention)
+
 ---
 
 <a id="model-special-tokens"></a>
@@ -914,8 +935,9 @@ First-fit-decreasing bin packing. Better packing efficiency but requires bufferi
 
 Grouped first-fit-decreasing packing over a `packing_group_docs` lookahead
 pool, emitting segment-local `position_ids`. With
-`packing_strict_attention: true`, enables segment-isolated attention with
-per-segment RoPE resets (fails fast if the backend lacks support).
+`packing_strict_attention: true`, enables full per-document state isolation
+(attention, RoPE, CEMA, TimestepNorm — megalodon-jax ≥ 0.1.2; fails fast if
+the backend lacks the `supports_segment_reset` capability).
 <a id="data.packing_buffer_docs"></a>
 #### `data.packing_buffer_docs`
 ```yaml
@@ -971,14 +993,21 @@ packing_strict_attention: bool = true
 ```
 
 When `packing_mode: multipack`, forward `segment_ids`/`position_ids` to the
-model for segment-isolated attention and per-segment RoPE resets. Training
-fails fast if the backend does not support these parameters. Note: this
-isolates attention only — Megalodon's CEMA/TimestepNorm state still crosses
-packed document boundaries (see [Packing](packing.md)).
+model for strict packed semantics. With megalodon-jax ≥ 0.1.2 this is full
+per-document state isolation: segment-run-masked attention, per-segment RoPE
+resets, and ComplexEMA/TimestepNorm state resets at every boundary, with
+cross-segment label pairs excluded from the loss by the backend. Training
+fails fast if the backend does not advertise the `supports_segment_reset`
+capability flag (older versions isolated attention only). Strict mode bypasses
+the FFT CEMA path and costs ~2x attention FLOPs on packed rows; see
+[Packing](packing.md#attention-semantics).
 
 | Property | Value |
 |----------|-------|
 | Required | No |
+| Requires | megalodon-jax ≥ 0.1.2 for the `megalodon` backend |
+
+**Related:** [`model.use_associative_segment_scan`](#model.use_associative_segment_scan), [`data.mask_boundary_loss`](#data.mask_boundary_loss)
 
 ---
 
@@ -2050,7 +2079,7 @@ chomp validates all configuration at load time with actionable error messages.
 ## Field Index
 All configuration fields by section:
 
-**model** (35 fields): [`backend`](#model.backend), [`vocab_size`](#model.vocab_size), [`d_model`](#model.d_model), [`dropout`](#model.dropout), [`model_dim`](#model.model_dim), [`num_layers`](#model.num_layers), [`num_heads`](#model.num_heads), [`z_dim`](#model.z_dim), [`value_dim`](#model.value_dim), [`ffn_hidden_dim`](#model.ffn_hidden_dim), [`cema_ndim`](#model.cema_ndim), [`chunk_size`](#model.chunk_size), [`max_cache_len`](#model.max_cache_len), [`cache_unbounded`](#model.cache_unbounded), [`norm_num_groups`](#model.norm_num_groups), [`norm_eps`](#model.norm_eps), [`rope_base`](#model.rope_base), [`swiglu`](#model.swiglu), [`rescale_nffn`](#model.rescale_nffn), [`scale_emb`](#model.scale_emb), [`norm_affine`](#model.norm_affine), [`attention_dropout`](#model.attention_dropout), [`hidden_dropout`](#model.hidden_dropout), [`pad_token_id`](#model.pad_token_id), [`bos_token_id`](#model.bos_token_id), [`eos_token_id`](#model.eos_token_id), [`max_positions`](#model.max_positions), [`init_mode`](#model.init_mode), [`use_checkpoint`](#model.use_checkpoint), [`output_size`](#model.output_size), [`param_dtype`](#model.param_dtype), [`compute_dtype`](#model.compute_dtype), [`accum_dtype`](#model.accum_dtype), [`softmax_dtype`](#model.softmax_dtype), [`gemm_backend`](#model.gemm_backend)
+**model** (36 fields): [`backend`](#model.backend), [`vocab_size`](#model.vocab_size), [`d_model`](#model.d_model), [`dropout`](#model.dropout), [`model_dim`](#model.model_dim), [`num_layers`](#model.num_layers), [`num_heads`](#model.num_heads), [`z_dim`](#model.z_dim), [`value_dim`](#model.value_dim), [`ffn_hidden_dim`](#model.ffn_hidden_dim), [`cema_ndim`](#model.cema_ndim), [`chunk_size`](#model.chunk_size), [`max_cache_len`](#model.max_cache_len), [`cache_unbounded`](#model.cache_unbounded), [`norm_num_groups`](#model.norm_num_groups), [`norm_eps`](#model.norm_eps), [`rope_base`](#model.rope_base), [`swiglu`](#model.swiglu), [`rescale_nffn`](#model.rescale_nffn), [`scale_emb`](#model.scale_emb), [`norm_affine`](#model.norm_affine), [`attention_dropout`](#model.attention_dropout), [`hidden_dropout`](#model.hidden_dropout), [`pad_token_id`](#model.pad_token_id), [`bos_token_id`](#model.bos_token_id), [`eos_token_id`](#model.eos_token_id), [`max_positions`](#model.max_positions), [`init_mode`](#model.init_mode), [`use_checkpoint`](#model.use_checkpoint), [`output_size`](#model.output_size), [`use_associative_segment_scan`](#model.use_associative_segment_scan), [`param_dtype`](#model.param_dtype), [`compute_dtype`](#model.compute_dtype), [`accum_dtype`](#model.accum_dtype), [`softmax_dtype`](#model.softmax_dtype), [`gemm_backend`](#model.gemm_backend)
 
 **data** (23 fields): [`backend`](#data.backend), [`hf_dataset`](#data.hf_dataset), [`hf_name`](#data.hf_name), [`hf_split`](#data.hf_split), [`hf_eval_split`](#data.hf_eval_split), [`text_key`](#data.text_key), [`shuffle`](#data.shuffle), [`shuffle_buffer_size`](#data.shuffle_buffer_size), [`seed`](#data.seed), [`repeat`](#data.repeat), [`max_retries`](#data.max_retries), [`retry_delay_sec`](#data.retry_delay_sec), [`state_update_interval`](#data.state_update_interval), [`local_text`](#data.local_text), [`packing_mode`](#data.packing_mode), [`packing_buffer_docs`](#data.packing_buffer_docs), [`packing_max_docs_per_bin`](#data.packing_max_docs_per_bin), [`mask_boundary_loss`](#data.mask_boundary_loss), [`train_on_eos`](#data.train_on_eos), [`grain_prefetch`](#data.grain_prefetch), [`max_eval_samples`](#data.max_eval_samples), [`tokenizer`](#data.tokenizer), [`device_put`](#data.device_put)
 

@@ -59,27 +59,43 @@ Key multipack knobs:
 used for loss masking and diagnostics, but attention remains stream-like.
 
 `multipack` with `data.packing_strict_attention: true` enables strict packed
-semantics:
+semantics. With megalodon-jax >= 0.1.2 this is **full state isolation** — each
+packed document computes as if it were run alone:
 
-- segment-isolated attention (no cross-segment query-key links),
-- per-segment RoPE position resets via explicit `position_ids`.
+- segment-isolated attention (masked by contiguous segment *runs*, so a reused
+  segment id cannot attend back to an earlier same-id document),
+- per-segment RoPE position resets via explicit `position_ids`,
+- ComplexEMA recurrent state zeroed at every segment boundary,
+- TimestepNorm running statistics (count/mean/M2) restarted at every boundary,
+- cross-segment label pairs and pairs targeting padding excluded from the loss
+  by the backend automatically.
 
-If strict packed semantics are requested but unsupported by the backend,
-training fails fast.
+chomp gates this path on the backend's `supports_segment_reset` capability
+flag and fails fast at startup if the installed megalodon-jax predates it
+(older versions accepted the same kwargs but only isolated attention).
 
-### Known limitation: CEMA/TimestepNorm state leakage
+Costs and notes:
 
-Even under `multipack` + `packing_strict_attention: true`, Megalodon's
-`ComplexEMA` and `TimestepNorm` layers never receive segment boundaries and
-keep accumulating recurrent/normalization state across packed document
-boundaries. Attention-only segment masking still leaks across documents via
-Megalodon's ComplexEMA and TimestepNorm ("expensive partial correctness").
-"Strict packed semantics" in this codebase currently means *attention-isolated
-with per-segment RoPE*, not *fully segment-isolated*. True segment reset would
-require plumbing `segment_ids` into `megalodon_jax/layers/complex_ema.py` and
-`megalodon_jax/layers/timestep_norm.py` (tracked under Future work; out of
-scope here). This leakage applies identically to all packing modes and
-datasets.
+- Strict mode bypasses the FFT CEMA path (it cannot express resets) and adds
+  ~2x attention FLOPs on packed rows (per-document chunk re-anchoring), so it
+  trades throughput for correctness.
+- `model.use_associative_segment_scan` selects the segmented CEMA
+  implementation: `true` (default) is a parallel associative scan; `false` is
+  a sequential low-memory fallback if the associative path OOMs.
+- Strict packed metadata is training-only upstream: passing segment_ids with a
+  cache (generation/streaming) raises.
+- Keep `data.mask_boundary_loss: true` in strict mode. The backend masks
+  boundary pairs regardless, but chomp's token-weighted grad accumulation and
+  `loss_tokens` counting happen host-side from the labels; pre-masking keeps
+  the two consistent (config validation warns otherwise).
+
+### Non-strict modes: CEMA/TimestepNorm state crosses boundaries
+
+Under `sequential`, `bin`, and non-strict `multipack`, no segment metadata
+reaches the model: recurrent/normalization state flows across packed document
+boundaries by design (stream semantics). This is a semantics choice, not a
+leak — boundary loss masking still prevents cross-document next-token
+supervision.
 
 For sequential packing internals, segment IDs are normalized to bounded values
 and reindexed per emitted window. Boundary semantics are unchanged, and this
@@ -143,8 +159,6 @@ at each packed segment boundary. For non-strict modes, they are informational.
 Near-term packing work focuses on:
 
 - further multipack efficiency tuning and diagnostics
-- expanding strict packed semantics to additional backend paths
-- true segment-isolated recurrence: plumb `segment_ids` into
-  `megalodon_jax/layers/complex_ema.py` and
-  `megalodon_jax/layers/timestep_norm.py` so CEMA/TimestepNorm state resets at
-  packed document boundaries (see Known limitation above)
+- benchmarking strict multipack (full isolation) vs sequential + window
+  shuffle on short-document mixes, now that megalodon-jax 0.1.2 makes strict
+  mode fully correct (previously "expensive partial correctness")

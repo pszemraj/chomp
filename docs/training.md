@@ -78,7 +78,11 @@ path is defined in [Data Pipeline](data_pipeline.md).
 
 When `data.packing_mode=multipack` and `data.packing_strict_attention=true`,
 the step also forwards `segment_ids` and `position_ids` into the backend model
-for strict packed semantics (segment-isolated attention + position reset).
+for strict packed semantics. With megalodon-jax >= 0.1.2 this means full state
+isolation per packed document (attention, RoPE positions, ComplexEMA, and
+TimestepNorm all reset at segment boundaries); chomp verifies the backend's
+`supports_segment_reset` capability flag at startup and fails fast otherwise.
+See [Packing — Attention Semantics](packing.md#attention-semantics).
 
 ## Loss-stability recipe
 
