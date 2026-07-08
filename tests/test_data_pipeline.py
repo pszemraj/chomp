@@ -514,6 +514,33 @@ def test_docs_added_this_batch_accounts_for_all_pulls(
     assert total == it.get_stats().get("docs_seen")
 
 
+def test_disabled_stats_skip_per_batch_chain_walks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """data.device_put=true disables stats; batch assembly must then skip the
+    per-batch iterator-chain walks entirely — nothing ever reads the snapshot."""
+    import chomp.data.grain as grain_mod
+
+    calls = {"n": 0}
+    real = grain_mod._packer_stats_from_chain
+
+    def _counting(it: Any) -> dict[str, Any]:
+        """Count chain walks while delegating to the real implementation.
+
+        :param it: Outermost Grain DatasetIterator.
+        :return dict[str, Any]: Packer stats from the real walk.
+        """
+        calls["n"] += 1
+        return real(it)
+
+    monkeypatch.setattr(grain_mod, "_packer_stats_from_chain", _counting)
+
+    cfg = make_pipeline_cfg(packing_mode="bin", packing_buffer_docs=4, device_put=True)
+    it = build_train_iterator(cfg)
+    for _ in range(2):
+        _ = next(it)
+        assert it.get_stats() == {}
+    assert calls["n"] == 0
+
+
 def test_eval_iterator_never_shuffles() -> None:
     """Eval batches must come out in strict document order regardless of W."""
     cfg = _window_shuffle_cfg(window=4096)

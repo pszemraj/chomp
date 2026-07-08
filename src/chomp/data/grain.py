@@ -278,13 +278,17 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
         access happens inside __next__; the finished stats dict is published
         via a single attribute assignment (atomic under the GIL) and get_stats
         only reads that snapshot — it never walks into producer-owned objects.
+
+        With enable_stats=False the per-batch chain walks are skipped entirely
+        (nothing would ever read the snapshot).
         """
 
-        def __init__(self, parent: Any, *, cfg: Config) -> None:
+        def __init__(self, parent: Any, *, cfg: Config, enable_stats: bool) -> None:
             """Initialize the batch assembler.
 
             :param parent: Parent DatasetIterator yielding packed windows.
             :param Config cfg: Training configuration.
+            :param bool enable_stats: Whether to compute per-batch packer stats.
             """
             super().__init__(parent)
             self._A = int(cfg.train.grad_accum)
@@ -294,6 +298,7 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
             self._mask_boundary_loss = bool(cfg.data.mask_boundary_loss)
             self._train_on_eos = bool(cfg.data.train_on_eos)
             self._eos_id = int(cfg.model.eos_token_id)
+            self._enable_stats = bool(enable_stats)
             self._stats_snapshot: dict[str, Any] = {}
 
         def _docs_seen(self) -> int | None:
@@ -307,7 +312,7 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
         def __next__(self) -> Batch:
             from chomp.data.pipeline import _assemble_batch
 
-            docs_seen_before = self._docs_seen()
+            docs_seen_before = self._docs_seen() if self._enable_stats else None
             batch = _assemble_batch(
                 lambda: next(self._parent),
                 grad_accum=self._A,
@@ -318,6 +323,8 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
                 eos_id=self._eos_id,
                 device_put=self._device_put,
             )
+            if not self._enable_stats:
+                return batch
             stats = _packer_stats_from_chain(self._parent)
             docs_seen_after = stats.get("docs_seen")
             if docs_seen_before is not None and docs_seen_after is not None:
@@ -354,17 +361,21 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
     class _BatchAssembleIterDataset(grain.IterDataset):  # type: ignore[misc]
         """IterDataset that yields chomp Batch objects."""
 
-        def __init__(self, parent: Any, *, cfg: Config) -> None:
+        def __init__(self, parent: Any, *, cfg: Config, enable_stats: bool) -> None:
             """Initialize the dataset.
 
             :param parent: Parent IterDataset yielding packed windows.
             :param Config cfg: Training configuration.
+            :param bool enable_stats: Whether iterators compute per-batch packer stats.
             """
             super().__init__(parent)
             self._cfg = cfg
+            self._enable_stats = bool(enable_stats)
 
         def __iter__(self) -> grain.DatasetIterator:
-            return _BatchAssembleDatasetIterator(self._parent.__iter__(), cfg=self._cfg)
+            return _BatchAssembleDatasetIterator(
+                self._parent.__iter__(), cfg=self._cfg, enable_stats=self._enable_stats
+            )
 
     return _TrainSequenceIterDataset, _BatchAssembleIterDataset, _ResumeSafeWindowShuffleIterDataset
 
@@ -398,7 +409,12 @@ def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchItera
             seed=int(cfg.data.seed) + _WINDOW_SHUFFLE_SEED_OFFSET,
         )
 
-    ds = _BatchAssembleIterDataset(ds, cfg=cfg)
+    # Single source of the stats-gating rule: device_put moves batches to
+    # device inside the iterator, and stats are disabled with it (see
+    # GrainTrainBatchIterator.get_stats). The batch assembler receives the
+    # same flag so it skips the per-batch chain walks nothing would read.
+    enable_stats = not cfg.data.device_put
+    ds = _BatchAssembleIterDataset(ds, cfg=cfg, enable_stats=enable_stats)
 
     if cfg.data.device_put and cfg.data.grain_prefetch > 0:
         logger.warning(
@@ -414,5 +430,5 @@ def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchItera
     return GrainTrainBatchIterator(
         ds=ds,
         packing_mode=cfg.data.packing_mode,
-        enable_stats=not cfg.data.device_put,
+        enable_stats=enable_stats,
     )
