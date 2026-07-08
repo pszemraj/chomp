@@ -975,18 +975,27 @@ def derived_deterministic(cfg: Config) -> bool:
     )
 
 
-def resolve_decay_duration(cfg: Config) -> int:
-    """Resolve cosine decay duration (post-warmup) in steps.
+def decay_horizon_from_values(
+    *, steps: int | None, warmup_steps: int | None, decay_steps: int | None
+) -> int | None:
+    """Total LR schedule horizon (warmup + decay) from raw config values.
 
-    If `optim.decay_steps` is unset, we default to `train.steps - optim.warmup_steps`
-    so the schedule ends at `train.steps`.
+    If `decay_steps` is unset, decay defaults to `steps - warmup_steps` so the
+    schedule ends at `steps`. Returns None when underspecified — resume-compat
+    checks feed this partial metadata from old checkpoints.
 
-    :param Config cfg: Training configuration.
-    :return int: Decay duration in steps.
+    :param steps: Total training steps, if known.
+    :param warmup_steps: Warmup steps, if known.
+    :param decay_steps: Post-warmup decay duration, if set.
+    :return int | None: Warmup + decay horizon, or None if underspecified.
     """
-    if cfg.optim.decay_steps is None:
-        return int(cfg.train.steps) - int(cfg.optim.warmup_steps)
-    return int(cfg.optim.decay_steps)
+    if warmup_steps is None:
+        return None
+    if decay_steps is None:
+        if steps is None:
+            return None
+        decay_steps = int(steps) - int(warmup_steps)
+    return int(warmup_steps) + int(decay_steps)
 
 
 def resolve_decay_horizon(cfg: Config) -> int:
@@ -995,7 +1004,13 @@ def resolve_decay_horizon(cfg: Config) -> int:
     :param Config cfg: Training configuration.
     :return int: Total schedule steps (warmup + decay duration).
     """
-    return int(cfg.optim.warmup_steps) + resolve_decay_duration(cfg)
+    horizon = decay_horizon_from_values(
+        steps=cfg.train.steps,
+        warmup_steps=cfg.optim.warmup_steps,
+        decay_steps=cfg.optim.decay_steps,
+    )
+    # train.steps / optim.warmup_steps are always set on a validated Config.
+    return int(horizon)
 
 
 def dtype_from_str(name: str) -> jnp.dtype:

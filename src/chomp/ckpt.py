@@ -31,7 +31,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import orbax.checkpoint as ocp
 
-from chomp.config import Config
+from chomp import __version__ as _chomp_version
+from chomp.config import Config, decay_horizon_from_values
 from chomp.data import data_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -106,7 +107,7 @@ def build_meta(
         python=platform.python_version(),
         jax=_safe_version("jax"),
         orbax=_safe_version("orbax-checkpoint"),
-        chomp=_safe_version("chomp") or "0.0.0",
+        chomp=_chomp_version,
         megalodon_jax=_safe_version("megalodon-jax"),
         tokens_seen=int(tokens_seen) if tokens_seen is not None else None,
         config=config,
@@ -121,23 +122,6 @@ def default_ckpt_dir(run_dir: Path) -> Path:
     :return Path: Path to checkpoints subdirectory.
     """
     return run_dir / "checkpoints"
-
-
-def _dir_size_bytes(path: Path) -> int:
-    """Calculate total size of all files in a directory recursively.
-
-    :param Path path: Directory to measure.
-    :return int: Total size in bytes.
-    """
-    total = 0
-    for p in path.rglob("*"):
-        try:
-            if p.is_file():
-                total += p.stat().st_size
-        except FileNotFoundError:
-            # async / concurrent cleanup
-            pass
-    return total
 
 
 def make_manager(
@@ -193,7 +177,6 @@ def save(
     train_state: Any,
     data_iter: Any,
     meta: CheckpointMeta,
-    enforce_size_gb: float | None = None,
     force: bool = False,
 ) -> None:
     """Save a checkpoint.
@@ -202,26 +185,19 @@ def save(
     - `data_state` via Grain's checkpoint handler
     - `meta` via JsonSave
 
-    `enforce_size_gb` is a guardrail to catch saving static graphs or duplicating tensors.
-    It's intentionally a blunt instrument.
-
     :param ocp.CheckpointManager manager: Orbax checkpoint manager.
     :param int step: Training step number.
     :param Any train_state: TrainState pytree (arrays only).
     :param Any data_iter: Data iterator to checkpoint via Grain's handler.
     :param CheckpointMeta meta: Checkpoint metadata.
-    :param enforce_size_gb: Optional max size in GB; raises if exceeded.
     :param bool force: If True, force a save even if the step is off-interval.
-    :raises RuntimeError: If checkpoint size exceeds enforce_size_gb.
     """
 
     import grain.checkpoint as gcp
     import orbax.checkpoint as ocp
 
-    step = int(step)
-
     manager.save(
-        step,
+        int(step),
         args=ocp.args.Composite(
             train_state=ocp.args.StandardSave(train_state),
             data_state=gcp.CheckpointSave(_checkpoint_target(data_iter)),
@@ -229,17 +205,6 @@ def save(
         ),
         force=force,
     )
-
-    if enforce_size_gb is not None:
-        # Best-effort size check after save finishes.
-        manager.wait_until_finished()
-        ckpt_path = Path(manager.directory) / str(step)
-        size_gb = _dir_size_bytes(ckpt_path) / 1e9
-        if size_gb > enforce_size_gb:
-            raise RuntimeError(
-                f"Checkpoint at step {step} is {size_gb:.2f}GB, exceeding {enforce_size_gb:.2f}GB. "
-                "This usually means you're saving non-array static state or duplicating tensors."
-            )
 
 
 def restore_latest(
@@ -575,28 +540,16 @@ def check_resume_compat(
             continue
         _cmp(f"optim.{key}", optim_cur.get(key), optim_prev.get(key), severity="error")
 
-    def _effective_decay_horizon(
-        train_cfg: dict[str, Any], optim_cfg: dict[str, Any]
-    ) -> int | None:
-        """Return the effective LR schedule horizon in steps.
-
-        :param dict[str, Any] train_cfg: Training config section.
-        :param dict[str, Any] optim_cfg: Optimizer config section.
-        :return int | None: Warmup + decay horizon, or None if unavailable.
-        """
-        warmup = optim_cfg.get("warmup_steps")
-        if warmup is None:
-            return None
-        decay = optim_cfg.get("decay_steps")
-        if decay is None:
-            steps = train_cfg.get("steps")
-            if steps is None:
-                return None
-            decay = int(steps) - int(warmup)
-        return int(warmup) + int(decay)
-
-    decay_prev = _effective_decay_horizon(train_prev, optim_prev)
-    decay_cur = _effective_decay_horizon(train_cur, optim_cur)
+    decay_prev = decay_horizon_from_values(
+        steps=train_prev.get("steps"),
+        warmup_steps=optim_prev.get("warmup_steps"),
+        decay_steps=optim_prev.get("decay_steps"),
+    )
+    decay_cur = decay_horizon_from_values(
+        steps=train_cur.get("steps"),
+        warmup_steps=optim_cur.get("warmup_steps"),
+        decay_steps=optim_cur.get("decay_steps"),
+    )
     _cmp("optim.decay_steps_effective", decay_cur, decay_prev, severity="error")
     if optim_prev.get("decay_steps") != optim_cur.get("decay_steps") and decay_cur == decay_prev:
         warnings.append(
