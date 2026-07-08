@@ -1275,6 +1275,11 @@ def run(
     # Host-side Python int: avoids int32 overflow without jax_enable_x64.
     tokens_seen_count = int(tokens_seen_base)
     last_saved_step: int = -1
+    # True whenever `state` and `data_it` correspond to the same completed
+    # step. False in the window between consuming a batch and finishing its
+    # train step — a checkpoint written there would pair the old train state
+    # with an advanced data stream and silently skip that batch on resume.
+    data_state_aligned = True
 
     def _run_eval(params: Any) -> dict[str, Any]:
         """Run a full eval pass over the cached eval texts.
@@ -1415,9 +1420,11 @@ def run(
                 for _ in tqdm(range(start_step, target_steps), desc="train", dynamic_ncols=True):
                     # Fetch batch (host) and (optionally) device_put
                     step_i = int(host_step) + 1
+                    data_state_aligned = False
                     try:
                         batch = next(data_it)
                     except StopIteration:
+                        data_state_aligned = True  # nothing was consumed
                         tokens_seen_host = int(tokens_seen_count)
                         step_i = int(host_step)
                         row = {
@@ -1454,6 +1461,7 @@ def run(
                         tokens_seen_count += step_loss_tokens
 
                     host_step = int(step_i)
+                    data_state_aligned = True
 
                     should_eval = (
                         eval_step is not None and eval_every > 0 and (step_i % eval_every) == 0
@@ -1587,10 +1595,21 @@ def run(
                 _flush_loggers()
                 raise
     finally:
-        # Final checkpoint: save if we did any training and the last step wasn't already saved.
-        # Use state.step to avoid writing a "future" checkpoint on crashes.
+        # Final checkpoint: save if we did any training and the last step
+        # wasn't already saved — but only when `state` and `data_it` are
+        # aligned. In the fetched-but-unfinished window (Ctrl-C mid
+        # train_step, device failure, placement check) the iterator is one
+        # batch ahead of state.step; a checkpoint written there would
+        # silently skip that batch on resume.
         final_step = None
-        if manager is not None:
+        if manager is not None and not data_state_aligned:
+            logger.warning(
+                "Skipping final checkpoint: a fetched batch never completed its "
+                "step, so the data iterator is ahead of the train state. Resume "
+                "from the last periodic checkpoint%s.",
+                f" (step {last_saved_step})" if last_saved_step >= 0 else "",
+            )
+        elif manager is not None:
             with contextlib.suppress(Exception):
                 final_step = int(jax.device_get(state.step))
         if (

@@ -339,6 +339,81 @@ def test_checkpoint_saves_final_step(tmp_path: Path) -> None:
     assert (ckpt_dir / "3").exists(), "expected final checkpoint at step 3"
 
 
+def test_crash_between_fetch_and_step_skips_final_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash after batch fetch but before its step completes must not
+    write a final checkpoint: the data iterator is one batch ahead of the
+    train state there, and saving would silently skip that batch on resume.
+
+    Interrupted at the worst moment + resumed must match continuous exactly.
+    """
+    from chomp.utils.devices import assert_batch_on_device as real_assert
+
+    def _finish_cfg(cfg: Config) -> Config:
+        cfg = replace(cfg, train=replace(cfg.train, steps=5))
+        return replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=2))
+
+    # Continuous reference: 5 steps, periodic saves at 2 and 4, final at 5.
+    cfg_cont, config_src = make_small_run_cfg(tmp_path, run_subdir="run_cont", decay_steps=5)
+    cfg_cont = _finish_cfg(cfg_cont)
+    run_dir_cont = run(cfg_cont, config_path=str(config_src), resume="none", dry_run=False)
+
+    # Crashing run: identical data/seed; the placement check runs once per
+    # loop iteration (after fetch, before train_step) — blow up on exactly
+    # the 4th call, i.e. mid-step 4 with state at step 3 and the last
+    # periodic save at step 2.
+    cfg_crash, _ = make_small_run_cfg(tmp_path, run_subdir="run_crash", decay_steps=5)
+    cfg_crash = _finish_cfg(cfg_crash)
+    cfg_crash = replace(cfg_crash, debug=replace(cfg_crash.debug, check_device_every=1))
+
+    calls = {"n": 0}
+
+    def _exploding_assert(batch: Batch, *, allow_cpu: bool) -> None:
+        calls["n"] += 1
+        if calls["n"] == 4:
+            raise RuntimeError("injected crash between batch fetch and train step")
+        real_assert(batch, allow_cpu=allow_cpu)
+
+    monkeypatch.setattr("chomp.train.assert_batch_on_device", _exploding_assert)
+    with pytest.raises(RuntimeError, match="injected crash"):
+        run(cfg_crash, config_path=str(config_src), resume="none", dry_run=False)
+
+    ckpt_dir_crash = default_ckpt_dir(Path(cfg_crash.logging.run_dir))
+    steps_on_disk = {
+        int(p.name) for p in ckpt_dir_crash.iterdir() if p.is_dir() and p.name.isdigit()
+    }
+    assert steps_on_disk == {2}, (
+        f"final checkpoint must be skipped in the misaligned window, found {steps_on_disk}"
+    )
+
+    # Resume from the periodic checkpoint and finish; batches 3-5 replay.
+    run(cfg_crash, config_path=str(config_src), resume="latest", dry_run=False)
+
+    # Bit-exact resume contract: both step-5 train states identical.
+    cfg_ref, tokenizer = prepare_tokenizer_and_config(cfg_cont)
+    params, static = build_model(cfg_ref, key=jax.random.PRNGKey(0))
+    tx, _ = build_optimizer(cfg_ref, params)
+    abstract_state = abstractify_tree(
+        init_train_state(cfg_ref, params=params, tx=tx, key=jax.random.PRNGKey(1))
+    )
+
+    states = []
+    for run_dir in (run_dir_cont, Path(cfg_crash.logging.run_dir)):
+        mgr = make_manager(default_ckpt_dir(run_dir), max_to_keep=2, save_every=2, async_save=False)
+        _, state, _ = restore_at_step(
+            mgr,
+            step=5,
+            abstract_train_state=abstract_state,
+            data_iter=build_train_iterator(cfg_ref, tokenizer=tokenizer),
+        )
+        states.append(state)
+
+    assert int(jax.device_get(states[0].step)) == 5
+    assert tree_allclose(states[0].params, states[1].params, rtol=0.0, atol=0.0)
+    assert tree_allclose(states[0].opt_state, states[1].opt_state, rtol=0.0, atol=0.0)
+
+
 def test_resume_rejects_seq_len_mismatch(tmp_path: Path) -> None:
     """Resuming with different seq_len should raise RuntimeError."""
     base = Config(
