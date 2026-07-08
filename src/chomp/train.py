@@ -694,88 +694,6 @@ def _muon_lr_from_adam(lr_adam: jax.Array, cfg: Config) -> jax.Array:
     return lr_adam * cfg.optim.muon.lr_scale
 
 
-def _init_tokens_seen(tokens_seen: int) -> int:
-    """Return a host-side tokens seen counter.
-
-    We intentionally keep this as a Python int to avoid int32 overflow when
-    `jax_enable_x64` is disabled.
-
-    :param int tokens_seen: Starting token count.
-    :return int: Host-side counter value.
-    """
-    return int(tokens_seen)
-
-
-def _estimate_tokens_seen_increment(cfg: Config, data_stats: dict[str, Any] | None) -> int:
-    """Estimate tokens contributing to loss for a batch without device sync.
-
-    When packing stats are available, we use `packing_tokens` (non-pad tokens)
-    and subtract one token per sequence for the causal shift. Otherwise we fall
-    back to a fixed-size estimate.
-
-    :param Config cfg: Training configuration.
-    :param dict[str, Any] | None data_stats: Latest iterator stats.
-    :return int: Estimated tokens contributing to loss for this step.
-    """
-    sequences = int(cfg.train.grad_accum) * int(cfg.train.batch_size)
-    seq_len = int(cfg.train.seq_len)
-    default_tokens = sequences * max(seq_len - 1, 0)
-    if not data_stats:
-        return default_tokens
-    packing_tokens = data_stats.get("packing_tokens")
-    if packing_tokens is None:
-        return default_tokens
-    tokens_used = int(packing_tokens)
-    return max(tokens_used - sequences, 0)
-
-
-def _scale_updates(mask_fn: Callable[[Any], Any], scale: float) -> optax.GradientTransformation:
-    """Scale masked updates by a fixed factor.
-
-    :param Callable mask_fn: Function returning a boolean mask pytree.
-    :param float scale: Scaling factor to apply where mask is True.
-    :return optax.GradientTransformation: Stateless scaling transform.
-    """
-
-    def init_fn(params: Any) -> optax.EmptyState:
-        """Initialize stateless scaling state.
-
-        :param Any params: Parameters passed by Optax (unused).
-        :return optax.EmptyState: Empty state for stateless transform.
-        """
-        del params
-        return optax.EmptyState()
-
-    def update_fn(
-        updates: Any, state: optax.EmptyState, params: Any | None = None
-    ) -> tuple[Any, optax.EmptyState]:
-        """Scale updates for masked leaves and pass through others.
-
-        :param Any updates: Gradient updates.
-        :param optax.EmptyState state: Optimizer state (stateless).
-        :param Any | None params: Parameters to derive the mask from.
-        :return tuple[Any, optax.EmptyState]: Scaled updates and state.
-        """
-        mask_source = params if params is not None else updates
-        mask = mask_fn(mask_source)
-
-        def _apply_scale(m: bool, g: Any) -> Any:
-            """Apply scaling to a single leaf if masked.
-
-            :param bool m: Mask flag for this leaf.
-            :param Any g: Gradient leaf.
-            :return Any: Scaled gradient leaf.
-            """
-            if g is None:
-                return None
-            return g * scale if m else g
-
-        updates = jax.tree.map(_apply_scale, mask, updates, is_leaf=lambda node: node is None)
-        return updates, state
-
-    return optax.GradientTransformation(init_fn, update_fn)
-
-
 def build_optimizer(
     cfg: Config, params: Any
 ) -> tuple[optax.GradientTransformation, Callable[[jax.Array], jax.Array]]:
@@ -1327,7 +1245,8 @@ def run(
     tokens_seen_base = 0
     if resume_meta and resume_meta.get("tokens_seen") is not None:
         tokens_seen_base = int(resume_meta["tokens_seen"])
-    tokens_seen_count = _init_tokens_seen(tokens_seen_base)
+    # Host-side Python int: avoids int32 overflow without jax_enable_x64.
+    tokens_seen_count = int(tokens_seen_base)
     last_saved_step: int = -1
 
     def _run_eval(params: Any) -> dict[str, Any]:
@@ -1499,6 +1418,11 @@ def run(
                     with step_annotation("train_step"):
                         t1 = time.perf_counter()
                         state, metrics = train_step(state, batch)
+                        # Intentional per-step device sync: tokens_seen feeds
+                        # checkpoint meta and must be exact for resume
+                        # accounting. On a single device the host blocks at the
+                        # next dispatch anyway, so estimating to stay async
+                        # would trade exactness for nothing.
                         step_loss_tokens = int(jax.device_get(metrics["token_sum"]))
                         tokens_seen_count += step_loss_tokens
 
