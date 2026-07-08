@@ -1280,6 +1280,10 @@ def run(
     # train step — a checkpoint written there would pair the old train state
     # with an advanced data stream and silently skip that batch on resume.
     data_state_aligned = True
+    # Device metrics of the last completed train_step (always matching
+    # `state`); the finally block re-validates them before the final save so
+    # a non-finite step can never be persisted as "latest".
+    metrics: dict[str, jax.Array] | None = None
 
     eval_batches_cache: list[Batch] = []
 
@@ -1484,7 +1488,15 @@ def run(
                         eval_step is not None and eval_every > 0 and (step_i % eval_every) == 0
                     )
                     should_log = (step_i % cfg.train.log_every) == 0 or should_eval
-                    should_sync = should_log or (t_compile is None)
+                    save_every = int(cfg.checkpoint.save_every)
+                    save_interval = (
+                        manager is not None and save_every > 0 and (step_i % save_every == 0)
+                    )
+                    # Save steps force a sync so the finite check below runs
+                    # before the checkpoint write: a step with NaN/Inf metrics
+                    # must never be persisted as a resume point, even when the
+                    # save cadence does not land on a logging step.
+                    should_sync = should_log or save_interval or (t_compile is None)
 
                     step_time_s = None
                     tokens_per_sec = 0.0
@@ -1500,10 +1512,8 @@ def run(
                         token_sum = float(metrics_host.get("token_sum", 0.0))
                         tokens_per_sec = token_sum / step_time_s if step_time_s > 0 else 0.0
 
-                    # Checkpoint save (after state updated)
-                    save_every = int(cfg.checkpoint.save_every)
-                    save_interval = save_every > 0 and (step_i % save_every == 0)
-                    if manager is not None and save_interval:
+                    # Checkpoint save (after state updated + finite-checked)
+                    if save_interval:
                         tokens_seen_ckpt = int(tokens_seen_count)
                         meta = build_meta(
                             step=step_i,
@@ -1652,24 +1662,45 @@ def run(
             and final_step > start_step
             and final_step != last_saved_step
         ):
-            try:
-                meta = build_meta(
-                    step=final_step,
-                    config=cfg.to_dict(),
-                    data_fingerprint=data_fingerprint(cfg, tokenizer_snapshot_hash=tokenizer_hash),
-                    tokens_seen=int(tokens_seen_count),
-                )
-                save(
-                    manager,
-                    step=final_step,
-                    train_state=state,
-                    data_iter=data_it,
-                    meta=meta,
-                    force=True,
-                )
-            except Exception as exc:
-                logger.exception("Final checkpoint save failed at step %s", final_step)
-                ckpt_errors.append(exc)
+            final_state_valid = True
+            if cfg.debug.nan_check and metrics is not None:
+                # The in-loop finite check only runs on sync steps, and a
+                # non-finite step may itself be why we are unwinding.
+                # Re-validate the last completed step's metrics (they always
+                # match `state`) so "latest" can never be a NaN tombstone.
+                try:
+                    _check_finite_metrics(jax.device_get(metrics), step=final_step)
+                except Exception as exc:
+                    final_state_valid = False
+                    logger.error(
+                        "Skipping final checkpoint at step %s (%s). Resume from "
+                        "the last periodic checkpoint%s.",
+                        final_step,
+                        exc,
+                        f" (step {last_saved_step})" if last_saved_step >= 0 else "",
+                    )
+                    ckpt_errors.append(exc)
+            if final_state_valid:
+                try:
+                    meta = build_meta(
+                        step=final_step,
+                        config=cfg.to_dict(),
+                        data_fingerprint=data_fingerprint(
+                            cfg, tokenizer_snapshot_hash=tokenizer_hash
+                        ),
+                        tokens_seen=int(tokens_seen_count),
+                    )
+                    save(
+                        manager,
+                        step=final_step,
+                        train_state=state,
+                        data_iter=data_it,
+                        meta=meta,
+                        force=True,
+                    )
+                except Exception as exc:
+                    logger.exception("Final checkpoint save failed at step %s", final_step)
+                    ckpt_errors.append(exc)
 
         if wandb_run is not None:
             # Telemetry only; never worth masking or replacing a real failure.

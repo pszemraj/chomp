@@ -518,6 +518,88 @@ def test_final_checkpoint_failure_fails_the_run(
     assert any("Final checkpoint save failed" in rec.message for rec in caplog.records)
 
 
+def _poison_loss_at_step(monkeypatch: pytest.MonkeyPatch, poison_step: int) -> None:
+    """Wrap make_train_step so metrics['loss'] is NaN at one chosen step.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch chomp.train.
+    :param int poison_step: 1-based step whose loss becomes NaN.
+    """
+    import chomp.train as train_mod
+
+    real_make = train_mod.make_train_step
+
+    def _poisoned_make(cfg: Config, **kwargs: Any) -> Any:
+        step_fn = real_make(cfg, **kwargs)
+
+        def wrapped(state: Any, batch: Batch) -> tuple[Any, dict[str, Any]]:
+            new_state, metrics = step_fn(state, batch)
+            metrics = dict(metrics)
+            metrics["loss"] = jnp.where(new_state.step == poison_step, jnp.nan, metrics["loss"])
+            return new_state, metrics
+
+        return wrapped
+
+    monkeypatch.setattr("chomp.train.make_train_step", _poisoned_make)
+
+
+def test_periodic_save_step_forces_finite_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    """A save step that is not a logging step must still run the finite
+    check before writing: without the forced sync, a NaN step landing on the
+    save cadence would be persisted as a resume point.
+    """
+    cfg, config_src = make_small_run_cfg(tmp_path, run_subdir="run_nan_save", decay_steps=5)
+    # log_every=1000: step 3 is a save step but not a logging step.
+    cfg = replace(cfg, train=replace(cfg.train, steps=5, log_every=1000))
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=3))
+    _poison_loss_at_step(monkeypatch, poison_step=3)
+
+    with (
+        caplog.at_level(logging.ERROR, logger="chomp.train"),
+        pytest.raises(RuntimeError, match="Non-finite loss at step 3"),
+    ):
+        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+
+    ckpt_dir = default_ckpt_dir(Path(cfg.logging.run_dir))
+    steps_on_disk = (
+        {int(p.name) for p in ckpt_dir.iterdir() if p.is_dir() and p.name.isdigit()}
+        if ckpt_dir.exists()
+        else set()
+    )
+    assert steps_on_disk == set(), f"NaN step must never reach disk, found {steps_on_disk}"
+    # The finally-block validation also refused to write the poisoned state.
+    assert any("Skipping final checkpoint at step" in rec.getMessage() for rec in caplog.records)
+
+
+def test_final_checkpoint_refuses_nonfinite_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    """A NaN on a step that neither logs nor saves is only caught at exit:
+    the final-save validation must skip the write, keep the last good
+    periodic checkpoint as latest, and fail the run loudly.
+    """
+    cfg, config_src = make_small_run_cfg(tmp_path, run_subdir="run_nan_final", decay_steps=5)
+    # Step 5 (the last step) neither logs nor saves, so the in-loop finite
+    # check never sees it; only the finally-block validation can.
+    cfg = replace(cfg, train=replace(cfg.train, steps=5, log_every=1000))
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=2))
+    _poison_loss_at_step(monkeypatch, poison_step=5)
+
+    with (
+        caplog.at_level(logging.ERROR, logger="chomp.train"),
+        pytest.raises(
+            RuntimeError, match="checkpoint finalization failed: Non-finite loss at step 5"
+        ),
+    ):
+        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+
+    ckpt_dir = default_ckpt_dir(Path(cfg.logging.run_dir))
+    steps_on_disk = {int(p.name) for p in ckpt_dir.iterdir() if p.is_dir() and p.name.isdigit()}
+    assert steps_on_disk == {2, 4}, f"latest must stay the last good save, found {steps_on_disk}"
+    assert any("Skipping final checkpoint at step" in rec.getMessage() for rec in caplog.records)
+
+
 def test_resume_rejects_seq_len_mismatch(tmp_path: Path) -> None:
     """Resuming with different seq_len should raise RuntimeError."""
     base = Config(
