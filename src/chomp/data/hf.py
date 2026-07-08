@@ -16,6 +16,7 @@ Tokenization + packing happen elsewhere.
 from __future__ import annotations
 
 import contextlib
+import logging
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -23,6 +24,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import datasets
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -73,14 +76,6 @@ class HFStreamingTextStream:
         self._last_state: dict[str, Any] | None = None
         self._build()
 
-    @property
-    def epoch(self) -> int:
-        """Current epoch number.
-
-        :return int: The current epoch index.
-        """
-        return self._epoch
-
     def _load_ds_for_epoch(self, epoch: int) -> datasets.IterableDataset:
         """Load and configure the dataset for a given epoch.
 
@@ -127,6 +122,11 @@ class HFStreamingTextStream:
         try:
             self._last_state = self._ds.state_dict()  # type: ignore[attr-defined]
         except Exception:
+            logger.warning(
+                "HF stream state_dict() failed during periodic caching; "
+                "retry recovery will restart from the last good state (if any).",
+                exc_info=True,
+            )
             self._last_state = None
 
     def _recover_iterator(self) -> None:
@@ -137,8 +137,14 @@ class HFStreamingTextStream:
             self._ds = self._load_ds_for_epoch(self._epoch)
             self._ds.load_state_dict(self._last_state)  # type: ignore[attr-defined]
             self._it = iter(self._ds)
+            logger.info("HF stream rebuilt from last cached state after failure.")
         except Exception:
             # Fall back to sleeping and retrying next() on current iterator.
+            logger.warning(
+                "HF stream rebuild from cached state failed; retrying on the "
+                "current iterator instead.",
+                exc_info=True,
+            )
             return
 
     def _next_item(self) -> str:
@@ -178,10 +184,18 @@ class HFStreamingTextStream:
                 if attempt >= self._spec.max_retries:
                     raise
 
+                delay = self._spec.retry_delay_sec * (2**attempt)
+                logger.warning(
+                    "HF stream next() failed (attempt %d/%d); retrying in %.1fs.",
+                    attempt + 1,
+                    self._spec.max_retries,
+                    delay,
+                    exc_info=True,
+                )
                 # Best-effort recovery: rebuild ds from last known state if available.
                 self._recover_iterator()
 
-                time.sleep(self._spec.retry_delay_sec * (2**attempt))
+                time.sleep(delay)
 
         # Should not reach
         raise RuntimeError("HFStreamingTextStream retry loop fell through")
@@ -190,15 +204,19 @@ class HFStreamingTextStream:
         """Capture stream state for checkpointing.
 
         :return dict[str, Any]: State dict with epoch and HF iterator state.
+        :raises RuntimeError: If the dataset cannot produce a ``state_dict()``.
+            Better to fail the save than write a checkpoint that silently
+            cannot resume exactly.
         """
         if self._ds is None:
             self._build()
-        hf_state = None
         try:
             hf_state = self._ds.state_dict()  # type: ignore[attr-defined]
-        except Exception:
-            # If state_dict isn't available, resumability is broken.
-            hf_state = None
+        except Exception as e:
+            raise RuntimeError(
+                "HF streaming dataset failed to produce state_dict(); refusing "
+                "to write a checkpoint whose data stream cannot resume exactly."
+            ) from e
 
         return {
             "epoch": int(self._epoch),
@@ -217,15 +235,11 @@ class HFStreamingTextStream:
 
         # Correct ordering:
         # 1) rebuild dataset
-        # 2) load_state_dict
+        # 2) load_state_dict (crash on failure — never silently restart from zero)
         # 3) iter(ds)
         self._ds = self._load_ds_for_epoch(self._epoch)
         if hf_state is not None:
-            try:
-                self._ds.load_state_dict(hf_state)  # type: ignore[attr-defined]
-            except Exception:
-                # If this fails, better to crash than silently restart from beginning.
-                raise
+            self._ds.load_state_dict(hf_state)  # type: ignore[attr-defined]
         self._it = iter(self._ds)
         self._n_since_state = 0
         self._last_state = hf_state
