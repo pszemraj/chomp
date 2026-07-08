@@ -492,54 +492,57 @@ def _emit_generation_output(
     tqdm.write(f"Generated: {generated_text}")
 
 
-def _format_console_row(
+# Keys logged to wandb but dropped from the local metrics file, and vice versa.
+_METRICS_FILE_DROP = frozenset(
+    {"wall_time_s", "packing_tokens", "packing_capacity", "eval_tokens", "device_memory_gb"}
+)
+_WANDB_DROP = _METRICS_FILE_DROP | {"step", "peak_memory_gb"}
+
+
+def _console_row(
+    cfg: Config,
     *,
     step: int,
-    loss: float,
-    grad_norm: float,
-    lr: float,
-    lr_muon: float | None,
+    metrics_host: dict[str, Any],
     step_time_s: float,
     tokens_per_sec: float,
     eval_loss: float | None,
-    packing_util: float | None,
-    device_mem_gb: float | None,
-    peak_mem_gb: float | None,
+    data_stats: dict[str, Any] | None,
+    mem_stats: dict[str, Any],
 ) -> str:
-    """Format a concise console line with key training metrics.
+    """Format the console line from host metrics and iterator/memory stats.
 
+    Shared by the dry-run path and the main loop so the two never drift.
+
+    :param Config cfg: Training configuration.
     :param int step: Training step number.
-    :param float loss: Training loss value.
-    :param float grad_norm: Gradient norm value.
-    :param float lr: Learning rate value.
-    :param float | None lr_muon: Optional Muon learning rate.
+    :param dict[str, Any] metrics_host: Host-side step metrics (loss/grad_norm/lr).
     :param float step_time_s: Step wall time in seconds.
     :param float tokens_per_sec: Throughput in tokens per second.
     :param float | None eval_loss: Optional eval loss.
-    :param float | None packing_util: Optional packing utilization.
-    :param float | None device_mem_gb: Optional device memory usage.
-    :param float | None peak_mem_gb: Optional peak memory usage.
+    :param data_stats: Latest data iterator stats, if any.
+    :param dict[str, Any] mem_stats: Device memory stats (possibly empty).
     :return str: Formatted console line.
     """
-
+    lr_adam = float(metrics_host["lr"])
     parts = [
         f"step {step}",
-        f"loss {loss:.4f}",
-        f"grad {grad_norm:.2e}",
-        f"lr {lr:.2e}",
-        f"time {step_time_s:.3f}s",
-        f"tok/s {tokens_per_sec:.0f}",
+        f"loss {float(metrics_host['loss']):.4f}",
+        f"grad {float(metrics_host['grad_norm']):.2e}",
+        f"lr {lr_adam:.2e}",
+        f"time {float(step_time_s):.3f}s",
+        f"tok/s {float(tokens_per_sec):.0f}",
     ]
-    if lr_muon is not None:
-        parts.append(f"muon_lr {lr_muon:.2e}")
+    if cfg.optim.name == "muon":
+        parts.append(f"muon_lr {float(_muon_lr_from_adam(lr_adam, cfg)):.2e}")
     if eval_loss is not None:
-        parts.append(f"eval {eval_loss:.4f}")
-    if packing_util is not None:
-        parts.append(f"pack {packing_util:.3f}")
-    if device_mem_gb is not None:
-        parts.append(f"mem {device_mem_gb:.1f}GB")
-    if peak_mem_gb is not None:
-        parts.append(f"peak {peak_mem_gb:.1f}GB")
+        parts.append(f"eval {float(eval_loss):.4f}")
+    if data_stats and "packing_utilization" in data_stats:
+        parts.append(f"pack {float(data_stats['packing_utilization']):.3f}")
+    if "device_memory_gb" in mem_stats:
+        parts.append(f"mem {float(mem_stats['device_memory_gb']):.1f}GB")
+    if "peak_memory_gb" in mem_stats:
+        parts.append(f"peak {float(mem_stats['peak_memory_gb']):.1f}GB")
     return " | ".join(parts)
 
 
@@ -1211,28 +1214,15 @@ def run(
 
         token_sum = float(metrics_host.get("token_sum", 0.0))
         tokens_per_sec = token_sum / step_time_s if step_time_s > 0 else 0.0
-        lr_adam = float(metrics_host["lr"])
-        lr_muon = _muon_lr_from_adam(lr_adam, cfg) if cfg.optim.name == "muon" else None
-        mem_stats = _device_memory_stats_gb()
-        packing_util = (
-            float(data_stats["packing_utilization"])
-            if data_stats and "packing_utilization" in data_stats
-            else None
-        )
-        device_mem = float(mem_stats.get("device_memory_gb")) if mem_stats else None
-        peak_mem = float(mem_stats.get("peak_memory_gb")) if mem_stats else None
-        console_line = _format_console_row(
+        console_line = _console_row(
+            cfg,
             step=step_i,
-            loss=float(metrics_host["loss"]),
-            grad_norm=float(metrics_host["grad_norm"]),
-            lr=lr_adam,
-            lr_muon=lr_muon,
-            step_time_s=float(step_time_s),
-            tokens_per_sec=float(tokens_per_sec),
+            metrics_host=metrics_host,
+            step_time_s=step_time_s,
+            tokens_per_sec=tokens_per_sec,
             eval_loss=None,
-            packing_util=packing_util,
-            device_mem_gb=device_mem,
-            peak_mem_gb=peak_mem,
+            data_stats=data_stats,
+            mem_stats=_device_memory_stats_gb(),
         )
         print("[chomp] dry-run complete")
         print(console_line)
@@ -1260,7 +1250,6 @@ def run(
     if start_step >= target_steps:
         print(f"[chomp] start_step ({start_step}) >= target steps ({target_steps}); nothing to do")
 
-    console_every = int(cfg.train.log_every)
     host_step = int(start_step)
     step_i = int(host_step)
     tokens_seen_base = 0
@@ -1453,11 +1442,8 @@ def run(
                         eval_step is not None and eval_every > 0 and (step_i % eval_every) == 0
                     )
                     should_log = (step_i % cfg.train.log_every) == 0 or should_eval
-                    should_console = (step_i % console_every) == 0 or should_eval
-                    should_sync = should_log or should_console or (t_compile is None)
+                    should_sync = should_log or (t_compile is None)
 
-                    metrics_host = None
-                    tokens_seen_host = int(tokens_seen_count)
                     step_time_s = None
                     tokens_per_sec = 0.0
 
@@ -1505,16 +1491,12 @@ def run(
                     ):
                         _run_generation_sample(step_i, state.params)
 
-                    # Log
-                    mem_stats = _device_memory_stats_gb() if (should_log or should_console) else {}
+                    # Log: metrics file, wandb, and console fire on the same
+                    # steps by design (metrics_host is set — should_log
+                    # implies should_sync).
                     if should_log:
-                        if metrics_host is None:
-                            metrics_host = jax.device_get(metrics)
-                        tokens_seen_host = int(tokens_seen_count)
+                        mem_stats = _device_memory_stats_gb()
                         lr_adam = float(metrics_host["lr"])
-                        lr_muon = (
-                            _muon_lr_from_adam(lr_adam, cfg) if cfg.optim.name == "muon" else None
-                        )
                         row = {
                             "step": int(step_i),
                             "loss": float(metrics_host["loss"]),
@@ -1523,11 +1505,11 @@ def run(
                             "loss_tokens": int(step_loss_tokens),
                             "step_time_s": float(step_time_s),
                             "tokens_per_sec": float(tokens_per_sec),
-                            "tokens_seen": int(tokens_seen_host),
+                            "tokens_seen": int(tokens_seen_count),
                             "wall_time_s": time.perf_counter() - t0,
                         }
-                        if lr_muon is not None:
-                            row["lr_muon"] = float(lr_muon)
+                        if cfg.optim.name == "muon":
+                            row["lr_muon"] = float(_muon_lr_from_adam(lr_adam, cfg))
                         if data_stats:
                             row.update(data_stats)
                         if eval_row:
@@ -1537,58 +1519,26 @@ def run(
                         if step_i == (start_step + 1) and t_compile is not None:
                             row["first_step_compile_time_s"] = float(t_compile)
 
-                        local_drop = {
-                            "wall_time_s",
-                            "packing_tokens",
-                            "packing_capacity",
-                            "eval_tokens",
-                            "device_memory_gb",
-                        }
-                        row_local = {k: v for k, v in row.items() if k not in local_drop}
-                        mw.write(row_local)
+                        mw.write({k: v for k, v in row.items() if k not in _METRICS_FILE_DROP})
                         if wandb_run is not None:
-                            wandb_drop = {
-                                "wall_time_s",
-                                "step",
-                                "peak_memory_gb",
-                                "packing_tokens",
-                                "packing_capacity",
-                                "eval_tokens",
-                                "device_memory_gb",
-                            }
-                            row_wandb = {k: v for k, v in row.items() if k not in wandb_drop}
-                            wandb_run.log(row_wandb, step=step_i)
-                    if should_console:
-                        if metrics_host is None:
-                            metrics_host = jax.device_get(metrics)
-                        lr_adam = float(metrics_host["lr"])
-                        lr_muon = (
-                            _muon_lr_from_adam(lr_adam, cfg) if cfg.optim.name == "muon" else None
-                        )
+                            wandb_run.log(
+                                {k: v for k, v in row.items() if k not in _WANDB_DROP},
+                                step=step_i,
+                            )
+
                         eval_loss = eval_row.get("eval_loss") if eval_row else None
-                        packing_util = None
-                        if data_stats and "packing_utilization" in data_stats:
-                            packing_util = float(data_stats["packing_utilization"])
-                        device_mem = None
-                        peak_mem = None
-                        if "device_memory_gb" in mem_stats:
-                            device_mem = float(mem_stats["device_memory_gb"])
-                        if "peak_memory_gb" in mem_stats:
-                            peak_mem = float(mem_stats["peak_memory_gb"])
-                        console_line = _format_console_row(
-                            step=step_i,
-                            loss=float(metrics_host["loss"]),
-                            grad_norm=float(metrics_host["grad_norm"]),
-                            lr=lr_adam,
-                            lr_muon=lr_muon,
-                            step_time_s=float(step_time_s),
-                            tokens_per_sec=float(tokens_per_sec),
-                            eval_loss=float(eval_loss) if eval_loss is not None else None,
-                            packing_util=packing_util,
-                            device_mem_gb=device_mem,
-                            peak_mem_gb=peak_mem,
+                        tqdm.write(
+                            _console_row(
+                                cfg,
+                                step=step_i,
+                                metrics_host=metrics_host,
+                                step_time_s=step_time_s,
+                                tokens_per_sec=tokens_per_sec,
+                                eval_loss=eval_loss,
+                                data_stats=data_stats,
+                                mem_stats=mem_stats,
+                            )
                         )
-                        tqdm.write(console_line)
             except Exception as exc:
                 exit_code = 1
                 crash_type = type(exc).__name__
