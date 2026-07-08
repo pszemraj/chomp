@@ -414,6 +414,58 @@ def test_crash_between_fetch_and_step_skips_final_checkpoint(
     assert tree_allclose(states[0].opt_state, states[1].opt_state, rtol=0.0, atol=0.0)
 
 
+def test_grain_data_state_capture_is_synchronous() -> None:
+    """ckpt.save() relies on grain serializing iterator state in the blocking
+    phase of manager.save(); if grain's handler ever grows an async_save,
+    the data stream could advance before capture and this contract breaks.
+    """
+    import grain.checkpoint as gcp
+    from orbax.checkpoint import AsyncCheckpointHandler
+
+    assert not issubclass(gcp.CheckpointHandler, AsyncCheckpointHandler)
+
+
+def test_final_checkpoint_failure_fails_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    """A failed final save must not let training exit successfully.
+
+    And when training itself crashed, the checkpoint failure is logged as
+    secondary without masking the original exception.
+    """
+    cfg, config_src = make_small_run_cfg(tmp_path, run_subdir="run_ckpt_fail", decay_steps=3)
+    cfg = replace(cfg, train=replace(cfg.train, steps=3))
+    # save_every > steps: no periodic save, only the finally-block final save.
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=5))
+
+    def _failing_save(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("disk full (injected)")
+
+    monkeypatch.setattr("chomp.train.save", _failing_save)
+    with pytest.raises(RuntimeError, match="checkpoint finalization failed"):
+        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+
+    # Crash path: the original exception wins; the save failure is logged.
+    cfg2, _ = make_small_run_cfg(tmp_path, run_subdir="run_ckpt_fail2", decay_steps=3)
+    cfg2 = replace(cfg2, train=replace(cfg2.train, steps=3))
+    cfg2 = replace(cfg2, checkpoint=replace(cfg2.checkpoint, save_every=5))
+
+    calls = {"n": 0}
+
+    def _nan_boom(metrics: dict[str, Any], *, step: int) -> None:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("injected nan at step 2")
+
+    monkeypatch.setattr("chomp.train._check_finite_metrics", _nan_boom)
+    with (
+        caplog.at_level(logging.ERROR, logger="chomp.train"),
+        pytest.raises(RuntimeError, match="injected nan"),
+    ):
+        run(cfg2, config_path=str(config_src), resume="none", dry_run=False)
+    assert any("Final checkpoint save failed" in rec.message for rec in caplog.records)
+
+
 def test_resume_rejects_seq_len_mismatch(tmp_path: Path) -> None:
     """Resuming with different seq_len should raise RuntimeError."""
     base = Config(

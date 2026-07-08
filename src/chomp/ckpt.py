@@ -201,6 +201,12 @@ def save(
     - `data_state` via Grain's checkpoint handler
     - `meta` via JsonSave
 
+    Data-iterator state is serialized synchronously inside `manager.save()`:
+    grain's CheckpointHandler is not an Orbax AsyncCheckpointHandler, so the
+    composite handler runs it in the blocking phase. Async checkpointing
+    therefore cannot race the training loop advancing the iterator (pinned
+    by test_grain_data_state_capture_is_synchronous).
+
     :param ocp.CheckpointManager manager: Orbax checkpoint manager.
     :param int step: Training step number.
     :param Any train_state: TrainState pytree (arrays only).

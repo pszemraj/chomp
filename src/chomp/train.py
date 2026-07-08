@@ -1601,6 +1601,13 @@ def run(
         # train_step, device failure, placement check) the iterator is one
         # batch ahead of state.step; a checkpoint written there would
         # silently skip that batch on resume.
+        # Checkpoint failures must never be silent: on a clean exit they are
+        # re-raised (training must not exit successfully with an unwritten
+        # checkpoint); on the crash path the original exception keeps
+        # propagating and they are logged as secondary failures.
+        exc_in_flight = sys.exc_info()[0] is not None
+        ckpt_errors: list[Exception] = []
+
         final_step = None
         if manager is not None and not data_state_aligned:
             logger.warning(
@@ -1610,15 +1617,18 @@ def run(
                 f" (step {last_saved_step})" if last_saved_step >= 0 else "",
             )
         elif manager is not None:
-            with contextlib.suppress(Exception):
+            try:
                 final_step = int(jax.device_get(state.step))
+            except Exception as exc:
+                logger.exception("Could not read state.step for the final checkpoint")
+                ckpt_errors.append(exc)
         if (
             manager is not None
             and final_step is not None
             and final_step > start_step
             and final_step != last_saved_step
         ):
-            with contextlib.suppress(Exception):
+            try:
                 meta = build_meta(
                     step=final_step,
                     config=cfg.to_dict(),
@@ -1633,8 +1643,12 @@ def run(
                     meta=meta,
                     force=True,
                 )
+            except Exception as exc:
+                logger.exception("Final checkpoint save failed at step %s", final_step)
+                ckpt_errors.append(exc)
 
         if wandb_run is not None:
+            # Telemetry only; never worth masking or replacing a real failure.
             with contextlib.suppress(Exception):
                 if crash_reason is not None:
                     wandb_run.summary["crashed"] = True
@@ -1643,13 +1657,21 @@ def run(
                 wandb_run.finish(exit_code=exit_code)
 
         if manager is not None:
-            with contextlib.suppress(Exception):
+            try:
                 manager.wait_until_finished()
+            except Exception as exc:
+                logger.exception("Waiting for async checkpoint writes failed")
+                ckpt_errors.append(exc)
 
         if profile_enabled:
             with contextlib.suppress(Exception):
                 stop_trace()
 
         _flush_loggers()
+
+        if ckpt_errors and not exc_in_flight:
+            raise RuntimeError(
+                f"checkpoint finalization failed: {ckpt_errors[0]}"
+            ) from ckpt_errors[0]
 
     return run_dir
