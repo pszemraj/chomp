@@ -131,10 +131,6 @@ def test_restore_params_only_from_trained_run(trained_small_run: tuple[Config, P
     ), "Restored params should differ from fresh init after training"
 
 
-@pytest.mark.skipif(
-    os.environ.get("JAX_PLATFORMS") == "cpu",
-    reason="Generate requires megalodon_jax.generate which needs full model",
-)
 def test_generate_cli_produces_output(tmp_path: Path) -> None:
     """End-to-end test of the generate CLI command."""
     import orbax.checkpoint as ocp
