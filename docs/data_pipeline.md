@@ -125,6 +125,12 @@ stream, so eval losses stay comparable even if the upstream dataset revision or
 split contents drift. A cache whose manifest or hash mismatches fails loudly;
 delete the run directory (not just the cache) to change eval identity.
 
+A **missing** cache on resume is also a hard error — silently recollecting
+would compare post-resume eval losses against a different token set than every
+earlier point on the curve. `data.recreate_eval_cache: true` is the explicit
+one-shot override; it rebuilds the cache with a loud warning that eval curves
+across the boundary are not comparable.
+
 Config validation rejects `max_eval_samples` below the packer emission
 threshold for `bin`/`multipack` (packers never flush a partial buffer at end of
 stream). If eval still cannot emit any batch at runtime (for example an eval

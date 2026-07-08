@@ -215,8 +215,14 @@ def _setup_run_dir_and_tokenizer(
 
     # run_dir pins the eval set: created once, persisted, and reloaded on
     # resume so evals stay comparable even if the upstream dataset drifts.
+    # allow_existing is exactly "this is a resume": a missing cache then
+    # fails hard unless data.recreate_eval_cache explicitly overrides.
     eval_tokens = (
-        [] if dry_run else load_or_create_eval_texts(cfg, tokenizer=tokenizer, run_dir=run_dir)
+        []
+        if dry_run
+        else load_or_create_eval_texts(
+            cfg, tokenizer=tokenizer, run_dir=run_dir, resume=allow_existing
+        )
     )
 
     gen_settings: GenerationSettings | None = None

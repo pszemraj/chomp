@@ -790,6 +790,23 @@ With packed modes, values below the packer's emission threshold
 grad_accum)` for multipack) can never emit an eval batch (packers do not flush
 a partial buffer at end of stream); config validation errors when eval is
 enabled and warns otherwise.
+
+<a id="data.recreate_eval_cache"></a>
+#### `data.recreate_eval_cache`
+```yaml
+recreate_eval_cache: bool = false
+```
+
+One-shot operational override for resume. A resume normally requires the
+pinned eval set (`run_dir/eval_tokens.json.gz`) to exist — a missing cache is
+a hard error because recollecting it would silently change what eval losses
+are measured on. Setting this to `true` (typically via
+`--override data.recreate_eval_cache=true`) allows the resume to rebuild the
+cache, with a loud warning that eval curves before and after the boundary are
+not comparable. It has no effect when the cache is present and is not part of
+the data fingerprint.
+
+**Related:** [`data.max_eval_samples`](#data.max_eval_samples)
 ---
 
 <a id="data-shuffle"></a>

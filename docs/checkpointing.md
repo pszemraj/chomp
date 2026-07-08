@@ -23,7 +23,9 @@ Each checkpoint stores three items:
 The run directory also includes a tokenizer snapshot under `tokenizer/` and
 the pinned eval token set `eval_tokens.json.gz` (created once at run start,
 reloaded on every resume so eval losses stay comparable even if the upstream
-dataset drifts).
+dataset drifts). If that file is missing when resuming, resume fails hard;
+`data.recreate_eval_cache: true` is the explicit override (eval curves across
+the boundary are then not comparable).
 
 ## Save cadence
 

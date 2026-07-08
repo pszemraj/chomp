@@ -440,6 +440,64 @@ def test_eval_tokens_cache_rejects_eval_knob_drift(tmp_path: Path) -> None:
         load_or_create_eval_texts(drifted, tokenizer=tok, run_dir=tmp_path)
 
 
+def test_eval_cache_missing_on_resume_fails(tmp_path: Path) -> None:
+    """A resume whose pinned eval set vanished must fail hard: recollecting
+    silently would compare post-resume eval losses against a different token
+    set. data.recreate_eval_cache is the explicit one-shot override."""
+    cfg = _local_eval_cfg()
+    tok = build_tokenizer(cfg)
+    tokens = load_or_create_eval_texts(cfg, tokenizer=tok, run_dir=tmp_path, resume=False)
+    assert tokens
+    (tmp_path / "eval_tokens.json.gz").unlink()
+
+    with pytest.raises(RuntimeError, match="pinned eval set is missing"):
+        load_or_create_eval_texts(cfg, tokenizer=tok, run_dir=tmp_path, resume=True)
+
+    override = replace(cfg, data=replace(cfg.data, recreate_eval_cache=True))
+    recreated = load_or_create_eval_texts(override, tokenizer=tok, run_dir=tmp_path, resume=True)
+    assert recreated == tokens
+    assert (tmp_path / "eval_tokens.json.gz").exists()
+
+
+def test_run_resume_requires_eval_cache(tmp_path: Path) -> None:
+    """The training entrypoint treats resume + missing eval cache as fatal."""
+    run_dir = tmp_path / "run"
+    cfg = Config(
+        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
+        data=DataConfig(
+            backend="local_text",
+            repeat=True,
+            local_text="abcdefghijklmnopqrstuvwxyz" * 4,
+            max_eval_samples=3,
+            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+        ),
+        train=TrainConfig(
+            seed=0,
+            steps=1,
+            batch_size=1,
+            seq_len=8,
+            grad_accum=1,
+            jit=False,
+            deterministic=True,
+            allow_cpu=True,
+            log_every=1000,
+            eval_every=1,
+        ),
+        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
+        checkpoint=CheckpointConfig(enabled=True, save_every=1, max_to_keep=2, async_save=False),
+        debug=DebugConfig(nan_check=True, check_device_every=0),
+        logging=LoggingConfig(project="chomp", run_dir=str(run_dir)),
+    )
+
+    run(cfg, config_path=None, resume="none")
+    cache = run_dir / "eval_tokens.json.gz"
+    assert cache.exists()
+    cache.unlink()
+
+    with pytest.raises(RuntimeError, match="pinned eval set is missing"):
+        run(cfg, config_path=None, resume="latest")
+
+
 def test_eval_tokens_cache_rejects_corruption(tmp_path: Path) -> None:
     """A cache whose content no longer matches its hash is refused."""
     import gzip

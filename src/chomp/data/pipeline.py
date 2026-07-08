@@ -581,7 +581,7 @@ def _write_eval_tokens_cache(path: Path, cfg: Config, tokens: list[list[int]]) -
 
 
 def load_or_create_eval_texts(
-    cfg: Config, *, tokenizer: Tokenizer, run_dir: Path | None = None
+    cfg: Config, *, tokenizer: Tokenizer, run_dir: Path | None = None, resume: bool = False
 ) -> list[list[int]]:
     """Build the evaluation token set, pinned to the run directory.
 
@@ -597,8 +597,12 @@ def load_or_create_eval_texts(
     :param Tokenizer tokenizer: Tokenizer used to pre-tokenize eval texts.
     :param run_dir: Run directory holding the persistent cache; None disables
         persistence.
+    :param bool resume: True when resuming an existing run. A missing cache is
+        then a hard error (recollecting would silently change what eval losses
+        are measured on) unless ``data.recreate_eval_cache`` is set.
     :raises RuntimeError: If a cached eval set exists but was written with
-        different eval settings or fails its content hash.
+        different eval settings or fails its content hash, or if the cache is
+        missing on resume without ``data.recreate_eval_cache``.
     :return list[list[int]]: Tokenized documents for evaluation.
     """
     max_samples = int(cfg.data.max_eval_samples)
@@ -610,6 +614,24 @@ def load_or_create_eval_texts(
         tokens = _read_eval_tokens_cache(cache_path, cfg)
         logger.info("Loaded %d cached eval documents from %s", len(tokens), cache_path)
         return tokens
+    if resume and cache_path is not None:
+        # The run was created with a pinned eval set (or predates one); a
+        # silent recollect here would compare post-resume eval losses against
+        # a different token set than every earlier point on the curve.
+        if not cfg.data.recreate_eval_cache:
+            raise RuntimeError(
+                f"Resume requested but the pinned eval set is missing at {cache_path}. "
+                "Recollecting it silently would break eval-loss comparability across "
+                "the resume boundary. Set data.recreate_eval_cache=true (one-shot "
+                "override, e.g. --override data.recreate_eval_cache=true) to rebuild "
+                "it, accepting that eval curves before and after this resume are not "
+                "comparable."
+            )
+        logger.warning(
+            "Recreating the missing eval set at %s (data.recreate_eval_cache=true): "
+            "eval losses before and after this resume boundary are not comparable.",
+            cache_path,
+        )
 
     texts: list[str] = []
     split_used: str | None = None
