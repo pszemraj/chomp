@@ -789,6 +789,11 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
         "train_on_eos": d.train_on_eos,
         "grain_prefetch": d.grain_prefetch,
         "window_shuffle_windows": d.window_shuffle_windows,
+        # device_put does not change sample order, but it moves the
+        # host->device transfer into the iterator and disables iterator
+        # stats — recorded so resume can warn (or error under prefetch,
+        # where iterator mechanics already differ).
+        "device_put": d.device_put,
     }
     if d.packing_mode in ("bin", "multipack"):
         packing["max_docs_per_bin"] = d.packing_max_docs_per_bin

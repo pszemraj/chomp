@@ -74,6 +74,11 @@ Hard failures include:
 - batch shape invariants (`seq_len`, `batch_size`, `grad_accum`)
 - model and optimizer config, `train.deterministic`
 
+`data.device_put` drift is a warning (it changes where the host-to-device
+transfer happens, not sample order) — except when `grain_prefetch > 0` on
+either side, where it hardens to an error because it changes the prefetch
+mechanics around the serialized iterator state.
+
 Remaining warnings are logged so you can make an informed decision, but
 anything that changes what data the resumed run sees — or what it optimizes —
 is an error, not a warning.

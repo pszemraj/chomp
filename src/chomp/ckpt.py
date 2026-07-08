@@ -531,6 +531,17 @@ def check_resume_compat(
         pack_prev.get("grain_prefetch"),
         severity="error",
     )
+    # device_put does not change sample order, so a mismatch is normally a
+    # warning — but under prefetch it moves device transfers into the
+    # prefetch thread, changing iterator mechanics around the very state a
+    # restore must line up against, so it hardens to an error there.
+    prefetch_active = bool(pack_cur.get("grain_prefetch") or pack_prev.get("grain_prefetch"))
+    _cmp(
+        "data.device_put",
+        pack_cur.get("device_put"),
+        pack_prev.get("device_put"),
+        severity="error" if prefetch_active else "warning",
+    )
     _cmp(
         "data.mask_boundary_loss",
         pack_cur.get("mask_boundary_loss"),

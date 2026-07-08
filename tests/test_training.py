@@ -1160,6 +1160,25 @@ def test_resume_compat_rejects_stream_and_objective_drift(
         check_resume_compat(mutate(cfg), meta)
 
 
+def test_resume_compat_device_put_drift(tmp_path: Path, caplog: LogCaptureFixture) -> None:
+    """device_put does not change sample order, so plain drift only warns —
+    but with prefetch active it moves device transfers into the prefetch
+    thread whose serialized state a restore must line up against, so the
+    mismatch hardens to an error."""
+    cfg = _base_cfg(tmp_path / "run_dput")
+    meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
+    drifted = replace(cfg, data=replace(cfg.data, device_put=not cfg.data.device_put))
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+        check_resume_compat(drifted, meta)  # must not raise
+    assert any("device_put" in rec.message for rec in caplog.records)
+
+    pf = replace(cfg, data=replace(cfg.data, grain_prefetch=2))
+    pf_meta = {"config": pf.to_dict(), "data_fingerprint": data_fingerprint(pf)}
+    pf_drifted = replace(pf, data=replace(pf.data, device_put=not pf.data.device_put))
+    with pytest.raises(RuntimeError, match="device_put"):
+        check_resume_compat(pf_drifted, pf_meta)
+
+
 def test_resume_compat_rejects_hf_shuffle_buffer_drift(tmp_path: Path) -> None:
     """shuffle_buffer_size drives HF shuffled document order — hard error."""
     cfg = _base_cfg(tmp_path / "run_sbuf")
