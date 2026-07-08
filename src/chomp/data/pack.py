@@ -464,13 +464,15 @@ class FFDPackerState:
 
         :param dict[str, Any] d: State dict from to_dict().
         :raises KeyError: If a required field is missing (corrupt/foreign state).
-        :raises ValueError: If ready_tokens/ready_segments lengths differ.
+        :raises ValueError: If any structural invariant fails (queue/row length
+            pairing, counter signs).
         :return FFDPackerState: Reconstructed state.
         """
         # Deliberately strict, mirroring PackerState: defaulting missing
         # pending/ready queues to [] (as the old `d.get(...) or []` did)
         # silently resumes with an empty buffer instead of failing loud on
-        # corrupt/foreign state.
+        # corrupt/foreign state. Capacity-dependent invariants (chunk sizes,
+        # fixed ready-row length) live in set_state, which knows seq_len.
         pending = list(d["pending_docs"])
         ready_tokens = list(d["ready_tokens"])
         ready_segments = list(d["ready_segments"])
@@ -479,12 +481,25 @@ class FFDPackerState:
                 "ready_tokens and ready_segments must have the same length "
                 f"({len(ready_tokens)} != {len(ready_segments)})"
             )
+        for i, (row_t, row_s) in enumerate(zip(ready_tokens, ready_segments, strict=True)):
+            if len(row_t) != len(row_s):
+                raise ValueError(
+                    f"ready_tokens[{i}] and ready_segments[{i}] lengths differ "
+                    f"({len(row_t)} != {len(row_s)})"
+                )
+        docs_seen = int(d["docs_seen"])
+        docs_truncated = int(d["docs_truncated"])
+        if docs_seen < 0 or docs_truncated < 0 or docs_truncated > docs_seen:
+            raise ValueError(
+                f"invalid document counters (docs_seen={docs_seen}, "
+                f"docs_truncated={docs_truncated})"
+            )
         return FFDPackerState(
             pending_docs=[list(x) for x in pending],
             ready_tokens=[list(x) for x in ready_tokens],
             ready_segments=[list(x) for x in ready_segments],
-            docs_seen=int(d["docs_seen"]),
-            docs_truncated=int(d["docs_truncated"]),
+            docs_seen=docs_seen,
+            docs_truncated=docs_truncated,
         )
 
 
@@ -724,8 +739,26 @@ class _FFDPackerBase:
         """Restore packer state from a checkpoint.
 
         :param dict[str, Any] state: State dict from get_state().
+        :raises ValueError: If a queue entry violates a capacity invariant
+            (corrupt/foreign state).
         """
         st = FFDPackerState.from_dict(state)
+        # Capacity invariants from_dict cannot check: pending entries are
+        # pre-split chunks in 1..capacity, ready rows are padded to exactly
+        # seq_len with nonnegative segment ids (0 = padding).
+        for i, doc in enumerate(st.pending_docs):
+            if not 0 < len(doc) <= self._capacity:
+                raise ValueError(
+                    f"pending_docs[{i}] has {len(doc)} tokens; expected 1..{self._capacity}"
+                )
+        for i, (tokens, segs) in enumerate(zip(st.ready_tokens, st.ready_segments, strict=True)):
+            if len(tokens) != self.seq_len:
+                raise ValueError(
+                    f"ready sequence {i} has {len(tokens)} tokens; expected "
+                    f"exactly seq_len={self.seq_len}"
+                )
+            if any(s < 0 for s in segs):
+                raise ValueError(f"ready sequence {i} has negative segment ids")
         self._pending_docs = deque(np.asarray(x, dtype=np.int32) for x in st.pending_docs)
         self._ready = deque(
             (

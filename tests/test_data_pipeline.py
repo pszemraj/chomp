@@ -173,6 +173,64 @@ def test_ffd_packer_state_from_dict_is_strict(missing_key: str) -> None:
         packer.set_state(full_state)
 
 
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        # ready row pair with mismatched inner lengths
+        (
+            {"ready_tokens": [[1, 2, 3, 4, 5, 6, 7, 8]], "ready_segments": [[1, 1, 1]]},
+            r"ready_tokens\[0\] and ready_segments\[0\]",
+        ),
+        # ready row shorter than seq_len (rows are padded to fixed length)
+        (
+            {"ready_tokens": [[1, 2, 3]], "ready_segments": [[1, 1, 1]]},
+            "expected exactly seq_len",
+        ),
+        # negative segment id in a ready row
+        (
+            {
+                "ready_tokens": [[1, 2, 3, 4, 5, 6, 7, 8]],
+                "ready_segments": [[1, 1, 1, 1, -1, 0, 0, 0]],
+            },
+            "negative segment ids",
+        ),
+        # empty pending chunk (chunks are non-empty by construction)
+        ({"pending_docs": [[]]}, r"pending_docs\[0\]"),
+        # pending chunk longer than capacity (chunks are pre-split)
+        ({"pending_docs": [list(range(9))]}, r"pending_docs\[0\]"),
+        # negative counters / truncated > seen
+        ({"docs_seen": -1}, "invalid document counters"),
+        ({"docs_seen": 1, "docs_truncated": 2}, "invalid document counters"),
+    ],
+    ids=[
+        "row_pair_mismatch",
+        "short_ready_row",
+        "negative_segment",
+        "empty_pending_chunk",
+        "oversized_pending_chunk",
+        "negative_counter",
+        "truncated_exceeds_seen",
+    ],
+)
+@pytest.mark.parametrize("make_packer", [_bin_packer, _multipack_packer])
+def test_ffd_packer_state_rejects_corrupt_queues(
+    make_packer: Callable[[], Any], mutation: dict[str, Any], match: str
+) -> None:
+    """Nested queue invariants fail loud at restore: row pairing, fixed
+    seq_len ready rows, capacity-bounded pending chunks, sane counters."""
+    packer = make_packer()
+    state = {
+        "pending_docs": [],
+        "ready_tokens": [],
+        "ready_segments": [],
+        "docs_seen": 3,
+        "docs_truncated": 0,
+    }
+    state.update(mutation)
+    with pytest.raises(ValueError, match=match):
+        packer.set_state(state)
+
+
 def test_token_packer_legacy_state_normalizes_large_segment_ids() -> None:
     """TokenPacker should accept legacy large segment IDs and preserve boundaries."""
     packer = TokenPacker(
