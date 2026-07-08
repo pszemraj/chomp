@@ -291,13 +291,9 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
             :param bool enable_stats: Whether to compute per-batch packer stats.
             """
             super().__init__(parent)
-            self._A = int(cfg.train.grad_accum)
-            self._B = int(cfg.train.batch_size)
-            self._T = int(cfg.train.seq_len)
-            self._device_put = bool(cfg.data.device_put)
-            self._mask_boundary_loss = bool(cfg.data.mask_boundary_loss)
-            self._train_on_eos = bool(cfg.data.train_on_eos)
-            self._eos_id = int(cfg.model.eos_token_id)
+            from chomp.data.pipeline import _BatchAssemblySpec
+
+            self._spec = _BatchAssemblySpec.from_config(cfg)
             self._enable_stats = bool(enable_stats)
             self._stats_snapshot: dict[str, Any] = {}
 
@@ -313,16 +309,7 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
             from chomp.data.pipeline import _assemble_batch
 
             docs_seen_before = self._docs_seen() if self._enable_stats else None
-            batch = _assemble_batch(
-                lambda: next(self._parent),
-                grad_accum=self._A,
-                batch_size=self._B,
-                seq_len=self._T,
-                mask_boundary_loss=self._mask_boundary_loss,
-                train_on_eos=self._train_on_eos,
-                eos_id=self._eos_id,
-                device_put=self._device_put,
-            )
+            batch = _assemble_batch(lambda: next(self._parent), self._spec)
             if not self._enable_stats:
                 return batch
             stats = _packer_stats_from_chain(self._parent)

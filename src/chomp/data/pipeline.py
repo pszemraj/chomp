@@ -844,16 +844,43 @@ def _mask_labels(
     return labels
 
 
+@dataclass(frozen=True)
+class _BatchAssemblySpec:
+    """Batch-assembly knobs extracted from a Config.
+
+    Single source of the config-to-assembly mapping shared by the Grain train
+    path and the eval iterator, so the two paths cannot drift apart.
+    """
+
+    grad_accum: int
+    batch_size: int
+    seq_len: int
+    mask_boundary_loss: bool
+    train_on_eos: bool
+    eos_id: int
+    device_put: bool
+
+    @staticmethod
+    def from_config(cfg: Config) -> _BatchAssemblySpec:
+        """Extract the batch-assembly knobs from a training config.
+
+        :param Config cfg: Training configuration.
+        :return _BatchAssemblySpec: Immutable assembly parameters.
+        """
+        return _BatchAssemblySpec(
+            grad_accum=int(cfg.train.grad_accum),
+            batch_size=int(cfg.train.batch_size),
+            seq_len=int(cfg.train.seq_len),
+            mask_boundary_loss=bool(cfg.data.mask_boundary_loss),
+            train_on_eos=bool(cfg.data.train_on_eos),
+            eos_id=int(cfg.model.eos_token_id),
+            device_put=bool(cfg.data.device_put),
+        )
+
+
 def _assemble_batch(
     next_window: Callable[[], tuple[np.ndarray, np.ndarray, np.ndarray]],
-    *,
-    grad_accum: int,
-    batch_size: int,
-    seq_len: int,
-    mask_boundary_loss: bool,
-    train_on_eos: bool,
-    eos_id: int,
-    device_put: bool,
+    spec: _BatchAssemblySpec,
 ) -> Batch:
     """Assemble one fixed-shape [A, B, T] Batch from packed [T] windows.
 
@@ -862,15 +889,10 @@ def _assemble_batch(
     used by both the Grain train path and the eval iterator.
 
     :param next_window: Callable yielding (tokens, segment_ids, position_ids) [T] arrays.
-    :param int grad_accum: Number of microbatches (A).
-    :param int batch_size: Microbatch size (B).
-    :param int seq_len: Sequence length (T).
-    :param bool mask_boundary_loss: Mask labels at segment transitions.
-    :param bool train_on_eos: Keep EOS positions in the loss.
-    :param int eos_id: EOS token id used when train_on_eos is False.
-    :param bool device_put: Transfer the batch to device before returning.
+    :param _BatchAssemblySpec spec: Assembly knobs extracted from the config.
     :return Batch: Fixed-shape batch of [A, B, T] arrays.
     """
+    grad_accum, batch_size, seq_len = spec.grad_accum, spec.batch_size, spec.seq_len
     need = grad_accum * batch_size
     inps = np.empty((need, seq_len), dtype=np.int32)
     labs = np.empty((need, seq_len), dtype=np.int32)
@@ -884,9 +906,9 @@ def _assemble_batch(
         labs[idx] = _mask_labels(
             inp.copy(),
             segs,
-            mask_boundary_loss=mask_boundary_loss,
-            train_on_eos=train_on_eos,
-            eos_id=eos_id,
+            mask_boundary_loss=spec.mask_boundary_loss,
+            train_on_eos=spec.train_on_eos,
+            eos_id=spec.eos_id,
         )
         inps[idx] = inp
         segs_out[idx] = np.asarray(segs, dtype=np.int32)
@@ -900,7 +922,7 @@ def _assemble_batch(
         segment_ids=segs_abt,
         position_ids=pos_out.reshape(grad_accum, batch_size, seq_len),
     )
-    if device_put:
+    if spec.device_put:
         import jax  # imported lazily to keep iterator usable in non-JAX contexts
 
         batch = jax.device_put(batch)
@@ -1062,30 +1084,13 @@ class TrainBatchIterator:
         :raises ValueError: If data.backend is unknown.
         """
         self._producer = _SequenceProducer(cfg, tokenizer=tokenizer, text_stream=text_stream)
-
-        # Batch shape
-        self._A = int(cfg.train.grad_accum)
-        self._B = int(cfg.train.batch_size)
-        self._T = int(cfg.train.seq_len)
-        self._device_put = bool(cfg.data.device_put)
-        self._mask_boundary_loss = bool(cfg.data.mask_boundary_loss)
-        self._train_on_eos = bool(cfg.data.train_on_eos)
-        self._eos_id = int(cfg.model.eos_token_id)
+        self._spec = _BatchAssemblySpec.from_config(cfg)
 
     def __iter__(self) -> TrainBatchIterator:
         return self
 
     def __next__(self) -> Batch:
-        return _assemble_batch(
-            self._producer.next_window,
-            grad_accum=self._A,
-            batch_size=self._B,
-            seq_len=self._T,
-            mask_boundary_loss=self._mask_boundary_loss,
-            train_on_eos=self._train_on_eos,
-            eos_id=self._eos_id,
-            device_put=self._device_put,
-        )
+        return _assemble_batch(self._producer.next_window, self._spec)
 
     # -------- checkpoint hooks --------
 
