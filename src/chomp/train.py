@@ -57,7 +57,7 @@ from chomp.config import (
     derived_deterministic,
     dtype_from_str,
     resolve_decay_horizon,
-    strict_packed_attention,
+    strict_packed_segments,
 )
 from chomp.data import (
     build_eval_iterator,
@@ -403,18 +403,18 @@ def _validate_packing_capabilities(cfg: Config, *, params: Any, static: Any) -> 
     :param Config cfg: Training configuration.
     :param Any params: Model parameters.
     :param Any static: Static model components.
-    :raises RuntimeError: If strict packed attention is requested but unavailable.
+    :raises RuntimeError: If strict segment isolation is requested but unavailable.
     """
-    if not strict_packed_attention(cfg):
+    if not strict_packed_segments(cfg):
         return
     if supports_packed_attention(params, static):
         return
     raise RuntimeError(
-        f"Strict packed attention (packing_mode={cfg.data.packing_mode!r}) was "
+        f"Strict segment isolation (packing_mode={cfg.data.packing_mode!r}) was "
         "requested but the model backend does not "
         "advertise full segment isolation (supports_segment_reset capability flag, "
         "megalodon-jax >= 0.1.2: attention + ComplexEMA + TimestepNorm reset at "
-        "packed document boundaries). Set data.packing_strict_attention=false to "
+        "packed document boundaries). Set data.packing_strict_segments=false to "
         "run in non-strict mode or upgrade megalodon-jax."
     )
 
@@ -926,7 +926,7 @@ def make_train_step(
     deterministic = derived_deterministic(cfg)
     grad_accum = int(cfg.train.grad_accum)
     clip_norm = float(cfg.optim.grad_clip_norm) if cfg.optim.grad_clip_norm else 0.0
-    use_packed_attention = strict_packed_attention(cfg)
+    use_packed_attention = strict_packed_segments(cfg)
     accum_dtype = dtype_from_str(cfg.model.accum_dtype)
 
     def micro_loss(
@@ -1070,7 +1070,7 @@ def make_eval_step(
     :return Callable: eval_step(params, batch) -> (loss_sum, token_sum).
     """
 
-    use_packed_attention = strict_packed_attention(cfg)
+    use_packed_attention = strict_packed_segments(cfg)
 
     def eval_step(params: Any, batch: Batch) -> tuple[jax.Array, jax.Array]:
         """Compute token-weighted loss sums for a batch.

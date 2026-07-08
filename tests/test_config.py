@@ -191,7 +191,7 @@ def test_strict_packed_rejects_disabled_boundary_masking(mode: str) -> None:
             cfg.data,
             packing_mode=mode,
             packing_group_docs=2,
-            packing_strict_attention=True,
+            packing_strict_segments=True,
             mask_boundary_loss=False,
             max_eval_samples=0,
         ),
@@ -200,7 +200,7 @@ def test_strict_packed_rejects_disabled_boundary_masking(mode: str) -> None:
         validate_config(cfg)
 
     non_strict = replace(
-        cfg, data=replace(cfg.data, packing_strict_attention=False, packing_buffer_docs=2)
+        cfg, data=replace(cfg.data, packing_strict_segments=False, packing_buffer_docs=2)
     )
     validate_config(non_strict)  # deliberate bleed stays allowed
 

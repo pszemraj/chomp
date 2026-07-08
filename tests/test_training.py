@@ -38,7 +38,7 @@ from chomp.config import (
     TokenizerConfig,
     TrainConfig,
     WandbConfig,
-    strict_packed_attention,
+    strict_packed_segments,
 )
 from chomp.data import build_train_iterator, data_fingerprint, prepare_tokenizer_and_config
 from chomp.model import build_model, supports_packed_attention, training_loss
@@ -875,7 +875,7 @@ def test_strict_packed_guard_raises_when_backend_unsupported(
             packing_mode=mode,
             packing_group_docs=2,
             packing_buffer_docs=4,
-            packing_strict_attention=True,
+            packing_strict_segments=True,
             max_eval_samples=0,
             tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
         ),
@@ -898,15 +898,15 @@ def test_strict_packed_guard_raises_when_backend_unsupported(
     )
 
     monkeypatch.setattr("chomp.train.supports_packed_attention", lambda params, static: False)
-    with pytest.raises(RuntimeError, match="Strict packed attention"):
+    with pytest.raises(RuntimeError, match="Strict segment isolation"):
         run(cfg, config_path=None, resume="none")
 
 
 def test_resume_compat_rejects_multipack_knob_changes(tmp_path: Path) -> None:
-    """Resume must reject changed packing_group_docs / packing_strict_attention.
+    """Resume must reject changed packing_group_docs / packing_strict_segments.
 
     group_docs changes which documents each multipack cycle packs (data-order
-    divergence); strict_attention silently changes the training objective.
+    divergence); strict_segments silently changes the training objective.
     """
     cfg = _base_cfg(tmp_path / "run_compat")
     cfg = replace(
@@ -915,7 +915,7 @@ def test_resume_compat_rejects_multipack_knob_changes(tmp_path: Path) -> None:
             cfg.data,
             packing_mode="multipack",
             packing_group_docs=8,
-            packing_strict_attention=True,
+            packing_strict_segments=True,
             max_eval_samples=0,
         ),
     )
@@ -927,14 +927,14 @@ def test_resume_compat_rejects_multipack_knob_changes(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="packing_group_docs"):
         check_resume_compat(changed_group, meta)
 
-    changed_strict = replace(cfg, data=replace(cfg.data, packing_strict_attention=False))
-    with pytest.raises(RuntimeError, match="packing_strict_attention"):
+    changed_strict = replace(cfg, data=replace(cfg.data, packing_strict_segments=False))
+    with pytest.raises(RuntimeError, match="packing_strict_segments"):
         check_resume_compat(changed_strict, meta)
 
     binc = replace(cfg, data=replace(cfg.data, packing_mode="bin", packing_buffer_docs=8))
     bin_meta = {"config": binc.to_dict(), "data_fingerprint": data_fingerprint(binc)}
-    bin_changed = replace(binc, data=replace(binc.data, packing_strict_attention=False))
-    with pytest.raises(RuntimeError, match="packing_strict_attention"):
+    bin_changed = replace(binc, data=replace(binc.data, packing_strict_segments=False))
+    with pytest.raises(RuntimeError, match="packing_strict_segments"):
         check_resume_compat(bin_changed, bin_meta)
 
 
@@ -955,7 +955,7 @@ def test_resume_compat_ignores_inert_packing_knobs(tmp_path: Path) -> None:
             cfg.data,
             packing_buffer_docs=cfg.data.packing_buffer_docs + 1,
             packing_group_docs=cfg.data.packing_group_docs + 1,
-            packing_strict_attention=not cfg.data.packing_strict_attention,
+            packing_strict_segments=not cfg.data.packing_strict_segments,
             packing_max_docs_per_bin=7,
         ),
     )
@@ -1062,7 +1062,7 @@ def test_supports_packed_attention_requires_capability_flag() -> None:
     assert not supports_packed_attention(legacy_params, legacy_static)
 
 
-def test_strict_packed_attention_covers_multi_document_modes(tmp_path: Path) -> None:
+def test_strict_packed_segments_covers_multi_document_modes(tmp_path: Path) -> None:
     """Every mode that packs unrelated documents together requires isolation.
 
     bin previously trained non-strict by silent omission: it FFD-packs
@@ -1074,14 +1074,14 @@ def test_strict_packed_attention_covers_multi_document_modes(tmp_path: Path) -> 
 
     def _mode(mode: str, strict: bool = True) -> Config:
         return replace(
-            cfg, data=replace(cfg.data, packing_mode=mode, packing_strict_attention=strict)
+            cfg, data=replace(cfg.data, packing_mode=mode, packing_strict_segments=strict)
         )
 
-    assert strict_packed_attention(_mode("bin"))
-    assert strict_packed_attention(_mode("multipack"))
-    assert not strict_packed_attention(_mode("sequential"))
-    assert not strict_packed_attention(_mode("bin", strict=False))
-    assert not strict_packed_attention(_mode("multipack", strict=False))
+    assert strict_packed_segments(_mode("bin"))
+    assert strict_packed_segments(_mode("multipack"))
+    assert not strict_packed_segments(_mode("sequential"))
+    assert not strict_packed_segments(_mode("bin", strict=False))
+    assert not strict_packed_segments(_mode("multipack", strict=False))
 
 
 def test_training_loss_passes_segments_iff_packed() -> None:

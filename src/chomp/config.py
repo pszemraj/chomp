@@ -89,7 +89,7 @@ class ModelConfig:
     # Segmented CEMA path selection for strict packed training (megalodon-jax
     # >= 0.1.2). True = parallel associative scan (fast, higher peak memory);
     # False = sequential lax.scan fallback (O(1) memory). Ignored unless
-    # segment_ids reach the model (multipack + packing_strict_attention).
+    # segment_ids reach the model (multipack + packing_strict_segments).
     use_associative_segment_scan: bool = True
 
     # Dtype policy (strings so YAML is clean; converted at runtime)
@@ -202,7 +202,7 @@ class DataConfig:
     # can never emit a batch.
     packing_group_docs: int = 512
     # Require strict segment-aware attention semantics when using multipack.
-    packing_strict_attention: bool = True
+    packing_strict_segments: bool = True
 
     # Packed-doc loss behavior
     mask_boundary_loss: bool = True
@@ -850,7 +850,7 @@ def _validate_data(cfg: Config) -> None:
             warnings.warn(msg, stacklevel=2)
     if (
         cfg.data.packing_mode in ("bin", "multipack")
-        and cfg.data.packing_strict_attention
+        and cfg.data.packing_strict_segments
         and not cfg.data.mask_boundary_loss
     ):
         _vfail(
@@ -859,7 +859,7 @@ def _validate_data(cfg: Config) -> None:
             "loss whenever segment_ids are passed (megalodon-jax >= 0.1.2), "
             "while host-side token counts would still include them — silently "
             "changing token-weighted grad accumulation and loss_tokens. Keep "
-            "mask_boundary_loss=true, or set data.packing_strict_attention=false "
+            "mask_boundary_loss=true, or set data.packing_strict_segments=false "
             "for deliberate cross-document state bleed."
         )
 
@@ -992,7 +992,7 @@ def derived_deterministic(cfg: Config) -> bool:
     )
 
 
-def strict_packed_attention(cfg: Config) -> bool:
+def strict_packed_segments(cfg: Config) -> bool:
     """True when packed sequences require full segment isolation in the backend.
 
     Covers every mode that packs multiple unrelated documents into one
@@ -1004,7 +1004,7 @@ def strict_packed_attention(cfg: Config) -> bool:
     :param Config cfg: Training configuration.
     :return bool: True iff a multi-document packing mode is active with strict isolation.
     """
-    return cfg.data.packing_mode in ("bin", "multipack") and cfg.data.packing_strict_attention
+    return cfg.data.packing_mode in ("bin", "multipack") and cfg.data.packing_strict_segments
 
 
 def decay_horizon_from_values(

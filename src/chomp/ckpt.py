@@ -513,12 +513,12 @@ def check_resume_compat(
         pack_prev.get("group_docs"),
         severity="error",
     )
-    # Changing strict_attention silently changes the training objective
+    # Changing strict_segments silently changes the training objective
     # (segment isolation + backend boundary masking) mid-run.
     _cmp(
-        "data.packing_strict_attention",
-        pack_cur.get("strict_attention"),
-        pack_prev.get("strict_attention"),
+        "data.packing_strict_segments",
+        pack_cur.get("strict_segments"),
+        pack_prev.get("strict_segments"),
         severity="error",
     )
     # Hard error: prefetch changes the grain chain wrapping, and with it the
