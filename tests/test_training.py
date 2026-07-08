@@ -466,6 +466,84 @@ def test_exhaustion_mid_assembly_skips_final_checkpoint(tmp_path: Path) -> None:
     assert steps_on_disk == {2}
 
 
+def test_resume_bit_exact_with_prefetch_and_window_shuffle(tmp_path: Path) -> None:
+    """Interrupted + resumed must match continuous bit-exactly with the full
+    iterator stack engaged: grain_prefetch > 0 and window shuffle enabled.
+
+    This pins the sharpest resume question: when the prefetch thread has
+    pulled batches ahead of the consumer, the serialized iterator state must
+    represent the consumer-visible position, not the advanced parent — and
+    the window shuffle must replay identically from a checkpoint taken
+    mid-window. Every window is distinct (varied text, period coprime with
+    seq_len), so a skipped or reordered batch cannot cancel out.
+    """
+    # 101 varied byte tokens; gcd(101, 16) = 1, so packed windows repeat only
+    # every 101 windows — far beyond the 12 this test consumes.
+    # max_doc_tokens must be raised: null resolves to 4*seq_len=64 and would
+    # shorten the period.
+    text = "".join(chr(97 + (i * 7) % 26) for i in range(101))
+
+    def _make_cfg(subdir: str, steps: int) -> tuple[Config, Path]:
+        cfg, config_src = make_small_run_cfg(tmp_path, run_subdir=subdir, decay_steps=6)
+        cfg = replace(cfg, train=replace(cfg.train, steps=steps, grad_accum=2))
+        cfg = replace(
+            cfg,
+            data=replace(
+                cfg.data,
+                local_text=text,
+                grain_prefetch=2,
+                window_shuffle_windows=8,
+                tokenizer=replace(cfg.data.tokenizer, max_doc_tokens=256),
+            ),
+        )
+        # save_every > steps: the interrupted run's step-3 checkpoint is the
+        # finally-block final save, taken while prefetch is ahead and 6
+        # windows into shuffle block 0 (blocks span 8 windows; 2 per step).
+        return replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=4)), config_src
+
+    cfg_cont, config_src = _make_cfg("run_pf_cont", steps=6)
+    run_dir_cont = run(cfg_cont, config_path=str(config_src), resume="none", dry_run=False)
+
+    cfg_int, _ = _make_cfg("run_pf_int", steps=3)
+    run_dir_int = run(cfg_int, config_path=str(config_src), resume="none", dry_run=False)
+    cfg_resume, _ = _make_cfg("run_pf_int", steps=6)
+    run(cfg_resume, config_path=str(config_src), resume="latest", dry_run=False)
+
+    # Per-step losses agree exactly across the resume boundary (steps 4-6 ran
+    # from the restored mid-window prefetching iterator).
+    def _losses(run_dir: Path) -> dict[int, float]:
+        rows = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
+        return {int(r["step"]): r["loss"] for r in rows if "loss" in r and "step" in r}
+
+    losses_cont = _losses(run_dir_cont)
+    losses_int = _losses(run_dir_int)
+    assert set(losses_cont) == set(losses_int) == {1, 2, 3, 4, 5, 6}
+    # Teeth: distinct windows produce distinct step losses, so an off-by-one
+    # in the replayed stream could not produce equal sequences by accident.
+    assert len(set(losses_cont.values())) > 1
+    assert losses_cont == losses_int
+
+    # And the step-6 train states are bit-identical.
+    cfg_ref, tokenizer = prepare_tokenizer_and_config(cfg_cont)
+    params, _static = build_model(cfg_ref, key=jax.random.PRNGKey(0))
+    tx, _ = build_optimizer(cfg_ref, params)
+    abstract_state = abstractify_tree(
+        init_train_state(cfg_ref, params=params, tx=tx, key=jax.random.PRNGKey(1))
+    )
+    states = []
+    for run_dir in (run_dir_cont, run_dir_int):
+        mgr = make_manager(default_ckpt_dir(run_dir), max_to_keep=2, save_every=4, async_save=False)
+        _, state, _ = restore_at_step(
+            mgr,
+            step=6,
+            abstract_train_state=abstract_state,
+            data_iter=build_train_iterator(cfg_ref, tokenizer=tokenizer),
+        )
+        states.append(state)
+    assert tree_allclose(states[0].params, states[1].params, rtol=0.0, atol=0.0)
+    assert tree_allclose(states[0].opt_state, states[1].opt_state, rtol=0.0, atol=0.0)
+
+
 def test_grain_data_state_capture_is_synchronous() -> None:
     """ckpt.save() relies on grain serializing iterator state in the blocking
     phase of manager.save(); if grain's handler ever grows an async_save,
