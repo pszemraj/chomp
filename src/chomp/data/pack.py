@@ -217,27 +217,20 @@ class PackerState:
         """Construct PackerState from a dictionary.
 
         :param dict[str, Any] d: State dict from to_dict().
+        :raises KeyError: If a required field is missing (corrupt/foreign state).
         :raises ValueError: If segments/tokens lengths don't match.
         :return PackerState: Reconstructed state.
         """
-        toks = d.get("remaining_tokens") or []
-        segs = d.get("remaining_segments")
-        if segs is None:
-            segs_list = [1 for _ in range(len(toks))]
-        else:
-            segs_list = list(segs)
-        if len(segs_list) != len(toks):
+        toks = list(d["remaining_tokens"])
+        segs = list(d["remaining_segments"])
+        if len(segs) != len(toks):
             raise ValueError(
-                f"remaining_segments length ({len(segs_list)}) must match remaining_tokens ({len(toks)})"
+                f"remaining_segments length ({len(segs)}) must match remaining_tokens ({len(toks)})"
             )
-        next_id = d.get("next_segment_id")
-        if next_id is None:
-            max_seg = max(segs_list) if segs_list else 0
-            next_id = max_seg + 1
         return PackerState(
-            remaining_tokens=list(toks),
-            remaining_segments=segs_list,
-            next_segment_id=int(next_id),
+            remaining_tokens=toks,
+            remaining_segments=segs,
+            next_segment_id=int(d["next_segment_id"]),
         )
 
 
@@ -332,17 +325,10 @@ class TokenPacker:
         if segs.size == 0:
             return segs.astype(np.int32, copy=False)
 
-        out = np.empty_like(segs, dtype=np.int32)
-        out_id = 1
-        out[0] = out_id
-        prev = int(segs[0])
-        for i in range(1, int(segs.size)):
-            cur = int(segs[i])
-            if cur != prev:
-                out_id += 1
-            out[i] = out_id
-            prev = cur
-        return out
+        boundary = np.empty(segs.size, dtype=np.int64)
+        boundary[0] = 1
+        boundary[1:] = segs[1:] != segs[:-1]
+        return np.cumsum(boundary).astype(np.int32)
 
     def add_document(self, tokens: Iterable[int]) -> None:
         """Add a tokenized document to the packer buffer.
