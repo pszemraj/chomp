@@ -773,10 +773,17 @@ class BinPacker(_FFDPackerBase):
     ):
         """Initialize the bin packer.
 
+        :param int seq_len: Fixed sequence length for output.
+        :param bool add_bos: Whether to prepend BOS to each document.
+        :param bool add_eos: Whether to append EOS to each document.
+        :param int bos_id: BOS token ID.
+        :param int eos_id: EOS token ID.
+        :param max_doc_tokens: Optional max tokens per document before truncation.
+        :param int bins_per_pack: Number of bins emitted per pack cycle.
         :param int buffer_docs: Minimum docs to buffer before packing.
+        :param max_docs_per_bin: Optional cap on documents per bin.
+        :param int pad_id: Padding token ID.
         :raises ValueError: If an input argument is invalid.
-
-        See :class:`_FFDPackerBase` for the shared parameters.
         """
         super().__init__(
             seq_len=seq_len,
@@ -794,6 +801,10 @@ class BinPacker(_FFDPackerBase):
         self._buffer_docs = int(buffer_docs)
 
     def _pack_threshold(self) -> int:
+        """Pending-doc count that triggers a pack cycle.
+
+        :return int: Minimum pending documents before packing runs.
+        """
         return max(self._bins_per_pack, self._buffer_docs)
 
     def _pack(self) -> None:
@@ -836,10 +847,17 @@ class MultipackPacker(_FFDPackerBase):
     ):
         """Initialize the multipack packer.
 
+        :param int seq_len: Fixed sequence length for output.
+        :param bool add_bos: Whether to prepend BOS to each document.
+        :param bool add_eos: Whether to append EOS to each document.
+        :param int bos_id: BOS token ID.
+        :param int eos_id: EOS token ID.
+        :param max_doc_tokens: Optional max tokens per document before truncation.
+        :param int bins_per_pack: Number of bins emitted per pack cycle.
         :param int group_docs: Number of candidate documents to consider per cycle.
+        :param max_docs_per_bin: Optional cap on packed segments per sequence.
+        :param int pad_id: Padding token ID.
         :raises ValueError: If an input argument is invalid.
-
-        See :class:`_FFDPackerBase` for the shared parameters.
         """
         super().__init__(
             seq_len=seq_len,
@@ -857,6 +875,10 @@ class MultipackPacker(_FFDPackerBase):
         self._group_docs = int(group_docs)
 
     def _pack_threshold(self) -> int:
+        """Pending-doc count that triggers a pack cycle.
+
+        :return int: Minimum pending documents before packing runs.
+        """
         return max(self._bins_per_pack, self._group_docs)
 
     def _pack(self) -> None:

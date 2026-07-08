@@ -251,6 +251,10 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
             original_set_state = it.set_state
 
             def _set_state(state: dict[str, Any]) -> None:
+                """Restore state, then clear _init so restore wins over lazy init.
+
+                :param dict[str, Any] state: Serialized iterator state.
+                """
                 original_set_state(state)
                 it._init = False
 
