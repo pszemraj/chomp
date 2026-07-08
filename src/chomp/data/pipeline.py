@@ -22,6 +22,7 @@ This pipeline keeps debug sources (local_text) but *still* exercises tokenize+pa
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import logging
@@ -507,16 +508,108 @@ def _tokenize_eval_texts(texts: list[str], tok: Tokenizer) -> list[list[int]]:
     return [tok.encode(text) for text in texts]
 
 
-def load_or_create_eval_texts(cfg: Config, *, tokenizer: Tokenizer) -> list[list[int]]:
-    """Create an evaluation set without on-disk caching.
+_EVAL_TOKENS_FILENAME = "eval_tokens.json.gz"
+
+
+def _eval_cache_manifest(cfg: Config) -> dict[str, Any]:
+    """Eval-set-defining config knobs pinned alongside the cached tokens.
+
+    :param Config cfg: Training configuration.
+    :return dict[str, Any]: Manifest of eval-identity config fields.
+    """
+    return {
+        "backend": cfg.data.backend,
+        "max_eval_samples": int(cfg.data.max_eval_samples),
+        "hf_eval_split": cfg.data.hf_eval_split,
+        "hf_split": cfg.data.hf_split,
+    }
+
+
+def _eval_tokens_sha256(tokens: list[list[int]]) -> str:
+    """Content hash of the eval token set (guards cache corruption).
+
+    :param list[list[int]] tokens: Tokenized eval documents.
+    :return str: Hex sha256 digest over all documents.
+    """
+    h = hashlib.sha256()
+    for doc in tokens:
+        h.update(np.asarray(doc, dtype=np.int64).tobytes())
+        h.update(b"|")
+    return h.hexdigest()
+
+
+def _read_eval_tokens_cache(path: Path, cfg: Config) -> list[list[int]]:
+    """Load and validate a persisted eval token cache.
+
+    :param Path path: Cache file path.
+    :param Config cfg: Current training configuration.
+    :raises RuntimeError: If the manifest or content hash does not match.
+    :return list[list[int]]: Tokenized eval documents.
+    """
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        payload = json.load(f)
+    manifest = payload.get("manifest") or {}
+    expected = _eval_cache_manifest(cfg)
+    if manifest != expected:
+        raise RuntimeError(
+            f"Eval token cache at {path} was created with different eval settings "
+            f"(cached={manifest!r}, current={expected!r}). The eval set is pinned "
+            "per run directory; use a fresh run_dir to change eval knobs."
+        )
+    tokens = [[int(t) for t in doc] for doc in payload["tokens"]]
+    if _eval_tokens_sha256(tokens) != payload.get("sha256"):
+        raise RuntimeError(f"Eval token cache at {path} is corrupt (content hash mismatch).")
+    return tokens
+
+
+def _write_eval_tokens_cache(path: Path, cfg: Config, tokens: list[list[int]]) -> None:
+    """Atomically persist the eval token set next to the run.
+
+    :param Path path: Cache file path.
+    :param Config cfg: Training configuration (for the identity manifest).
+    :param list[list[int]] tokens: Tokenized eval documents.
+    """
+    payload = {
+        "manifest": _eval_cache_manifest(cfg),
+        "sha256": _eval_tokens_sha256(tokens),
+        "tokens": tokens,
+    }
+    tmp = path.with_name(path.name + ".tmp")
+    with gzip.open(tmp, "wt", encoding="utf-8") as f:
+        json.dump(payload, f)
+    tmp.replace(path)
+
+
+def load_or_create_eval_texts(
+    cfg: Config, *, tokenizer: Tokenizer, run_dir: Path | None = None
+) -> list[list[int]]:
+    """Build the evaluation token set, pinned to the run directory.
+
+    With ``run_dir`` set, tokens are persisted to ``run_dir/eval_tokens.json.gz``
+    on first creation and loaded from there on every later start. A resumed run
+    therefore evaluates on the exact same token set even if the upstream
+    streaming dataset, split contents, or local file changed since the run was
+    created — which is what makes the hard resume-compat errors on eval knobs
+    meaningful. Without ``run_dir`` the set is rebuilt from the stream each
+    call (unit tests / ad-hoc callers).
 
     :param Config cfg: Training configuration.
     :param Tokenizer tokenizer: Tokenizer used to pre-tokenize eval texts.
+    :param run_dir: Run directory holding the persistent cache; None disables
+        persistence.
+    :raises RuntimeError: If a cached eval set exists but was written with
+        different eval settings or fails its content hash.
     :return list[list[int]]: Tokenized documents for evaluation.
     """
     max_samples = int(cfg.data.max_eval_samples)
     if max_samples <= 0:
         return []
+
+    cache_path = None if run_dir is None else Path(run_dir) / _EVAL_TOKENS_FILENAME
+    if cache_path is not None and cache_path.exists():
+        tokens = _read_eval_tokens_cache(cache_path, cfg)
+        logger.info("Loaded %d cached eval documents from %s", len(tokens), cache_path)
+        return tokens
 
     texts: list[str] = []
     split_used: str | None = None
@@ -571,7 +664,13 @@ def load_or_create_eval_texts(cfg: Config, *, tokenizer: Tokenizer) -> list[list
     if not texts:
         logger.warning("Eval text set is empty (max_eval_samples=%d).", max_samples)
 
-    return _tokenize_eval_texts(texts, tokenizer)
+    tokens = _tokenize_eval_texts(texts, tokenizer)
+    # An empty set is a broken state, not an identity worth pinning; leave no
+    # cache so the next start retries collection.
+    if cache_path is not None and tokens:
+        _write_eval_tokens_cache(cache_path, cfg, tokens)
+        logger.info("Persisted %d eval documents to %s", len(tokens), cache_path)
+    return tokens
 
 
 def _build_backend_text_stream(cfg: Config, *, seed_offset: int = 0) -> TextStream:

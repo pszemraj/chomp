@@ -58,6 +58,9 @@ def test_eval_logging_writes_metrics(tmp_path: Path) -> None:
 
     run(cfg, config_path=None, resume="none")
 
+    # The training entrypoint pins the eval set to the run directory.
+    assert (run_dir / "eval_tokens.json.gz").exists()
+
     metrics_path = run_dir / cfg.logging.metrics_file
     rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
     assert any(row.get("eval_loss") not in (None, "") for row in rows)
@@ -316,6 +319,70 @@ def test_eval_empty_when_disabled() -> None:
     cfg = replace(cfg, data=replace(cfg.data, max_eval_samples=0))
     tok = build_tokenizer(cfg)
     assert load_or_create_eval_texts(cfg, tokenizer=tok) == []
+
+
+def _local_eval_cfg(local_text: str = "eval persistence corpus\n") -> Config:
+    """Local-text config for eval token cache tests.
+
+    :param str local_text: Source text for the local backend.
+    :return Config: Minimal configuration with 3 eval samples.
+    """
+    return Config(
+        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
+        data=DataConfig(
+            backend="local_text",
+            repeat=True,
+            local_text=local_text,
+            max_eval_samples=3,
+            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+        ),
+    )
+
+
+def test_eval_tokens_pinned_to_run_dir(tmp_path: Path) -> None:
+    """The eval set is created once and reloaded from the run directory, so
+    upstream source drift cannot silently change what a resumed run
+    evaluates on (config-visible drift is resume-compat's job)."""
+    cfg = _local_eval_cfg(local_text="first corpus")
+    tok = build_tokenizer(cfg)
+    tokens_first = load_or_create_eval_texts(cfg, tokenizer=tok, run_dir=tmp_path)
+    assert tokens_first
+    assert (tmp_path / "eval_tokens.json.gz").exists()
+
+    drifted = replace(cfg, data=replace(cfg.data, local_text="different corpus"))
+    assert load_or_create_eval_texts(drifted, tokenizer=tok, run_dir=tmp_path) == tokens_first
+    # Sanity: without the cache the drifted source yields a different set.
+    assert load_or_create_eval_texts(drifted, tokenizer=tok) != tokens_first
+
+
+def test_eval_tokens_cache_rejects_eval_knob_drift(tmp_path: Path) -> None:
+    """Changing an eval-identity knob against an existing cache fails loudly."""
+    cfg = _local_eval_cfg()
+    tok = build_tokenizer(cfg)
+    load_or_create_eval_texts(cfg, tokenizer=tok, run_dir=tmp_path)
+
+    drifted = replace(cfg, data=replace(cfg.data, max_eval_samples=5))
+    with pytest.raises(RuntimeError, match="different eval settings"):
+        load_or_create_eval_texts(drifted, tokenizer=tok, run_dir=tmp_path)
+
+
+def test_eval_tokens_cache_rejects_corruption(tmp_path: Path) -> None:
+    """A cache whose content no longer matches its hash is refused."""
+    import gzip
+
+    cfg = _local_eval_cfg()
+    tok = build_tokenizer(cfg)
+    load_or_create_eval_texts(cfg, tokenizer=tok, run_dir=tmp_path)
+
+    path = tmp_path / "eval_tokens.json.gz"
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        payload = json.load(f)
+    payload["tokens"][0][0] = int(payload["tokens"][0][0]) + 1
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        json.dump(payload, f)
+
+    with pytest.raises(RuntimeError, match="corrupt"):
+        load_or_create_eval_texts(cfg, tokenizer=tok, run_dir=tmp_path)
 
 
 def test_eval_train_fallback_uses_train_seed_when_data_seed_is_default(

@@ -213,7 +213,11 @@ def _setup_run_dir_and_tokenizer(
     metrics_path = run_dir / cfg.logging.metrics_file
     save_tokenizer_snapshot(run_dir, cfg, tokenizer, allow_existing=allow_existing)
 
-    eval_tokens = [] if dry_run else load_or_create_eval_texts(cfg, tokenizer=tokenizer)
+    # run_dir pins the eval set: created once, persisted, and reloaded on
+    # resume so evals stay comparable even if the upstream dataset drifts.
+    eval_tokens = (
+        [] if dry_run else load_or_create_eval_texts(cfg, tokenizer=tokenizer, run_dir=run_dir)
+    )
 
     gen_settings: GenerationSettings | None = None
     gen_stream = None
