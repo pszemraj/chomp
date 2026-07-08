@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -109,7 +110,7 @@ def test_eval_fails_fast_when_bin_packer_emits_zero_batches(tmp_path: Path) -> N
 
 
 def test_eval_fails_fast_when_multipack_emits_zero_batches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, patch_hf_load_dataset: Callable[..., dict[str, int]]
 ) -> None:
     """Eval should raise when multipack cannot produce any batch.
 
@@ -117,16 +118,13 @@ def test_eval_fails_fast_when_multipack_emits_zero_batches(
     outright, so the runtime guard is exercised via its remaining real-world
     trigger: an eval split that yields fewer documents than max_eval_samples.
     """
-    train_items = [{"text": "xxxx"} for _ in range(64)]
-    eval_items = [{"text": "yy"}, {"text": "zz"}]  # 2 docs < packing_group_docs=8
-
-    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> FakeHFIterable:
-        _ = (dataset, name, streaming)
-        return FakeHFIterable(items=eval_items if split == "validation" else train_items)
-
-    import datasets
-
-    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
+    patch_hf_load_dataset(
+        {
+            "train": [{"text": "xxxx"} for _ in range(64)],
+            # 2 docs < packing_group_docs=8
+            "validation": [{"text": "yy"}, {"text": "zz"}],
+        }
+    )
 
     run_dir = tmp_path / "run_multipack"
     cfg = Config(

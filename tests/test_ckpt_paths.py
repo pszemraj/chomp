@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,14 +12,12 @@ from chomp.ckpt import default_ckpt_dir
 from chomp.config import Config
 from chomp.train import run
 from chomp.utils.ckpt_paths import load_config_for_checkpoint, resolve_checkpoint_path
+from tests.helpers.config_factories import make_small_run_cfg
 
 
-def test_resolve_checkpoint_with_root_dir(
-    tmp_path: Path,
-    small_run_cfg_factory: Callable[..., tuple[Config, Path]],
-) -> None:
+def test_resolve_checkpoint_with_root_dir(tmp_path: Path) -> None:
     """resolve_checkpoint_path should respect checkpoint.root_dir from run config."""
-    cfg, config_src = small_run_cfg_factory(tmp_path)
+    cfg, config_src = make_small_run_cfg(tmp_path)
     ckpt_root = tmp_path / "ckpt_root"
     cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, root_dir=str(ckpt_root)))
 
@@ -33,12 +30,9 @@ def test_resolve_checkpoint_with_root_dir(
     assert (step_dir / "train_state").exists()
 
 
-def test_resolve_checkpoint_with_step_dir(
-    tmp_path: Path,
-    small_run_cfg_factory: Callable[..., tuple[Config, Path]],
-) -> None:
+def test_resolve_checkpoint_with_step_dir(tmp_path: Path) -> None:
     """resolve_checkpoint_path should accept direct step-directory input."""
-    cfg, config_src = small_run_cfg_factory(tmp_path)
+    cfg, config_src = make_small_run_cfg(tmp_path)
     run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
 
     step_dir_input = default_ckpt_dir(run_dir) / "1"

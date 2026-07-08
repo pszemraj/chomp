@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import pytest
 
 from chomp.config import (
     CheckpointConfig,
@@ -29,9 +28,10 @@ from chomp.data.pipeline import (
     build_train_iterator,
 )
 from chomp.train import run
-from tests.helpers.hf_fakes import FakeHFIterable, FakeHFStateIterable
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from chomp.types import Batch
 
 
@@ -343,17 +343,12 @@ def _row_doc_tokens(batch: Batch) -> list[int]:
     return [int(r[1]) for r in rows]
 
 
-def test_window_shuffle_disabled_matches_unshuffled(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_window_shuffle_disabled_matches_unshuffled(
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+) -> None:
     """window_shuffle_windows=0 must preserve raw packer output order."""
     items = _distinct_docs(20)
-
-    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> FakeHFIterable:
-        _ = (dataset, name, split, streaming)
-        return FakeHFIterable(items=items)
-
-    import datasets
-
-    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
+    patch_hf_load_dataset(items)
 
     cfg = _window_shuffle_cfg(window=0)
     it = build_train_iterator(cfg)
@@ -363,17 +358,12 @@ def test_window_shuffle_disabled_matches_unshuffled(monkeypatch: pytest.MonkeyPa
     assert seen == expected
 
 
-def test_window_shuffle_permutes_within_window(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_window_shuffle_permutes_within_window(
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+) -> None:
     """W>0 must permute rows within each window without loss or duplication."""
     items = _distinct_docs(20)
-
-    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> FakeHFIterable:
-        _ = (dataset, name, split, streaming)
-        return FakeHFIterable(items=items)
-
-    import datasets
-
-    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
+    patch_hf_load_dataset(items)
 
     window = 8
     cfg = _window_shuffle_cfg(window=window)
@@ -387,7 +377,9 @@ def test_window_shuffle_permutes_within_window(monkeypatch: pytest.MonkeyPatch) 
     assert seen != expected_window  # order actually changed
 
 
-def test_window_shuffle_state_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_window_shuffle_state_roundtrip(
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+) -> None:
     """Resume with W>0 must reproduce the continuous run exactly.
 
     Snapshots mid-window (3 batches = 6 of 8 window slots consumed) so the
@@ -395,14 +387,7 @@ def test_window_shuffle_state_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None
     same permutation, fast-forward, and then cross a window boundary.
     """
     items = _distinct_docs(60)
-
-    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> FakeHFIterable:
-        _ = (dataset, name, split, streaming)
-        return FakeHFIterable(items=items)
-
-    import datasets
-
-    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
+    patch_hf_load_dataset(items)
 
     cfg = _window_shuffle_cfg(window=8)
     cfg = replace(cfg, data=replace(cfg.data, grain_prefetch=2))
@@ -427,18 +412,10 @@ def test_window_shuffle_state_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_docs_added_this_batch_accounts_for_all_pulls(
-    monkeypatch: pytest.MonkeyPatch,
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
 ) -> None:
     """Sum of docs_added_this_batch must equal the packer's docs_seen counter."""
-    items = _distinct_docs(64)
-
-    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> FakeHFIterable:
-        _ = (dataset, name, split, streaming)
-        return FakeHFIterable(items=items)
-
-    import datasets
-
-    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
+    patch_hf_load_dataset(_distinct_docs(64))
 
     cfg = _window_shuffle_cfg(window=8)
     it = build_train_iterator(cfg)
@@ -717,31 +694,10 @@ def test_pipeline_multipack_position_ids_and_stats() -> None:
 
 
 def test_hf_pipeline_segment_ids_and_label_mask(
-    monkeypatch: pytest.MonkeyPatch,
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
 ) -> None:
     """HF pipeline should emit segment IDs and mask labels at boundaries."""
-    items = [
-        {"text": "hi"},
-        {"text": "ok"},
-        {"text": "yo"},
-        {"text": "sup"},
-    ]
-
-    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> FakeHFIterable:
-        """Mock load_dataset returning fake iterable.
-
-        :param str dataset: Dataset name.
-        :param str name: Config name.
-        :param str split: Split name.
-        :param bool streaming: Streaming flag.
-        :return FakeHFIterable: Fake dataset iterable.
-        """
-        _ = (dataset, name, split, streaming)
-        return FakeHFIterable(items=items)
-
-    import datasets
-
-    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
+    patch_hf_load_dataset([{"text": "hi"}, {"text": "ok"}, {"text": "yo"}, {"text": "sup"}])
 
     cfg = Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
@@ -785,28 +741,9 @@ def test_hf_pipeline_segment_ids_and_label_mask(
     assert np.all(masked_labels == -100)
 
 
-@pytest.mark.slow
-def test_hf_state_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_hf_state_roundtrip(patch_hf_load_dataset: Callable[..., dict[str, int]]) -> None:
     """HF stream should resume to same position after state roundtrip."""
-    items = [{"text": "alpha"}, {"text": "bravo"}, {"text": "charlie"}]
-
-    def _load_dataset(
-        dataset: str, *, name: str, split: str, streaming: bool
-    ) -> FakeHFStateIterable:
-        """Mock load_dataset returning fake iterable.
-
-        :param str dataset: Dataset name.
-        :param str name: Config name.
-        :param str split: Split name.
-        :param bool streaming: Streaming flag.
-        :return FakeHFStateIterable: Fake dataset iterable.
-        """
-        _ = (dataset, name, split, streaming)
-        return FakeHFStateIterable(items=items)
-
-    import datasets
-
-    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
+    patch_hf_load_dataset([{"text": "alpha"}, {"text": "bravo"}, {"text": "charlie"}])
 
     spec = HFStreamSpec(
         dataset="dummy",
@@ -833,30 +770,11 @@ def test_hf_state_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
     assert next(resumed) == expected
 
 
-@pytest.mark.slow
-def test_hf_retry_rebuild_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_hf_retry_rebuild_roundtrip(patch_hf_load_dataset: Callable[..., dict[str, int]]) -> None:
     """HF stream should recover from transient failure via state restore."""
     items = [{"text": "alpha"}, {"text": "bravo"}, {"text": "charlie"}]
-    record: dict[str, Any] = {"builds": 0, "fail_consumed": False}
-
-    def _load_dataset(
-        dataset: str, *, name: str, split: str, streaming: bool
-    ) -> FakeHFStateIterable:
-        """Mock load_dataset with failure injection.
-
-        :param str dataset: Dataset name.
-        :param str name: Config name.
-        :param str split: Split name.
-        :param bool streaming: Streaming flag.
-        :return FakeHFStateIterable: Fake dataset iterable.
-        """
-        _ = (dataset, name, split, streaming)
-        record["builds"] += 1
-        return FakeHFStateIterable(items=items, fail_at=1, record=record)
-
-    import datasets
-
-    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
+    record: dict[str, Any] = {"fail_consumed": False}
+    calls = patch_hf_load_dataset(items, fail_at=1, record=record)
 
     spec = HFStreamSpec(
         dataset="dummy",
@@ -876,7 +794,7 @@ def test_hf_retry_rebuild_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
     assert next(stream) == "alpha"
     assert next(stream) == "bravo"
 
-    assert record["builds"] >= 2
+    assert calls["builds"] >= 2
     assert record.get("load_calls", 0) >= 1
     assert record.get("last_loaded") == {"index": 1}
 
