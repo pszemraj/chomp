@@ -456,23 +456,20 @@ def _cast_like(old: Any, raw: str) -> Any:
     return raw
 
 
-def load_config(path: str | Path, overrides: Iterable[str] | None = None) -> Config:
-    """Load YAML config file + apply dot-path overrides.
+def build_config(data: dict[str, Any], overrides: Iterable[str] | None = None) -> Config:
+    """Build and validate a Config from a raw nested mapping.
 
-    Overrides format: "train.steps=2000".
+    Applies $variables resolution, dataclass parsing, optional dot-path
+    overrides, then validation — the same pipeline as load_config minus the
+    YAML file read. Use this to reconstruct configs from stored dicts
+    (checkpoint metadata, config_resolved.json).
 
-    :param path: Path to the YAML config file.
+    :param dict[str, Any] data: Raw nested config mapping.
     :param overrides: Optional list of dot-path overrides (e.g., ["train.steps=2000"]).
-    :raises ValueError: If override format is invalid or path does not exist.
+    :raises ValueError: If override format is invalid.
     :return Config: Validated configuration object.
     """
-
-    path = Path(path)
-    with path.open("r") as f:
-        data = yaml.safe_load(f) or {}
-
     data = _resolve_variables(data)
-
     cfg = _from_nested_dict(data)
 
     if overrides:
@@ -484,6 +481,22 @@ def load_config(path: str | Path, overrides: Iterable[str] | None = None) -> Con
 
     validate_config(cfg)
     return cfg
+
+
+def load_config(path: str | Path, overrides: Iterable[str] | None = None) -> Config:
+    """Load YAML config file + apply dot-path overrides.
+
+    Overrides format: "train.steps=2000".
+
+    :param path: Path to the YAML config file.
+    :param overrides: Optional list of dot-path overrides (e.g., ["train.steps=2000"]).
+    :raises ValueError: If override format is invalid or path does not exist.
+    :return Config: Validated configuration object.
+    """
+    path = Path(path)
+    with path.open("r") as f:
+        data = yaml.safe_load(f) or {}
+    return build_config(data, overrides)
 
 
 _VAR_INLINE_RE = re.compile(r"\{\$variables\.([A-Za-z0-9_.-]+)\}")

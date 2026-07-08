@@ -124,6 +124,22 @@ def default_ckpt_dir(run_dir: Path) -> Path:
     return run_dir / "checkpoints"
 
 
+def resolve_ckpt_root(cfg: Config, run_dir: Path) -> Path:
+    """Resolve the checkpoint root directory for a run.
+
+    checkpoint.root_dir wins when set (relative paths resolve against
+    run_dir); otherwise the default `<run_dir>/checkpoints`.
+
+    :param Config cfg: Training configuration.
+    :param Path run_dir: Run directory path.
+    :return Path: Checkpoint root directory.
+    """
+    if cfg.checkpoint.root_dir:
+        root = Path(cfg.checkpoint.root_dir)
+        return root if root.is_absolute() else run_dir / root
+    return default_ckpt_dir(run_dir)
+
+
 def make_manager(
     ckpt_dir: Path, *, max_to_keep: int, save_every: int, async_save: bool
 ) -> ocp.CheckpointManager:

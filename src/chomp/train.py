@@ -46,8 +46,8 @@ from tqdm import tqdm
 from chomp.ckpt import (
     build_meta,
     check_resume_compat,
-    default_ckpt_dir,
     make_manager,
+    resolve_ckpt_root,
     restore_at_step,
     restore_latest,
     save,
@@ -328,14 +328,8 @@ def _build_checkpoint_manager(cfg: Config, run_dir: Path) -> Any | None:
     """
     if not cfg.checkpoint.enabled:
         return None
-    if cfg.checkpoint.root_dir:
-        ckpt_dir = Path(cfg.checkpoint.root_dir)
-        if not ckpt_dir.is_absolute():
-            ckpt_dir = run_dir / ckpt_dir
-    else:
-        ckpt_dir = default_ckpt_dir(run_dir)
     return make_manager(
-        ckpt_dir,
+        resolve_ckpt_root(cfg, run_dir),
         max_to_keep=cfg.checkpoint.max_to_keep,
         save_every=cfg.checkpoint.save_every,
         async_save=cfg.checkpoint.async_save,

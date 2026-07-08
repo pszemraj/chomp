@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from chomp.config import _from_nested_dict, _resolve_variables, validate_config
+from chomp.ckpt import resolve_ckpt_root
+from chomp.config import build_config
 
 
 def _is_step_dir(path: Path) -> bool:
@@ -76,12 +77,8 @@ def _read_config_override(config_override: str) -> dict[str, Any]:
     if not config_path.exists():
         raise FileNotFoundError(f"Config override not found: {config_path}")
     if config_path.suffix in {".yaml", ".yml"}:
-        try:
-            import yaml
-        except ImportError as exc:  # pragma: no cover - optional dependency
-            raise RuntimeError(
-                "pyyaml is required to load YAML configs. Install with: pip install pyyaml"
-            ) from exc
+        import yaml
+
         try:
             with config_path.open() as f:
                 data = yaml.safe_load(f) or {}
@@ -136,18 +133,6 @@ def _read_meta_config(step_dir: Path) -> dict[str, Any] | None:
     return cfg
 
 
-def _config_from_data(data: dict[str, Any]) -> Any:
-    """Build and validate a Config from raw data.
-
-    :param dict[str, Any] data: Raw config mapping.
-    :return Config: Validated configuration.
-    """
-    data = _resolve_variables(data)
-    cfg = _from_nested_dict(data)
-    validate_config(cfg)
-    return cfg
-
-
 def load_config_for_checkpoint(
     *, step_dir: Path, run_dir: Path | None, config_override: str | None
 ) -> Any:
@@ -160,13 +145,11 @@ def load_config_for_checkpoint(
     :raises FileNotFoundError: If no config source can be found.
     """
     if config_override:
-        data = _read_config_override(config_override)
-        return _config_from_data(data)
+        return build_config(_read_config_override(config_override))
 
     if run_dir is not None:
         try:
-            data = _read_run_dir_config(run_dir)
-            return _config_from_data(data)
+            return build_config(_read_run_dir_config(run_dir))
         except FileNotFoundError:
             pass
 
@@ -176,7 +159,7 @@ def load_config_for_checkpoint(
             f"No config found for checkpoint {step_dir}. "
             "Provide --config or ensure config_resolved.json is available."
         )
-    return _config_from_data(data)
+    return build_config(data)
 
 
 def _infer_run_dir_from_meta(step_dir: Path) -> Path | None:
@@ -223,12 +206,8 @@ def resolve_checkpoint_path(
     if (path / "config_resolved.json").exists():
         run_dir = path
         # Use the run's resolved config to locate checkpoints, regardless of overrides.
-        cfg = _config_from_data(_read_run_dir_config(run_dir))
-        ckpt_root = Path(cfg.checkpoint.root_dir) if cfg.checkpoint.root_dir else None
-        if ckpt_root is None:
-            ckpt_root = run_dir / "checkpoints"
-        elif not ckpt_root.is_absolute():
-            ckpt_root = run_dir / ckpt_root
+        cfg = build_config(_read_run_dir_config(run_dir))
+        ckpt_root = resolve_ckpt_root(cfg, run_dir)
         step_dir = _latest_step_dir(ckpt_root)
         if step_dir is None:
             raise FileNotFoundError(f"No step directories found in {ckpt_root}")
@@ -250,11 +229,7 @@ def resolve_checkpoint_path(
         cfg = load_config_for_checkpoint(
             step_dir=path, run_dir=run_dir, config_override=config_override
         )
-        ckpt_root = Path(cfg.checkpoint.root_dir) if cfg.checkpoint.root_dir else None
-        if ckpt_root is None:
-            ckpt_root = run_dir / "checkpoints"
-        elif not ckpt_root.is_absolute():
-            ckpt_root = run_dir / ckpt_root
+        ckpt_root = resolve_ckpt_root(cfg, run_dir)
         step_dir = _latest_step_dir(ckpt_root)
         if step_dir is None:
             raise FileNotFoundError(f"No step directories found in {ckpt_root}")
