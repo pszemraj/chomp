@@ -796,6 +796,37 @@ def test_resume_compat_rejects_multipack_knob_changes(tmp_path: Path) -> None:
         check_resume_compat(changed_strict, meta)
 
 
+def test_resume_compat_ignores_inert_packing_knobs(tmp_path: Path) -> None:
+    """Editing a packing knob the active mode never consumes must not block resume.
+
+    The fingerprint records mode-specific knobs only for the active
+    packing_mode, so e.g. group_docs drift under 'sequential' (or
+    buffer_docs drift under 'multipack') is invisible to compat checks.
+    """
+    cfg = _base_cfg(tmp_path / "run_inert")
+    assert cfg.data.packing_mode == "sequential"
+    meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
+
+    drifted = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            packing_buffer_docs=cfg.data.packing_buffer_docs + 1,
+            packing_group_docs=cfg.data.packing_group_docs + 1,
+            packing_strict_attention=not cfg.data.packing_strict_attention,
+            packing_max_docs_per_bin=7,
+        ),
+    )
+    check_resume_compat(drifted, meta)  # must not raise
+
+    mp = replace(cfg, data=replace(cfg.data, packing_mode="multipack", packing_group_docs=8))
+    mp_meta = {"config": mp.to_dict(), "data_fingerprint": data_fingerprint(mp)}
+    mp_drifted = replace(
+        mp, data=replace(mp.data, packing_buffer_docs=mp.data.packing_buffer_docs + 1)
+    )
+    check_resume_compat(mp_drifted, mp_meta)  # bin-only knob is inert here
+
+
 def test_supports_packed_attention_requires_capability_flag() -> None:
     """Capability check keys on supports_segment_reset, not compute_loss signature.
 

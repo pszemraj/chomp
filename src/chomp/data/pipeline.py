@@ -574,15 +574,14 @@ def load_or_create_eval_texts(cfg: Config, *, tokenizer: Tokenizer) -> list[list
     return _tokenize_eval_texts(texts, tokenizer)
 
 
-def build_generation_text_stream(cfg: Config, *, seed_offset: int = 1) -> TextStream:
-    """Build a text stream for periodic generation prompts.
-
-    Uses the training split but with an optional seed offset so sampling stays
-    independent from the training iterator.
+def _build_backend_text_stream(cfg: Config, *, seed_offset: int = 0) -> TextStream:
+    """Build the configured backend's text stream over the training split.
 
     :param Config cfg: Training configuration.
-    :param int seed_offset: Offset added to the dataset shuffle seed.
+    :param int seed_offset: Offset added to the HF shuffle seed (keeps
+        auxiliary streams independent from the training iterator).
     :return TextStream: Streaming text iterator.
+    :raises ValueError: If data.backend is unknown.
     """
     if cfg.data.backend == "hf":
         return _build_hf_stream(
@@ -593,7 +592,20 @@ def build_generation_text_stream(cfg: Config, *, seed_offset: int = 1) -> TextSt
         )
     if cfg.data.backend == "local_text":
         return LocalTextStream(text=cfg.data.local_text, repeat=cfg.data.repeat)
-    raise ValueError(f"Unknown data.backend for generation: {cfg.data.backend!r}")
+    raise ValueError(f"Unknown data.backend: {cfg.data.backend!r}")
+
+
+def build_generation_text_stream(cfg: Config, *, seed_offset: int = 1) -> TextStream:
+    """Build a text stream for periodic generation prompts.
+
+    Uses the training split but with a seed offset so sampling stays
+    independent from the training iterator.
+
+    :param Config cfg: Training configuration.
+    :param int seed_offset: Offset added to the dataset shuffle seed.
+    :return TextStream: Streaming text iterator.
+    """
+    return _build_backend_text_stream(cfg, seed_offset=seed_offset)
 
 
 def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None) -> dict[str, Any]:
@@ -639,17 +651,24 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
     if tokenizer_snapshot_hash is not None:
         tok["snapshot_sha256"] = tokenizer_snapshot_hash
 
+    # Mode-specific knobs are recorded only when the active mode consumes
+    # them, so editing an inert default between save and resume cannot block
+    # resume (check_resume_compat compares via .get(); a mode change itself
+    # is always an error).
     packing = {
         "mode": d.packing_mode,
-        "buffer_docs": d.packing_buffer_docs,
-        "max_docs_per_bin": d.packing_max_docs_per_bin,
-        "group_docs": d.packing_group_docs,
-        "strict_attention": d.packing_strict_attention,
         "mask_boundary_loss": d.mask_boundary_loss,
         "train_on_eos": d.train_on_eos,
         "grain_prefetch": d.grain_prefetch,
         "window_shuffle_windows": d.window_shuffle_windows,
     }
+    if d.packing_mode in ("bin", "multipack"):
+        packing["max_docs_per_bin"] = d.packing_max_docs_per_bin
+    if d.packing_mode == "bin":
+        packing["buffer_docs"] = d.packing_buffer_docs
+    if d.packing_mode == "multipack":
+        packing["group_docs"] = d.packing_group_docs
+        packing["strict_attention"] = d.packing_strict_attention
     eval_cfg = {
         "max_eval_samples": d.max_eval_samples,
         "hf_eval_split": d.hf_eval_split,
@@ -778,14 +797,8 @@ class _SequenceProducer:
         # Text stream
         if text_stream is not None:
             self._text_stream = text_stream
-        elif cfg.data.backend == "hf":
-            self._text_stream = _build_hf_stream(
-                cfg, split=cfg.data.hf_split, repeat=cfg.data.repeat
-            )
-        elif cfg.data.backend == "local_text":
-            self._text_stream = LocalTextStream(text=cfg.data.local_text, repeat=cfg.data.repeat)
         else:
-            raise ValueError(f"Unknown data.backend: {cfg.data.backend!r}")
+            self._text_stream = _build_backend_text_stream(cfg)
 
         # Packer
         if cfg.data.packing_mode == "bin":
@@ -832,7 +845,10 @@ class _SequenceProducer:
         elif isinstance(item, list):
             ids = item
         else:
-            ids = list(item)
+            raise TypeError(
+                f"Text stream yielded unsupported item type {type(item).__name__}; "
+                "expected str or list[int]."
+            )
         self._packer.add_document(ids)
 
     def next_window(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
