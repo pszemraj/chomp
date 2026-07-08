@@ -128,7 +128,8 @@ delete the run directory (not just the cache) to change eval identity.
 Config validation rejects `max_eval_samples` below the packer emission
 threshold for `bin`/`multipack` (packers never flush a partial buffer at end of
 stream). If eval still cannot emit any batch at runtime (for example an eval
-split yielding fewer documents than promised), training raises instead of
+split yielding fewer documents than promised), or emits batches whose labels
+are entirely masked (zero valid loss tokens), training raises instead of
 silently emitting a null eval loss.
 
 ## Key config knobs

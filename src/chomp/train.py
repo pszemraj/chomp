@@ -1350,7 +1350,15 @@ def run(
             )
 
         if total_tokens <= 0:
-            return {"eval_loss": None, "eval_tokens": 0}
+            # Batches exist but every label is masked out: broken boundary
+            # masking, EOS suppression eating the whole set, or pathological
+            # short docs. A null eval loss would hide it for the entire run.
+            raise RuntimeError(
+                f"Evaluation produced {batch_count} batch(es) but zero valid "
+                "loss tokens: every label is masked. Check "
+                "data.mask_boundary_loss / data.train_on_eos against the eval "
+                "document lengths."
+            )
         return {"eval_loss": total_loss / total_tokens, "eval_tokens": int(total_tokens)}
 
     def _run_generation_sample(step: int, params: Any) -> None:

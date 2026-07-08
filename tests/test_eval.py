@@ -182,6 +182,61 @@ def test_eval_fails_fast_when_bin_packer_emits_zero_batches(
         run(cfg, config_path=None, resume="none")
 
 
+def test_eval_fails_fast_on_zero_valid_tokens(
+    tmp_path: Path, patch_hf_load_dataset: Callable[..., dict[str, int]]
+) -> None:
+    """Eval batches whose labels are entirely masked must raise, not log
+    eval_loss=None.
+
+    Single-token eval docs make every adjacent window position a segment
+    transition, so boundary masking wipes all shifted labels — batches emit
+    but token_sum stays 0, which would otherwise silently null the eval curve
+    for the whole run.
+    """
+    patch_hf_load_dataset(
+        {
+            "train": [{"text": "abcdefghijklmnop"} for _ in range(64)],
+            "validation": [{"text": "a"} for _ in range(64)],
+        }
+    )
+
+    run_dir = tmp_path / "run_zero_tokens"
+    cfg = Config(
+        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
+        data=DataConfig(
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_split="train",
+            hf_eval_split="validation",
+            shuffle=False,
+            repeat=True,
+            packing_mode="sequential",
+            max_eval_samples=64,
+            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+        ),
+        train=TrainConfig(
+            seed=0,
+            steps=1,
+            batch_size=1,
+            seq_len=8,
+            grad_accum=1,
+            jit=False,
+            deterministic=True,
+            allow_cpu=True,
+            log_every=1000,
+            eval_every=1,
+        ),
+        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
+        checkpoint=CheckpointConfig(enabled=False),
+        debug=DebugConfig(nan_check=True, check_device_every=0),
+        logging=LoggingConfig(project="chomp", run_dir=str(run_dir)),
+    )
+
+    with pytest.raises(RuntimeError, match="zero valid loss tokens"):
+        run(cfg, config_path=None, resume="none")
+
+
 def test_eval_fails_fast_when_multipack_emits_zero_batches(
     tmp_path: Path, patch_hf_load_dataset: Callable[..., dict[str, int]]
 ) -> None:

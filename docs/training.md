@@ -122,8 +122,9 @@ between evals.
 For `bin` and `multipack`, config validation rejects `max_eval_samples` below
 the packer's emission threshold outright, and eval still fails fast at runtime
 if the iterator cannot emit even a single batch (for example, an eval split
-that yields fewer documents than promised). This avoids silent
-`eval_loss: null` runs.
+that yields fewer documents than promised) or if every emitted label is masked
+out (zero valid loss tokens — broken boundary masking or pathological short
+docs). There is no silent `eval_loss: null` outcome.
 
 ## Generation samples
 
