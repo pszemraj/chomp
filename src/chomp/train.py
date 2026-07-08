@@ -55,6 +55,7 @@ from chomp.ckpt import (
 from chomp.config import (
     Config,
     derived_deterministic,
+    dtype_from_str,
     resolve_decay_horizon,
     strict_packed_attention,
 )
@@ -926,6 +927,7 @@ def make_train_step(
     grad_accum = int(cfg.train.grad_accum)
     clip_norm = float(cfg.optim.grad_clip_norm) if cfg.optim.grad_clip_norm else 0.0
     use_packed_attention = strict_packed_attention(cfg)
+    accum_dtype = dtype_from_str(cfg.model.accum_dtype)
 
     def micro_loss(
         params: Any,
@@ -973,9 +975,16 @@ def make_train_step(
         rng, step_key = jax.random.split(state.rng)
         micro_keys = jax.random.split(step_key, grad_accum)
 
-        # Init accumulators
+        # Init accumulators. Gradients accumulate in accum_dtype (fp32 by
+        # default), not param dtype: with bf16 params, summing micro-grads
+        # in bf16 systematically drops low-order bits across the scan.
         loss0 = jnp.zeros((), dtype=jnp.float32)
-        grad0 = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), state.params)
+        grad0 = jax.tree_util.tree_map(
+            lambda x: jnp.zeros(x.shape, dtype=accum_dtype)
+            if jnp.issubdtype(x.dtype, jnp.floating)
+            else jnp.zeros_like(x),
+            state.params,
+        )
         token0 = jnp.zeros((), dtype=jnp.float32)
 
         def body(
@@ -995,7 +1004,7 @@ def make_train_step(
                 state.params, in_ids, labs, attn, segs, pos_ids, k, token_count
             )
             loss_sum = loss_sum + loss.astype(jnp.float32)
-            grad_sum = jax.tree_util.tree_map(lambda a, b: a + b, grad_sum, grads)
+            grad_sum = jax.tree_util.tree_map(lambda a, b: a + b.astype(a.dtype), grad_sum, grads)
             token_sum = token_sum + token_count
             return (loss_sum, grad_sum, token_sum), None
 
@@ -1023,6 +1032,13 @@ def make_train_step(
                 lambda g: jnp.where(trigger, g * (clip_norm / jnp.maximum(grad_norm, 1e-6)), g),
                 grads,
             )
+        # Normalization + global-norm clipping ran in accum_dtype above; cast
+        # back to param dtype only now so opt_state dtypes stay stable.
+        grads = jax.tree_util.tree_map(
+            lambda g, p: g.astype(p.dtype) if jnp.issubdtype(p.dtype, jnp.floating) else g,
+            grads,
+            state.params,
+        )
         updates, new_opt_state = tx.update(grads, state.opt_state, state.params)
         new_params = optax.apply_updates(state.params, updates)
 

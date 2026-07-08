@@ -345,3 +345,66 @@ def test_grad_accum_equivalence_dummy_local_text() -> None:
     assert tree_allclose(state1.params, params_ref, rtol=rtol, atol=atol)
     assert tree_allclose(state1.opt_state, opt_state_ref, rtol=rtol, atol=atol)
     assert jnp.allclose(metrics["loss"], loss_ref)
+
+
+def test_bf16_params_accumulate_grads_in_fp32() -> None:
+    """Gradient accumulation must run in accum_dtype (fp32), not param dtype.
+
+    With bf16 params, zeros_like-initialized accumulators would sum
+    micro-gradients in bf16 across the scan, silently dropping low-order
+    bits. The scan carry (loss, grad tree, token count) must therefore be
+    entirely fp32 even when every param leaf is bf16.
+    """
+    cfg = Config(
+        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
+        data=DataConfig(
+            backend="local_text",
+            repeat=True,
+            local_text="The quick brown fox jumps over the lazy dog.\n",
+            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+        ),
+        train=TrainConfig(
+            seed=0,
+            steps=1,
+            batch_size=1,
+            seq_len=16,
+            grad_accum=2,
+            jit=False,
+            allow_cpu=True,
+            deterministic=True,
+        ),
+        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=1.0, warmup_steps=0),
+    )
+
+    key = jax.random.PRNGKey(cfg.train.seed)
+    key, k_model = jax.random.split(key, 2)
+    params, static = build_model(cfg, key=k_model)
+    params = jax.tree_util.tree_map(
+        lambda x: x.astype(jnp.bfloat16) if jnp.issubdtype(x.dtype, jnp.floating) else x,
+        params,
+    )
+    tx, sched = build_optimizer(cfg, params)
+    state0 = init_train_state(cfg, params=params, tx=tx, key=key)
+
+    batch = jax.device_put(next(build_train_iterator(cfg)))
+    train_step = make_train_step(cfg, static=static, tx=tx, lr_schedule=sched)
+
+    jaxpr = jax.make_jaxpr(train_step)(state0, batch)
+    scan_eqns = [e for e in jaxpr.eqns if e.primitive.name == "scan"]
+    assert scan_eqns, "grad accumulation scan not found in train_step jaxpr"
+    for eqn in scan_eqns:
+        num_carry = int(eqn.params["num_carry"])
+        carry_dtypes = {v.aval.dtype for v in eqn.outvars[:num_carry]}
+        assert carry_dtypes == {jnp.dtype(jnp.float32)}, (
+            f"non-fp32 accumulator carry: {carry_dtypes}"
+        )
+
+    state1, metrics = train_step(state0, batch)
+    assert jnp.isfinite(metrics["loss"])
+    assert jnp.isfinite(metrics["grad_norm"])
+    for leaf0, leaf1 in zip(
+        jax.tree_util.tree_leaves(state0.params),
+        jax.tree_util.tree_leaves(state1.params),
+        strict=True,
+    ):
+        assert leaf0.dtype == leaf1.dtype  # params keep their dtype through the update
