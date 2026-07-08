@@ -1281,6 +1281,8 @@ def run(
     # with an advanced data stream and silently skip that batch on resume.
     data_state_aligned = True
 
+    eval_batches_cache: list[Batch] = []
+
     def _run_eval(params: Any) -> dict[str, Any]:
         """Run a full eval pass over the cached eval texts.
 
@@ -1289,15 +1291,18 @@ def run(
         """
         if eval_step is None or not eval_tokens:
             return {}
+        # Eval batches are deterministic (cached tokens, never shuffled), so
+        # assemble them once and reuse across evals instead of re-running
+        # tokenize/pack every eval_every steps. Host-side cache; device_put
+        # stays per-eval so device memory is not held between evals.
+        if not eval_batches_cache:
+            eval_batches_cache.extend(
+                build_eval_iterator(cfg, tokens=eval_tokens, tokenizer=tokenizer)
+            )
         total_loss = 0.0
         total_tokens = 0.0
         batch_count = 0
-        eval_it = build_eval_iterator(cfg, tokens=eval_tokens, tokenizer=tokenizer)
-        while True:
-            try:
-                eval_batch = next(eval_it)
-            except StopIteration:
-                break
+        for eval_batch in eval_batches_cache:
             batch_count += 1
             if not cfg.data.device_put:
                 eval_batch = jax.device_put(eval_batch)
@@ -1421,6 +1426,7 @@ def run(
                     # Fetch batch (host) and (optionally) device_put
                     step_i = int(host_step) + 1
                     data_state_aligned = False
+                    t_fetch = time.perf_counter()
                     try:
                         batch = next(data_it)
                     except StopIteration:
@@ -1441,6 +1447,11 @@ def run(
                     data_stats = data_it.get_stats()
                     if not cfg.data.device_put:
                         batch = jax.device_put(batch)
+                    # Host-side input-pipeline time for this step: fetch (incl.
+                    # tokenize/pack/shuffle backpressure) + stats + device_put.
+                    # tokens_per_sec below is model-step throughput only; the
+                    # e2e rate in the metrics row includes this wait.
+                    data_wait_s = time.perf_counter() - t_fetch
 
                     # Batch placement validation (real check)
                     if cfg.debug.check_device_every > 0 and (
@@ -1529,7 +1540,13 @@ def run(
                             "lr": lr_adam,
                             "loss_tokens": int(step_loss_tokens),
                             "step_time_s": float(step_time_s),
+                            "data_wait_s": float(data_wait_s),
                             "tokens_per_sec": float(tokens_per_sec),
+                            "tokens_per_sec_e2e": float(
+                                token_sum / (step_time_s + data_wait_s)
+                                if (step_time_s + data_wait_s) > 0
+                                else 0.0
+                            ),
                             "tokens_seen": int(tokens_seen_count),
                             "wall_time_s": time.perf_counter() - t0,
                         }

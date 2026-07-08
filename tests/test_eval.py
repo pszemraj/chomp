@@ -73,6 +73,57 @@ def test_eval_logging_writes_metrics(tmp_path: Path) -> None:
             assert key not in row
 
 
+def test_eval_batches_assembled_once_and_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Eval batches are deterministic; the iterator is built once, not per eval."""
+    from chomp.data import build_eval_iterator as real_build
+
+    calls = {"n": 0}
+
+    def _counting_build(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr("chomp.train.build_eval_iterator", _counting_build)
+
+    run_dir = tmp_path / "run_cache"
+    cfg = Config(
+        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
+        data=DataConfig(
+            backend="local_text",
+            repeat=True,
+            local_text="abcdefghijklmnopqrstuvwxyz" * 4,
+            max_eval_samples=3,
+            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+        ),
+        train=TrainConfig(
+            seed=0,
+            steps=2,
+            batch_size=1,
+            seq_len=8,
+            grad_accum=1,
+            jit=False,
+            deterministic=True,
+            allow_cpu=True,
+            log_every=1000,
+            eval_every=1,
+        ),
+        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
+        checkpoint=CheckpointConfig(enabled=False),
+        debug=DebugConfig(nan_check=True, check_device_every=0),
+        logging=LoggingConfig(project="chomp", run_dir=str(run_dir)),
+    )
+
+    run(cfg, config_path=None, resume="none")
+
+    assert calls["n"] == 1, f"eval iterator rebuilt {calls['n']} times for 2 evals"
+    metrics_path = run_dir / cfg.logging.metrics_file
+    rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
+    eval_rows = [row for row in rows if row.get("eval_loss") not in (None, "")]
+    assert len(eval_rows) == 2  # both evals produced a loss from the cached batches
+
+
 def test_eval_fails_fast_when_bin_packer_emits_zero_batches(tmp_path: Path) -> None:
     """Eval should raise when bin packing cannot produce any batch."""
     run_dir = tmp_path / "run"
