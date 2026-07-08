@@ -89,7 +89,7 @@ class ModelConfig:
     # Segmented CEMA path selection for strict packed training (megalodon-jax
     # >= 0.1.2). True = parallel associative scan (fast, higher peak memory);
     # False = sequential lax.scan fallback (O(1) memory). Ignored unless
-    # segment_ids reach the model (multipack + packing_strict_segments).
+    # segment_ids reach the model (bin/multipack + packing_strict_segments).
     use_associative_segment_scan: bool = True
 
     # Dtype policy (strings so YAML is clean; converted at runtime).
@@ -208,7 +208,10 @@ class DataConfig:
     # pack cycle — keep it modest, and below max_eval_samples or eval
     # can never emit a batch.
     packing_group_docs: int = 512
-    # Require strict segment-aware attention semantics when using multipack.
+    # Require full per-document state isolation (attention, RoPE, CEMA,
+    # TimestepNorm) whenever documents are packed together — applies to both
+    # bin and multipack modes. False = explicit opt-in to cross-document
+    # state bleed.
     packing_strict_segments: bool = True
 
     # Packed-doc loss behavior
@@ -881,8 +884,8 @@ def _validate_data(cfg: Config) -> None:
         and not cfg.data.mask_boundary_loss
     ):
         _vfail(
-            "data.mask_boundary_loss=false is incompatible with strict packed "
-            "attention: the backend excludes cross-segment label pairs from the "
+            "data.mask_boundary_loss=false is incompatible with strict segment "
+            "isolation: the backend excludes cross-segment label pairs from the "
             "loss whenever segment_ids are passed (megalodon-jax >= 0.1.2), "
             "while host-side token counts would still include them — silently "
             "changing token-weighted grad accumulation and loss_tokens. Keep "

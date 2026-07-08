@@ -270,7 +270,7 @@ def training_loss(
     batch: Batch,
     deterministic: bool,
     key: jax.Array | None,
-    use_packed_attention: bool = False,
+    use_packed_segments: bool = False,
 ) -> jax.Array:
     """Compute training loss.
 
@@ -284,7 +284,7 @@ def training_loss(
     :param Batch batch: Batch with input_ids, labels, attention_mask, and packed metadata.
     :param bool deterministic: If False, apply dropout.
     :param key: PRNG key required when deterministic=False.
-    :param bool use_packed_attention: Whether to pass segment_ids/position_ids to backend loss.
+    :param bool use_packed_segments: Whether to pass segment_ids/position_ids to backend loss.
     :return jax.Array: Scalar loss value.
     """
 
@@ -297,7 +297,7 @@ def training_loss(
         "deterministic": deterministic,
         "key": key,
     }
-    if use_packed_attention:
+    if use_packed_segments:
         kwargs["segment_ids"] = batch.segment_ids
         kwargs["position_ids"] = batch.position_ids
     return model.compute_loss(  # type: ignore[attr-defined]
@@ -307,7 +307,7 @@ def training_loss(
     )
 
 
-def supports_packed_attention(params: Any, static: Any) -> bool:
+def supports_packed_segments(params: Any, static: Any) -> bool:
     """Return True if the model backend supports full packed-segment isolation.
 
     Checks the ``supports_segment_reset`` capability flag introduced in

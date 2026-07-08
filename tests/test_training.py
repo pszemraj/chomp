@@ -41,7 +41,7 @@ from chomp.config import (
     strict_packed_segments,
 )
 from chomp.data import build_train_iterator, data_fingerprint, prepare_tokenizer_and_config
-from chomp.model import build_model, supports_packed_attention, training_loss
+from chomp.model import build_model, supports_packed_segments, training_loss
 from chomp.train import _build_checkpoint_manager, build_optimizer, init_train_state, run
 from chomp.types import Batch, TrainState
 from chomp.utils.tree import abstractify_tree, tree_allclose
@@ -1031,7 +1031,7 @@ def test_strict_packed_guard_raises_when_backend_unsupported(
         logging=LoggingConfig(project="chomp", run_dir=str(tmp_path / "run_guard")),
     )
 
-    monkeypatch.setattr("chomp.train.supports_packed_attention", lambda params, static: False)
+    monkeypatch.setattr("chomp.train.supports_packed_segments", lambda params, static: False)
     with pytest.raises(RuntimeError, match="Strict segment isolation"):
         run(cfg, config_path=None, resume="none")
 
@@ -1184,7 +1184,7 @@ def test_resume_compat_rejects_hf_repeat_drift(tmp_path: Path) -> None:
         check_resume_compat(drifted, meta)
 
 
-def test_supports_packed_attention_requires_capability_flag() -> None:
+def test_supports_packed_segments_requires_capability_flag() -> None:
     """Capability check keys on supports_segment_reset, not compute_loss signature.
 
     A backend that accepts segment_ids/position_ids but does not advertise the
@@ -1195,7 +1195,7 @@ def test_supports_packed_attention_requires_capability_flag() -> None:
 
     cfg = Config(model=ModelConfig(backend="dummy", vocab_size=64, d_model=16, dropout=0.0))
     params, static = build_model(cfg, key=jax.random.PRNGKey(0))
-    assert supports_packed_attention(params, static)
+    assert supports_packed_segments(params, static)
 
     class _LegacyLM(eqx.Module):
         """Pre-0.1.2 shape: packed kwargs in the signature, no capability flag."""
@@ -1214,7 +1214,7 @@ def test_supports_packed_attention_requires_capability_flag() -> None:
             return jnp.zeros(())
 
     legacy_params, legacy_static = eqx.partition(_LegacyLM(w=jnp.zeros(1)), eqx.is_array)
-    assert not supports_packed_attention(legacy_params, legacy_static)
+    assert not supports_packed_segments(legacy_params, legacy_static)
 
 
 def test_strict_packed_segments_covers_multi_document_modes(tmp_path: Path) -> None:
@@ -1240,7 +1240,7 @@ def test_strict_packed_segments_covers_multi_document_modes(tmp_path: Path) -> N
 
 
 def test_training_loss_passes_segments_iff_packed() -> None:
-    """segment_ids/position_ids reach the backend exactly when packed attention is on."""
+    """segment_ids/position_ids reach the backend exactly when strict packed segments are on."""
     import equinox as eqx
 
     calls: dict[str, Any] = {}
@@ -1276,13 +1276,13 @@ def test_training_loss_passes_segments_iff_packed() -> None:
     )
 
     training_loss(
-        params, static, batch=micro, deterministic=True, key=None, use_packed_attention=True
+        params, static, batch=micro, deterministic=True, key=None, use_packed_segments=True
     )
     assert calls["segment_ids"] is not None
     assert calls["position_ids"] is not None
 
     training_loss(
-        params, static, batch=micro, deterministic=True, key=None, use_packed_attention=False
+        params, static, batch=micro, deterministic=True, key=None, use_packed_segments=False
     )
     assert calls["segment_ids"] is None
     assert calls["position_ids"] is None
@@ -1354,4 +1354,4 @@ def test_megalodon_backend_advertises_segment_reset() -> None:
         )
     )
     params, static = build_model(cfg, key=jax.random.PRNGKey(0))
-    assert supports_packed_attention(params, static)
+    assert supports_packed_segments(params, static)

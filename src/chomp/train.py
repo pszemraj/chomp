@@ -33,6 +33,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from dataclasses import replace as dc_replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -69,7 +70,7 @@ from chomp.data import (
     save_tokenizer_snapshot,
     tokenizer_snapshot_hash,
 )
-from chomp.model import build_model, supports_packed_attention, training_loss
+from chomp.model import build_model, supports_packed_segments, training_loss
 from chomp.types import IGNORE_INDEX, Batch, TrainState
 from chomp.utils.devices import assert_batch_on_device
 from chomp.utils.io import MetricsWriter, add_file_logging, create_run_dir
@@ -410,7 +411,7 @@ def _validate_packing_capabilities(cfg: Config, *, params: Any, static: Any) -> 
     """
     if not strict_packed_segments(cfg):
         return
-    if supports_packed_attention(params, static):
+    if supports_packed_segments(params, static):
         return
     raise RuntimeError(
         f"Strict segment isolation (packing_mode={cfg.data.packing_mode!r}) was "
@@ -929,7 +930,7 @@ def make_train_step(
     deterministic = derived_deterministic(cfg)
     grad_accum = int(cfg.train.grad_accum)
     clip_norm = float(cfg.optim.grad_clip_norm) if cfg.optim.grad_clip_norm else 0.0
-    use_packed_attention = strict_packed_segments(cfg)
+    use_packed_segments = strict_packed_segments(cfg)
     # Harness-level optimizer math — micro-grad summation, token
     # normalization, and global-norm clipping — is always fp32. Deliberately
     # NOT cfg.model.accum_dtype: that knob feeds the model's *internal*
@@ -966,7 +967,7 @@ def make_train_step(
             batch=micro,
             deterministic=deterministic,
             key=key,
-            use_packed_attention=use_packed_attention,
+            use_packed_segments=use_packed_segments,
         )
         return loss * token_count
 
@@ -1078,7 +1079,7 @@ def make_eval_step(
     :return Callable: eval_step(params, batch) -> (loss_sum, token_sum).
     """
 
-    use_packed_attention = strict_packed_segments(cfg)
+    use_packed_segments = strict_packed_segments(cfg)
 
     def eval_step(params: Any, batch: Batch) -> tuple[jax.Array, jax.Array]:
         """Compute token-weighted loss sums for a batch.
@@ -1109,7 +1110,7 @@ def make_eval_step(
                 batch=micro,
                 deterministic=True,
                 key=None,
-                use_packed_attention=use_packed_attention,
+                use_packed_segments=use_packed_segments,
             )
             return (loss_sum + loss * token_count, token_sum + token_count), None
 
@@ -1305,19 +1306,21 @@ def run(
             return {}
         # Eval batches are deterministic (cached tokens, never shuffled), so
         # assemble them once and reuse across evals instead of re-running
-        # tokenize/pack every eval_every steps. Host-side cache; device_put
-        # stays per-eval so device memory is not held between evals.
+        # tokenize/pack every eval_every steps. The iterator is built with
+        # device_put disabled so the cache stays host-side regardless of
+        # data.device_put; each eval transfers per batch, so device memory is
+        # never held between evals.
         if not eval_batches_cache:
+            host_cfg = dc_replace(cfg, data=dc_replace(cfg.data, device_put=False))
             eval_batches_cache.extend(
-                build_eval_iterator(cfg, tokens=eval_tokens, tokenizer=tokenizer)
+                build_eval_iterator(host_cfg, tokens=eval_tokens, tokenizer=tokenizer)
             )
         total_loss = 0.0
         total_tokens = 0.0
         batch_count = 0
         for eval_batch in eval_batches_cache:
             batch_count += 1
-            if not cfg.data.device_put:
-                eval_batch = jax.device_put(eval_batch)
+            eval_batch = jax.device_put(eval_batch)
             loss_sum, token_sum = eval_step(params, eval_batch)
             loss_sum_host, token_sum_host = jax.device_get((loss_sum, token_sum))
             total_loss += float(loss_sum_host)
