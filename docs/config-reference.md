@@ -514,8 +514,8 @@ Selects the segmented ComplexEMA implementation used for strict packed
 training (megalodon-jax ≥ 0.1.2). `true` runs a parallel associative scan
 (fast, but materializes `(L, B, D, N)` complex64 intermediates); `false`
 falls back to a sequential `lax.scan` with O(1) memory. Only consulted when
-`segment_ids` reach the model, i.e. `data.packing_mode: multipack` with
-`data.packing_strict_attention: true`; inert otherwise.
+`segment_ids` reach the model, i.e. `data.packing_mode: bin` or `multipack`
+with `data.packing_strict_segments: true`; inert otherwise.
 
 | Property | Value |
 |----------|-------|
@@ -523,7 +523,7 @@ falls back to a sequential `lax.scan` with O(1) memory. Only consulted when
 | Backend | `megalodon` only |
 | Recommended | `false` only if the associative path OOMs |
 
-**Related:** [`data.packing_strict_attention`](#data.packing_strict_attention)
+**Related:** [`data.packing_strict_segments`](#data.packing_strict_segments)
 
 ---
 
@@ -929,15 +929,19 @@ Stream documents and concatenate tokens sequentially. Simple and deterministic.
 
 ##### bin
 
-First-fit-decreasing bin packing. Better packing efficiency but requires buffering documents.
+First-fit-decreasing bin packing over a `packing_buffer_docs` buffer. Better
+packing efficiency but requires buffering documents, and is a length-based
+local reorder (large documents pulled forward within each refill), not a
+stream-order-preserving mode. Packs multiple documents per sequence, so
+[`packing_strict_segments`](#data.packing_strict_segments) applies (strict by
+default).
 
 ##### multipack
 
 Grouped first-fit-decreasing packing over a `packing_group_docs` lookahead
-pool, emitting segment-local `position_ids`. With
-`packing_strict_attention: true`, enables full per-document state isolation
-(attention, RoPE, CEMA, TimestepNorm — megalodon-jax ≥ 0.1.2; fails fast if
-the backend lacks the `supports_segment_reset` capability).
+pool, emitting segment-local `position_ids`. Packs multiple documents per
+sequence, so [`packing_strict_segments`](#data.packing_strict_segments)
+applies (strict by default).
 <a id="data.packing_buffer_docs"></a>
 #### `data.packing_buffer_docs`
 ```yaml
@@ -986,26 +990,32 @@ a batch (a hard validation error when eval is enabled).
 
 **Related:** [`data.max_eval_samples`](#data.max_eval_samples)
 
-<a id="data.packing_strict_attention"></a>
-#### `data.packing_strict_attention`
+<a id="data.packing_strict_segments"></a>
+#### `data.packing_strict_segments`
 ```yaml
-packing_strict_attention: bool = true
+packing_strict_segments: bool = true
 ```
 
-When `packing_mode: multipack`, forward `segment_ids`/`position_ids` to the
-model for strict packed semantics. With megalodon-jax ≥ 0.1.2 this is full
-per-document state isolation: segment-run-masked attention, per-segment RoPE
-resets, and ComplexEMA/TimestepNorm state resets at every boundary, with
-cross-segment label pairs excluded from the loss by the backend. Training
-fails fast if the backend does not advertise the `supports_segment_reset`
-capability flag (older versions isolated attention only). Strict mode bypasses
-the FFT CEMA path and costs ~2x attention FLOPs on packed rows; see
-[Packing](packing.md#attention-semantics).
+When `packing_mode` is `bin` or `multipack`, forward
+`segment_ids`/`position_ids` to the model for strict packed semantics. With
+megalodon-jax ≥ 0.1.2 this is full per-document state isolation:
+segment-run-masked attention, per-segment RoPE resets, and
+ComplexEMA/TimestepNorm state resets at every boundary, with cross-segment
+label pairs excluded from the loss by the backend. Training fails fast if the
+backend does not advertise the `supports_segment_reset` capability flag
+(older versions isolated attention only). Strict mode bypasses the FFT CEMA
+path and costs ~2x attention FLOPs on packed rows; see
+[Packing](packing.md#segment-isolation-semantics).
+
+Requires `mask_boundary_loss: true` (config error otherwise: the backend
+excludes cross-segment pairs from the loss while host-side token counts would
+still include them, silently changing gradient normalization). Set to `false`
+only for deliberate cross-document state bleed. Inert under `sequential`.
 
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Requires | megalodon-jax ≥ 0.1.2 for the `megalodon` backend |
+| Requires | megalodon-jax ≥ 0.1.2 for the `megalodon` backend; `mask_boundary_loss: true` |
 
 **Related:** [`model.use_associative_segment_scan`](#model.use_associative_segment_scan), [`data.mask_boundary_loss`](#data.mask_boundary_loss)
 
@@ -1250,7 +1260,11 @@ Random seed for training reproducibility.
 steps: int = 100
 ```
 
-Total training steps.
+Total training steps, as an **absolute target step count** — a resumed run
+continues until `state.step` reaches this value, not for `steps` additional
+steps. The CLI `--max-steps` override has the same absolute semantics
+(`target = min(train.steps, max_steps)`): resuming at step 50k with
+`--max-steps 10000` trains zero steps.
 
 | Property | Value |
 |----------|-------|

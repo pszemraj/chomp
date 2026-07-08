@@ -24,6 +24,10 @@ all emitting fixed-length windows of `seq_len`:
    - Buffers multiple documents and uses a First-Fit-Decreasing heuristic to
      pack documents into bins of size `seq_len`.
    - Useful for higher utilization when documents are short or variable length.
+   - Note this is a **length-based local reorder with bounded lookahead**, not
+     "stream order with less padding": FFD sorts the buffered candidates by
+     descending length, so large documents are pulled forward and small ones
+     deferred within each buffer refill.
 
 3) **Multipack packer** (`data.packing_mode: multipack`)
    - Uses grouped First-Fit-Decreasing packing over `data.packing_group_docs`
@@ -50,17 +54,26 @@ Key bin-packing knobs:
 Key multipack knobs:
 
 - `data.packing_group_docs`: grouped lookahead size for multipack packing.
-- `data.packing_strict_attention`: require strict segment-aware attention path.
 - `data.packing_max_docs_per_bin`: optional cap on packed segments per sequence.
 
-## Attention Semantics
+Shared by both packed modes:
 
-`sequential` and `bin` modes keep stream semantics by default: segment IDs are
-used for loss masking and diagnostics, but attention remains stream-like.
+- `data.packing_strict_segments` (default `true`): require full per-document
+  state isolation in the backend.
 
-`multipack` with `data.packing_strict_attention: true` enables strict packed
-semantics. With megalodon-jax >= 0.1.2 this is **full state isolation** — each
-packed document computes as if it were run alone:
+## Segment-Isolation Semantics
+
+`sequential` keeps stream semantics: the corpus is treated as one continuous
+token stream, no segment metadata reaches the model, and segment IDs are used
+only for loss masking and diagnostics.
+
+`bin` and `multipack` with `data.packing_strict_segments: true` (the default)
+enable strict packed semantics. Both modes place multiple unrelated documents
+in one sequence, and for a recurrent-state architecture cross-document bleed
+means CEMA/TimestepNorm contamination, not just attention leakage — so
+isolation is required by default wherever documents are packed. With
+megalodon-jax >= 0.1.2 this is **full state isolation** — each packed document
+computes as if it were run alone:
 
 - segment-isolated attention (masked by contiguous segment *runs*, so a reused
   segment id cannot attend back to an earlier same-id document),
@@ -84,18 +97,21 @@ Costs and notes:
   a sequential low-memory fallback if the associative path OOMs.
 - Strict packed metadata is training-only upstream: passing segment_ids with a
   cache (generation/streaming) raises.
-- Keep `data.mask_boundary_loss: true` in strict mode. The backend masks
-  boundary pairs regardless, but chomp's token-weighted grad accumulation and
-  `loss_tokens` counting happen host-side from the labels; pre-masking keeps
-  the two consistent (config validation warns otherwise).
+- `data.mask_boundary_loss: true` is **required** in strict mode (config
+  validation errors otherwise). The backend masks boundary pairs regardless,
+  but chomp's token-weighted grad accumulation and `loss_tokens` counting
+  happen host-side from the labels; unmasked labels would silently change the
+  gradient normalization denominator.
 
-### Non-strict modes: CEMA/TimestepNorm state crosses boundaries
+### Non-strict operation: CEMA/TimestepNorm state crosses boundaries
 
-Under `sequential`, `bin`, and non-strict `multipack`, no segment metadata
-reaches the model: recurrent/normalization state flows across packed document
-boundaries by design (stream semantics). This is a semantics choice, not a
-leak — boundary loss masking still prevents cross-document next-token
-supervision.
+Under `sequential` — and under `bin`/`multipack` with an explicit
+`data.packing_strict_segments: false` — no segment metadata reaches the model:
+recurrent/normalization state flows across packed document boundaries. For
+`sequential` this is the intended continuous-stream semantics. For the packed
+modes it is deliberate cross-document bleed that must be opted into; the
+default refuses to do it silently. Boundary loss masking still prevents
+cross-document next-token supervision in all cases.
 
 For sequential packing internals, segment IDs are normalized to bounded values
 and reindexed per emitted window. Boundary semantics are unchanged, and this
@@ -151,8 +167,9 @@ affect shapes.
 ## Position IDs
 
 The batch contract now includes `position_ids` for all packing modes.
-For `multipack`, they are consumed by strict attention mode to reset positions
-at each packed segment boundary. For non-strict modes, they are informational.
+For `bin` and `multipack` under strict segment isolation, they are consumed by
+the backend to reset positions at each packed segment boundary. Otherwise they
+are informational.
 
 ## Future work
 
