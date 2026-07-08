@@ -9,6 +9,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
+import pytest
 from megalodon_jax.config import MegalodonConfig
 from megalodon_jax.model import MegalodonForCausalLM
 from optax.contrib import MuonDimensionNumbers
@@ -29,8 +30,12 @@ from chomp.types import Batch
 from chomp.utils.tree import tree_allclose
 
 
-def _megalodon_params() -> Any:
-    """Build a small Megalodon parameter pytree for tests.
+@pytest.fixture(scope="module")
+def megalodon_params() -> Any:
+    """Small Megalodon parameter pytree, built once per module.
+
+    Consumers only read it (JAX arrays are immutable; optimizer calls do not
+    mutate params), so module scope is safe and avoids 8 model builds.
 
     :return Any: Filtered parameter pytree.
     """
@@ -41,8 +46,7 @@ def _megalodon_params() -> Any:
         num_heads=1,
         chunk_size=16,
     )
-    key = jax.random.PRNGKey(0)
-    model = MegalodonForCausalLM(cfg, key=key)
+    model = MegalodonForCausalLM(cfg, key=jax.random.PRNGKey(0))
     return eqx.filter(model, eqx.is_array)
 
 
@@ -80,9 +84,9 @@ def _leaf_map(tree: Any) -> dict[str, Any]:
     return {_path_to_str(path): leaf for path, leaf in flat}
 
 
-def test_muon_param_labels_whitelist_excludes_embed() -> None:
+def test_muon_param_labels_whitelist_excludes_embed(megalodon_params: Any) -> None:
     """Muon labels should include projection weights but exclude embeddings."""
-    params = _megalodon_params()
+    params = megalodon_params
     dim_nums = _muon_weight_dim_numbers(params, allow_all_2d=False)
     mapping = _label_map(dim_nums)
 
@@ -94,18 +98,18 @@ def test_muon_param_labels_whitelist_excludes_embed() -> None:
     assert mapping["model.layers.[0].ffn.norm.weight"] is False
 
 
-def test_muon_param_labels_allow_all_2d() -> None:
+def test_muon_param_labels_allow_all_2d(megalodon_params: Any) -> None:
     """allow_all_2d should label every 2D tensor as muon."""
-    params = _megalodon_params()
+    params = megalodon_params
     dim_nums = _muon_weight_dim_numbers(params, allow_all_2d=True)
     mapping = _label_map(dim_nums)
 
     assert mapping["model.embed.weight"] is True
 
 
-def test_muon_param_labels_allow_tied_embed() -> None:
+def test_muon_param_labels_allow_tied_embed(megalodon_params: Any) -> None:
     """allow_embed should include the tied embedding matrix."""
-    params = _megalodon_params()
+    params = megalodon_params
     dim_nums = _muon_weight_dim_numbers(params, allow_all_2d=False, allow_embed=True)
     mapping = _label_map(dim_nums)
 
@@ -125,9 +129,9 @@ def test_muon_param_labels_allow_tied_embed_root_path() -> None:
     assert mapping["proj.weight"] is False
 
 
-def test_muon_dim_numbers_match_eqx_orientation() -> None:
+def test_muon_dim_numbers_match_eqx_orientation(megalodon_params: Any) -> None:
     """Muon dimension numbers should treat eqx Linear weights as (out, in)."""
-    params = _megalodon_params()
+    params = megalodon_params
     dim_nums = _muon_weight_dim_numbers(params, allow_all_2d=False)
     dims = _dim_map(dim_nums)
 
@@ -137,9 +141,9 @@ def test_muon_dim_numbers_match_eqx_orientation() -> None:
     assert spec.output_axis == (0,)
 
 
-def test_muon_update_handles_none_leaves() -> None:
+def test_muon_update_handles_none_leaves(megalodon_params: Any) -> None:
     """Muon optimizer should tolerate None leaves in the update tree."""
-    params = _megalodon_params()
+    params = megalodon_params
     cfg = Config()
     cfg = replace(cfg, optim=replace(cfg.optim, name="muon"))
     tx, _ = build_optimizer(cfg, params)
@@ -155,9 +159,9 @@ def test_muon_update_handles_none_leaves() -> None:
     assert any(leaf is not None for leaf in leaves)
 
 
-def test_muon_lr_scale_matches_schedule() -> None:
+def test_muon_lr_scale_matches_schedule(megalodon_params: Any) -> None:
     """Muon LR should be a scaled copy of the Adam schedule."""
-    params = _megalodon_params()
+    params = megalodon_params
     cfg = Config()
     cfg = replace(cfg, train=replace(cfg.train, steps=10))
     muon_cfg = replace(cfg.optim.muon, lr_scale=10.0)
@@ -174,9 +178,9 @@ def test_muon_lr_scale_matches_schedule() -> None:
         assert jnp.allclose(lr_muon, lr_adam * cfg.optim.muon.lr_scale)
 
 
-def test_muon_allow_all_2d_warns(caplog: Any) -> None:
+def test_muon_allow_all_2d_warns(megalodon_params: Any, caplog: Any) -> None:
     """Allowing all 2D params should warn for Megalodon backends."""
-    params = _megalodon_params()
+    params = megalodon_params
     cfg = Config()
     muon_cfg = replace(cfg.optim.muon, allow_all_2d=True)
     cfg = replace(cfg, optim=replace(cfg.optim, name="muon", muon=muon_cfg))
@@ -184,9 +188,9 @@ def test_muon_allow_all_2d_warns(caplog: Any) -> None:
     assert any("muon.allow_all_2d" in rec.message for rec in caplog.records)
 
 
-def test_muon_non_muon_params_use_plain_adamw() -> None:
+def test_muon_non_muon_params_use_plain_adamw(megalodon_params: Any) -> None:
     """Non-Muon params should use AdamW even when Muon uses Nesterov."""
-    params = _megalodon_params()
+    params = megalodon_params
     cfg = Config()
     muon_cfg = replace(cfg.optim.muon, nesterov=True, consistent_rms=None)
     adam_cfg = replace(cfg.optim.adam, nesterov=False)

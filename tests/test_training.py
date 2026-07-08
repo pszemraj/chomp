@@ -89,18 +89,30 @@ def _make_state() -> TrainState:
     )
 
 
-def test_async_checkpoint_roundtrip(tmp_path: Path) -> None:
-    """Async checkpoint save should roundtrip state correctly."""
-    run_dir = tmp_path / "run_async"
+def _saved_step1_checkpoint(
+    run_dir: Path, *, async_save: bool = False
+) -> tuple[Config, TrainState, Any, Path]:
+    """Build the standard save harness and write one step-1 checkpoint.
+
+    :param Path run_dir: Run directory for the checkpoint.
+    :param bool async_save: Whether the manager saves asynchronously.
+    :return tuple: (cfg, saved_state, manager, ckpt_dir).
+    """
     cfg = _base_cfg(run_dir)
     state = _make_state()
     data_it = build_train_iterator(cfg)
     ckpt_dir = default_ckpt_dir(run_dir)
-    mgr = make_manager(ckpt_dir, max_to_keep=2, save_every=1, async_save=True)
+    mgr = make_manager(ckpt_dir, max_to_keep=2, save_every=1, async_save=async_save)
 
     meta = build_meta(step=1, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg))
     save(mgr, step=1, train_state=state, data_iter=data_it, meta=meta)
     mgr.wait_until_finished()
+    return cfg, state, mgr, ckpt_dir
+
+
+def test_async_checkpoint_roundtrip(tmp_path: Path) -> None:
+    """Async checkpoint save should roundtrip state correctly."""
+    cfg, state, mgr, _ckpt_dir = _saved_step1_checkpoint(tmp_path / "run_async", async_save=True)
 
     abstract_state = abstractify_tree(state)
     data_it_restore = build_train_iterator(cfg)
@@ -114,16 +126,7 @@ def test_async_checkpoint_roundtrip(tmp_path: Path) -> None:
 
 def test_restore_params_only(tmp_path: Path) -> None:
     """Params-only restore (generate CLI path) matches the saved params exactly."""
-    run_dir = tmp_path / "run_params_only"
-    cfg = _base_cfg(run_dir)
-    state = _make_state()
-    data_it = build_train_iterator(cfg)
-    ckpt_dir = default_ckpt_dir(run_dir)
-    mgr = make_manager(ckpt_dir, max_to_keep=2, save_every=1, async_save=False)
-
-    meta = build_meta(step=1, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg))
-    save(mgr, step=1, train_state=state, data_iter=data_it, meta=meta)
-    mgr.wait_until_finished()
+    _cfg, state, _mgr, ckpt_dir = _saved_step1_checkpoint(tmp_path / "run_params_only")
 
     params = restore_params_only(ckpt_dir / "1", abstractify_tree(state.params))
     assert tree_allclose(params, state.params, rtol=0.0, atol=0.0)
@@ -192,16 +195,7 @@ def test_checkpoint_data_state_roundtrip(tmp_path: Path) -> None:
 
 def test_latest_step_ignores_incomplete(tmp_path: Path) -> None:
     """Checkpoint manager should ignore incomplete checkpoint directories."""
-    run_dir = tmp_path / "run_latest"
-    cfg = _base_cfg(run_dir)
-    state = _make_state()
-    data_it = build_train_iterator(cfg)
-    ckpt_dir = default_ckpt_dir(run_dir)
-    mgr = make_manager(ckpt_dir, max_to_keep=2, save_every=1, async_save=False)
-
-    meta = build_meta(step=1, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg))
-    save(mgr, step=1, train_state=state, data_iter=data_it, meta=meta)
-    mgr.wait_until_finished()
+    _cfg, _state, mgr, ckpt_dir = _saved_step1_checkpoint(tmp_path / "run_latest")
 
     (ckpt_dir / "2").mkdir()
     assert mgr.latest_step() == 1
@@ -209,16 +203,7 @@ def test_latest_step_ignores_incomplete(tmp_path: Path) -> None:
 
 def test_corrupt_checkpoint_fails_restore(tmp_path: Path) -> None:
     """Corrupted checkpoint metadata should raise an error on restore."""
-    run_dir = tmp_path / "run_corrupt"
-    cfg = _base_cfg(run_dir)
-    state = _make_state()
-    data_it = build_train_iterator(cfg)
-    ckpt_dir = default_ckpt_dir(run_dir)
-    mgr = make_manager(ckpt_dir, max_to_keep=2, save_every=1, async_save=False)
-
-    meta = build_meta(step=1, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg))
-    save(mgr, step=1, train_state=state, data_iter=data_it, meta=meta)
-    mgr.wait_until_finished()
+    cfg, state, mgr, ckpt_dir = _saved_step1_checkpoint(tmp_path / "run_corrupt")
 
     corrupt_target = None
     for path in (ckpt_dir / "1").rglob("*"):
