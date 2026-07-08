@@ -21,7 +21,7 @@ from chomp.cli.main import BANNER, parse_resume, print_banner
 from chomp.config import Config
 from chomp.model import build_model
 from chomp.train import run
-from chomp.utils.checkpoints import resolve_checkpoint_path
+from chomp.utils.ckpt_paths import resolve_checkpoint_path
 from chomp.utils.tree import abstractify_tree
 from tests.helpers.config_factories import make_small_run_cfg
 

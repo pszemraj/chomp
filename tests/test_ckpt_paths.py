@@ -12,7 +12,7 @@ import pytest
 from chomp.ckpt import default_ckpt_dir
 from chomp.config import Config
 from chomp.train import run
-from chomp.utils.checkpoints import load_config_for_checkpoint, resolve_checkpoint_path
+from chomp.utils.ckpt_paths import load_config_for_checkpoint, resolve_checkpoint_path
 
 
 def test_resolve_checkpoint_with_root_dir(

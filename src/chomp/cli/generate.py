@@ -7,7 +7,7 @@ from typing import Any
 
 import click
 
-from chomp.utils.checkpoints import load_config_for_checkpoint, resolve_checkpoint_path
+from chomp.utils.ckpt_paths import load_config_for_checkpoint, resolve_checkpoint_path
 
 
 def _restore_params(step_dir: Path, abstract_params: Any) -> Any:

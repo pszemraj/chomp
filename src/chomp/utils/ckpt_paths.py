@@ -1,4 +1,9 @@
-"""Checkpoint path and config resolution utilities."""
+"""Checkpoint path and config resolution for CLI tools.
+
+Distinct from chomp.ckpt (training-loop Orbax save/restore): this module
+locates step directories on disk and reconstructs configs from stored
+artifacts (config_resolved.json, checkpoint metadata) without touching Orbax.
+"""
 
 from __future__ import annotations
 

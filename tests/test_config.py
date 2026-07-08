@@ -19,7 +19,7 @@ from chomp.config import (
     validate_config,
 )
 from chomp.data.pipeline import build_tokenizer, resolve_tokenizer_config
-from chomp.utils.checkpoints import load_config_for_checkpoint
+from chomp.utils.ckpt_paths import load_config_for_checkpoint
 
 
 def _base_cfg() -> Config:
