@@ -144,6 +144,31 @@ def test_optim_validation_rejects_invalid_values() -> None:
             validate_config(mutate(_base_cfg()))
 
 
+@pytest.mark.parametrize(
+    ("mode", "knob"),
+    [
+        ("bin", "packing_buffer_docs"),
+        ("multipack", "packing_group_docs"),
+    ],
+)
+def test_packed_eval_starvation_guard(mode: str, knob: str) -> None:
+    """max_eval_samples below the packer's emission threshold can never
+    yield an eval batch (packers do not flush a partial buffer at end of
+    stream): hard error when eval is enabled, warning otherwise."""
+    cfg = _base_cfg()
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, packing_mode=mode, max_eval_samples=4, **{knob: 8}),
+        train=replace(cfg.train, eval_every=1),
+    )
+    with pytest.raises(ValueError, match=knob):
+        validate_config(cfg)
+
+    cfg_noeval = replace(cfg, train=replace(cfg.train, eval_every=0))
+    with pytest.warns(UserWarning, match=knob):
+        validate_config(cfg_noeval)
+
+
 def test_data_and_logging_validation_rejects_invalid_values() -> None:
     """Data/logging validation should reject invalid configuration values."""
     cases: list[tuple[Callable[[Config], Config], str]] = [

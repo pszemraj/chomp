@@ -127,18 +127,37 @@ def test_eval_batches_assembled_once_and_reused(
     assert len(eval_rows) == 2  # both evals produced a loss from the cached batches
 
 
-def test_eval_fails_fast_when_bin_packer_emits_zero_batches(tmp_path: Path) -> None:
-    """Eval should raise when bin packing cannot produce any batch."""
-    run_dir = tmp_path / "run"
+def test_eval_fails_fast_when_bin_packer_emits_zero_batches(
+    tmp_path: Path, patch_hf_load_dataset: Callable[..., dict[str, int]]
+) -> None:
+    """Eval should raise when bin packing cannot produce any batch.
+
+    Config validation now rejects max_eval_samples < packing_buffer_docs
+    outright, so the runtime guard is exercised via its remaining real-world
+    trigger: an eval split that yields fewer documents than max_eval_samples.
+    """
+    patch_hf_load_dataset(
+        {
+            "train": [{"text": "xxxx"} for _ in range(64)],
+            # 2 docs < packing_buffer_docs=4
+            "validation": [{"text": "yy"}, {"text": "zz"}],
+        }
+    )
+
+    run_dir = tmp_path / "run_bin"
     cfg = Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
         data=DataConfig(
-            backend="local_text",
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_split="train",
+            hf_eval_split="validation",
+            shuffle=False,
             repeat=True,
-            local_text="x",
             packing_mode="bin",
             packing_buffer_docs=4,
-            max_eval_samples=3,
+            max_eval_samples=4,
             tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
         ),
         train=TrainConfig(

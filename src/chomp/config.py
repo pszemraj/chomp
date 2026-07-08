@@ -846,6 +846,18 @@ def _validate_data(cfg: Config) -> None:
                 "data.packing_max_docs_per_bin must be positive when set, "
                 f"got {cfg.data.packing_max_docs_per_bin}"
             )
+        if 0 < cfg.data.max_eval_samples < cfg.data.packing_buffer_docs:
+            msg = (
+                f"data.max_eval_samples ({cfg.data.max_eval_samples}) is smaller than "
+                f"data.packing_buffer_docs ({cfg.data.packing_buffer_docs}); the bin "
+                "packer emits nothing until packing_buffer_docs pending docs "
+                "accumulate and never flushes a partial buffer at end of stream, "
+                "so evaluation will fail with zero batches. Lower "
+                "packing_buffer_docs or raise max_eval_samples."
+            )
+            if cfg.train.eval_every > 0:
+                _vfail(msg)
+            warnings.warn(msg, stacklevel=2)
     if cfg.data.packing_mode == "multipack":
         if cfg.data.packing_group_docs <= 0:
             _vfail(
