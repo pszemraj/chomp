@@ -4,10 +4,61 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
-from chomp.config import Config, load_config
+from chomp.config import (
+    Config,
+    DataConfig,
+    ModelConfig,
+    OptimConfig,
+    TokenizerConfig,
+    TrainConfig,
+    load_config,
+)
 
 DEFAULT_SMALL_RUN_TEXT = "hello from chomp"
+
+
+def make_pipeline_cfg(
+    *,
+    batch_size: int = 1,
+    seq_len: int = 8,
+    vocab_size: int = 512,
+    **data_kwargs: Any,
+) -> Config:
+    """Tiny data-pipeline Config: dummy model, byte(offset=4)+BOS/EOS tokenizer.
+
+    ``data_kwargs`` override/extend the local-text DataConfig defaults; pass
+    ``backend="hf"`` plus hf_* fields for HF-backed tests. Call sites should
+    state only the knobs the test is about.
+
+    :param int batch_size: Rows per micro-batch.
+    :param int seq_len: Packed sequence length.
+    :param int vocab_size: Dummy model vocab size.
+    :param data_kwargs: DataConfig field overrides.
+    :return Config: Validated-shape test configuration.
+    """
+    data: dict[str, Any] = {
+        "backend": "local_text",
+        "repeat": True,
+        "local_text": "hi",
+        "tokenizer": TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
+    }
+    data.update(data_kwargs)
+    return Config(
+        model=ModelConfig(backend="dummy", vocab_size=vocab_size, d_model=32, dropout=0.0),
+        data=DataConfig(**data),
+        train=TrainConfig(
+            steps=1,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            grad_accum=1,
+            jit=False,
+            deterministic=True,
+            allow_cpu=True,
+        ),
+        optim=OptimConfig(warmup_steps=0),
+    )
 
 
 def make_small_run_cfg(

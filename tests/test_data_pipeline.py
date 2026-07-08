@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import pytest
 
 from chomp.config import (
     CheckpointConfig,
@@ -28,6 +29,7 @@ from chomp.data.pipeline import (
     build_train_iterator,
 )
 from chomp.train import run
+from tests.helpers.config_factories import make_pipeline_cfg
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -45,9 +47,9 @@ def _doc(token: int, length: int) -> list[int]:
     return [token] * length
 
 
-def test_bin_packer_packs_multiple_docs() -> None:
-    """Bin packer should combine multiple documents into packed bins."""
-    packer = BinPacker(
+def _bin_packer() -> BinPacker:
+    """Standard tiny BinPacker for packer-level tests."""
+    return BinPacker(
         seq_len=8,
         add_bos=False,
         add_eos=False,
@@ -60,6 +62,26 @@ def test_bin_packer_packs_multiple_docs() -> None:
         pad_id=0,
     )
 
+
+def _multipack_packer() -> MultipackPacker:
+    """Standard tiny MultipackPacker for packer-level tests."""
+    return MultipackPacker(
+        seq_len=8,
+        add_bos=False,
+        add_eos=False,
+        bos_id=1,
+        eos_id=2,
+        max_doc_tokens=None,
+        bins_per_pack=1,
+        group_docs=2,
+        max_docs_per_bin=None,
+        pad_id=0,
+    )
+
+
+def test_bin_packer_packs_multiple_docs() -> None:
+    """Bin packer should combine multiple documents into packed bins."""
+    packer = _bin_packer()
     for tok, length in [(10, 6), (11, 2), (12, 6), (13, 2)]:
         packer.add_document(_doc(tok, length))
 
@@ -79,63 +101,9 @@ def test_bin_packer_packs_multiple_docs() -> None:
         assert unique.size >= 2
 
 
-def test_bin_packer_state_roundtrip() -> None:
-    """Bin packer state should roundtrip correctly via get/set_state."""
-    packer = BinPacker(
-        seq_len=8,
-        add_bos=False,
-        add_eos=False,
-        bos_id=1,
-        eos_id=2,
-        max_doc_tokens=None,
-        bins_per_pack=2,
-        buffer_docs=2,
-        max_docs_per_bin=None,
-        pad_id=0,
-    )
-
-    for tok, length in [(21, 6), (22, 2), (23, 6), (24, 2)]:
-        packer.add_document(_doc(tok, length))
-
-    _ = packer.pop_seq_with_metadata()
-    state = packer.get_state()
-    seq_b = packer.pop_seq_with_metadata()
-
-    restored = BinPacker(
-        seq_len=8,
-        add_bos=False,
-        add_eos=False,
-        bos_id=1,
-        eos_id=2,
-        max_doc_tokens=None,
-        bins_per_pack=2,
-        buffer_docs=2,
-        max_docs_per_bin=None,
-        pad_id=0,
-    )
-    restored.set_state(state)
-    seq_b2 = restored.pop_seq_with_metadata()
-
-    np.testing.assert_array_equal(seq_b[0], seq_b2[0])
-    np.testing.assert_array_equal(seq_b[1], seq_b2[1])
-    np.testing.assert_array_equal(seq_b[2], seq_b2[2])
-
-
 def test_multipack_packer_emits_segment_local_positions() -> None:
     """MultipackPacker should emit segment IDs and per-segment position IDs."""
-    packer = MultipackPacker(
-        seq_len=8,
-        add_bos=False,
-        add_eos=False,
-        bos_id=1,
-        eos_id=2,
-        max_doc_tokens=None,
-        bins_per_pack=1,
-        group_docs=2,
-        max_docs_per_bin=None,
-        pad_id=0,
-    )
-
+    packer = _multipack_packer()
     packer.add_document([10, 11, 12])
     packer.add_document([20, 21])
     assert packer.can_pop()
@@ -148,44 +116,35 @@ def test_multipack_packer_emits_segment_local_positions() -> None:
     assert np.all(pos[5:] == 0)
 
 
-def test_multipack_packer_state_roundtrip() -> None:
-    """Multipack packer state should roundtrip via get/set_state."""
-    packer = MultipackPacker(
-        seq_len=8,
-        add_bos=False,
-        add_eos=False,
-        bos_id=1,
-        eos_id=2,
-        max_doc_tokens=None,
-        bins_per_pack=1,
-        group_docs=2,
-        max_docs_per_bin=None,
-        pad_id=0,
-    )
-    packer.add_document([31, 32, 33])
-    packer.add_document([41, 42])
-
+@pytest.mark.parametrize(
+    ("make_packer", "docs", "pops_before_snapshot"),
+    [
+        pytest.param(
+            _bin_packer, [_doc(21, 6), _doc(22, 2), _doc(23, 6), _doc(24, 2)], 1, id="bin"
+        ),
+        pytest.param(_multipack_packer, [[31, 32, 33], [41, 42]], 0, id="multipack"),
+    ],
+)
+def test_ffd_packer_state_roundtrip(
+    make_packer: Callable[[], Any],
+    docs: list[list[int]],
+    pops_before_snapshot: int,
+) -> None:
+    """FFD packer state must roundtrip via get/set_state (shared base-class state)."""
+    packer = make_packer()
+    for doc in docs:
+        packer.add_document(doc)
+    for _ in range(pops_before_snapshot):
+        _ = packer.pop_seq_with_metadata()
     state = packer.get_state()
-    seq_a = packer.pop_seq_with_metadata()
+    expected = packer.pop_seq_with_metadata()
 
-    restored = MultipackPacker(
-        seq_len=8,
-        add_bos=False,
-        add_eos=False,
-        bos_id=1,
-        eos_id=2,
-        max_doc_tokens=None,
-        bins_per_pack=1,
-        group_docs=2,
-        max_docs_per_bin=None,
-        pad_id=0,
-    )
+    restored = make_packer()
     restored.set_state(state)
-    seq_b = restored.pop_seq_with_metadata()
+    actual = restored.pop_seq_with_metadata()
 
-    np.testing.assert_array_equal(seq_a[0], seq_b[0])
-    np.testing.assert_array_equal(seq_a[1], seq_b[1])
-    np.testing.assert_array_equal(seq_a[2], seq_b[2])
+    for arr_a, arr_b in zip(expected, actual, strict=True):
+        np.testing.assert_array_equal(arr_a, arr_b)
 
 
 def test_token_packer_legacy_state_normalizes_large_segment_ids() -> None:
@@ -238,31 +197,7 @@ def test_token_packer_legacy_state_normalizes_large_segment_ids() -> None:
 
 def test_grain_iterator_state_roundtrip() -> None:
     """Grain iterator should produce same batches after state restore."""
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="local_text",
-            repeat=True,
-            local_text="hi",
-            packing_mode="bin",
-            packing_buffer_docs=4,
-            packing_max_docs_per_bin=None,
-            mask_boundary_loss=True,
-            train_on_eos=True,
-            grain_prefetch=2,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
-        ),
-        train=TrainConfig(
-            steps=1,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-        ),
-        optim=OptimConfig(warmup_steps=0),
-    )
+    cfg = make_pipeline_cfg(packing_mode="bin", packing_buffer_docs=4, grain_prefetch=2)
 
     it = build_train_iterator(cfg)
     _ = next(it)
@@ -293,34 +228,16 @@ def _window_shuffle_cfg(*, window: int, repeat: bool = False) -> Config:
     :param bool repeat: Whether to repeat the stream.
     :return Config: Test configuration.
     """
-    return Config(
-        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="hf",
-            hf_dataset="dummy",
-            hf_name="dummy",
-            hf_split="train",
-            text_key="text",
-            shuffle=False,
-            shuffle_buffer_size=8,
-            seed=0,
-            repeat=repeat,
-            packing_mode="sequential",
-            mask_boundary_loss=True,
-            train_on_eos=True,
-            window_shuffle_windows=window,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
-        ),
-        train=TrainConfig(
-            steps=1,
-            batch_size=2,
-            seq_len=8,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-        ),
-        optim=OptimConfig(warmup_steps=0),
+    return make_pipeline_cfg(
+        batch_size=2,
+        backend="hf",
+        hf_dataset="dummy",
+        hf_name="dummy",
+        hf_split="train",
+        shuffle=False,
+        shuffle_buffer_size=8,
+        repeat=repeat,
+        window_shuffle_windows=window,
     )
 
 
@@ -443,99 +360,18 @@ def test_eval_iterator_never_shuffles() -> None:
 
 def test_grain_iterator_stats_disabled_with_device_put() -> None:
     """Packing stats should be empty when device_put=True."""
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="local_text",
-            repeat=True,
-            local_text="hi",
-            packing_mode="bin",
-            packing_buffer_docs=4,
-            packing_max_docs_per_bin=None,
-            mask_boundary_loss=True,
-            train_on_eos=True,
-            grain_prefetch=0,
-            device_put=True,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
-        ),
-        train=TrainConfig(
-            steps=1,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-        ),
-        optim=OptimConfig(warmup_steps=0),
-    )
+    cfg = make_pipeline_cfg(packing_mode="bin", packing_buffer_docs=4, device_put=True)
 
     it = build_train_iterator(cfg)
     _ = next(it)
     assert it.get_stats() == {}
 
 
-def test_labels_align_with_inputs_except_masked() -> None:
-    """Labels should match inputs except where masked with -100."""
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="local_text",
-            repeat=True,
-            local_text="hi",
-            mask_boundary_loss=True,
-            train_on_eos=False,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
-        ),
-        train=TrainConfig(
-            steps=1,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=2,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-        ),
-        optim=OptimConfig(warmup_steps=0),
-    )
+def _assert_multi_segment_boundary_masked(batch: Batch) -> None:
+    """Assert a row holds >=2 positive segments with boundary labels masked.
 
-    it = build_train_iterator(cfg)
-    batch = next(it)
-
-    labels = np.asarray(batch.labels)
-    inputs = np.asarray(batch.input_ids)
-    mask = labels != -100
-
-    assert mask.any()
-    assert np.all(labels[mask] == inputs[mask])
-
-
-def test_pipeline_segment_ids_multiple_docs() -> None:
-    """Pipeline should emit multiple segment IDs and mask boundaries."""
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="local_text",
-            repeat=True,
-            local_text="hi",
-            mask_boundary_loss=True,
-            train_on_eos=True,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
-        ),
-        train=TrainConfig(
-            steps=1,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-        ),
-        optim=OptimConfig(warmup_steps=0),
-    )
-
-    it = build_train_iterator(cfg)
-    batch = next(it)
+    :param Batch batch: Batch whose first row is checked.
+    """
     segs = batch.segment_ids[0, 0]
     unique = np.unique(segs)
     assert unique.size >= 2
@@ -547,29 +383,17 @@ def test_pipeline_segment_ids_multiple_docs() -> None:
     assert np.all(masked_labels == -100)
 
 
+def test_pipeline_segment_ids_multiple_docs() -> None:
+    """Pipeline should emit multiple segment IDs and mask boundaries."""
+    cfg = make_pipeline_cfg()
+
+    it = build_train_iterator(cfg)
+    _assert_multi_segment_boundary_masked(next(it))
+
+
 def test_boundary_loss_mask_toggle() -> None:
     """With mask_boundary_loss=False, boundary labels should not be masked."""
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="local_text",
-            repeat=True,
-            local_text="hi",
-            mask_boundary_loss=False,
-            train_on_eos=True,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
-        ),
-        train=TrainConfig(
-            steps=1,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-        ),
-        optim=OptimConfig(warmup_steps=0),
-    )
+    cfg = make_pipeline_cfg(mask_boundary_loss=False)
 
     it = build_train_iterator(cfg)
     batch = next(it)
@@ -582,30 +406,7 @@ def test_boundary_loss_mask_toggle() -> None:
 
 def test_pipeline_bin_packing_segment_ids() -> None:
     """Bin packing should produce multiple segments with packing stats."""
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="local_text",
-            repeat=True,
-            local_text="hi",
-            packing_mode="bin",
-            packing_buffer_docs=4,
-            packing_max_docs_per_bin=None,
-            mask_boundary_loss=True,
-            train_on_eos=True,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
-        ),
-        train=TrainConfig(
-            steps=1,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-        ),
-        optim=OptimConfig(warmup_steps=0),
-    )
+    cfg = make_pipeline_cfg(packing_mode="bin", packing_buffer_docs=4)
 
     it = build_train_iterator(cfg)
     batch = next(it)
@@ -647,30 +448,7 @@ def test_pipeline_bin_packing_segment_ids() -> None:
 
 def test_pipeline_multipack_position_ids_and_stats() -> None:
     """Multipack mode should emit per-segment position IDs and packing stats."""
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="local_text",
-            repeat=True,
-            local_text="hi",
-            packing_mode="multipack",
-            packing_group_docs=4,
-            packing_max_docs_per_bin=None,
-            mask_boundary_loss=True,
-            train_on_eos=True,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
-        ),
-        train=TrainConfig(
-            steps=1,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-        ),
-        optim=OptimConfig(warmup_steps=0),
-    )
+    cfg = make_pipeline_cfg(packing_mode="multipack", packing_group_docs=4)
 
     it = build_train_iterator(cfg)
     batch = next(it)
@@ -699,46 +477,19 @@ def test_hf_pipeline_segment_ids_and_label_mask(
     """HF pipeline should emit segment IDs and mask labels at boundaries."""
     patch_hf_load_dataset([{"text": "hi"}, {"text": "ok"}, {"text": "yo"}, {"text": "sup"}])
 
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="hf",
-            hf_dataset="dummy",
-            hf_name="dummy",
-            hf_split="train",
-            text_key="text",
-            shuffle=False,
-            shuffle_buffer_size=8,
-            seed=0,
-            repeat=False,
-            mask_boundary_loss=True,
-            train_on_eos=True,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
-        ),
-        train=TrainConfig(
-            steps=1,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-        ),
-        optim=OptimConfig(warmup_steps=0),
+    cfg = make_pipeline_cfg(
+        vocab_size=256,
+        backend="hf",
+        hf_dataset="dummy",
+        hf_name="dummy",
+        hf_split="train",
+        shuffle=False,
+        shuffle_buffer_size=8,
+        repeat=False,
     )
 
     it = build_train_iterator(cfg)
-    batch = next(it)
-
-    segs = batch.segment_ids[0, 0]
-    unique = np.unique(segs)
-    assert unique.size >= 2
-    assert np.all(unique > 0)
-
-    boundary = segs[1:] != segs[:-1]
-    assert boundary.any()
-    masked_labels = batch.labels[0, 0][1:][boundary]
-    assert np.all(masked_labels == -100)
+    _assert_multi_segment_boundary_masked(next(it))
 
 
 def test_hf_state_roundtrip(patch_hf_load_dataset: Callable[..., dict[str, int]]) -> None:
@@ -810,27 +561,8 @@ def _batch_arrays(batch: Batch) -> tuple:
 
 def test_packer_alignment_after_restore() -> None:
     """Restored iterator should produce same batches as continued iterator."""
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="local_text",
-            repeat=True,
-            local_text="abcde",
-            # Raw packer-state layout is only exposed without window shuffling.
-            window_shuffle_windows=0,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
-        ),
-        train=TrainConfig(
-            steps=1,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-        ),
-        optim=OptimConfig(warmup_steps=0),
-    )
+    # Raw packer-state layout is only exposed without window shuffling.
+    cfg = make_pipeline_cfg(local_text="abcde", window_shuffle_windows=0)
 
     it = build_train_iterator(cfg)
     _ = next(it)
@@ -852,27 +584,7 @@ def test_packer_alignment_after_restore() -> None:
 
 def test_train_on_eos_false_masks_eos_labels() -> None:
     """With train_on_eos=False, EOS token labels should be masked to -100."""
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="local_text",
-            repeat=True,
-            local_text="hi",
-            mask_boundary_loss=False,
-            train_on_eos=False,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
-        ),
-        train=TrainConfig(
-            steps=1,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-        ),
-        optim=OptimConfig(warmup_steps=0),
-    )
+    cfg = make_pipeline_cfg(mask_boundary_loss=False, train_on_eos=False)
 
     it = build_train_iterator(cfg)
     batch = next(it)
