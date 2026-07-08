@@ -66,16 +66,17 @@ class GrainTrainBatchIterator:
         valid_loss = valid_loss & attn[..., 1:]
         loss_tokens_host = int(np.count_nonzero(valid_loss))
 
-        boundary = (segs[..., 1:] != segs[..., :-1]) & (segs[..., 1:] > 0) & (segs[..., :-1] > 0)
-        boundary_transitions = int(np.count_nonzero(boundary))
-
+        # Reshape commutes with the per-last-axis boundary op, so one [rows, T-1]
+        # array serves both the global count and the per-sequence doc counts.
         flat_segs = segs.reshape(-1, segs.shape[-1])
-        has_tokens = np.any(flat_segs > 0, axis=1)
         seq_boundary = (
             (flat_segs[:, 1:] != flat_segs[:, :-1])
             & (flat_segs[:, 1:] > 0)
             & (flat_segs[:, :-1] > 0)
         )
+        boundary_transitions = int(np.count_nonzero(seq_boundary))
+
+        has_tokens = np.any(flat_segs > 0, axis=1)
         docs_per_seq = np.where(has_tokens, 1 + seq_boundary.sum(axis=1), 0).astype(np.int32)
         self._last_stats = {
             "packing_mode": self._packing_mode,
@@ -140,7 +141,12 @@ def _packer_stats_from_chain(it: Any) -> dict[str, Any]:
                 return dict(get_stats())
             except Exception:
                 return {}
-        node = getattr(node, "_parent", None)
+        # grain's DatasetIterator._parent is a property that raises
+        # AssertionError (not AttributeError) on parentless nodes.
+        try:
+            node = getattr(node, "_parent", None)
+        except AssertionError:
+            return {}
     return {}
 
 
