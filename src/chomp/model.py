@@ -145,6 +145,14 @@ _MIN_MEGALODON_JAX = "0.1.2"
 def _require_megalodon_jax_version() -> None:
     """Fail fast when the installed megalodon-jax predates the required floor.
 
+    Package metadata is deliberately the *only* version source: megalodon_jax
+    exposes no ``__version__`` attribute (as of 0.1.2), so a module-attribute
+    fallback would be dead code, and pip editable installs do produce
+    metadata. Missing metadata means a sys.path-injected source tree — an
+    unsupported setup whose actual version cannot be verified, so it errors
+    rather than guesses. Strict packed mode is independently guarded by the
+    ``supports_segment_reset`` capability flag on the built model instance.
+
     :raises RuntimeError: If megalodon-jax is older than _MIN_MEGALODON_JAX
         or its version metadata cannot be read.
     """
