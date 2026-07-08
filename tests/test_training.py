@@ -1133,6 +1133,53 @@ def test_training_loss_passes_segments_iff_packed() -> None:
     assert calls["position_ids"] is None
 
 
+def test_megalodon_version_floor_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any megalodon model build must reject megalodon-jax < 0.1.2 outright.
+
+    The pyproject git URL cannot carry a version specifier, so a stale
+    environment is only caught here — for every mode, not just strict packing.
+    """
+    import importlib.metadata as real_metadata
+
+    pytest.importorskip("megalodon_jax")
+
+    cfg = Config(
+        model=ModelConfig(
+            backend="megalodon",
+            vocab_size=64,
+            model_dim=32,
+            num_layers=1,
+            num_heads=1,
+            z_dim=16,
+            value_dim=32,
+            ffn_hidden_dim=64,
+            cema_ndim=4,
+            chunk_size=8,
+            norm_num_groups=4,
+        )
+    )
+
+    real_version = real_metadata.version
+
+    def _stale_version(name: str) -> str:
+        if name == "megalodon-jax":
+            return "0.1.1"
+        return real_version(name)
+
+    monkeypatch.setattr("importlib.metadata.version", _stale_version)
+    with pytest.raises(RuntimeError, match="requires megalodon-jax >= 0.1.2"):
+        build_model(cfg, key=jax.random.PRNGKey(0))
+
+    def _missing_version(name: str) -> str:
+        if name == "megalodon-jax":
+            raise real_metadata.PackageNotFoundError(name)
+        return real_version(name)
+
+    monkeypatch.setattr("importlib.metadata.version", _missing_version)
+    with pytest.raises(RuntimeError, match="Cannot verify"):
+        build_model(cfg, key=jax.random.PRNGKey(0))
+
+
 def test_megalodon_backend_advertises_segment_reset() -> None:
     """The installed megalodon-jax must expose the full-isolation capability flag."""
     pytest.importorskip("megalodon_jax")

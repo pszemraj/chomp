@@ -26,7 +26,13 @@ classifiers = [
 dependencies = [
   "jax>=0.7.0",
   "equinox>=0.12.0",
+  # chomp requires megalodon-jax >= 0.1.2 (supports_segment_reset: full
+  # per-document state isolation). A PEP 508 direct URL cannot carry a
+  # version specifier, so the floor is enforced at model build time
+  # (chomp.model._require_megalodon_jax_version); fresh installs from this
+  # URL always satisfy it.
   "megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git",
+  "packaging>=23.0",
   "optax @ git+https://github.com/google-deepmind/optax.git@141c8d5e3746540163da8c7edf5a0072369a27c8",
   "orbax-checkpoint==0.11.31",
   "PyYAML>=6.0",

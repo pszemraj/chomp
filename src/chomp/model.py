@@ -134,6 +134,41 @@ class DummyLM(eqx.Module):
 
 # ------------------------------ Builders -----------------------------------
 
+# Repo-wide floor, enforced for every megalodon model build (train and
+# generate) regardless of packing mode. Older versions lack full segment
+# isolation (supports_segment_reset), and the pyproject git URL cannot carry
+# a version specifier — a stale environment is the only way to end up below
+# this, so refuse it outright rather than degrade per-feature.
+_MIN_MEGALODON_JAX = "0.1.2"
+
+
+def _require_megalodon_jax_version() -> None:
+    """Fail fast when the installed megalodon-jax predates the required floor.
+
+    :raises RuntimeError: If megalodon-jax is older than _MIN_MEGALODON_JAX
+        or its version metadata cannot be read.
+    """
+    from importlib import metadata
+
+    from packaging.version import Version
+
+    try:
+        found = metadata.version("megalodon-jax")
+    except metadata.PackageNotFoundError as exc:
+        raise RuntimeError(
+            "Cannot verify the installed megalodon-jax version (no package "
+            f"metadata); chomp requires megalodon-jax >= {_MIN_MEGALODON_JAX}. "
+            "Reinstall it: pip install -U "
+            "'megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git'"
+        ) from exc
+    if Version(found) < Version(_MIN_MEGALODON_JAX):
+        raise RuntimeError(
+            f"chomp requires megalodon-jax >= {_MIN_MEGALODON_JAX}, found {found}. "
+            "Older versions only isolate attention across packed documents, "
+            "leaking ComplexEMA/TimestepNorm state. Upgrade: pip install -U "
+            "'megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git'"
+        )
+
 
 def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
     """Build model and return (params, static).
@@ -149,6 +184,7 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
     :param Config cfg: Model configuration.
     :param jax.Array key: PRNG key for model initialization.
     :raises ImportError: If megalodon backend requested but not installed.
+    :raises RuntimeError: If the installed megalodon-jax is older than the repo-wide floor.
     :raises ValueError: If model.backend is unknown.
     :return tuple: (params, static) pytrees from eqx.partition.
     """
@@ -169,6 +205,7 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
                 "model.backend='megalodon' requires the `megalodon_jax` package. "
                 "Install it (e.g., pip install -e /path/to/megalodon-jax)."
             ) from e
+        _require_megalodon_jax_version()
 
         mcfg = MegalodonConfig(
             vocab_size=cfg.model.vocab_size,
