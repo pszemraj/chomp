@@ -52,7 +52,12 @@ from chomp.ckpt import (
     restore_latest,
     save,
 )
-from chomp.config import Config, derived_deterministic, resolve_decay_horizon
+from chomp.config import (
+    Config,
+    derived_deterministic,
+    resolve_decay_horizon,
+    strict_multipack_attention,
+)
 from chomp.data import (
     build_eval_iterator,
     build_generation_text_stream,
@@ -399,10 +404,7 @@ def _validate_packing_capabilities(cfg: Config, *, params: Any, static: Any) -> 
     :param Any static: Static model components.
     :raises RuntimeError: If strict multipack attention is requested but unavailable.
     """
-    strict_multipack = bool(
-        cfg.data.packing_mode == "multipack" and cfg.data.packing_strict_attention
-    )
-    if not strict_multipack:
+    if not strict_multipack_attention(cfg):
         return
     if supports_packed_attention(params, static):
         return
@@ -621,6 +623,27 @@ def _is_embed_weight_path(path_str: str) -> bool:
     return path_str.endswith("embed.weight")
 
 
+def _is_muon_eligible(leaf: Any, path_str: str, *, allow_all_2d: bool, allow_embed: bool) -> bool:
+    """Single source of truth for Muon eligibility of a parameter leaf.
+
+    Non-array leaves and non-2D tensors are never eligible (optimizer stats,
+    labeling, and dimension numbers must all agree on this).
+
+    :param Any leaf: Parameter leaf.
+    :param str path_str: Dotted parameter path.
+    :param bool allow_all_2d: If True, apply Muon to all 2D tensors.
+    :param bool allow_embed: If True, allow Muon on tied embedding weights.
+    :return bool: True if the leaf should use Muon.
+    """
+    if not hasattr(leaf, "ndim") or leaf.ndim != 2:
+        return False
+    return (
+        allow_all_2d
+        or _is_muon_weight_path(path_str)
+        or (allow_embed and _is_embed_weight_path(path_str))
+    )
+
+
 def _muon_param_stats(
     params: Any, *, allow_all_2d: bool, allow_embed: bool
 ) -> tuple[int, int, int, int, list[str]]:
@@ -644,12 +667,7 @@ def _muon_param_stats(
         if leaf.ndim == 2:
             total_2d += 1
         path_str = _path_to_str(path)
-        use_muon = leaf.ndim == 2 and (
-            allow_all_2d
-            or _is_muon_weight_path(path_str)
-            or (allow_embed and _is_embed_weight_path(path_str))
-        )
-        if use_muon:
+        if _is_muon_eligible(leaf, path_str, allow_all_2d=allow_all_2d, allow_embed=allow_embed):
             muon_tensors += 1
             muon_2d += 1
             muon_paths.append(path_str)
@@ -667,20 +685,14 @@ def _muon_weight_dim_numbers(params: Any, *, allow_all_2d: bool, allow_embed: bo
     """
     muon_dims = optax.contrib.MuonDimensionNumbers(reduction_axis=(1,), output_axis=(0,))
     flat, treedef = jax.tree_util.tree_flatten_with_path(params)
-    dim_nums: list[Any] = []
-    for path, leaf in flat:
-        if not hasattr(leaf, "ndim") or leaf.ndim != 2:
-            dim_nums.append(None)
-            continue
-        if allow_all_2d:
-            dim_nums.append(muon_dims)
-            continue
-        path_str = _path_to_str(path)
-        dim_nums.append(
-            muon_dims
-            if (_is_muon_weight_path(path_str) or (allow_embed and _is_embed_weight_path(path_str)))
-            else None
+    dim_nums = [
+        muon_dims
+        if _is_muon_eligible(
+            leaf, _path_to_str(path), allow_all_2d=allow_all_2d, allow_embed=allow_embed
         )
+        else None
+        for path, leaf in flat
+    ]
     return treedef.unflatten(dim_nums)
 
 
@@ -754,22 +766,21 @@ def build_optimizer(
         def label_fn(tree: Any) -> Any:
             """Return optimizer labels for each parameter leaf.
 
+            multi_transform requires a label for EVERY leaf, so non-array
+            leaves label "adam" (_is_muon_eligible is False for them).
+
             :param Any tree: Parameter pytree.
             :return Any: Pytree of labels ("muon" or "adam").
             """
             flat, treedef = jax.tree_util.tree_flatten_with_path(tree)
-            labels: list[str] = []
-            for path, leaf in flat:
-                if not hasattr(leaf, "ndim"):
-                    labels.append("adam")
-                    continue
-                path_str = _path_to_str(path)
-                use_muon = leaf.ndim == 2 and (
-                    allow_all_2d
-                    or _is_muon_weight_path(path_str)
-                    or (allow_embed and _is_embed_weight_path(path_str))
+            labels = [
+                "muon"
+                if _is_muon_eligible(
+                    leaf, _path_to_str(path), allow_all_2d=allow_all_2d, allow_embed=allow_embed
                 )
-                labels.append("muon" if use_muon else "adam")
+                else "adam"
+                for path, leaf in flat
+            ]
             return treedef.unflatten(labels)
 
         def muon_schedule(step: jax.Array) -> jax.Array:
@@ -858,6 +869,31 @@ def init_train_state(
     )
 
 
+def _micro_batch(
+    input_ids: jax.Array,
+    labels: jax.Array,
+    attn: jax.Array,
+    segs: jax.Array,
+    pos_ids: jax.Array,
+) -> Batch:
+    """Assemble one [B, T] micro-batch inside a scan body (train and eval).
+
+    :param jax.Array input_ids: Input token IDs [B, T].
+    :param jax.Array labels: Label token IDs [B, T].
+    :param jax.Array attn: Attention mask [B, T].
+    :param jax.Array segs: Segment IDs [B, T].
+    :param jax.Array pos_ids: Position IDs [B, T].
+    :return Batch: Micro-batch with contract dtypes.
+    """
+    return Batch(
+        input_ids=input_ids,
+        labels=labels,
+        attention_mask=attn.astype(bool),
+        segment_ids=segs.astype(jnp.int32),
+        position_ids=pos_ids.astype(jnp.int32),
+    )
+
+
 def make_train_step(
     cfg: Config,
     *,
@@ -885,9 +921,7 @@ def make_train_step(
     deterministic = derived_deterministic(cfg)
     grad_accum = int(cfg.train.grad_accum)
     clip_norm = float(cfg.optim.grad_clip_norm) if cfg.optim.grad_clip_norm else 0.0
-    use_packed_attention = bool(
-        cfg.data.packing_mode == "multipack" and cfg.data.packing_strict_attention
-    )
+    use_packed_attention = strict_multipack_attention(cfg)
 
     def micro_loss(
         params: Any,
@@ -911,13 +945,7 @@ def make_train_step(
         :param jax.Array token_count: Number of valid tokens for weighting.
         :return jax.Array: Weighted loss scalar.
         """
-        micro = Batch(
-            input_ids=input_ids,
-            labels=labels,
-            attention_mask=attn.astype(bool),
-            segment_ids=segs.astype(jnp.int32),
-            position_ids=pos_ids.astype(jnp.int32),
-        )
+        micro = _micro_batch(input_ids, labels, attn, segs, pos_ids)
         loss = training_loss(
             params,
             static,
@@ -1022,6 +1050,8 @@ def make_eval_step(
     :return Callable: eval_step(params, batch) -> (loss_sum, token_sum).
     """
 
+    use_packed_attention = strict_multipack_attention(cfg)
+
     def eval_step(params: Any, batch: Batch) -> tuple[jax.Array, jax.Array]:
         """Compute token-weighted loss sums for a batch.
 
@@ -1029,9 +1059,6 @@ def make_eval_step(
         :param Batch batch: Input batch of shape [A, B, T].
         :return tuple: (loss_sum, token_sum) for the batch.
         """
-        use_packed_attention = bool(
-            cfg.data.packing_mode == "multipack" and cfg.data.packing_strict_attention
-        )
         loss0 = jnp.zeros((), dtype=jnp.float32)
         token0 = jnp.zeros((), dtype=jnp.float32)
 
@@ -1046,13 +1073,7 @@ def make_eval_step(
             """
             loss_sum, token_sum = carry
             input_ids, labels, attn, segs, pos_ids = xs
-            micro = Batch(
-                input_ids=input_ids,
-                labels=labels,
-                attention_mask=attn.astype(bool),
-                segment_ids=segs.astype(jnp.int32),
-                position_ids=pos_ids.astype(jnp.int32),
-            )
+            micro = _micro_batch(input_ids, labels, attn, segs, pos_ids)
             token_count = _count_tokens(labels, attn).astype(jnp.float32)
             loss = training_loss(
                 params,

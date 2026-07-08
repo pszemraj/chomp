@@ -988,6 +988,15 @@ def derived_deterministic(cfg: Config) -> bool:
     )
 
 
+def strict_multipack_attention(cfg: Config) -> bool:
+    """True when packed windows require full segment isolation in the backend.
+
+    :param Config cfg: Training configuration.
+    :return bool: True iff multipack packing with strict attention is active.
+    """
+    return cfg.data.packing_mode == "multipack" and cfg.data.packing_strict_attention
+
+
 def decay_horizon_from_values(
     *, steps: int | None, warmup_steps: int | None, decay_steps: int | None
 ) -> int | None:
