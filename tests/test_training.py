@@ -8,7 +8,7 @@ import math
 import os
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
@@ -38,6 +38,7 @@ from chomp.config import (
     TokenizerConfig,
     TrainConfig,
     WandbConfig,
+    strict_packed_attention,
 )
 from chomp.data import build_train_iterator, data_fingerprint, prepare_tokenizer_and_config
 from chomp.model import build_model, supports_packed_attention, training_loss
@@ -733,18 +734,20 @@ def test_tokens_seen_matches_exact_loss_tokens(tmp_path: Path) -> None:
         assert int(row["tokens_seen"]) == cumulative
 
 
-def test_strict_multipack_guard_raises_when_backend_unsupported(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("mode", ["bin", "multipack"])
+def test_strict_packed_guard_raises_when_backend_unsupported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
-    """Strict multipack mode should fail fast when backend support is unavailable."""
+    """Strict packed modes (bin and multipack) fail fast without backend support."""
     cfg = Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
         data=DataConfig(
             backend="local_text",
             repeat=True,
-            local_text="strict multipack guard\n",
-            packing_mode="multipack",
+            local_text="strict packed guard\n",
+            packing_mode=mode,
             packing_group_docs=2,
+            packing_buffer_docs=4,
             packing_strict_attention=True,
             max_eval_samples=0,
             tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
@@ -768,7 +771,7 @@ def test_strict_multipack_guard_raises_when_backend_unsupported(
     )
 
     monkeypatch.setattr("chomp.train.supports_packed_attention", lambda params, static: False)
-    with pytest.raises(RuntimeError, match="Strict multipack attention"):
+    with pytest.raises(RuntimeError, match="Strict packed attention"):
         run(cfg, config_path=None, resume="none")
 
 
@@ -800,6 +803,12 @@ def test_resume_compat_rejects_multipack_knob_changes(tmp_path: Path) -> None:
     changed_strict = replace(cfg, data=replace(cfg.data, packing_strict_attention=False))
     with pytest.raises(RuntimeError, match="packing_strict_attention"):
         check_resume_compat(changed_strict, meta)
+
+    binc = replace(cfg, data=replace(cfg.data, packing_mode="bin", packing_buffer_docs=8))
+    bin_meta = {"config": binc.to_dict(), "data_fingerprint": data_fingerprint(binc)}
+    bin_changed = replace(binc, data=replace(binc.data, packing_strict_attention=False))
+    with pytest.raises(RuntimeError, match="packing_strict_attention"):
+        check_resume_compat(bin_changed, bin_meta)
 
 
 def test_resume_compat_ignores_inert_packing_knobs(tmp_path: Path) -> None:
@@ -864,6 +873,77 @@ def test_supports_packed_attention_requires_capability_flag() -> None:
 
     legacy_params, legacy_static = eqx.partition(_LegacyLM(w=jnp.zeros(1)), eqx.is_array)
     assert not supports_packed_attention(legacy_params, legacy_static)
+
+
+def test_strict_packed_attention_covers_multi_document_modes(tmp_path: Path) -> None:
+    """Every mode that packs unrelated documents together requires isolation.
+
+    bin previously trained non-strict by silent omission: it FFD-packs
+    multiple documents per sequence exactly like multipack, so leaving it out
+    of the strict predicate meant cross-document CEMA/TimestepNorm bleed on
+    the default path.
+    """
+    cfg = _base_cfg(tmp_path / "run_pred")
+
+    def _mode(mode: str, strict: bool = True) -> Config:
+        return replace(
+            cfg, data=replace(cfg.data, packing_mode=mode, packing_strict_attention=strict)
+        )
+
+    assert strict_packed_attention(_mode("bin"))
+    assert strict_packed_attention(_mode("multipack"))
+    assert not strict_packed_attention(_mode("sequential"))
+    assert not strict_packed_attention(_mode("bin", strict=False))
+    assert not strict_packed_attention(_mode("multipack", strict=False))
+
+
+def test_training_loss_passes_segments_iff_packed() -> None:
+    """segment_ids/position_ids reach the backend exactly when packed attention is on."""
+    import equinox as eqx
+
+    calls: dict[str, Any] = {}
+
+    class _SpyLM(eqx.Module):
+        """Backend spy recording which packed kwargs arrive."""
+
+        w: jax.Array
+        supports_segment_reset: ClassVar[bool] = True
+
+        def compute_loss(
+            self,
+            input_ids: jax.Array,
+            labels: jax.Array,
+            attention_mask: jax.Array | None = None,
+            deterministic: bool = True,
+            key: jax.Array | None = None,
+            segment_ids: jax.Array | None = None,
+            position_ids: jax.Array | None = None,
+        ) -> jax.Array:
+            _ = (input_ids, labels, attention_mask, deterministic, key)
+            calls["segment_ids"] = segment_ids
+            calls["position_ids"] = position_ids
+            return jnp.zeros(())
+
+    params, static = eqx.partition(_SpyLM(w=jnp.zeros(1)), eqx.is_array)
+    micro = Batch(
+        input_ids=jnp.zeros((1, 8), dtype=jnp.int32),
+        labels=jnp.zeros((1, 8), dtype=jnp.int32),
+        attention_mask=jnp.ones((1, 8), dtype=bool),
+        segment_ids=jnp.ones((1, 8), dtype=jnp.int32),
+        position_ids=jnp.zeros((1, 8), dtype=jnp.int32),
+    )
+
+    training_loss(
+        params, static, batch=micro, deterministic=True, key=None, use_packed_attention=True
+    )
+    assert calls["segment_ids"] is not None
+    assert calls["position_ids"] is not None
+
+    training_loss(
+        params, static, batch=micro, deterministic=True, key=None, use_packed_attention=False
+    )
+    assert calls["segment_ids"] is None
+    assert calls["position_ids"] is None
 
 
 def test_megalodon_backend_advertises_segment_reset() -> None:

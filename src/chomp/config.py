@@ -848,16 +848,20 @@ def _validate_data(cfg: Config) -> None:
             if cfg.train.eval_every > 0:
                 _vfail(msg)
             warnings.warn(msg, stacklevel=2)
-        if cfg.data.packing_strict_attention and not cfg.data.mask_boundary_loss:
-            warnings.warn(
-                "data.mask_boundary_loss=false has no effect on the objective under "
-                "strict multipack: the backend excludes cross-segment label pairs "
-                "from the loss whenever segment_ids are passed (megalodon-jax >= "
-                "0.1.2). Host-side token counts will include those pairs, slightly "
-                "skewing token-weighted grad accumulation and loss_tokens metrics. "
-                "Keep mask_boundary_loss=true so host counts match the model.",
-                stacklevel=2,
-            )
+    if (
+        cfg.data.packing_mode in ("bin", "multipack")
+        and cfg.data.packing_strict_attention
+        and not cfg.data.mask_boundary_loss
+    ):
+        _vfail(
+            "data.mask_boundary_loss=false is incompatible with strict packed "
+            "attention: the backend excludes cross-segment label pairs from the "
+            "loss whenever segment_ids are passed (megalodon-jax >= 0.1.2), "
+            "while host-side token counts would still include them — silently "
+            "changing token-weighted grad accumulation and loss_tokens. Keep "
+            "mask_boundary_loss=true, or set data.packing_strict_attention=false "
+            "for deliberate cross-document state bleed."
+        )
 
     if cfg.data.window_shuffle_windows < 0:
         _vfail(f"data.window_shuffle_windows must be >=0, got {cfg.data.window_shuffle_windows}")
@@ -988,13 +992,19 @@ def derived_deterministic(cfg: Config) -> bool:
     )
 
 
-def strict_multipack_attention(cfg: Config) -> bool:
-    """True when packed windows require full segment isolation in the backend.
+def strict_packed_attention(cfg: Config) -> bool:
+    """True when packed sequences require full segment isolation in the backend.
+
+    Covers every mode that packs multiple unrelated documents into one
+    sequence (bin and multipack) — for a recurrent-state architecture,
+    cross-document bleed is CEMA/TimestepNorm contamination, not just
+    attention leakage. Sequential mode is excluded by design: it treats the
+    corpus as a continuous token stream, not as isolated packed documents.
 
     :param Config cfg: Training configuration.
-    :return bool: True iff multipack packing with strict attention is active.
+    :return bool: True iff a multi-document packing mode is active with strict isolation.
     """
-    return cfg.data.packing_mode == "multipack" and cfg.data.packing_strict_attention
+    return cfg.data.packing_mode in ("bin", "multipack") and cfg.data.packing_strict_attention
 
 
 def decay_horizon_from_values(

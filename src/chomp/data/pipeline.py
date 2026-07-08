@@ -667,11 +667,11 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
     }
     if d.packing_mode in ("bin", "multipack"):
         packing["max_docs_per_bin"] = d.packing_max_docs_per_bin
+        packing["strict_attention"] = d.packing_strict_attention
     if d.packing_mode == "bin":
         packing["buffer_docs"] = d.packing_buffer_docs
     if d.packing_mode == "multipack":
         packing["group_docs"] = d.packing_group_docs
-        packing["strict_attention"] = d.packing_strict_attention
     eval_cfg = {
         "max_eval_samples": d.max_eval_samples,
         "hf_eval_split": d.hf_eval_split,

@@ -56,7 +56,7 @@ from chomp.config import (
     Config,
     derived_deterministic,
     resolve_decay_horizon,
-    strict_multipack_attention,
+    strict_packed_attention,
 )
 from chomp.data import (
     build_eval_iterator,
@@ -397,19 +397,20 @@ def _trim_trailing_token(tokens: list[int], token_id: int | None) -> list[int]:
 
 
 def _validate_packing_capabilities(cfg: Config, *, params: Any, static: Any) -> None:
-    """Fail fast when strict multipack semantics are requested but unsupported.
+    """Fail fast when strict packed semantics are requested but unsupported.
 
     :param Config cfg: Training configuration.
     :param Any params: Model parameters.
     :param Any static: Static model components.
-    :raises RuntimeError: If strict multipack attention is requested but unavailable.
+    :raises RuntimeError: If strict packed attention is requested but unavailable.
     """
-    if not strict_multipack_attention(cfg):
+    if not strict_packed_attention(cfg):
         return
     if supports_packed_attention(params, static):
         return
     raise RuntimeError(
-        "Strict multipack attention was requested but the model backend does not "
+        f"Strict packed attention (packing_mode={cfg.data.packing_mode!r}) was "
+        "requested but the model backend does not "
         "advertise full segment isolation (supports_segment_reset capability flag, "
         "megalodon-jax >= 0.1.2: attention + ComplexEMA + TimestepNorm reset at "
         "packed document boundaries). Set data.packing_strict_attention=false to "
@@ -924,7 +925,7 @@ def make_train_step(
     deterministic = derived_deterministic(cfg)
     grad_accum = int(cfg.train.grad_accum)
     clip_norm = float(cfg.optim.grad_clip_norm) if cfg.optim.grad_clip_norm else 0.0
-    use_packed_attention = strict_multipack_attention(cfg)
+    use_packed_attention = strict_packed_attention(cfg)
 
     def micro_loss(
         params: Any,
@@ -1053,7 +1054,7 @@ def make_eval_step(
     :return Callable: eval_step(params, batch) -> (loss_sum, token_sum).
     """
 
-    use_packed_attention = strict_multipack_attention(cfg)
+    use_packed_attention = strict_packed_attention(cfg)
 
     def eval_step(params: Any, batch: Batch) -> tuple[jax.Array, jax.Array]:
         """Compute token-weighted loss sums for a batch.
