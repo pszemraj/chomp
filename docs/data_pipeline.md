@@ -108,7 +108,7 @@ or re-streaming.
 
 ## Validation set
 
-chomp builds a fixed validation set at startup:
+chomp builds a fixed validation set when the run is created:
 
 - If `data.hf_eval_split` is set and the HF dataset has that split, it takes the
   first `data.max_eval_samples` examples from that split.
@@ -118,12 +118,18 @@ chomp builds a fixed validation set at startup:
 - For train-split fallback, if `data.seed` is left at `0` and `train.seed` is
   non-zero, the shuffle seed defaults to `train.seed`.
 
-The selected texts are derived at run start (configured eval split preferred,
-fallback to train) and are not cached on disk.
+The selected tokens are **persisted to `run_dir/eval_tokens.json.gz`** together
+with an identity manifest (eval knobs) and a content hash. Every later start —
+including resume — loads that exact set instead of re-collecting from the
+stream, so eval losses stay comparable even if the upstream dataset revision or
+split contents drift. A cache whose manifest or hash mismatches fails loudly;
+delete the run directory (not just the cache) to change eval identity.
 
-If eval cannot emit any batch (for example with `bin`/`multipack` and too few
-eval documents for packer thresholds), training now raises a runtime error
-instead of silently emitting a null eval loss.
+Config validation rejects `max_eval_samples` below the packer emission
+threshold for `bin`/`multipack` (packers never flush a partial buffer at end of
+stream). If eval still cannot emit any batch at runtime (for example an eval
+split yielding fewer documents than promised), training raises instead of
+silently emitting a null eval loss.
 
 ## Key config knobs
 

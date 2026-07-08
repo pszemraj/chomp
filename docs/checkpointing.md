@@ -20,7 +20,10 @@ Each checkpoint stores three items:
    checkpoint handler
 3) `meta`: JSON metadata (config snapshot + data fingerprint + versions)
 
-The run directory also includes a tokenizer snapshot under `tokenizer/`.
+The run directory also includes a tokenizer snapshot under `tokenizer/` and
+the pinned eval token set `eval_tokens.json.gz` (created once at run start,
+reloaded on every resume so eval losses stay comparable even if the upstream
+dataset drifts).
 
 ## Save cadence
 
@@ -34,19 +37,44 @@ Checkpoint frequency is controlled by:
 If async saving is enabled, the manager waits on exit to avoid partial writes.
 Orbax enforces `checkpoint.max_to_keep` for retained checkpoints.
 
+Save steps force a metrics sync so the finite-loss/grad-norm check
+(`debug.nan_check`) always runs before the write — a step with non-finite
+metrics is never persisted as a resume point, even when the save cadence does
+not land on a logging step.
+
+## Final checkpoint policy
+
+On exit (clean, crash, or Ctrl-C), a final checkpoint of the last completed
+step is written only when it is safe to resume from:
+
+- **Alignment**: the train state and data iterator must correspond to the same
+  completed step. A crash between batch fetch and step completion — or the
+  stream running dry partway through assembling a batch (`repeat: false`) —
+  leaves the iterator ahead of the train state, so the final save is skipped
+  (loudly) and resume uses the last periodic checkpoint.
+- **Validity**: the last step's metrics are re-checked for finiteness before
+  the write; "latest" can never be a NaN tombstone.
+
+A final save that fails on an otherwise clean exit fails the run — training
+never exits successfully with an unwritten checkpoint.
+
 ## Resume compatibility checks
 
 On resume, chomp compares the checkpoint metadata against the current config.
 Hard failures include:
 
 - data source identity (`hf_dataset`, `hf_name`, `split`, `text_key`)
+- stream-order and termination semantics (`shuffle`, `shuffle_buffer_size`,
+  `repeat`, `window_shuffle_windows`, `grain_prefetch`)
 - tokenizer settings and vocab rounding
-- packing mode and packing buffer sizes
+- packing mode, packing buffer sizes, and strict-segment settings
+- objective knobs (`mask_boundary_loss`, `train_on_eos`) and eval knobs
 - batch shape invariants (`seq_len`, `batch_size`, `grad_accum`)
-- model and optimizer config
+- model and optimizer config, `train.deterministic`
 
-Some changes are warnings only (e.g., shuffle buffer size), but they are logged
-so you can make an informed decision.
+Remaining warnings are logged so you can make an informed decision, but
+anything that changes what data the resumed run sees — or what it optimizes —
+is an error, not a warning.
 
 ## Typical usage
 

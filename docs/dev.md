@@ -93,8 +93,9 @@ High-risk invariants remain isolated for visibility:
   loop over `grad_accum * batch_size` windows per step. Fine at current batch
   geometry; revisit only if profiling shows it in `data_wait_s` at very large
   accumulation or tiny seq_len. (2026-07 review deferral.)
-- TODO: full fp32 optimizer path under `param_dtype: bfloat16` — grad
-  accumulation, normalization, and clipping already run in fp32, but optimizer
-  moments (adam mu/nu, muon momentum) follow param dtype. Only matters if bf16
-  params ever become a supported configuration rather than an experiment.
-  (2026-07 review deferral.)
+- TODO: fp32 master-param path to support `param_dtype: bfloat16` — grad
+  accumulation, normalization, and clipping already run in fp32 (hardcoded in
+  `make_train_step`), but optimizer moments (adam mu/nu, muon momentum) follow
+  param dtype. Config validation rejects non-fp32 params until this exists;
+  implementing it is the prerequisite for re-allowing them. (2026-07 review
+  deferral.)

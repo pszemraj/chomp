@@ -591,15 +591,19 @@ End-of-sequence token ID.
 <a id="model.param_dtype"></a>
 #### `model.param_dtype`
 ```yaml
-param_dtype: "float32" | "bfloat16" = "float32"
+param_dtype: "float32" = "float32"
 ```
 
-Dtype for model parameters (weights).
+Dtype for model parameters (weights). **Must be `float32`** — config
+validation rejects anything else: optimizer state follows param dtype and
+chomp has no fp32 master-param path yet (tracked in [dev.md](dev.md)), so
+bf16 params would silently mean bf16 optimizer moments. Use
+`compute_dtype: bfloat16` for bf16 activations.
 
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Recommended | `"float32"` |
+| Constraints | Must be `"float32"` (validation error otherwise) |
 
 <a id="model.compute_dtype"></a>
 #### `model.compute_dtype`
@@ -621,7 +625,10 @@ Dtype for forward/backward computation.
 accum_dtype: "float32" | "bfloat16" = "float32"
 ```
 
-Dtype for gradient accumulation.
+Dtype for **model-internal** accumulation (attention/CEMA reductions inside
+megalodon-jax). Harness-level optimizer math — micro-gradient accumulation,
+token normalization, and global-norm clipping — always runs in fp32 and
+deliberately ignores this knob.
 
 | Property | Value |
 |----------|-------|
@@ -767,12 +774,21 @@ Maximum examples to use for evaluation.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be ≥ 0 |
+| Constraints | Must be ≥ 0; must be ≥ `packing_buffer_docs` (bin) / `packing_group_docs` (multipack) when eval is enabled |
 
-Evaluation texts are selected once at run start and reused for the entire run. If the
-evaluation split is missing, chomp uses the first `max_eval_samples` examples from the
-shuffled training stream. For this train-split fallback path, if `data.seed: 0`
-(default) and `train.seed` is non-zero, the shuffle seed defaults to `train.seed`.
+Evaluation tokens are collected once when the run is created and **persisted to
+`run_dir/eval_tokens.json.gz`** (identity manifest + content hash); every later
+start — including resume — loads that exact set, so eval losses stay comparable
+even if the upstream streaming dataset drifts. If the evaluation split is
+missing, chomp uses the first `max_eval_samples` examples from the shuffled
+training stream. For this train-split fallback path, if `data.seed: 0`
+(default) and `train.seed` is non-zero, the shuffle seed defaults to
+`train.seed`.
+
+With packed modes, values below the packer's emission threshold
+(`packing_buffer_docs` for bin, `packing_group_docs` for multipack) can never
+emit an eval batch (packers do not flush a partial buffer at end of stream);
+config validation errors when eval is enabled and warns otherwise.
 ---
 
 <a id="data-shuffle"></a>
@@ -837,7 +853,14 @@ Random seed for data shuffling.
 repeat: bool = true
 ```
 
-Repeat the dataset indefinitely.
+Repeat the dataset indefinitely. Part of the data fingerprint for both
+backends: changing it between save and resume is a hard resume-compat error
+(it decides whether the stream rolls into the next epoch or terminates).
+
+With `repeat: false`, a stream that runs dry partway through assembling a
+batch ends the run **without a final checkpoint** — partial consumption makes
+the iterator state unalignable with the train state; resume from the last
+periodic checkpoint (see [Training](training.md)).
 
 | Property | Value |
 |----------|-------|
@@ -948,16 +971,19 @@ applies (strict by default).
 packing_buffer_docs: int = 128
 ```
 
-Number of documents to buffer for bin packing.
+Number of documents to buffer for bin packing. The bin packer emits nothing
+until this many pending docs accumulate and never flushes a partial buffer at
+end of stream, so it must also stay ≤ `max_eval_samples` when eval is enabled
+(hard validation error; warning when eval is off).
 
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be positive; when `packing_mode: bin`, must be ≥ `batch_size × grad_accum` |
+| Constraints | Must be positive; when `packing_mode: bin`, must be ≥ `batch_size × grad_accum` and ≤ `max_eval_samples` when eval is enabled |
 
 If `packing_buffer_docs < batch_size × grad_accum` with bin packing:
 `data.packing_buffer_docs must be >= train.batch_size * train.grad_accum (N), got M`
-**Related:** [`train.batch_size`](#train.batch_size), [`train.grad_accum`](#train.grad_accum)
+**Related:** [`train.batch_size`](#train.batch_size), [`train.grad_accum`](#train.grad_accum), [`data.max_eval_samples`](#data.max_eval_samples)
 
 <a id="data.packing_max_docs_per_bin"></a>
 #### `data.packing_max_docs_per_bin`
