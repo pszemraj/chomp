@@ -560,8 +560,8 @@ def _ffd_pack(
 ) -> tuple[list[_Bin], list[np.ndarray]]:
     """First-fit-decreasing pack candidates into bins_per_pack bins.
 
-    Sorts candidates by size (descending, stable), seeds each bin with one of
-    the largest segments, then first-fit places the rest. Requires
+    Considers candidates by size (descending, stable), seeds each bin with one
+    of the largest segments, then first-fit places the rest. Requires
     len(candidates) >= bins_per_pack and every candidate <= capacity.
 
     :param list[np.ndarray] candidates: Candidate segments to pack.
@@ -569,21 +569,24 @@ def _ffd_pack(
     :param int capacity: Bin capacity in tokens.
     :param max_docs: Optional cap on segments per bin.
     :return tuple[list[_Bin], list[np.ndarray]]: Filled bins and leftover
-        segments in descending-size order.
+        segments in original candidate (arrival) order, so callers can requeue
+        them without scrambling stream locality.
     """
-    segments = sorted(candidates, key=lambda x: int(x.size), reverse=True)
+    order = sorted(range(len(candidates)), key=lambda i: int(candidates[i].size), reverse=True)
     bins = [_Bin(capacity=capacity, max_docs=max_docs) for _ in range(bins_per_pack)]
-    for idx in range(bins_per_pack):
-        bins[idx].add(segments[idx])
+    for slot in range(bins_per_pack):
+        bins[slot].add(candidates[order[slot]])
 
-    leftover: list[np.ndarray] = []
-    for seg in segments[bins_per_pack:]:
+    leftover_idx: list[int] = []
+    for idx in order[bins_per_pack:]:
+        seg = candidates[idx]
         for b in bins:
             if b.can_fit(seg):
                 b.add(seg)
                 break
         else:
-            leftover.append(seg)
+            leftover_idx.append(idx)
+    leftover = [candidates[i] for i in sorted(leftover_idx)]
     return bins, leftover
 
 

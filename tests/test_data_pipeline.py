@@ -118,6 +118,42 @@ def test_multipack_packer_emits_segment_local_positions() -> None:
     assert np.all(pos[5:] == 0)
 
 
+@pytest.mark.parametrize("mode", ["bin", "multipack"])
+def test_ffd_leftover_requeue_preserves_arrival_order(mode: str) -> None:
+    """Leftovers must requeue in arrival order, not FFD descending-size order.
+
+    Sizes 10, 8, 9 with capacity 16 and one bin per cycle: the size-10 doc
+    seeds the bin, the other two don't fit and become leftovers. Descending
+    FFD order would requeue [9, 8]; arrival order is [8, 9].
+    """
+    kwargs: dict[str, Any] = {
+        "seq_len": 16,
+        "add_bos": False,
+        "add_eos": False,
+        "bos_id": 1,
+        "eos_id": 2,
+        "max_doc_tokens": None,
+        "bins_per_pack": 1,
+        "max_docs_per_bin": None,
+        "pad_id": 0,
+    }
+    if mode == "bin":
+        packer: Any = BinPacker(buffer_docs=3, **kwargs)
+    else:
+        packer = MultipackPacker(group_docs=3, **kwargs)
+
+    packer.add_document(_doc(10, 10))
+    packer.add_document(_doc(20, 8))
+    packer.add_document(_doc(30, 9))
+
+    assert packer.can_pop()
+    seq, _, _ = packer.pop_seq_with_metadata()
+    np.testing.assert_array_equal(seq[:10], np.full((10,), 10, dtype=np.int32))
+
+    pending = packer.get_state()["pending_docs"]
+    assert pending == [_doc(20, 8), _doc(30, 9)]
+
+
 @pytest.mark.parametrize(
     ("make_packer", "docs", "pops_before_snapshot"),
     [
