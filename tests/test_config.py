@@ -41,6 +41,12 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
     cases: list[tuple[Callable[[Config], Config], str]] = [
         (lambda cfg: replace(cfg, model=replace(cfg.model, chunk_size=32)), "chunk_size"),
         (lambda cfg: replace(cfg, model=replace(cfg.model, chunk_size=10)), "divisible"),
+        # bf16 params without an fp32 master-param path silently give bf16
+        # optimizer moments; rejected until that path exists (docs/dev.md).
+        (
+            lambda cfg: replace(cfg, model=replace(cfg.model, param_dtype="bfloat16")),
+            "param_dtype",
+        ),
         (
             lambda cfg: replace(cfg, model=replace(cfg.model, model_dim=130, num_heads=8)),
             "model_dim",

@@ -347,16 +347,25 @@ def test_grad_accum_equivalence_dummy_local_text() -> None:
     assert jnp.allclose(metrics["loss"], loss_ref)
 
 
-def test_bf16_params_accumulate_grads_in_fp32() -> None:
-    """Gradient accumulation must run in accum_dtype (fp32), not param dtype.
+@pytest.mark.parametrize("model_accum_dtype", ["float32", "bfloat16"])
+def test_bf16_params_accumulate_grads_in_fp32(model_accum_dtype: str) -> None:
+    """Gradient accumulation must always run in fp32.
 
     With bf16 params, zeros_like-initialized accumulators would sum
     micro-gradients in bf16 across the scan, silently dropping low-order
     bits. The scan carry (loss, grad tree, token count) must therefore be
-    entirely fp32 even when every param leaf is bf16.
+    entirely fp32 even when every param leaf is bf16 — and regardless of
+    model.accum_dtype, which governs model-internal accumulation only and
+    must not leak into harness optimizer math.
     """
     cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
+        model=ModelConfig(
+            backend="dummy",
+            vocab_size=256,
+            d_model=32,
+            dropout=0.0,
+            accum_dtype=model_accum_dtype,
+        ),
         data=DataConfig(
             backend="local_text",
             repeat=True,

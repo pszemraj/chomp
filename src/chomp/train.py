@@ -55,7 +55,6 @@ from chomp.ckpt import (
 from chomp.config import (
     Config,
     derived_deterministic,
-    dtype_from_str,
     resolve_decay_horizon,
     strict_packed_segments,
 )
@@ -931,7 +930,12 @@ def make_train_step(
     grad_accum = int(cfg.train.grad_accum)
     clip_norm = float(cfg.optim.grad_clip_norm) if cfg.optim.grad_clip_norm else 0.0
     use_packed_attention = strict_packed_segments(cfg)
-    accum_dtype = dtype_from_str(cfg.model.accum_dtype)
+    # Harness-level optimizer math — micro-grad summation, token
+    # normalization, and global-norm clipping — is always fp32. Deliberately
+    # NOT cfg.model.accum_dtype: that knob feeds the model's *internal*
+    # accumulation (attention/CEMA reductions), and pointing it at bf16 must
+    # not silently degrade gradient accumulation across the scan.
+    grad_accum_dtype = jnp.float32
 
     def micro_loss(
         params: Any,
@@ -979,12 +983,12 @@ def make_train_step(
         rng, step_key = jax.random.split(state.rng)
         micro_keys = jax.random.split(step_key, grad_accum)
 
-        # Init accumulators. Gradients accumulate in accum_dtype (fp32 by
-        # default), not param dtype: with bf16 params, summing micro-grads
-        # in bf16 systematically drops low-order bits across the scan.
+        # Init accumulators. Gradients accumulate in fp32, not param dtype:
+        # with bf16 params, summing micro-grads in bf16 systematically drops
+        # low-order bits across the scan.
         loss0 = jnp.zeros((), dtype=jnp.float32)
         grad0 = jax.tree_util.tree_map(
-            lambda x: jnp.zeros(x.shape, dtype=accum_dtype)
+            lambda x: jnp.zeros(x.shape, dtype=grad_accum_dtype)
             if jnp.issubdtype(x.dtype, jnp.floating)
             else jnp.zeros_like(x),
             state.params,
@@ -1036,7 +1040,7 @@ def make_train_step(
                 lambda g: jnp.where(trigger, g * (clip_norm / jnp.maximum(grad_norm, 1e-6)), g),
                 grads,
             )
-        # Normalization + global-norm clipping ran in accum_dtype above; cast
+        # Normalization + global-norm clipping ran in fp32 above; cast
         # back to param dtype only now so opt_state dtypes stay stable.
         grads = jax.tree_util.tree_map(
             lambda g, p: g.astype(p.dtype) if jnp.issubdtype(p.dtype, jnp.floating) else g,

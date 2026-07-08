@@ -92,9 +92,16 @@ class ModelConfig:
     # segment_ids reach the model (multipack + packing_strict_segments).
     use_associative_segment_scan: bool = True
 
-    # Dtype policy (strings so YAML is clean; converted at runtime)
+    # Dtype policy (strings so YAML is clean; converted at runtime).
+    # param_dtype must stay float32: optimizer state follows param dtype and
+    # chomp has no fp32 master-param path (tracked in docs/dev.md), so
+    # validate_config rejects bfloat16 params rather than silently training
+    # with bf16 optimizer moments. bf16 belongs in compute_dtype.
     param_dtype: Literal["float32", "bfloat16"] = "float32"
     compute_dtype: Literal["float32", "bfloat16"] = "bfloat16"
+    # Model-internal accumulation only (attention/CEMA reductions inside
+    # megalodon-jax). Harness gradient accumulation/clipping is always fp32
+    # and deliberately ignores this knob (see make_train_step).
     accum_dtype: Literal["float32", "bfloat16"] = "float32"
     softmax_dtype: Literal["float32", "bfloat16"] = "float32"
 
@@ -741,6 +748,14 @@ def _validate_model(cfg: Config) -> None:
     """Validate model-related config fields."""
     if cfg.model.vocab_size <= 0:
         _vfail(f"model.vocab_size must be positive, got {cfg.model.vocab_size}")
+    if cfg.model.param_dtype != "float32":
+        _vfail(
+            f"model.param_dtype must be 'float32', got {cfg.model.param_dtype!r}: "
+            "optimizer state follows param dtype and chomp has no fp32 "
+            "master-param path yet (tracked in docs/dev.md), so non-fp32 params "
+            "silently degrade optimizer moments. Use compute_dtype='bfloat16' "
+            "for bf16 activations."
+        )
     if cfg.model.backend == "dummy":
         if cfg.model.d_model <= 0:
             _vfail(f"model.d_model must be positive, got {cfg.model.d_model}")
