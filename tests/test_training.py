@@ -1163,6 +1163,27 @@ def test_resume_compat_rejects_hf_shuffle_buffer_drift(tmp_path: Path) -> None:
         check_resume_compat(drifted, meta)
 
 
+def test_resume_compat_rejects_hf_repeat_drift(tmp_path: Path) -> None:
+    """repeat decides epoch rollover vs stream termination — hard error for
+    HF streams, not just local_text."""
+    cfg = _base_cfg(tmp_path / "run_repeat")
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_split="train",
+            repeat=True,
+        ),
+    )
+    meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
+    drifted = replace(cfg, data=replace(cfg.data, repeat=False))
+    with pytest.raises(RuntimeError, match="data.repeat"):
+        check_resume_compat(drifted, meta)
+
+
 def test_supports_packed_attention_requires_capability_flag() -> None:
     """Capability check keys on supports_segment_reset, not compute_loss signature.
 

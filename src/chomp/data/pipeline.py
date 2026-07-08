@@ -628,6 +628,10 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
             "shuffle": d.shuffle,
             "shuffle_buffer_size": d.shuffle_buffer_size,
             "seed": d.seed,
+            # repeat decides whether the stream rolls into the next epoch or
+            # terminates — a data-order/termination semantic, so it is part of
+            # the resume identity for HF exactly as for local_text.
+            "repeat": d.repeat,
         }
     else:
         src = {

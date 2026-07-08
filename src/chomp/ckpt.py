@@ -420,7 +420,9 @@ def check_resume_compat(
             src_prev.get("local_text_hash"),
             severity="error",
         )
-        _cmp("data.repeat", src_cur.get("repeat"), src_prev.get("repeat"), severity="error")
+    # Both backends: repeat decides epoch rollover vs termination, so a drift
+    # changes what data the resumed run sees.
+    _cmp("data.repeat", src_cur.get("repeat"), src_prev.get("repeat"), severity="error")
 
     # Tokenizer comparisons.
     tok_prev = meta_fp.get("tokenizer") or {}
