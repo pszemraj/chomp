@@ -221,6 +221,10 @@ class PackerState:
         :raises ValueError: If segments/tokens lengths don't match.
         :return PackerState: Reconstructed state.
         """
+        # Deliberately strict: synthesizing missing segment metadata (as older
+        # loaders did) silently merges all buffered documents into one segment
+        # on resume — wrong boundary masking and, under strict multipack,
+        # wrong isolation. Corrupt/foreign state must fail loud.
         toks = list(d["remaining_tokens"])
         segs = list(d["remaining_segments"])
         if len(segs) != len(toks):

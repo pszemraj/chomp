@@ -654,7 +654,10 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
     # Mode-specific knobs are recorded only when the active mode consumes
     # them, so editing an inert default between save and resume cannot block
     # resume (check_resume_compat compares via .get(); a mode change itself
-    # is always an error).
+    # is always an error). Fingerprints written before this gating recorded
+    # inert knobs unconditionally and fail resume-compat — accepted, per the
+    # no-backward-compat policy (docs/dev.md); they already fail on the
+    # window_shuffle_windows key regardless.
     packing = {
         "mode": d.packing_mode,
         "mask_boundary_loss": d.mask_boundary_loss,
