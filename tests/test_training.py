@@ -969,6 +969,66 @@ def test_resume_compat_ignores_inert_packing_knobs(tmp_path: Path) -> None:
     check_resume_compat(mp_drifted, mp_meta)  # bin-only knob is inert here
 
 
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (
+            lambda c: replace(c, data=replace(c.data, grain_prefetch=c.data.grain_prefetch + 1)),
+            "grain_prefetch",
+        ),
+        (
+            lambda c: replace(c, data=replace(c.data, window_shuffle_windows=64)),
+            "window_shuffle_windows",
+        ),
+        (
+            lambda c: replace(
+                c, data=replace(c.data, mask_boundary_loss=not c.data.mask_boundary_loss)
+            ),
+            "mask_boundary_loss",
+        ),
+        (
+            lambda c: replace(c, data=replace(c.data, train_on_eos=not c.data.train_on_eos)),
+            "train_on_eos",
+        ),
+        (
+            lambda c: replace(c, train=replace(c.train, deterministic=not c.train.deterministic)),
+            "deterministic",
+        ),
+    ],
+    ids=["grain_prefetch", "window_shuffle", "mask_boundary", "train_on_eos", "deterministic"],
+)
+def test_resume_compat_rejects_stream_and_objective_drift(
+    tmp_path: Path, mutate: Any, match: str
+) -> None:
+    """Every knob that changes data order, iterator-state shape, or the
+    objective must hard-error on resume, not warn."""
+    cfg = _base_cfg(tmp_path / "run_drift")
+    meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
+    with pytest.raises(RuntimeError, match=match):
+        check_resume_compat(mutate(cfg), meta)
+
+
+def test_resume_compat_rejects_hf_shuffle_buffer_drift(tmp_path: Path) -> None:
+    """shuffle_buffer_size drives HF shuffled document order — hard error."""
+    cfg = _base_cfg(tmp_path / "run_sbuf")
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_split="train",
+            shuffle=True,
+            shuffle_buffer_size=10_000,
+        ),
+    )
+    meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
+    drifted = replace(cfg, data=replace(cfg.data, shuffle_buffer_size=200_000))
+    with pytest.raises(RuntimeError, match="shuffle_buffer_size"):
+        check_resume_compat(drifted, meta)
+
+
 def test_supports_packed_attention_requires_capability_flag() -> None:
     """Capability check keys on supports_segment_reset, not compute_loss signature.
 

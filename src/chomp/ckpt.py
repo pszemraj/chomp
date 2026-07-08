@@ -405,11 +405,13 @@ def check_resume_compat(
         _cmp("data.text_key", src_cur.get("text_key"), src_prev.get("text_key"), severity="error")
         _cmp("data.shuffle", src_cur.get("shuffle"), src_prev.get("shuffle"), severity="error")
         _cmp("data.seed", src_cur.get("seed"), src_prev.get("seed"), severity="error")
+        # Hard error: buffer size drives HF's shuffled document order, so a
+        # mismatch makes the resumed stream diverge from the continuous run.
         _cmp(
             "data.shuffle_buffer_size",
             src_cur.get("shuffle_buffer_size"),
             src_prev.get("shuffle_buffer_size"),
-            severity="warning",
+            severity="error",
         )
     elif src_cur.get("backend") == "local_text":
         _cmp(
@@ -519,11 +521,13 @@ def check_resume_compat(
         pack_prev.get("strict_attention"),
         severity="error",
     )
+    # Hard error: prefetch changes the grain chain wrapping, and with it the
+    # shape of the serialized iterator state a restore must line up against.
     _cmp(
         "data.grain_prefetch",
         pack_cur.get("grain_prefetch"),
         pack_prev.get("grain_prefetch"),
-        severity="warning",
+        severity="error",
     )
     _cmp(
         "data.mask_boundary_loss",
@@ -547,6 +551,9 @@ def check_resume_compat(
         severity="error",
     )
 
+    # Eval knobs stay hard errors on purpose: eval texts are cached per run
+    # and eval-loss continuity is a first-class diagnostic here — silently
+    # changing the eval set mid-run poisons every cross-run comparison.
     eval_prev = meta_fp.get("eval") or {}
     eval_cur = cur_fp.get("eval") or {}
     _cmp(
@@ -581,6 +588,14 @@ def check_resume_compat(
     cur_cfg = cfg.to_dict()
     train_prev = meta_cfg.get("train") or {}
     train_cur = cur_cfg.get("train") or {}
+    # Flipping deterministic toggles dropout against a restored optimizer
+    # state — a silent objective change mid-run.
+    _cmp(
+        "train.deterministic",
+        train_cur.get("deterministic"),
+        train_prev.get("deterministic"),
+        severity="error",
+    )
     model_prev = meta_cfg.get("model") or {}
     model_cur = cur_cfg.get("model") or {}
     for key in sorted(set(model_prev) | set(model_cur)):
