@@ -414,6 +414,58 @@ def test_crash_between_fetch_and_step_skips_final_checkpoint(
     assert tree_allclose(states[0].opt_state, states[1].opt_state, rtol=0.0, atol=0.0)
 
 
+def test_exhaustion_mid_assembly_skips_final_checkpoint(tmp_path: Path) -> None:
+    """StopIteration during batch fetch must not write a final checkpoint.
+
+    Batch assembly pops A*B windows one at a time, so exhaustion can strike
+    after part of the stream/packer state was consumed (and a popped window
+    discarded). "Nothing was consumed" does not hold; a final checkpoint
+    there would pair the old train state with a partially-advanced iterator.
+    """
+    # One 116-char doc -> 116 byte tokens (offset 0, no BOS/EOS; varied bytes
+    # so windows differ and the loss-replay check below has teeth): 7 poppable
+    # seq_len=16 windows. grad_accum=2 -> batches 1-3 eat 6 windows; batch 4
+    # pops window 7, then dies on window 8 with 4 leftover tokens.
+    # max_doc_tokens must be raised: null resolves to 4*seq_len=64 and would
+    # truncate the doc to 4 windows.
+    text = "".join(chr(97 + (i * 7) % 26) for i in range(116))
+    cfg, config_src = make_small_run_cfg(tmp_path, local_text=text, decay_steps=10)
+    cfg = replace(cfg, train=replace(cfg.train, steps=10, grad_accum=2))
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            repeat=False,
+            tokenizer=replace(cfg.data.tokenizer, max_doc_tokens=128),
+        ),
+    )
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=2))
+
+    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+
+    metrics_path = run_dir / cfg.logging.metrics_file
+    rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
+    assert any(row.get("data_exhausted") for row in rows)
+    loss_step3 = [row["loss"] for row in rows if row.get("step") == 3 and "loss" in row]
+    assert len(loss_step3) == 1
+
+    ckpt_dir = default_ckpt_dir(run_dir)
+    steps_on_disk = {int(p.name) for p in ckpt_dir.iterdir() if p.is_dir() and p.name.isdigit()}
+    assert steps_on_disk == {2}, (
+        f"exhaustion mid-assembly must skip the final checkpoint, found {steps_on_disk}"
+    )
+
+    # Resume from the aligned periodic checkpoint: batch 3 replays bit-exactly
+    # (same loss), then the stream exhausts again without new checkpoints.
+    run(cfg, config_path=str(config_src), resume="latest", dry_run=False)
+    rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
+    loss_step3_replayed = [row["loss"] for row in rows if row.get("step") == 3 and "loss" in row]
+    assert len(loss_step3_replayed) == 2
+    assert loss_step3_replayed[0] == loss_step3_replayed[1]
+    steps_on_disk = {int(p.name) for p in ckpt_dir.iterdir() if p.is_dir() and p.name.isdigit()}
+    assert steps_on_disk == {2}
+
+
 def test_grain_data_state_capture_is_synchronous() -> None:
     """ckpt.save() relies on grain serializing iterator state in the blocking
     phase of manager.save(); if grain's handler ever grows an async_save,

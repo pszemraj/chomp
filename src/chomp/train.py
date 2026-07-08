@@ -1430,7 +1430,13 @@ def run(
                     try:
                         batch = next(data_it)
                     except StopIteration:
-                        data_state_aligned = True  # nothing was consumed
+                        # Exhaustion is NOT a no-op: batch assembly pops A*B
+                        # windows one at a time, and the stream/packer may have
+                        # consumed documents (and discarded popped windows)
+                        # before running dry. data_state_aligned stays False so
+                        # the finally block skips the final checkpoint instead
+                        # of pairing the old train state with a
+                        # partially-advanced iterator.
                         tokens_seen_host = int(tokens_seen_count)
                         step_i = int(host_step)
                         row = {
@@ -1628,9 +1634,10 @@ def run(
         final_step = None
         if manager is not None and not data_state_aligned:
             logger.warning(
-                "Skipping final checkpoint: a fetched batch never completed its "
-                "step, so the data iterator is ahead of the train state. Resume "
-                "from the last periodic checkpoint%s.",
+                "Skipping final checkpoint: the data iterator is ahead of the "
+                "train state (a fetched batch never completed its step, or the "
+                "stream exhausted partway through batch assembly). Resume from "
+                "the last periodic checkpoint%s.",
                 f" (step {last_saved_step})" if last_saved_step >= 0 else "",
             )
         elif manager is not None:

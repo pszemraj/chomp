@@ -438,6 +438,26 @@ def _assert_multi_segment_boundary_masked(batch: Batch) -> None:
     assert np.all(masked_labels == -100)
 
 
+def test_stopiteration_mid_assembly_advances_iterator_state() -> None:
+    """Exhaustion during batch assembly is not a no-op.
+
+    Windows are popped (and discarded) and the stream advances before
+    StopIteration surfaces from a partial batch, so the train loop must
+    treat exhaustion as data-state misalignment (no final checkpoint).
+    """
+    # 10 chars + BOS/EOS = 12 tokens = one seq_len=8 window; grad_accum=2
+    # needs two, so assembly pops window 1 and then runs dry.
+    cfg = make_pipeline_cfg(local_text="x" * 10, repeat=False, window_shuffle_windows=0)
+    cfg = replace(cfg, train=replace(cfg.train, grad_accum=2))
+
+    it = build_train_iterator(cfg)
+    state_before = json.dumps(it.get_state(), sort_keys=True, default=str)
+    with pytest.raises(StopIteration):
+        next(it)
+    state_after = json.dumps(it.get_state(), sort_keys=True, default=str)
+    assert state_after != state_before
+
+
 def test_pipeline_segment_ids_multiple_docs() -> None:
     """Pipeline should emit multiple segment IDs and mask boundaries."""
     cfg = make_pipeline_cfg()
