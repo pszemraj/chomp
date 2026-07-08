@@ -1329,10 +1329,13 @@ def run(
         if batch_count == 0:
             bins_per_pack = int(cfg.train.grad_accum) * int(cfg.train.batch_size)
             if cfg.data.packing_mode == "multipack":
+                threshold = max(int(cfg.data.packing_group_docs), bins_per_pack)
                 threshold_hint = (
-                    f"packing_group_docs={int(cfg.data.packing_group_docs)} "
-                    "(multipack emits nothing until this many pending docs accumulate; "
-                    "it must be well below the eval doc count)"
+                    f"emission_threshold={threshold} "
+                    f"(max(packing_group_docs={int(cfg.data.packing_group_docs)}, "
+                    f"bins_per_pack)); multipack emits nothing until this many "
+                    "pending docs accumulate; it must be well below the eval doc "
+                    "count"
                 )
             else:
                 threshold_hint = f"packing_buffer_docs={int(cfg.data.packing_buffer_docs)}"

@@ -169,6 +169,29 @@ def test_packed_eval_starvation_guard(mode: str, knob: str) -> None:
         validate_config(cfg_noeval)
 
 
+def test_multipack_eval_guard_includes_batch_geometry() -> None:
+    """The multipack emission threshold is max(group_docs, batch_size *
+    grad_accum): a max_eval_samples that clears packing_group_docs but not one
+    full pack cycle of rows still starves eval and must be rejected."""
+    cfg = _base_cfg()
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            packing_mode="multipack",
+            packing_group_docs=8,
+            max_eval_samples=16,
+        ),
+        train=replace(cfg.train, batch_size=8, grad_accum=8, eval_every=1),
+    )
+    with pytest.raises(ValueError, match=r"batch_size\*grad_accum=64"):
+        validate_config(cfg)
+
+    # Clearing the full threshold (not just group_docs) passes.
+    cfg_ok = replace(cfg, data=replace(cfg.data, max_eval_samples=64))
+    validate_config(cfg_ok)
+
+
 def test_data_and_logging_validation_rejects_invalid_values() -> None:
     """Data/logging validation should reject invalid configuration values."""
     cases: list[tuple[Callable[[Config], Config], str]] = [

@@ -774,7 +774,7 @@ Maximum examples to use for evaluation.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be ≥ 0; must be ≥ `packing_buffer_docs` (bin) / `packing_group_docs` (multipack) when eval is enabled |
+| Constraints | Must be ≥ 0; must be ≥ `packing_buffer_docs` (bin) / `max(packing_group_docs, batch_size * grad_accum)` (multipack) when eval is enabled |
 
 Evaluation tokens are collected once when the run is created and **persisted to
 `run_dir/eval_tokens.json.gz`** (identity manifest + content hash); every later
@@ -786,9 +786,10 @@ training stream. For this train-split fallback path, if `data.seed: 0`
 `train.seed`.
 
 With packed modes, values below the packer's emission threshold
-(`packing_buffer_docs` for bin, `packing_group_docs` for multipack) can never
-emit an eval batch (packers do not flush a partial buffer at end of stream);
-config validation errors when eval is enabled and warns otherwise.
+(`packing_buffer_docs` for bin, `max(packing_group_docs, batch_size *
+grad_accum)` for multipack) can never emit an eval batch (packers do not flush
+a partial buffer at end of stream); config validation errors when eval is
+enabled and warns otherwise.
 ---
 
 <a id="data-shuffle"></a>
@@ -1004,15 +1005,18 @@ Maximum documents per packed sequence. `null` means unlimited.
 packing_group_docs: int = 512
 ```
 
-Multipack lookahead group size (documents/chunks). Nothing is emitted until
-this many pending items accumulate, and the whole pool is sorted each pack
-cycle — keep it modest, and below `max_eval_samples` or evaluation cannot emit
-a batch (a hard validation error when eval is enabled).
+Multipack lookahead group size (documents/chunks). The effective emission
+threshold is `max(packing_group_docs, batch_size * grad_accum)` — the packer
+also waits for enough docs to fill one full pack cycle of rows. Nothing is
+emitted until that many pending items accumulate, and the whole pool is sorted
+each pack cycle — keep it modest, and keep the threshold at or below
+`max_eval_samples` or evaluation cannot emit a batch (a hard validation error
+when eval is enabled).
 
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be positive when `packing_mode: multipack`; must be ≤ `max_eval_samples` when eval is enabled |
+| Constraints | Must be positive when `packing_mode: multipack`; `max(packing_group_docs, batch_size * grad_accum)` must be ≤ `max_eval_samples` when eval is enabled |
 
 **Related:** [`data.max_eval_samples`](#data.max_eval_samples)
 

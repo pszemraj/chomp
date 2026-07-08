@@ -62,8 +62,8 @@ Shared by both packed modes:
   state isolation in the backend.
 - Emission thresholds gate eval too: neither packer flushes a partial buffer
   at end of stream, so `data.max_eval_samples` below `packing_buffer_docs`
-  (bin) or `packing_group_docs` (multipack) can never emit an eval batch —
-  config validation errors when eval is enabled.
+  (bin) or `max(packing_group_docs, batch_size * grad_accum)` (multipack) can
+  never emit an eval batch — config validation errors when eval is enabled.
 
 ## Segment-Isolation Semantics
 
