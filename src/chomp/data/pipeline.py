@@ -987,10 +987,21 @@ class _SequenceProducer:
     def next_window(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Pop the next [T] token/segment/position sequence from the packer.
 
+        :raises StopIteration: When the text stream is exhausted and the
+            packer has nothing left to emit.
         :return tuple[np.ndarray, np.ndarray, np.ndarray]: Tokens, segment IDs, position IDs.
         """
         while not self._packer.can_pop():
-            self._push_next_document()
+            try:
+                self._push_next_document()
+            except StopIteration:
+                # Stream exhausted (data.repeat=false, or a finite eval doc
+                # set): let the packer flush partially filled buffers rather
+                # than silently dropping tail documents.
+                self._packer.finish()
+                if not self._packer.can_pop():
+                    raise
+                break
         seq, segs, pos = self._packer.pop_seq_with_metadata()
         return (
             np.asarray(seq, dtype=np.int32),

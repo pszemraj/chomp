@@ -154,6 +154,49 @@ def test_ffd_leftover_requeue_preserves_arrival_order(mode: str) -> None:
     assert pending == [_doc(20, 8), _doc(30, 9)]
 
 
+@pytest.mark.parametrize("make_packer", [_bin_packer, _multipack_packer])
+def test_ffd_packer_flushes_pending_docs_at_stream_end(
+    make_packer: Callable[[], Any],
+) -> None:
+    """finish() must flush sub-threshold pending docs instead of dropping them.
+
+    One doc is below both packers' thresholds (buffer_docs/group_docs = 2),
+    so can_pop stays False until finish() marks the stream exhausted.
+    """
+    packer = make_packer()
+    packer.add_document(_doc(7, 5))
+    assert not packer.can_pop()
+
+    packer.finish()
+    assert packer.can_pop()
+    seq, segs, _ = packer.pop_seq_with_metadata()
+    np.testing.assert_array_equal(seq[:5], np.full((5,), 7, dtype=np.int32))
+    np.testing.assert_array_equal(segs[:5], np.ones((5,), dtype=np.int32))
+    assert np.all(segs[5:] == 0)
+
+    # Drained: nothing pending, nothing ready, no infinite re-flush.
+    assert not packer.can_pop()
+
+
+@pytest.mark.parametrize("make_packer", [_bin_packer, _multipack_packer])
+def test_ffd_packer_flush_state_roundtrips(make_packer: Callable[[], Any]) -> None:
+    """The exhausted flag must survive get/set_state so a resumed run still
+    flushes the same tail windows as the continuous one."""
+    packer = make_packer()
+    packer.add_document(_doc(9, 3))
+    packer.finish()
+    state = packer.get_state()
+    assert state["exhausted"] is True
+    expected = packer.pop_seq_with_metadata()
+
+    restored = make_packer()
+    restored.set_state(state)
+    assert restored.can_pop()
+    actual = restored.pop_seq_with_metadata()
+    for arr_a, arr_b in zip(expected, actual, strict=True):
+        np.testing.assert_array_equal(arr_a, arr_b)
+
+
 @pytest.mark.parametrize(
     ("make_packer", "docs", "pops_before_snapshot"),
     [
@@ -192,7 +235,7 @@ def test_ffd_packer_state_roundtrip(
 
 @pytest.mark.parametrize(
     "missing_key",
-    ["pending_docs", "ready_tokens", "ready_segments", "docs_seen", "docs_truncated"],
+    ["pending_docs", "ready_tokens", "ready_segments", "docs_seen", "docs_truncated", "exhausted"],
 )
 def test_ffd_packer_state_from_dict_is_strict(missing_key: str) -> None:
     """FFD packer set_state must fail loud on corrupt/foreign state, not default to []/0."""
@@ -203,6 +246,7 @@ def test_ffd_packer_state_from_dict_is_strict(missing_key: str) -> None:
         "ready_segments": [],
         "docs_seen": 0,
         "docs_truncated": 0,
+        "exhausted": False,
     }
     del full_state[missing_key]
     with pytest.raises(KeyError):
@@ -261,6 +305,7 @@ def test_ffd_packer_state_rejects_corrupt_queues(
         "ready_segments": [],
         "docs_seen": 3,
         "docs_truncated": 0,
+        "exhausted": False,
     }
     state.update(mutation)
     with pytest.raises(ValueError, match=match):

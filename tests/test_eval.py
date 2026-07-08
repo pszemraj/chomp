@@ -127,25 +127,15 @@ def test_eval_batches_assembled_once_and_reused(
     assert len(eval_rows) == 2  # both evals produced a loss from the cached batches
 
 
-def test_eval_fails_fast_when_bin_packer_emits_zero_batches(
-    tmp_path: Path, patch_hf_load_dataset: Callable[..., dict[str, int]]
-) -> None:
-    """Eval should raise when bin packing cannot produce any batch.
+def _packed_eval_cfg(run_dir: Path, *, grad_accum: int = 1, **data_overrides: Any) -> Config:
+    """Build a tiny packed-mode config for eval flush/zero-batch tests.
 
-    Config validation now rejects max_eval_samples < packing_buffer_docs
-    outright, so the runtime guard is exercised via its remaining real-world
-    trigger: an eval split that yields fewer documents than max_eval_samples.
+    :param Path run_dir: Run directory for logging.
+    :param int grad_accum: Gradient accumulation steps (rows_per_batch knob).
+    :param data_overrides: DataConfig field overrides (packing mode/knobs).
+    :return Config: Ready-to-run configuration.
     """
-    patch_hf_load_dataset(
-        {
-            "train": [{"text": "xxxx"} for _ in range(64)],
-            # 2 docs < packing_buffer_docs=4
-            "validation": [{"text": "yy"}, {"text": "zz"}],
-        }
-    )
-
-    run_dir = tmp_path / "run_bin"
-    cfg = Config(
+    return Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
         data=DataConfig(
             backend="hf",
@@ -155,17 +145,15 @@ def test_eval_fails_fast_when_bin_packer_emits_zero_batches(
             hf_eval_split="validation",
             shuffle=False,
             repeat=True,
-            packing_mode="bin",
-            packing_buffer_docs=4,
-            max_eval_samples=4,
             tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+            **data_overrides,
         ),
         train=TrainConfig(
             seed=0,
             steps=1,
             batch_size=1,
             seq_len=8,
-            grad_accum=1,
+            grad_accum=grad_accum,
             jit=False,
             deterministic=True,
             allow_cpu=True,
@@ -176,6 +164,68 @@ def test_eval_fails_fast_when_bin_packer_emits_zero_batches(
         checkpoint=CheckpointConfig(enabled=False),
         debug=DebugConfig(nan_check=True, check_device_every=0),
         logging=LoggingConfig(project="chomp", run_dir=str(run_dir)),
+    )
+
+
+@pytest.mark.parametrize(
+    ("mode", "knobs"),
+    [
+        pytest.param("bin", {"packing_buffer_docs": 4}, id="bin"),
+        pytest.param("multipack", {"packing_group_docs": 8}, id="multipack"),
+    ],
+)
+def test_eval_flushes_partial_buffer_at_stream_end(
+    tmp_path: Path,
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+    mode: str,
+    knobs: dict[str, int],
+) -> None:
+    """Eval doc sets below the pack threshold must still produce eval batches.
+
+    The eval split yields 2 docs, below the packers' thresholds; the
+    end-of-stream flush packs them into a padded window instead of starving
+    eval with zero batches.
+    """
+    patch_hf_load_dataset(
+        {
+            "train": [{"text": "xxxx"} for _ in range(64)],
+            "validation": [{"text": "yy"}, {"text": "zz"}],
+        }
+    )
+
+    run_dir = tmp_path / f"run_flush_{mode}"
+    cfg = _packed_eval_cfg(run_dir, packing_mode=mode, max_eval_samples=8, **knobs)
+
+    run(cfg, config_path=None, resume="none")
+
+    metrics_path = run_dir / cfg.logging.metrics_file
+    rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
+    eval_rows = [row for row in rows if row.get("eval_loss") not in (None, "")]
+    assert eval_rows, "flushed eval windows should have produced an eval loss"
+
+
+def test_eval_fails_fast_when_windows_cannot_fill_one_batch(
+    tmp_path: Path, patch_hf_load_dataset: Callable[..., dict[str, int]]
+) -> None:
+    """Eval should raise when the doc set yields fewer packed windows than one
+    full [A, B, T] batch (partial batches are dropped by the fixed-shape
+    contract) — the zero-batches guard's remaining real-world trigger now that
+    packers flush at end of stream."""
+    patch_hf_load_dataset(
+        {
+            "train": [{"text": "xxxx"} for _ in range(64)],
+            # 4 tokens flush into a single [T=8] window < rows_per_batch=2.
+            "validation": [{"text": "yy"}, {"text": "zz"}],
+        }
+    )
+
+    run_dir = tmp_path / "run_zero_batches"
+    cfg = _packed_eval_cfg(
+        run_dir,
+        grad_accum=2,
+        packing_mode="bin",
+        packing_buffer_docs=4,
+        max_eval_samples=8,
     )
 
     with pytest.raises(RuntimeError, match="Evaluation produced zero batches"):
@@ -234,61 +284,6 @@ def test_eval_fails_fast_on_zero_valid_tokens(
     )
 
     with pytest.raises(RuntimeError, match="zero valid loss tokens"):
-        run(cfg, config_path=None, resume="none")
-
-
-def test_eval_fails_fast_when_multipack_emits_zero_batches(
-    tmp_path: Path, patch_hf_load_dataset: Callable[..., dict[str, int]]
-) -> None:
-    """Eval should raise when multipack cannot produce any batch.
-
-    Config validation now rejects max_eval_samples < packing_group_docs
-    outright, so the runtime guard is exercised via its remaining real-world
-    trigger: an eval split that yields fewer documents than max_eval_samples.
-    """
-    patch_hf_load_dataset(
-        {
-            "train": [{"text": "xxxx"} for _ in range(64)],
-            # 2 docs < packing_group_docs=8
-            "validation": [{"text": "yy"}, {"text": "zz"}],
-        }
-    )
-
-    run_dir = tmp_path / "run_multipack"
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="hf",
-            hf_dataset="dummy",
-            hf_name="dummy",
-            hf_split="train",
-            hf_eval_split="validation",
-            shuffle=False,
-            repeat=True,
-            packing_mode="multipack",
-            packing_group_docs=8,
-            max_eval_samples=8,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
-        ),
-        train=TrainConfig(
-            seed=0,
-            steps=1,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-            log_every=1000,
-            eval_every=1,
-        ),
-        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
-        checkpoint=CheckpointConfig(enabled=False),
-        debug=DebugConfig(nan_check=True, check_device_every=0),
-        logging=LoggingConfig(project="chomp", run_dir=str(run_dir)),
-    )
-
-    with pytest.raises(RuntimeError, match="Evaluation produced zero batches"):
         run(cfg, config_path=None, resume="none")
 
 

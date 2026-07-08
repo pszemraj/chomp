@@ -204,9 +204,8 @@ class DataConfig:
     # Optional cap on how many documents may be packed into a single bin.
     packing_max_docs_per_bin: int | None = None
     # Multipack lookahead group size (documents). Nothing is emitted until this
-    # many pending docs/chunks accumulate, and the whole pool is sorted each
-    # pack cycle — keep it modest, and below max_eval_samples or eval
-    # can never emit a batch.
+    # many pending docs/chunks accumulate (except the end-of-stream flush),
+    # and the group is sorted each pack cycle — keep it modest.
     packing_group_docs: int = 512
     # Require full per-document state isolation (attention, RoPE, CEMA,
     # TimestepNorm) whenever documents are packed together — applies to both
@@ -856,47 +855,11 @@ def _validate_data(cfg: Config) -> None:
                 "data.packing_max_docs_per_bin must be positive when set, "
                 f"got {cfg.data.packing_max_docs_per_bin}"
             )
-        if 0 < cfg.data.max_eval_samples < cfg.data.packing_buffer_docs:
-            msg = (
-                f"data.max_eval_samples ({cfg.data.max_eval_samples}) is smaller than "
-                f"data.packing_buffer_docs ({cfg.data.packing_buffer_docs}); the bin "
-                "packer emits nothing until packing_buffer_docs pending docs "
-                "accumulate and never flushes a partial buffer at end of stream, "
-                "so evaluation will fail with zero batches. Lower "
-                "packing_buffer_docs or raise max_eval_samples."
-            )
-            if cfg.train.eval_every > 0:
-                _vfail(msg)
-            warnings.warn(msg, stacklevel=2)
-    if cfg.data.packing_mode == "multipack":
-        if cfg.data.packing_group_docs <= 0:
-            _vfail(
-                "data.packing_group_docs must be positive when packing_mode='multipack', "
-                f"got {cfg.data.packing_group_docs}"
-            )
-        # The multipack emission threshold is max(packing_group_docs,
-        # bins_per_pack) with bins_per_pack = batch_size * grad_accum — the
-        # packer waits for enough docs to fill one full [A*B] pack cycle even
-        # when the group lookahead is smaller. The bin guard above does not
-        # need this max: packing_buffer_docs is already forced >=
-        # batch_size * grad_accum, so its threshold reduces to
-        # packing_buffer_docs.
-        bins_per_pack = cfg.train.batch_size * cfg.train.grad_accum
-        multipack_threshold = max(cfg.data.packing_group_docs, bins_per_pack)
-        if 0 < cfg.data.max_eval_samples < multipack_threshold:
-            msg = (
-                f"data.max_eval_samples ({cfg.data.max_eval_samples}) is smaller than "
-                f"the multipack emission threshold ({multipack_threshold} = "
-                f"max(packing_group_docs={cfg.data.packing_group_docs}, "
-                f"batch_size*grad_accum={bins_per_pack})); multipack emits nothing "
-                "until that many pending docs accumulate and never flushes a "
-                "partial buffer at end of stream, so evaluation will fail with "
-                "zero batches. Raise max_eval_samples, or lower "
-                "packing_group_docs / the batch geometry."
-            )
-            if cfg.train.eval_every > 0:
-                _vfail(msg)
-            warnings.warn(msg, stacklevel=2)
+    if cfg.data.packing_mode == "multipack" and cfg.data.packing_group_docs <= 0:
+        _vfail(
+            "data.packing_group_docs must be positive when packing_mode='multipack', "
+            f"got {cfg.data.packing_group_docs}"
+        )
     if (
         cfg.data.packing_mode in ("bin", "multipack")
         and cfg.data.packing_strict_segments

@@ -60,10 +60,12 @@ Shared by both packed modes:
 
 - `data.packing_strict_segments` (default `true`): require full per-document
   state isolation in the backend.
-- Emission thresholds gate eval too: neither packer flushes a partial buffer
-  at end of stream, so `data.max_eval_samples` below `packing_buffer_docs`
-  (bin) or `max(packing_group_docs, batch_size * grad_accum)` (multipack) can
-  never emit an eval batch — config validation errors when eval is enabled.
+- End-of-stream flush: when the upstream stream is exhausted (`data.repeat:
+  false`, or the finite eval doc set), both packers flush their remaining
+  sub-threshold pending documents into as many padded windows as needed
+  instead of silently dropping them. The fixed-shape contract still applies
+  downstream: windows that cannot fill one complete `[A, B, T]` batch are
+  dropped at batch assembly, and eval raises if zero batches result.
 
 ## Segment-Isolation Semantics
 

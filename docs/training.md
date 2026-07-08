@@ -121,12 +121,13 @@ Eval batches are assembled once and cached host-side for the whole run; the
 device transfer happens per batch each eval, so no device memory is held
 between evals.
 
-For `bin` and `multipack`, config validation rejects `max_eval_samples` below
-the packer's emission threshold outright, and eval still fails fast at runtime
-if the iterator cannot emit even a single batch (for example, an eval split
-that yields fewer documents than promised) or if every emitted label is masked
-out (zero valid loss tokens — broken boundary masking or pathological short
-docs). There is no silent `eval_loss: null` outcome.
+For `bin` and `multipack`, the packers flush their remaining pending documents
+into padded windows once the eval doc set is exhausted, so small eval sets
+still evaluate. Eval fails fast at runtime if the set cannot fill even one
+complete `[A, B, T]` batch (too few packed windows for `grad_accum *
+batch_size` rows) or if every emitted label is masked out (zero valid loss
+tokens — broken boundary masking or pathological short docs). There is no
+silent `eval_loss: null` outcome.
 
 ## Generation samples
 

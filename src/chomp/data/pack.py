@@ -373,6 +373,15 @@ class TokenPacker:
             raise RuntimeError("token/segment buffers are misaligned")
         return self._token_buf.size >= self.seq_len
 
+    def finish(self) -> None:
+        """Mark the upstream document stream exhausted (no-op here).
+
+        Sequential windows are unpadded slices of the continuous token
+        stream, so a partial tail window (< seq_len tokens) cannot be emitted
+        under the fixed-shape contract and is dropped by design. The FFD
+        packers implement this hook as a real flush of pending documents.
+        """
+
     def pop_seq_with_metadata(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Return ([seq_len] tokens, [seq_len] segment_ids, [seq_len] position_ids).
 
@@ -444,6 +453,7 @@ class FFDPackerState:
     ready_segments: list[list[int]]
     docs_seen: int
     docs_truncated: int
+    exhausted: bool
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to a JSON-serializable dictionary.
@@ -456,6 +466,7 @@ class FFDPackerState:
             "ready_segments": self.ready_segments,
             "docs_seen": int(self.docs_seen),
             "docs_truncated": int(self.docs_truncated),
+            "exhausted": bool(self.exhausted),
         }
 
     @staticmethod
@@ -500,6 +511,7 @@ class FFDPackerState:
             ready_segments=[list(x) for x in ready_segments],
             docs_seen=docs_seen,
             docs_truncated=docs_truncated,
+            exhausted=bool(d["exhausted"]),
         )
 
 
@@ -590,6 +602,39 @@ def _ffd_pack(
     return bins, leftover
 
 
+def _ffd_pack_all(
+    candidates: list[np.ndarray],
+    *,
+    capacity: int,
+    max_docs: int | None,
+) -> list[_Bin]:
+    """First-fit-decreasing pack all candidates, opening bins as needed.
+
+    Used to flush a partially filled pending queue at stream exhaustion:
+    unlike :func:`_ffd_pack` there is no fixed bin count and no leftover —
+    every candidate is placed (each fits an empty bin because documents are
+    pre-chunked to capacity).
+
+    :param list[np.ndarray] candidates: Candidate segments to pack.
+    :param int capacity: Bin capacity in tokens.
+    :param max_docs: Optional cap on segments per bin.
+    :return list[_Bin]: Filled bins in creation order.
+    """
+    order = sorted(range(len(candidates)), key=lambda i: int(candidates[i].size), reverse=True)
+    bins: list[_Bin] = []
+    for idx in order:
+        seg = candidates[idx]
+        for b in bins:
+            if b.can_fit(seg):
+                b.add(seg)
+                break
+        else:
+            b = _Bin(capacity=capacity, max_docs=max_docs)
+            b.add(seg)
+            bins.append(b)
+    return bins
+
+
 def _render_bin(b: _Bin, *, capacity: int, pad_id: int) -> tuple[np.ndarray, np.ndarray]:
     """Render a bin into (tokens, segment_ids) arrays of length capacity.
 
@@ -617,7 +662,9 @@ class _FFDPackerBase:
     """Shared machinery for the FFD-based packers (bin, multipack).
 
     Subclasses define the packing trigger (`_pack_threshold`) and how a pack
-    cycle consumes the pending queue (`_pack`).
+    cycle consumes the pending queue (`_pack`). Once `finish()` marks the
+    stream exhausted, sub-threshold pending documents are flushed into padded
+    bins instead of being dropped.
     """
 
     _mode_name = "ffd"
@@ -670,6 +717,7 @@ class _FFDPackerBase:
         self._ready: deque[tuple[np.ndarray, np.ndarray]] = deque()
         self._docs_seen = 0
         self._docs_truncated = 0
+        self._exhausted = False
 
     def _pack_threshold(self) -> int:
         """Return the pending-doc count that triggers a pack cycle."""
@@ -678,6 +726,28 @@ class _FFDPackerBase:
     def _pack(self) -> None:
         """Run one pack cycle over the pending queue, filling self._ready."""
         raise NotImplementedError
+
+    def _flush(self) -> None:
+        """FFD-pack every pending document into as many bins as needed.
+
+        Runs only after :meth:`finish`, when the pending queue can no longer
+        reach the pack threshold; without it every sub-threshold tail document
+        would be silently dropped at stream end.
+        """
+        candidates = list(self._pending_docs)
+        self._pending_docs.clear()
+        bins = _ffd_pack_all(candidates, capacity=self._capacity, max_docs=self._max_docs_per_bin)
+        for b in bins:
+            self._ready.append(_render_bin(b, capacity=self._capacity, pad_id=self._pad_id))
+
+    def finish(self) -> None:
+        """Mark the upstream document stream exhausted.
+
+        Later `can_pop` calls flush partially filled buffers instead of
+        waiting forever for the pack threshold. Idempotent; part of the
+        checkpointed state.
+        """
+        self._exhausted = True
 
     def add_document(self, tokens: Iterable[int]) -> None:
         """Add a tokenized document to the pending queue.
@@ -708,9 +778,10 @@ class _FFDPackerBase:
         """
         if self._ready:
             return True
-        if len(self._pending_docs) < self._pack_threshold():
-            return False
-        self._pack()
+        if len(self._pending_docs) >= self._pack_threshold():
+            self._pack()
+        elif self._exhausted and self._pending_docs:
+            self._flush()
         return bool(self._ready)
 
     def pop_seq_with_metadata(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -735,6 +806,7 @@ class _FFDPackerBase:
             ready_segments=[x.tolist() for _, x in self._ready],
             docs_seen=int(self._docs_seen),
             docs_truncated=int(self._docs_truncated),
+            exhausted=bool(self._exhausted),
         )
         return st.to_dict()
 
@@ -772,6 +844,7 @@ class _FFDPackerBase:
         )
         self._docs_seen = int(st.docs_seen)
         self._docs_truncated = int(st.docs_truncated)
+        self._exhausted = bool(st.exhausted)
 
     def get_stats(self) -> dict[str, int]:
         """Return basic document stats.

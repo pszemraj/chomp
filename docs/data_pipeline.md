@@ -146,12 +146,12 @@ earlier point on the curve. `data.recreate_eval_cache: true` is the explicit
 one-shot override; it rebuilds the cache with a loud warning that eval curves
 across the boundary are not comparable.
 
-Config validation rejects `max_eval_samples` below the packer emission
-threshold for `bin`/`multipack` (packers never flush a partial buffer at end of
-stream). If eval still cannot emit any batch at runtime (for example an eval
-split yielding fewer documents than promised), or emits batches whose labels
-are entirely masked (zero valid loss tokens), training raises instead of
-silently emitting a null eval loss.
+At end of stream the `bin`/`multipack` packers flush their remaining pending
+documents into padded windows, so an eval doc set below the pack threshold
+still emits windows. If eval cannot fill even one complete `[A, B, T]` batch
+(too few packed windows for `grad_accum * batch_size` rows), or emits batches
+whose labels are entirely masked (zero valid loss tokens), training raises
+instead of silently emitting a null eval loss.
 
 ## Key config knobs
 

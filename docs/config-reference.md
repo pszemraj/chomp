@@ -774,7 +774,7 @@ Maximum examples to use for evaluation.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be ≥ 0; must be ≥ `packing_buffer_docs` (bin) / `max(packing_group_docs, batch_size * grad_accum)` (multipack) when eval is enabled |
+| Constraints | Must be ≥ 0 |
 
 Evaluation tokens are collected once when the run is created and **persisted to
 `run_dir/eval_tokens.json.gz`** (identity manifest + content hash); every later
@@ -785,11 +785,11 @@ training stream. For this train-split fallback path, if `data.seed: 0`
 (default) and `train.seed` is non-zero, the shuffle seed defaults to
 `train.seed`.
 
-With packed modes, values below the packer's emission threshold
-(`packing_buffer_docs` for bin, `max(packing_group_docs, batch_size *
-grad_accum)` for multipack) can never emit an eval batch (packers do not flush
-a partial buffer at end of stream); config validation errors when eval is
-enabled and warns otherwise.
+With packed modes, the packers flush their remaining pending documents into
+padded windows once the eval doc set is exhausted, so values below the pack
+threshold still evaluate. The eval set must still yield enough packed windows
+to fill at least one complete `[A, B, T]` batch (`grad_accum * batch_size`
+rows) — evaluation raises at runtime otherwise.
 
 <a id="data.recreate_eval_cache"></a>
 #### `data.recreate_eval_cache`
@@ -996,14 +996,13 @@ packing_buffer_docs: int = 128
 ```
 
 Number of documents to buffer for bin packing. The bin packer emits nothing
-until this many pending docs accumulate and never flushes a partial buffer at
-end of stream, so it must also stay ≤ `max_eval_samples` when eval is enabled
-(hard validation error; warning when eval is off).
+until this many pending docs accumulate; at end of stream the remaining
+sub-threshold documents are flushed into padded windows rather than dropped.
 
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be positive; when `packing_mode: bin`, must be ≥ `batch_size × grad_accum` and ≤ `max_eval_samples` when eval is enabled |
+| Constraints | Must be positive; when `packing_mode: bin`, must be ≥ `batch_size × grad_accum` |
 
 If `packing_buffer_docs < batch_size × grad_accum` with bin packing:
 `data.packing_buffer_docs must be >= train.batch_size * train.grad_accum (N), got M`
@@ -1028,20 +1027,19 @@ Maximum documents per packed sequence. `null` means unlimited.
 packing_group_docs: int = 512
 ```
 
-Multipack lookahead group size (documents/chunks). The effective emission
+Multipack lookahead group size (documents/chunks). The effective pack
 threshold is `max(packing_group_docs, batch_size * grad_accum)` — the packer
 also waits for enough docs to fill one full pack cycle of rows. Nothing is
-emitted until that many pending items accumulate, and the whole pool is sorted
-each pack cycle — keep it modest, and keep the threshold at or below
-`max_eval_samples` or evaluation cannot emit a batch (a hard validation error
-when eval is enabled).
+emitted until that many pending items accumulate (except the end-of-stream
+flush, which packs whatever remains), and the group is sorted each pack
+cycle — keep it modest.
 
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be positive when `packing_mode: multipack`; `max(packing_group_docs, batch_size * grad_accum)` must be ≤ `max_eval_samples` when eval is enabled |
+| Constraints | Must be positive when `packing_mode: multipack` |
 
-**Related:** [`data.max_eval_samples`](#data.max_eval_samples)
+**Related:** [`train.batch_size`](#train.batch_size), [`train.grad_accum`](#train.grad_accum)
 
 <a id="data.packing_strict_segments"></a>
 #### `data.packing_strict_segments`

@@ -1333,26 +1333,16 @@ def run(
             total_tokens += float(token_sum_host)
 
         if batch_count == 0:
-            bins_per_pack = int(cfg.train.grad_accum) * int(cfg.train.batch_size)
-            if cfg.data.packing_mode == "multipack":
-                threshold = max(int(cfg.data.packing_group_docs), bins_per_pack)
-                threshold_hint = (
-                    f"emission_threshold={threshold} "
-                    f"(max(packing_group_docs={int(cfg.data.packing_group_docs)}, "
-                    f"bins_per_pack)); multipack emits nothing until this many "
-                    "pending docs accumulate; it must be well below the eval doc "
-                    "count"
-                )
-            else:
-                threshold_hint = f"packing_buffer_docs={int(cfg.data.packing_buffer_docs)}"
+            rows_per_batch = int(cfg.train.grad_accum) * int(cfg.train.batch_size)
             raise RuntimeError(
                 "Evaluation produced zero batches. "
                 f"packing_mode={cfg.data.packing_mode!r}, "
-                f"{threshold_hint}, "
-                f"bins_per_pack={bins_per_pack}, "
+                f"rows_per_batch={rows_per_batch} (grad_accum * batch_size), "
                 f"eval_doc_count={len(eval_tokens)}. "
-                "Increase eval samples, reduce the packing threshold, or use "
-                "sequential packing."
+                "The eval set must yield at least rows_per_batch packed [T] "
+                "windows to fill one complete [A, B, T] batch (partial batches "
+                "are dropped by the fixed-shape contract). Increase "
+                "data.max_eval_samples or reduce the batch geometry."
             )
 
         if total_tokens <= 0:

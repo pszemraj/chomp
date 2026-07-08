@@ -151,45 +151,17 @@ def test_optim_validation_rejects_invalid_values() -> None:
         ("multipack", "packing_group_docs"),
     ],
 )
-def test_packed_eval_starvation_guard(mode: str, knob: str) -> None:
-    """max_eval_samples below the packer's emission threshold can never
-    yield an eval batch (packers do not flush a partial buffer at end of
-    stream): hard error when eval is enabled, warning otherwise."""
+def test_max_eval_samples_below_pack_threshold_is_valid(mode: str, knob: str) -> None:
+    """max_eval_samples below the packer's pack threshold must validate: the
+    FFD packers flush partially filled buffers at end of stream, so a small
+    eval doc set still emits windows."""
     cfg = _base_cfg()
     cfg = replace(
         cfg,
         data=replace(cfg.data, packing_mode=mode, max_eval_samples=4, **{knob: 8}),
         train=replace(cfg.train, eval_every=1),
     )
-    with pytest.raises(ValueError, match=knob):
-        validate_config(cfg)
-
-    cfg_noeval = replace(cfg, train=replace(cfg.train, eval_every=0))
-    with pytest.warns(UserWarning, match=knob):
-        validate_config(cfg_noeval)
-
-
-def test_multipack_eval_guard_includes_batch_geometry() -> None:
-    """The multipack emission threshold is max(group_docs, batch_size *
-    grad_accum): a max_eval_samples that clears packing_group_docs but not one
-    full pack cycle of rows still starves eval and must be rejected."""
-    cfg = _base_cfg()
-    cfg = replace(
-        cfg,
-        data=replace(
-            cfg.data,
-            packing_mode="multipack",
-            packing_group_docs=8,
-            max_eval_samples=16,
-        ),
-        train=replace(cfg.train, batch_size=8, grad_accum=8, eval_every=1),
-    )
-    with pytest.raises(ValueError, match=r"batch_size\*grad_accum=64"):
-        validate_config(cfg)
-
-    # Clearing the full threshold (not just group_docs) passes.
-    cfg_ok = replace(cfg, data=replace(cfg.data, max_eval_samples=64))
-    validate_config(cfg_ok)
+    validate_config(cfg)
 
 
 def test_data_and_logging_validation_rejects_invalid_values() -> None:
