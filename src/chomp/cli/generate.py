@@ -2,47 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import click
 
 from chomp.utils.ckpt_paths import load_config_for_checkpoint, resolve_checkpoint_path
-
-
-def _restore_params(step_dir: Path, abstract_params: Any) -> Any:
-    """Restore just the params from a checkpoint.
-
-    Uses PyTreeCheckpointer directly on the train_state directory to load only
-    the params subtree, skipping opt_state/rng/step.
-
-    :param Path step_dir: Checkpoint step directory.
-    :param Any abstract_params: Abstract tree for params (ShapeDtypeStruct).
-    :raises click.ClickException: If train_state directory not found.
-    :return Any: Restored params pytree.
-    """
-    import orbax.checkpoint as ocp
-
-    train_state_dir = step_dir / "train_state"
-    if not train_state_dir.exists():
-        raise click.ClickException(
-            f"train_state directory not found in {step_dir}. Is this a valid chomp checkpoint?"
-        )
-
-    # Build abstract structure with only params key
-    abstract_train_state = {"params": abstract_params}
-
-    # Use PyTreeCheckpointer directly on the train_state directory
-    ckptr = ocp.PyTreeCheckpointer()
-
-    restored = ckptr.restore(
-        train_state_dir,
-        item=abstract_train_state,
-        transforms={},
-        restore_args=ocp.checkpoint_utils.construct_restore_args(abstract_train_state),
-    )
-
-    return restored["params"]
 
 
 @click.command()
@@ -121,8 +85,10 @@ def generate(
     import jax
     import jax.numpy as jnp
 
+    from chomp.ckpt import restore_params_only
     from chomp.data.pipeline import build_tokenizer, resolve_tokenizer_config
     from chomp.model import build_model
+    from chomp.utils.tree import abstractify_tree
 
     # Find checkpoint and load config
     try:
@@ -154,15 +120,12 @@ def generate(
     model_key, gen_key = jax.random.split(key)
     params, static = build_model(cfg, key=model_key)
 
-    # Get abstract params for restoration
-    abstract_params = jax.tree.map(
-        lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=getattr(x, "sharding", None)),
-        params,
-    )
-
     # Restore params from checkpoint
     click.echo("Restoring model parameters...")
-    params = _restore_params(step_dir, abstract_params)
+    try:
+        params = restore_params_only(step_dir, abstractify_tree(params))
+    except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     # Import generation function
     try:

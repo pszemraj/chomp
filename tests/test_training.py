@@ -24,6 +24,7 @@ from chomp.ckpt import (
     make_manager,
     restore_at_step,
     restore_latest,
+    restore_params_only,
     save,
 )
 from chomp.config import (
@@ -109,6 +110,26 @@ def test_async_checkpoint_roundtrip(tmp_path: Path) -> None:
     assert step == 1
     assert tree_allclose(restored.params, state.params, rtol=0.0, atol=0.0)
     assert tree_allclose(restored.opt_state, state.opt_state, rtol=0.0, atol=0.0)
+
+
+def test_restore_params_only(tmp_path: Path) -> None:
+    """Params-only restore (generate CLI path) matches the saved params exactly."""
+    run_dir = tmp_path / "run_params_only"
+    cfg = _base_cfg(run_dir)
+    state = _make_state()
+    data_it = build_train_iterator(cfg)
+    ckpt_dir = default_ckpt_dir(run_dir)
+    mgr = make_manager(ckpt_dir, max_to_keep=2, save_every=1, async_save=False)
+
+    meta = build_meta(step=1, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg))
+    save(mgr, step=1, train_state=state, data_iter=data_it, meta=meta)
+    mgr.wait_until_finished()
+
+    params = restore_params_only(ckpt_dir / "1", abstractify_tree(state.params))
+    assert tree_allclose(params, state.params, rtol=0.0, atol=0.0)
+
+    with pytest.raises(FileNotFoundError, match="train_state"):
+        restore_params_only(ckpt_dir / "999", abstractify_tree(state.params))
 
 
 def test_checkpoint_data_state_roundtrip(tmp_path: Path) -> None:

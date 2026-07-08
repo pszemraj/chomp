@@ -14,9 +14,8 @@ import jax
 import pytest
 from click.testing import CliRunner
 
-from chomp.ckpt import default_ckpt_dir
+from chomp.ckpt import default_ckpt_dir, restore_params_only
 from chomp.cli import cli
-from chomp.cli.generate import _restore_params
 from chomp.cli.main import BANNER, parse_resume, print_banner
 from chomp.config import Config
 from chomp.model import build_model
@@ -109,39 +108,22 @@ def test_generate_rejects_non_megalodon_backend(tmp_path: Path) -> None:
     assert "model.backend" in result.output
 
 
-def test_restore_params_partial_restore(trained_small_run: tuple[Config, Path]) -> None:
-    """_restore_params should load only params from a full TrainState checkpoint."""
-    cfg, run_dir = trained_small_run
-
-    params, _static = build_model(cfg, key=jax.random.PRNGKey(0))
-    abstract_params = abstractify_tree(params)
-
-    step_dir = default_ckpt_dir(run_dir) / "2"
-    assert step_dir.exists()
-
-    restored_params = _restore_params(step_dir, abstract_params)
-
-    params_leaves = jax.tree_util.tree_leaves(params)
-    restored_leaves = jax.tree_util.tree_leaves(restored_params)
-    assert len(params_leaves) == len(restored_leaves)
-
-    for orig, restored in zip(params_leaves, restored_leaves, strict=True):
-        assert orig.shape == restored.shape
-        assert orig.dtype == restored.dtype
-
-
-def test_restore_params_values_differ_from_init(trained_small_run: tuple[Config, Path]) -> None:
-    """Restored params should differ from fresh init after training."""
+def test_restore_params_only_from_trained_run(trained_small_run: tuple[Config, Path]) -> None:
+    """restore_params_only loads the trained params subtree from a full TrainState checkpoint."""
     cfg, run_dir = trained_small_run
 
     params_fresh, _static = build_model(cfg, key=jax.random.PRNGKey(0))
-    abstract_params = abstractify_tree(params_fresh)
-
     step_dir = default_ckpt_dir(run_dir) / "2"
-    restored_params = _restore_params(step_dir, abstract_params)
+    assert step_dir.exists()
+
+    restored_params = restore_params_only(step_dir, abstractify_tree(params_fresh))
 
     fresh_leaves = jax.tree_util.tree_leaves(params_fresh)
     restored_leaves = jax.tree_util.tree_leaves(restored_params)
+    assert len(fresh_leaves) == len(restored_leaves)
+    for fresh, restored in zip(fresh_leaves, restored_leaves, strict=True):
+        assert fresh.shape == restored.shape
+        assert fresh.dtype == restored.dtype
 
     assert any(
         not jax.numpy.allclose(fresh, restored)

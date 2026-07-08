@@ -311,6 +311,41 @@ def _restore_step(
     return step, train_state, meta
 
 
+def restore_params_only(step_dir: Path, abstract_params: Any) -> Any:
+    """Restore only the params subtree from a checkpoint step directory.
+
+    Inference-side helper: loads train_state/params without opt_state/rng/step,
+    directly from a step dir (no CheckpointManager needed).
+
+    :param Path step_dir: Checkpoint step directory (contains train_state/).
+    :param Any abstract_params: ShapeDtypeStruct tree matching params.
+    :raises FileNotFoundError: If the step dir has no train_state.
+    :return Any: Restored params pytree.
+    """
+    import orbax.checkpoint as ocp
+
+    train_state_dir = Path(step_dir) / "train_state"
+    if not train_state_dir.exists():
+        raise FileNotFoundError(
+            f"train_state directory not found in {step_dir}. Is this a valid chomp checkpoint?"
+        )
+
+    # transforms={} drops saved subtrees absent from item (opt_state/rng/step)
+    # without needing their structure; partial_restore=True cannot do that on
+    # this orbax version (0.11.31 chokes on the pruned tree metadata).
+    abstract_train_state = {"params": abstract_params}
+    with ocp.PyTreeCheckpointer() as ckptr:
+        restored = ckptr.restore(
+            train_state_dir,
+            args=ocp.args.PyTreeRestore(
+                item=abstract_train_state,
+                transforms={},
+                restore_args=ocp.checkpoint_utils.construct_restore_args(abstract_train_state),
+            ),
+        )
+    return restored["params"]
+
+
 def check_resume_compat(
     cfg: Config, meta: dict[str, Any] | None, *, tokenizer_snapshot_hash: str | None = None
 ) -> None:
