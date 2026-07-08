@@ -63,35 +63,10 @@ def _arr_with_device_property(platform: str) -> object:
     return _Arr()
 
 
-def _arr_with_device_method(platform: str) -> object:
-    """Build a mock array exposing a .device() method."""
-
-    class _Arr:
-        def device(self) -> _Dev:
-            return _Dev(platform)
-
-    return _Arr()
-
-
-def _arr_with_device_buffer(platform: str) -> object:
-    """Build a mock array exposing a .device_buffer.device() path."""
-
-    class _Buffer:
-        def device(self) -> _Dev:
-            return _Dev(platform)
-
-    class _Arr:
-        device_buffer = _Buffer()
-
-    return _Arr()
-
-
 def test_device_platform_handles_supported_object_shapes() -> None:
-    """device_platform should handle property/method/buffer and unknown object forms."""
+    """device_platform reads .device.platform and returns None for unknown objects."""
     for arr, expected in [
         (_arr_with_device_property("gpu"), "gpu"),
-        (_arr_with_device_method("cpu"), "cpu"),
-        (_arr_with_device_buffer("gpu"), "gpu"),
         (object(), None),
     ]:
         assert device_platform(arr) == expected  # type: ignore[arg-type]

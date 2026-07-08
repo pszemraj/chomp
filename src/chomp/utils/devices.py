@@ -39,19 +39,9 @@ def device_platform(x: jax.Array) -> str | None:
     :param jax.Array x: JAX array to check.
     :return str | None: Platform name (e.g., "cpu", "gpu") or None if unknown.
     """
-
-    # JAX 0.8+: x.device is a Device property (callable in older versions).
+    # .device can raise on multi-device sharded arrays; callers handle None.
     try:
-        dev = x.device  # type: ignore[attr-defined]
-        if callable(dev):
-            return dev().platform  # type: ignore[call-arg]
-        return dev.platform  # type: ignore[union-attr]
-    except Exception:
-        pass
-
-    # Older JAX: x.device_buffer.device()
-    try:
-        return x.device_buffer.device().platform  # type: ignore[attr-defined]
+        return x.device.platform
     except Exception:
         return None
 
