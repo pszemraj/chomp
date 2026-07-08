@@ -227,19 +227,32 @@ class HFStreamingTextStream:
         """Restore stream state from a checkpoint.
 
         :param dict[str, Any] state: State dict from get_state().
+        :raises RuntimeError: If ``hf_state`` is missing. Every checkpoint
+            written by this module has a non-None ``hf_state`` (get_state()
+            fails loud if it can't capture one); a missing value means the
+            checkpoint predates exact HF stream capture or is corrupt, and
+            only an approximate epoch/seed rebuild is possible — refuse
+            rather than resume silently wrong.
         :raises Exception: If load_state_dict fails (better to crash than silently reset).
         """
         epoch = int(state.get("epoch", 0))
         hf_state = state.get("hf_state")
         self._epoch = epoch
 
+        if hf_state is None:
+            raise RuntimeError(
+                "Checkpoint is missing hf_state for the HF streaming dataset; "
+                "refusing to approximate resume by rebuilding from epoch/seed. "
+                "This checkpoint predates exact HF stream capture (or is "
+                "corrupt) and exact resume is impossible."
+            )
+
         # Correct ordering:
         # 1) rebuild dataset
         # 2) load_state_dict (crash on failure — never silently restart from zero)
         # 3) iter(ds)
         self._ds = self._load_ds_for_epoch(self._epoch)
-        if hf_state is not None:
-            self._ds.load_state_dict(hf_state)  # type: ignore[attr-defined]
+        self._ds.load_state_dict(hf_state)  # type: ignore[attr-defined]
         self._it = iter(self._ds)
         self._n_since_state = 0
         self._last_state = hf_state

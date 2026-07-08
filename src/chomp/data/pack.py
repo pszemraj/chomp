@@ -200,6 +200,8 @@ class PackerState:
     remaining_tokens: list[int]
     remaining_segments: list[int]
     next_segment_id: int
+    docs_seen: int
+    docs_truncated: int
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to a JSON-serializable dictionary.
@@ -210,6 +212,8 @@ class PackerState:
             "remaining_tokens": self.remaining_tokens,
             "remaining_segments": self.remaining_segments,
             "next_segment_id": int(self.next_segment_id),
+            "docs_seen": int(self.docs_seen),
+            "docs_truncated": int(self.docs_truncated),
         }
 
     @staticmethod
@@ -235,6 +239,8 @@ class PackerState:
             remaining_tokens=toks,
             remaining_segments=segs,
             next_segment_id=int(d["next_segment_id"]),
+            docs_seen=int(d["docs_seen"]),
+            docs_truncated=int(d["docs_truncated"]),
         )
 
 
@@ -394,6 +400,8 @@ class TokenPacker:
             remaining_tokens=self._token_buf.dump_remaining(),
             remaining_segments=self._segment_buf.dump_remaining(),
             next_segment_id=int(self._next_segment_id),
+            docs_seen=int(self._docs_seen),
+            docs_truncated=int(self._docs_truncated),
         )
         return st.to_dict()
 
@@ -409,6 +417,8 @@ class TokenPacker:
         )
         self._segment_buf.load_remaining(normalized_segments)
         self._next_segment_id = int(next_segment_id)
+        self._docs_seen = int(st.docs_seen)
+        self._docs_truncated = int(st.docs_truncated)
 
     def get_stats(self) -> dict[str, int]:
         """Return basic document stats.
@@ -432,6 +442,8 @@ class FFDPackerState:
     pending_docs: list[list[int]]
     ready_tokens: list[list[int]]
     ready_segments: list[list[int]]
+    docs_seen: int
+    docs_truncated: int
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to a JSON-serializable dictionary.
@@ -442,6 +454,8 @@ class FFDPackerState:
             "pending_docs": self.pending_docs,
             "ready_tokens": self.ready_tokens,
             "ready_segments": self.ready_segments,
+            "docs_seen": int(self.docs_seen),
+            "docs_truncated": int(self.docs_truncated),
         }
 
     @staticmethod
@@ -449,12 +463,17 @@ class FFDPackerState:
         """Construct FFDPackerState from a dictionary.
 
         :param dict[str, Any] d: State dict from to_dict().
+        :raises KeyError: If a required field is missing (corrupt/foreign state).
         :raises ValueError: If ready_tokens/ready_segments lengths differ.
         :return FFDPackerState: Reconstructed state.
         """
-        pending = d.get("pending_docs") or []
-        ready_tokens = d.get("ready_tokens") or []
-        ready_segments = d.get("ready_segments") or []
+        # Deliberately strict, mirroring PackerState: defaulting missing
+        # pending/ready queues to [] (as the old `d.get(...) or []` did)
+        # silently resumes with an empty buffer instead of failing loud on
+        # corrupt/foreign state.
+        pending = list(d["pending_docs"])
+        ready_tokens = list(d["ready_tokens"])
+        ready_segments = list(d["ready_segments"])
         if len(ready_tokens) != len(ready_segments):
             raise ValueError(
                 "ready_tokens and ready_segments must have the same length "
@@ -464,6 +483,8 @@ class FFDPackerState:
             pending_docs=[list(x) for x in pending],
             ready_tokens=[list(x) for x in ready_tokens],
             ready_segments=[list(x) for x in ready_segments],
+            docs_seen=int(d["docs_seen"]),
+            docs_truncated=int(d["docs_truncated"]),
         )
 
 
@@ -694,6 +715,8 @@ class _FFDPackerBase:
             pending_docs=[x.tolist() for x in self._pending_docs],
             ready_tokens=[x.tolist() for x, _ in self._ready],
             ready_segments=[x.tolist() for _, x in self._ready],
+            docs_seen=int(self._docs_seen),
+            docs_truncated=int(self._docs_truncated),
         )
         return st.to_dict()
 
@@ -711,6 +734,8 @@ class _FFDPackerBase:
             )
             for tokens, segs in zip(st.ready_tokens, st.ready_segments, strict=True)
         )
+        self._docs_seen = int(st.docs_seen)
+        self._docs_truncated = int(st.docs_truncated)
 
     def get_stats(self) -> dict[str, int]:
         """Return basic document stats.

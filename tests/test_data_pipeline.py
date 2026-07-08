@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -20,6 +21,7 @@ from chomp.config import (
     TokenizerConfig,
     TrainConfig,
 )
+from chomp.data.grain import _packer_stats_from_chain
 from chomp.data.hf import HFStreamingTextStream, HFStreamSpec
 from chomp.data.pack import MultipackPacker, TokenPacker
 from chomp.data.pipeline import (
@@ -137,6 +139,7 @@ def test_ffd_packer_state_roundtrip(
     for _ in range(pops_before_snapshot):
         _ = packer.pop_seq_with_metadata()
     state = packer.get_state()
+    expected_stats = packer.get_stats()
     expected = packer.pop_seq_with_metadata()
 
     restored = make_packer()
@@ -145,6 +148,29 @@ def test_ffd_packer_state_roundtrip(
 
     for arr_a, arr_b in zip(expected, actual, strict=True):
         np.testing.assert_array_equal(arr_a, arr_b)
+
+    # docs_seen/docs_truncated diagnostics must survive save/load, not reset to 0.
+    assert restored.get_stats() == expected_stats
+    assert expected_stats["docs_seen"] == len(docs)
+
+
+@pytest.mark.parametrize(
+    "missing_key",
+    ["pending_docs", "ready_tokens", "ready_segments", "docs_seen", "docs_truncated"],
+)
+def test_ffd_packer_state_from_dict_is_strict(missing_key: str) -> None:
+    """FFD packer set_state must fail loud on corrupt/foreign state, not default to []/0."""
+    packer = _bin_packer()
+    full_state = {
+        "pending_docs": [],
+        "ready_tokens": [],
+        "ready_segments": [],
+        "docs_seen": 0,
+        "docs_truncated": 0,
+    }
+    del full_state[missing_key]
+    with pytest.raises(KeyError):
+        packer.set_state(full_state)
 
 
 def test_token_packer_legacy_state_normalizes_large_segment_ids() -> None:
@@ -171,6 +197,8 @@ def test_token_packer_legacy_state_normalizes_large_segment_ids() -> None:
             2_147_483_602,
         ],
         "next_segment_id": 2_147_483_603,
+        "docs_seen": 3,
+        "docs_truncated": 0,
     }
     packer.set_state(legacy_state)
 
@@ -367,6 +395,33 @@ def test_grain_iterator_stats_disabled_with_device_put() -> None:
     assert it.get_stats() == {}
 
 
+class _RaisingStatsNode:
+    """Chain node whose get_stats() always raises, to exercise error handling."""
+
+    def get_stats(self) -> dict[str, int]:
+        """Raise unconditionally to simulate a real packer bug."""
+        raise RuntimeError("boom")
+
+
+def test_packer_stats_from_chain_swallows_and_logs_get_stats_errors(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A packer's get_stats() raising must yield {} and log once, not spam per call."""
+    node = _RaisingStatsNode()
+
+    with caplog.at_level(logging.WARNING, logger="chomp.data.grain"):
+        first = _packer_stats_from_chain(node)
+        second = _packer_stats_from_chain(node)
+
+    assert first == {}
+    assert second == {}
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, "must warn once per node, not once per call"
+    assert "RuntimeError" in warnings[0].getMessage()
+    assert "boom" in warnings[0].getMessage()
+
+
 def _assert_multi_segment_boundary_masked(batch: Batch) -> None:
     """Assert a row holds >=2 positive segments with boundary labels masked.
 
@@ -521,6 +576,33 @@ def test_hf_state_roundtrip(patch_hf_load_dataset: Callable[..., dict[str, int]]
     assert next(resumed) == expected
 
 
+def test_hf_set_state_raises_on_missing_hf_state(
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+) -> None:
+    """set_state must fail loud when hf_state is missing, not silently rebuild."""
+    patch_hf_load_dataset([{"text": "alpha"}, {"text": "bravo"}])
+
+    spec = HFStreamSpec(
+        dataset="dummy",
+        name="dummy",
+        split="train",
+        text_key="text",
+        shuffle=False,
+        shuffle_buffer_size=8,
+        seed=0,
+        repeat=False,
+        max_retries=0,
+        retry_delay_sec=0.0,
+        state_update_interval=2,
+    )
+
+    stream = HFStreamingTextStream(spec)
+    with pytest.raises(RuntimeError, match="hf_state"):
+        stream.set_state({"epoch": 0, "hf_state": None})
+    with pytest.raises(RuntimeError, match="hf_state"):
+        stream.set_state({"epoch": 0})
+
+
 def test_hf_retry_rebuild_roundtrip(patch_hf_load_dataset: Callable[..., dict[str, int]]) -> None:
     """HF stream should recover from transient failure via state restore."""
     items = [{"text": "alpha"}, {"text": "bravo"}, {"text": "charlie"}]
@@ -570,11 +652,15 @@ def test_packer_alignment_after_restore() -> None:
 
     remaining = state.get("packer", {}).get("remaining_tokens")
     assert remaining, "expected non-empty packer buffer for alignment test"
+    docs_seen_at_snapshot = state["packer"]["docs_seen"]
+    assert docs_seen_at_snapshot > 0
 
     cont = [_batch_arrays(next(it)) for _ in range(3)]
 
     it2 = build_train_iterator(cfg)
     it2.set_state(state)
+    # docs_seen/docs_truncated diagnostics must survive save/load, not reset to 0.
+    assert it2.get_state()["packer"]["docs_seen"] == docs_seen_at_snapshot
     resumed = [_batch_arrays(next(it2)) for _ in range(3)]
 
     for batch_a, batch_b in zip(cont, resumed, strict=True):

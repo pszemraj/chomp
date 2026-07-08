@@ -130,6 +130,13 @@ def _packer_stats_from_chain(it: Any) -> dict[str, Any]:
     Intermediate nodes (window shuffle, prefetch) don't expose packer stats;
     the sequence-producer iterator at the bottom of the chain does.
 
+    Two failure modes are handled deliberately differently: grain's
+    `DatasetIterator._parent` is a property that raises AssertionError (not
+    AttributeError) on parentless nodes, which is expected and kept narrow to
+    the parent walk. A packer's own get_stats() raising is a real bug and
+    must not vanish silently, so it is caught separately, logged once per
+    node (to avoid per-batch log spam), and only then downgraded to {}.
+
     :param it: Outermost Grain DatasetIterator.
     :return dict[str, Any]: Packer stats, or an empty dict if unreachable.
     """
@@ -139,7 +146,15 @@ def _packer_stats_from_chain(it: Any) -> dict[str, Any]:
         if callable(get_stats):
             try:
                 return dict(get_stats())
-            except Exception:
+            except Exception as exc:
+                if not getattr(node, "_chomp_stats_error_warned", False):
+                    logger.warning(
+                        "packer get_stats() raised %s: %s; packing stats will be "
+                        "empty for this iterator until the underlying bug is fixed.",
+                        type(exc).__name__,
+                        exc,
+                    )
+                    node._chomp_stats_error_warned = True
                 return {}
         # grain's DatasetIterator._parent is a property that raises
         # AssertionError (not AttributeError) on parentless nodes.
