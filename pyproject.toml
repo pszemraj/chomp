@@ -39,7 +39,12 @@ dependencies = [
   "tqdm",
   "rich>=13.0",
   "wandb>=0.16.0",
-  "grain>=0.2.15",
+  # Upper bound is deliberate: the window-shuffle resume-exactness fix
+  # (_ResumeSafeWindowShuffleIterDataset in chomp.data.grain) patches grain's
+  # private _WindowShuffleDatasetIterator._init flag. A construction-time
+  # tripwire fails fast if the attribute vanishes, but bumping past the bound
+  # must be a deliberate act: re-verify the workaround, then raise the cap.
+  "grain>=0.2.15,<0.3",
   "datasets>=3.0.0",
   # transformers (tokenizers)
   "transformers>=4.40.0",

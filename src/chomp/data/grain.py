@@ -235,6 +235,11 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
         window's permutation seed, diverging from the continuous run.
         `set_state` itself fills the current window, so every later refill
         must increment: clearing `_init` after restore is always correct.
+
+        `_init` is a private grain internal, so pyproject.toml upper-bounds
+        the grain dependency; re-verify this workaround before raising that
+        cap. The `hasattr` tripwire below fires at iterator construction on
+        every run (fresh or resumed), so an incompatible grain fails fast.
         """
 
         def __iter__(self) -> Any:
