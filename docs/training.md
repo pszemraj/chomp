@@ -87,7 +87,9 @@ See [Packing — Segment-Isolation Semantics](packing.md#segment-isolation-seman
 
 ## Loss-stability recipe
 
-Validated on Comma (2026-07, 100m 5k-step ablation; see
+This is default hygiene for **domain-ordered or long-document streaming
+corpora** — any stream whose document order is not globally mixed — not a
+dataset-specific fix. Validated on Comma (2026-07, 100m 5k-step ablation; see
 [Packing — Window shuffling](packing.md#window-shuffling-batch-decorrelation)):
 
 - `data.window_shuffle_windows: 4096` (the default) — decorrelates batches from

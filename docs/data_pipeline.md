@@ -106,6 +106,21 @@ The iterator exposes a JSON-serializable state dict containing:
 This is checkpointed alongside the model so resume does not rely on `.skip()`
 or re-streaming.
 
+### Transient stream recovery (best-effort)
+
+Checkpoint resume is exact; in-run recovery from transient HF streaming
+errors is not. The stream caches a last-known-good state every
+`data.state_update_interval` documents (default 2000). When `next()` fails
+(network hiccup), iteration rebuilds from that cached state and retries with
+backoff — which can **replay up to `state_update_interval` recently yielded
+documents**. This is a deliberate tradeoff for long unattended runs: a rare
+duplicated slice beats a dead run. If bounding duplication matters more than
+overhead, lower `data.state_update_interval`; if strict no-replay semantics
+are required, treat any retry warning in the logs as a signal to stop and
+resume from the last checkpoint instead (checkpointed state is unaffected by
+recovery). Errors that survive `data.max_retries` still propagate and crash
+the run.
+
 ## Validation set
 
 chomp builds a fixed validation set when the run is created:

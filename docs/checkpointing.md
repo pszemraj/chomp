@@ -94,3 +94,10 @@ chomp train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run --resume lat
 ```
 
 If a mismatch is detected, resume fails fast with a detailed error.
+
+## Scope of exactness
+
+The exact-resume contract covers checkpoint save/restore. In-run recovery
+from transient HF streaming errors is a separate, best-effort mechanism that
+can replay up to `data.state_update_interval` recent documents — see
+[Data Pipeline — Transient stream recovery](data_pipeline.md#transient-stream-recovery-best-effort).

@@ -929,6 +929,12 @@ Cache HF state every N examples for retry recovery.
 | Constraints | Must be > 0 |
 
 Smaller values provide better recovery from network failures but add overhead.
+
+Note the recovery semantics: rebuilding from the cached state after a
+transient stream error can **replay up to this many recent documents**
+(checkpoint resume stays exact; only in-run recovery is best-effort). This
+value bounds the replay window — see
+[Data Pipeline — Transient stream recovery](data_pipeline.md#transient-stream-recovery-best-effort).
 ---
 
 <a id="data-local"></a>

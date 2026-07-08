@@ -144,10 +144,17 @@ never shuffled.
 
 Guidance:
 
+- This is default hygiene for any streaming corpus that is not known to be
+  globally pre-mixed, not a fix for one dataset. High-risk inputs are
+  **domain-ordered or long-document corpora**: source-concatenated mixes
+  (Common Pile derivatives), arXiv/books/legal/PDF dumps, code dumps —
+  anything stored as "all of source A, then all of source B", or with
+  documents spanning many `seq_len` windows.
 - Long-document corpora: `sequential` + `window_shuffle_windows` (default) +
   a large `shuffle_buffer_size` (e.g. `200_000`). The document-level shuffle
-  buffer fights domain ordering of the source stream; the window shuffle
-  fights single-document batch homogeneity. They are complementary.
+  buffer fights source/domain/shard-order homogeneity of the stream; the
+  window shuffle fights within-document, adjacent-window homogeneity. They
+  are complementary — neither replaces the other.
 - `bin`/`multipack` mainly improve utilization on short-document mixes
   (Zyda-2, SmolLM2-style); on long-document corpora most windows are
   full-capacity chunks and bin packing adds no utilization benefit.
