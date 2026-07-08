@@ -1199,6 +1199,22 @@ def test_resume_compat_ignores_inert_packing_knobs(tmp_path: Path) -> None:
     check_resume_compat(mp_drifted, mp_meta)  # bin-only knob is inert here
 
 
+def test_resume_compat_checks_unknown_packing_fingerprint_keys(tmp_path: Path) -> None:
+    """A packing key recorded on only one side must error, never be skipped.
+
+    The packing section is compared over the union of recorded keys, so a
+    knob added to data_fingerprint (or one written by a different chomp
+    version) can never bypass compat checking — the failure mode of a
+    hand-enumerated comparison list.
+    """
+    cfg = _base_cfg(tmp_path / "run_unknown_key")
+    meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
+    meta["data_fingerprint"]["packing"]["future_knob"] = 3
+
+    with pytest.raises(RuntimeError, match="future_knob"):
+        check_resume_compat(cfg, meta)
+
+
 @pytest.mark.parametrize(
     ("mutate", "match"),
     [

@@ -74,6 +74,10 @@ Hard failures include:
 - batch shape invariants (`seq_len`, `batch_size`, `grad_accum`)
 - model and optimizer config, `train.deterministic`
 
+The packing, model, and optimizer sections are compared over the union of
+keys recorded on either side, so a knob present in only one version's
+fingerprint is a hard mismatch — never silently skipped.
+
 `data.device_put` drift is a warning (it changes where the host-to-device
 transfer happens, not sample order) — except when `grain_prefetch > 0` on
 either side, where it hardens to an error because it changes the prefetch

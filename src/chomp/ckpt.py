@@ -486,83 +486,30 @@ def check_resume_compat(
             severity="error",
         )
 
-    # Packing/loss behavior comparisons.
+    # Packing/loss behavior comparisons. Compared generically over the union
+    # of recorded keys (mirroring the model/optim loops below) so a knob
+    # added to the fingerprint's packing section can never be silently
+    # skipped here. Every key defaults to a hard error: fingerprinted packing
+    # knobs change data order (mode, buffer_docs, group_docs,
+    # window_shuffle_windows), the training objective (strict_segments,
+    # mask_boundary_loss, train_on_eos), or the iterator-state shape a
+    # restore must line up against (grain_prefetch). The one exception is
+    # device_put: it does not change sample order, so a mismatch is normally
+    # a warning — but under prefetch it moves device transfers into the
+    # prefetch thread, changing iterator mechanics around that same state, so
+    # it hardens to an error there.
     pack_prev = meta_fp.get("packing") or {}
     pack_cur = cur_fp.get("packing") or {}
-    _cmp(
-        "data.packing_mode",
-        pack_cur.get("mode"),
-        pack_prev.get("mode"),
-        severity="error",
-    )
-    _cmp(
-        "data.packing_buffer_docs",
-        pack_cur.get("buffer_docs"),
-        pack_prev.get("buffer_docs"),
-        severity="error",
-    )
-    _cmp(
-        "data.packing_max_docs_per_bin",
-        pack_cur.get("max_docs_per_bin"),
-        pack_prev.get("max_docs_per_bin"),
-        severity="error",
-    )
-    # Changing group_docs alters which documents each multipack cycle packs,
-    # so a resumed run would diverge from the continuous one.
-    _cmp(
-        "data.packing_group_docs",
-        pack_cur.get("group_docs"),
-        pack_prev.get("group_docs"),
-        severity="error",
-    )
-    # Changing strict_segments silently changes the training objective
-    # (segment isolation + backend boundary masking) mid-run.
-    _cmp(
-        "data.packing_strict_segments",
-        pack_cur.get("strict_segments"),
-        pack_prev.get("strict_segments"),
-        severity="error",
-    )
-    # Hard error: prefetch changes the grain chain wrapping, and with it the
-    # shape of the serialized iterator state a restore must line up against.
-    _cmp(
-        "data.grain_prefetch",
-        pack_cur.get("grain_prefetch"),
-        pack_prev.get("grain_prefetch"),
-        severity="error",
-    )
-    # device_put does not change sample order, so a mismatch is normally a
-    # warning — but under prefetch it moves device transfers into the
-    # prefetch thread, changing iterator mechanics around the very state a
-    # restore must line up against, so it hardens to an error there.
+    # Knobs whose DataConfig field carries the packing_ prefix; the rest are
+    # top-level data.* fields recorded in the fingerprint's packing section.
+    packing_prefixed = {"mode", "buffer_docs", "max_docs_per_bin", "group_docs", "strict_segments"}
     prefetch_active = bool(pack_cur.get("grain_prefetch") or pack_prev.get("grain_prefetch"))
-    _cmp(
-        "data.device_put",
-        pack_cur.get("device_put"),
-        pack_prev.get("device_put"),
-        severity="error" if prefetch_active else "warning",
-    )
-    _cmp(
-        "data.mask_boundary_loss",
-        pack_cur.get("mask_boundary_loss"),
-        pack_prev.get("mask_boundary_loss"),
-        severity="error",
-    )
-    _cmp(
-        "data.train_on_eos",
-        pack_cur.get("train_on_eos"),
-        pack_prev.get("train_on_eos"),
-        severity="error",
-    )
-    # Changing this alters the iterator-state shape (window-shuffle layer is
-    # config-gated), so a mismatched resume would KeyError or silently skip
-    # the data-state restore.
-    _cmp(
-        "data.window_shuffle_windows",
-        pack_cur.get("window_shuffle_windows"),
-        pack_prev.get("window_shuffle_windows"),
-        severity="error",
-    )
+    for key in sorted(set(pack_prev) | set(pack_cur)):
+        severity = "error"
+        if key == "device_put" and not prefetch_active:
+            severity = "warning"
+        label = f"data.packing_{key}" if key in packing_prefixed else f"data.{key}"
+        _cmp(label, pack_cur.get(key), pack_prev.get(key), severity=severity)
 
     # Eval knobs stay hard errors on purpose: eval texts are cached per run
     # and eval-loss continuity is a first-class diagnostic here — silently
