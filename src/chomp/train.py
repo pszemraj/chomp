@@ -1730,6 +1730,18 @@ def run(
                     logger.exception("Final checkpoint save failed at step %s", final_step)
                     ckpt_errors.append(exc)
 
+        if manager is not None:
+            try:
+                manager.wait_until_finished()
+            except Exception as exc:
+                logger.exception("Waiting for async checkpoint writes failed")
+                ckpt_errors.append(exc)
+
+        # Checkpoint finalization failures fail the run (raise below), so the
+        # exit code W&B records must agree — finish() only after all
+        # checkpoint work has had its chance to error.
+        if ckpt_errors and not exc_in_flight and exit_code == 0:
+            exit_code = 1
         if wandb_run is not None:
             # Telemetry only; never worth masking or replacing a real failure.
             with contextlib.suppress(Exception):
@@ -1738,13 +1750,6 @@ def run(
                     wandb_run.summary["crash_type"] = crash_type
                     wandb_run.summary["crash_reason"] = crash_reason
                 wandb_run.finish(exit_code=exit_code)
-
-        if manager is not None:
-            try:
-                manager.wait_until_finished()
-            except Exception as exc:
-                logger.exception("Waiting for async checkpoint writes failed")
-                ckpt_errors.append(exc)
 
         if profile_enabled:
             with contextlib.suppress(Exception):

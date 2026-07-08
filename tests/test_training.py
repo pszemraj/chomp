@@ -493,9 +493,27 @@ def test_final_checkpoint_failure_fails_the_run(
     def _failing_save(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("disk full (injected)")
 
+    # W&B telemetry must agree with the raised failure: finish() is called
+    # with a nonzero exit code, not 0-then-raise.
+    finish_codes: list[int] = []
+
+    class _FakeWandbRun:
+        summary: dict[str, Any] = {}
+
+        def log(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def finish(self, exit_code: int = 0) -> None:
+            finish_codes.append(int(exit_code))
+
     monkeypatch.setattr("chomp.train.save", _failing_save)
+    monkeypatch.setattr("chomp.train._maybe_init_wandb", lambda *a, **k: _FakeWandbRun())
     with pytest.raises(RuntimeError, match="checkpoint finalization failed"):
         run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+    assert finish_codes == [1], (
+        f"W&B must record the checkpoint finalization failure, got {finish_codes}"
+    )
+    monkeypatch.setattr("chomp.train._maybe_init_wandb", lambda *a, **k: None)
 
     # Crash path: the original exception wins; the save failure is logged.
     cfg2, _ = make_small_run_cfg(tmp_path, run_subdir="run_ckpt_fail2", decay_steps=3)
