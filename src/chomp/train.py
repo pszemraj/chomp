@@ -179,7 +179,7 @@ def _setup_run_dir_and_tokenizer(
     Any,
     Path,
     Path,
-    list[list[int]],
+    list[list[int]] | None,
     GenerationSettings | None,
     Any | None,
     jax.Array | None,
@@ -191,8 +191,9 @@ def _setup_run_dir_and_tokenizer(
     :param str | None config_path: Optional config path for run_dir bookkeeping.
     :param bool allow_existing: Whether to reuse an existing run directory.
     :param bool dry_run: If True, skip heavy data/generation setup.
-    :return tuple[Config, Any, Path, Path, list[list[int]], GenerationSettings | None, Any | None, jax.Array | None, random.Random | None]:
-        Updated config, tokenizer, run/metrics paths, eval tokens, generation settings, stream, key, and RNG.
+    :return tuple[Config, Any, Path, Path, list[list[int]] | None, GenerationSettings | None, Any | None, jax.Array | None, random.Random | None]:
+        Updated config, tokenizer, run/metrics paths, optional deferred eval
+        tokens, generation settings, stream, key, and RNG.
     """
     tokenizer = None
     if allow_existing and cfg.logging.run_dir is not None:
@@ -216,15 +217,17 @@ def _setup_run_dir_and_tokenizer(
 
     # run_dir pins the eval set: created once, persisted, and reloaded on
     # resume so evals stay comparable even if the upstream dataset drifts.
-    # allow_existing is exactly "this is a resume": a missing cache then
-    # fails hard unless data.recreate_eval_cache explicitly overrides.
-    eval_tokens = (
-        []
-        if dry_run
-        else load_or_create_eval_texts(
+    # The recreation override can write a missing artifact, so defer that
+    # entire operation until checkpoint compatibility accepts this resume.
+    # None is the explicit "deferred" sentinel; [] remains "eval disabled."
+    if dry_run:
+        eval_tokens = []
+    elif allow_existing and cfg.data.recreate_eval_cache:
+        eval_tokens = None
+    else:
+        eval_tokens = load_or_create_eval_texts(
             cfg, tokenizer=tokenizer, run_dir=run_dir, resume=allow_existing
         )
-    )
 
     gen_settings: GenerationSettings | None = None
     gen_stream = None
@@ -1255,6 +1258,15 @@ def run(
         cfg=cfg,
         tokenizer_hash=tokenizer_hash,
     )
+
+    if eval_tokens is None:
+        # Reaching here means check_resume_compat accepted the restored
+        # checkpoint. It is now safe for the explicit override to persist a
+        # replacement cache without a rejected configuration poisoning the
+        # run directory.
+        eval_tokens = load_or_create_eval_texts(
+            cfg, tokenizer=tokenizer, run_dir=run_dir, resume=True
+        )
 
     train_step = make_train_step(cfg, static=static, tx=tx, lr_schedule=schedule)
     eval_every = int(cfg.train.eval_every)

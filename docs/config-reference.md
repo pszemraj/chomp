@@ -796,8 +796,10 @@ a hard error because recollecting it would silently change what eval losses
 are measured on. Setting this to `true` (typically via
 `--override data.recreate_eval_cache=true`) allows the resume to rebuild the
 cache, with a loud warning that eval curves before and after the boundary are
-not comparable. It has no effect when the cache is present and is not part of
-the data fingerprint.
+not comparable. The replacement is persisted only after checkpoint
+compatibility validation succeeds, so a rejected resume cannot poison the run
+directory. It has no effect when the cache is present and is not part of the
+data fingerprint.
 
 **Related:** [`data.max_eval_samples`](#data.max_eval_samples)
 ---

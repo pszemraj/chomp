@@ -137,8 +137,9 @@ delete the run directory (not just the cache) to change eval identity.
 A **missing** cache on resume is also a hard error — silently recollecting
 would compare post-resume eval losses against a different token set than every
 earlier point on the curve. `data.recreate_eval_cache: true` is the explicit
-one-shot override; it rebuilds the cache with a loud warning that eval curves
-across the boundary are not comparable.
+one-shot override; after checkpoint compatibility validation succeeds, it
+rebuilds the cache with a loud warning that eval curves across the boundary
+are not comparable. A rejected resume never persists its recollected tokens.
 
 At end of stream the `bin`/`multipack` packers flush their remaining pending
 documents into padded windows, so an eval doc set below the pack threshold

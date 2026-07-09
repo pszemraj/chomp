@@ -412,6 +412,44 @@ def test_run_resume_requires_eval_cache(tmp_path: Path) -> None:
         run(cfg, config_path=None, resume="latest")
 
 
+def test_failed_resume_does_not_persist_recreated_eval_cache(tmp_path: Path) -> None:
+    """A rejected resume must not poison a missing eval cache.
+
+    Recollection may use a changed source, tokenizer, or eval identity. The
+    replacement therefore cannot enter the run directory until checkpoint
+    compatibility accepts the current configuration.
+    """
+    run_dir = tmp_path / "run"
+    cfg = _eval_run_cfg(
+        run_dir,
+        steps=1,
+        checkpoint=CheckpointConfig(enabled=True, save_every=1, max_to_keep=2, async_save=False),
+    )
+    run(cfg, config_path=None, resume="none")
+
+    cache = run_dir / "eval_tokens.json.gz"
+    tok = build_tokenizer(cfg)
+    expected_tokens = load_or_create_eval_texts(cfg, tokenizer=tok, run_dir=run_dir)
+    cache.unlink()
+
+    incompatible = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            local_text="incompatible replacement corpus",
+            recreate_eval_cache=True,
+        ),
+    )
+    with pytest.raises(RuntimeError, match="local_text_hash"):
+        run(incompatible, config_path=None, resume="latest")
+    assert not cache.exists()
+
+    correct = replace(cfg, data=replace(cfg.data, recreate_eval_cache=True))
+    run(correct, config_path=None, resume="latest")
+    assert cache.exists()
+    assert load_or_create_eval_texts(cfg, tokenizer=tok, run_dir=run_dir) == expected_tokens
+
+
 def test_eval_tokens_cache_rejects_corruption(tmp_path: Path) -> None:
     """A cache whose content no longer matches its hash is refused."""
     import gzip
