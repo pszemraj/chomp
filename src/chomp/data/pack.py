@@ -563,6 +563,14 @@ def _chunk_to_capacity(doc: np.ndarray, capacity: int) -> list[np.ndarray]:
     return [doc[start : start + capacity] for start in range(0, int(doc.size), capacity)]
 
 
+def _place_first_fit(bins: list[_Bin], seg: np.ndarray) -> bool:
+    for b in bins:
+        if b.can_fit(seg):
+            b.add(seg)
+            return True
+    return False
+
+
 def _ffd_pack(
     candidates: list[np.ndarray],
     *,
@@ -591,12 +599,7 @@ def _ffd_pack(
 
     leftover_idx: list[int] = []
     for idx in order[bins_per_pack:]:
-        seg = candidates[idx]
-        for b in bins:
-            if b.can_fit(seg):
-                b.add(seg)
-                break
-        else:
+        if not _place_first_fit(bins, candidates[idx]):
             leftover_idx.append(idx)
     leftover = [candidates[i] for i in sorted(leftover_idx)]
     return bins, leftover
@@ -624,11 +627,7 @@ def _ffd_pack_all(
     bins: list[_Bin] = []
     for idx in order:
         seg = candidates[idx]
-        for b in bins:
-            if b.can_fit(seg):
-                b.add(seg)
-                break
-        else:
+        if not _place_first_fit(bins, seg):
             b = _Bin(capacity=capacity, max_docs=max_docs)
             b.add(seg)
             bins.append(b)
