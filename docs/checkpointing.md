@@ -63,7 +63,7 @@ Hard failures include:
 
 - data source identity (`hf_dataset`, `hf_name`, `split`, `text_key`)
 - stream-order and termination semantics (`shuffle`, `shuffle_buffer_size`,
-  `repeat`, `window_shuffle_windows`, `grain_prefetch`)
+  `repeat`, `window_shuffle_windows`, its effective seed, and `grain_prefetch`)
 - tokenizer settings and vocab rounding
 - packing mode, packing buffer sizes, and strict-segment settings
 - objective knobs (`mask_boundary_loss`, `train_on_eos`) and eval knobs

@@ -852,7 +852,9 @@ only; eval batches are never shuffled.
 seed: int = 0
 ```
 
-Random seed for data shuffling.
+Random seed for data shuffling. This seeds both HF document shuffling and the
+packed-window shuffle; changing it while either active is a hard resume
+compatibility error because it changes future batch order.
 
 | Property | Value |
 |----------|-------|

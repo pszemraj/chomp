@@ -37,6 +37,7 @@ from chomp.config import Config, validate_config
 from chomp.types import IGNORE_INDEX, Batch
 from chomp.utils.xla import deterministic_gpu_ops_setting
 
+from .grain import effective_window_shuffle_seed
 from .hf import HFStreamingTextStream, HFStreamSpec, ListTokenStream, LocalTextStream
 from .pack import BinPacker, MultipackPacker, TokenPacker
 
@@ -814,6 +815,12 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
         # where iterator mechanics already differ).
         "device_put": d.device_put,
     }
+    if d.window_shuffle_windows > 0:
+        # The shuffle reconstructs current and future windows from this seed
+        # after restore. Keep the fingerprint tied to the effective value used
+        # by Grain so changing either data.seed or the internal offset cannot
+        # silently change replay order.
+        packing["window_shuffle_seed"] = effective_window_shuffle_seed(cfg)
     if d.packing_mode in ("bin", "multipack"):
         packing["max_docs_per_bin"] = d.packing_max_docs_per_bin
         packing["strict_segments"] = d.packing_strict_segments

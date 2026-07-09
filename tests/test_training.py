@@ -1425,6 +1425,26 @@ def test_resume_compat_rejects_hf_shuffle_buffer_drift(tmp_path: Path) -> None:
         check_resume_compat(drifted, meta)
 
 
+def test_resume_compat_rejects_local_window_shuffle_seed_drift(tmp_path: Path) -> None:
+    """Local window-shuffle replay must reject a changed data seed."""
+    cfg = _base_cfg(tmp_path / "run_window_seed")
+    assert cfg.data.backend == "local_text"
+    assert cfg.data.window_shuffle_windows > 0
+    meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
+
+    drifted = replace(cfg, data=replace(cfg.data, seed=cfg.data.seed + 1))
+    with pytest.raises(RuntimeError, match="window_shuffle_seed"):
+        check_resume_compat(drifted, meta)
+
+    disabled = replace(cfg, data=replace(cfg.data, window_shuffle_windows=0))
+    disabled_meta = {
+        "config": disabled.to_dict(),
+        "data_fingerprint": data_fingerprint(disabled),
+    }
+    disabled_drifted = replace(disabled, data=replace(disabled.data, seed=disabled.data.seed + 1))
+    check_resume_compat(disabled_drifted, disabled_meta)
+
+
 def test_resume_compat_rejects_hf_repeat_drift(tmp_path: Path) -> None:
     """repeat decides epoch rollover vs stream termination — hard error for
     HF streams, not just local_text."""

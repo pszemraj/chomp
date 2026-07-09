@@ -17,6 +17,15 @@ logger = logging.getLogger(__name__)
 _WINDOW_SHUFFLE_SEED_OFFSET = 104_729
 
 
+def effective_window_shuffle_seed(cfg: Config) -> int:
+    """Return the deterministic seed consumed by packed-window shuffling.
+
+    :param Config cfg: Training configuration.
+    :return int: Effective Grain window-shuffle seed.
+    """
+    return int(cfg.data.seed) + _WINDOW_SHUFFLE_SEED_OFFSET
+
+
 class _IteratorProtocol(Protocol):
     """Protocol for Grain dataset iterators."""
 
@@ -398,7 +407,7 @@ def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchItera
         ds = _WindowShuffle(
             ds,
             window_size=int(cfg.data.window_shuffle_windows),
-            seed=int(cfg.data.seed) + _WINDOW_SHUFFLE_SEED_OFFSET,
+            seed=effective_window_shuffle_seed(cfg),
         )
 
     # Single source of the stats-gating rule: device_put moves batches to
