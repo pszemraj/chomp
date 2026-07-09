@@ -544,6 +544,83 @@ def test_resume_bit_exact_with_prefetch_and_window_shuffle(tmp_path: Path) -> No
     assert tree_allclose(states[0].opt_state, states[1].opt_state, rtol=0.0, atol=0.0)
 
 
+def test_resume_bit_exact_through_exhaustion_flush(tmp_path: Path) -> None:
+    """Interrupted + resumed must match continuous bit-exactly when the run
+    ends in an FFD end-of-stream flush, with window shuffle + prefetch engaged.
+
+    This is the integration claim behind the flush feature: grain's window
+    shuffle replays its parent from the block start on resume, so the resumed
+    process re-drives the packer through StopIteration -> finish() -> flush.
+    If the replayed flush produced different windows than the continuous run,
+    step-3 losses or the final states would diverge.
+    """
+    # One 84-byte doc -> segments [16]*5 + [4] at seq_len=16 (max_doc_tokens
+    # raised past the 4*seq_len=64 default so nothing truncates). With
+    # bins_per_pack = grad_accum*batch_size = 2 and buffer_docs=4, two pack
+    # cycles emit 4 windows and leave [16, 4] pending below threshold — only
+    # the exhaustion flush turns those into windows 5 and 6. Teeth: step 3
+    # trains on flushed windows, so without the flush both runs would end at
+    # step 2 and the step-set assertion below fails.
+    text = "".join(chr(97 + (i * 7) % 26) for i in range(84))
+
+    def _make_cfg(subdir: str, steps: int) -> tuple[Config, Path]:
+        cfg, config_src = make_small_run_cfg(tmp_path, run_subdir=subdir, decay_steps=3)
+        cfg = replace(cfg, train=replace(cfg.train, steps=steps, grad_accum=2))
+        cfg = replace(
+            cfg,
+            data=replace(
+                cfg.data,
+                local_text=text,
+                repeat=False,
+                packing_mode="bin",
+                grain_prefetch=2,
+                window_shuffle_windows=8,
+                tokenizer=replace(cfg.data.tokenizer, max_doc_tokens=256),
+            ),
+        )
+        # save_every > steps: only the finally-block final save runs, so the
+        # interrupted run checkpoints exactly at step 2.
+        return replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=4)), config_src
+
+    cfg_cont, config_src = _make_cfg("run_flush_cont", steps=3)
+    run_dir_cont = run(cfg_cont, config_path=str(config_src), resume="none", dry_run=False)
+
+    cfg_int, _ = _make_cfg("run_flush_int", steps=2)
+    run_dir_int = run(cfg_int, config_path=str(config_src), resume="none", dry_run=False)
+    cfg_resume, _ = _make_cfg("run_flush_int", steps=3)
+    run(cfg_resume, config_path=str(config_src), resume="latest", dry_run=False)
+
+    def _losses(run_dir: Path) -> dict[int, float]:
+        rows = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
+        return {int(r["step"]): r["loss"] for r in rows if "loss" in r and "step" in r}
+
+    losses_cont = _losses(run_dir_cont)
+    losses_int = _losses(run_dir_int)
+    # Step 3 exists only because the flush emitted windows 5 and 6.
+    assert set(losses_cont) == set(losses_int) == {1, 2, 3}
+    assert len(set(losses_cont.values())) > 1
+    assert losses_cont == losses_int
+
+    cfg_ref, tokenizer = prepare_tokenizer_and_config(cfg_cont)
+    params, _static = build_model(cfg_ref, key=jax.random.PRNGKey(0))
+    tx, _ = build_optimizer(cfg_ref, params)
+    abstract_state = abstractify_tree(
+        init_train_state(cfg_ref, params=params, tx=tx, key=jax.random.PRNGKey(1))
+    )
+    states = []
+    for run_dir in (run_dir_cont, run_dir_int):
+        mgr = make_manager(default_ckpt_dir(run_dir), max_to_keep=2, save_every=4, async_save=False)
+        _, state, _ = restore_at_step(
+            mgr,
+            step=3,
+            abstract_train_state=abstract_state,
+            data_iter=build_train_iterator(cfg_ref, tokenizer=tokenizer),
+        )
+        states.append(state)
+    assert tree_allclose(states[0].params, states[1].params, rtol=0.0, atol=0.0)
+    assert tree_allclose(states[0].opt_state, states[1].opt_state, rtol=0.0, atol=0.0)
+
+
 def test_grain_data_state_capture_is_synchronous() -> None:
     """ckpt.save() relies on grain serializing iterator state in the blocking
     phase of manager.save(); if grain's handler ever grows an async_save,
