@@ -193,48 +193,6 @@ def test_configure_blackwell_skips_non_blackwell(
     assert os.environ.get("XLA_FLAGS") == "--keep"
 
 
-def test_deterministic_gpu_ops_appended_when_gpu_present(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The opt-in pin appends the flag on any NVIDIA GPU (test-suite usage).
-
-    :param pytest.MonkeyPatch monkeypatch: Pytest monkeypatch fixture.
-    """
-    monkeypatch.setattr(xla, "_query_nvidia_gpu_names", lambda: ["NVIDIA GeForce RTX 4090"])
-    monkeypatch.setenv("XLA_FLAGS", "--keep")
-
-    assert xla.ensure_deterministic_gpu_ops() is True
-    assert os.environ.get("XLA_FLAGS") == "--keep --xla_gpu_deterministic_ops=true"
-
-
-@pytest.mark.parametrize("preset", ["true", "false"])
-def test_deterministic_gpu_ops_respects_explicit_setting(
-    monkeypatch: pytest.MonkeyPatch, preset: str
-) -> None:
-    """An explicit xla_gpu_deterministic_ops value (either way) must be kept.
-
-    :param pytest.MonkeyPatch monkeypatch: Pytest monkeypatch fixture.
-    :param str preset: Pre-existing flag value.
-    """
-    monkeypatch.setattr(xla, "_query_nvidia_gpu_names", lambda: ["NVIDIA GeForce RTX 5090"])
-    monkeypatch.setenv("XLA_FLAGS", f"--xla_gpu_deterministic_ops={preset}")
-
-    assert xla.ensure_deterministic_gpu_ops() is False
-    assert os.environ.get("XLA_FLAGS") == f"--xla_gpu_deterministic_ops={preset}"
-
-
-def test_deterministic_gpu_ops_skips_without_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No NVIDIA GPUs -> XLA_FLAGS untouched.
-
-    :param pytest.MonkeyPatch monkeypatch: Pytest monkeypatch fixture.
-    """
-    monkeypatch.setattr(xla, "_query_nvidia_gpu_names", lambda: [])
-    monkeypatch.setenv("XLA_FLAGS", "--keep")
-
-    assert xla.ensure_deterministic_gpu_ops() is False
-    assert os.environ.get("XLA_FLAGS") == "--keep"
-
-
 @pytest.mark.parametrize(
     ("flags", "expected"),
     [

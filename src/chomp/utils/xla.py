@@ -9,7 +9,6 @@ import subprocess
 
 _TRITON_FLAG = "--xla_gpu_enable_triton_gemm=false"
 _DETERMINISTIC_FLAG_PREFIX = "--xla_gpu_deterministic_ops="
-_DETERMINISTIC_FLAG = _DETERMINISTIC_FLAG_PREFIX + "true"
 _PREALLOC_ENV = "XLA_PYTHON_CLIENT_PREALLOCATE"
 _RTX_RE = re.compile(r"RTX\s*(\d{4})", re.IGNORECASE)
 _CONFIG_RESULT: bool | None = None
@@ -98,33 +97,6 @@ def deterministic_gpu_ops_setting() -> bool | None:
         if tok.startswith(_DETERMINISTIC_FLAG_PREFIX):
             setting = tok[len(_DETERMINISTIC_FLAG_PREFIX) :].strip().lower() == "true"
     return setting
-
-
-def ensure_deterministic_gpu_ops(*, logger: logging.Logger | None = None) -> bool:
-    """Pin XLA GPU kernel selection to deterministic algorithms.
-
-    NOT a production default — deterministic kernels cost real throughput
-    (~25-35% slower steps measured on a 100M-param run). The test suite calls
-    this so the exact-resume tests verify harness replay logic at atol=0
-    without XLA kernel-selection noise (kernel choices are sensitive to prior
-    GPU state); users can opt in via XLA_FLAGS for bit-exact debugging runs.
-    An explicit setting in XLA_FLAGS (either value) is respected; call before
-    JAX initializes its backend.
-
-    :param logger: Optional logger override.
-    :return bool: True if the flag was appended to XLA_FLAGS.
-    """
-    log = logger or logging.getLogger(__name__)
-    if not _query_nvidia_gpu_names():
-        return False
-
-    if deterministic_gpu_ops_setting() is not None:
-        log.info("XLA_FLAGS already sets xla_gpu_deterministic_ops; leaving it as-is.")
-        return False
-    existing = os.environ.get("XLA_FLAGS", "")
-    os.environ["XLA_FLAGS"] = f"{existing} {_DETERMINISTIC_FLAG}".strip()
-    log.info("Setting %s (deterministic kernel selection).", _DETERMINISTIC_FLAG)
-    return True
 
 
 def configure_blackwell_xla_env(

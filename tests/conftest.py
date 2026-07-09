@@ -8,8 +8,17 @@ from typing import Any
 
 import pytest
 
-from chomp.utils.xla import configure_blackwell_xla_env, ensure_deterministic_gpu_ops
+from chomp.utils import xla
 from tests.helpers.hf_fakes import FakeHFIterable
+
+
+def _pin_deterministic_gpu_ops() -> None:
+    """Pin deterministic GPU kernels for bit-exact resume assertions."""
+    if not xla._query_nvidia_gpu_names() or xla.deterministic_gpu_ops_setting() is not None:
+        return
+    flag = "--xla_gpu_deterministic_ops=true"
+    os.environ["XLA_FLAGS"] = f"{os.environ.get('XLA_FLAGS', '')} {flag}".strip()
+
 
 # Ensure XLA env quirks are applied before any JAX imports in tests.
 # Deterministic GPU ops are pinned HERE ONLY (production does not set them —
@@ -17,8 +26,8 @@ from tests.helpers.hf_fakes import FakeHFIterable
 # equality to catch harness replay bugs, and without the flag XLA kernel
 # choices depend on prior GPU state, adding low-order optimizer-state noise
 # under full-suite ordering that has nothing to do with the harness.
-configure_blackwell_xla_env()
-ensure_deterministic_gpu_ops()
+xla.configure_blackwell_xla_env()
+_pin_deterministic_gpu_ops()
 
 # Tests should not rely on users exporting preallocation flags.
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
