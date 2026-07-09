@@ -324,6 +324,50 @@ def _maybe_start_profile(cfg: Config, *, run_dir: Path) -> bool:
     return False
 
 
+def _finish_run_telemetry(
+    wandb_run: Any | None,
+    *,
+    profile_enabled: bool,
+    exit_code: int = 0,
+    crash_type: str | None = None,
+    crash_reason: str | None = None,
+) -> None:
+    """Finish optional telemetry resources without masking run failures.
+
+    :param Any | None wandb_run: Active W&B run, if any.
+    :param bool profile_enabled: Whether a profiler trace was started.
+    :param int exit_code: Process-style completion code reported to W&B.
+    :param str | None crash_type: Exception type recorded for a failed run.
+    :param str | None crash_reason: Exception message recorded for a failed run.
+    """
+    if wandb_run is not None:
+        with contextlib.suppress(Exception):
+            if crash_reason is not None:
+                wandb_run.summary["crashed"] = True
+                wandb_run.summary["crash_type"] = crash_type
+                wandb_run.summary["crash_reason"] = crash_reason
+            wandb_run.finish(exit_code=exit_code)
+    if profile_enabled:
+        with contextlib.suppress(Exception):
+            stop_trace()
+
+
+def _start_run_telemetry(cfg: Config, *, run_dir: Path, dry_run: bool) -> tuple[Any | None, bool]:
+    """Start optional telemetry resources as one failure-safe lifecycle.
+
+    :param Config cfg: Training configuration.
+    :param Path run_dir: Run directory path.
+    :param bool dry_run: Whether this is a dry run.
+    :return tuple[Any | None, bool]: W&B run and profiler-started flag.
+    """
+    wandb_run = _maybe_init_wandb(cfg, run_dir=run_dir, dry_run=dry_run)
+    try:
+        return wandb_run, _maybe_start_profile(cfg, run_dir=run_dir)
+    except Exception:
+        _finish_run_telemetry(wandb_run, profile_enabled=False, exit_code=1)
+        raise
+
+
 def _build_model_state(
     cfg: Config,
 ) -> tuple[
@@ -1240,9 +1284,6 @@ def run(
         )
     tokenizer_hash = tokenizer_snapshot_hash(run_dir)
 
-    wandb_run = _maybe_init_wandb(cfg, run_dir=run_dir, dry_run=dry_run)
-    profile_enabled = _maybe_start_profile(cfg, run_dir=run_dir)
-
     params, static, tx, schedule, state0, abstract_state = _build_model_state(cfg)
     _validate_packing_capabilities(cfg, params=params, static=static)
 
@@ -1283,48 +1324,49 @@ def run(
         eval_step = make_eval_step(cfg, static=static)
 
     if dry_run:
+        wandb_run, profile_enabled = _start_run_telemetry(cfg, run_dir=run_dir, dry_run=True)
         try:
-            batch = next(data_it)
-        except StopIteration as exc:
-            raise RuntimeError("dry_run: data iterator exhausted before first batch") from exc
-        data_stats = data_it.get_stats()
-        if not cfg.data.device_put:
-            batch = jax.device_put(batch)
-        if cfg.debug.check_device_every > 0:
-            assert_batch_on_device(batch, allow_cpu=cfg.train.allow_cpu)
+            try:
+                batch = next(data_it)
+            except StopIteration as exc:
+                raise RuntimeError("dry_run: data iterator exhausted before first batch") from exc
+            data_stats = data_it.get_stats()
+            if not cfg.data.device_put:
+                batch = jax.device_put(batch)
+            if cfg.debug.check_device_every > 0:
+                assert_batch_on_device(batch, allow_cpu=cfg.train.allow_cpu)
 
-        t1 = time.perf_counter()
-        state, metrics = train_step(state, batch)
-        metrics_host = jax.device_get(metrics)
-        t2 = time.perf_counter()
-        step_time_s = t2 - t1
+            t1 = time.perf_counter()
+            state, metrics = train_step(state, batch)
+            metrics_host = jax.device_get(metrics)
+            t2 = time.perf_counter()
+            step_time_s = t2 - t1
 
-        step_i = int(jax.device_get(state.step))
-        if cfg.debug.nan_check:
-            _check_finite_metrics(metrics_host, step=step_i)
+            step_i = int(jax.device_get(state.step))
+            if cfg.debug.nan_check:
+                _check_finite_metrics(metrics_host, step=step_i)
 
-        token_sum = float(metrics_host.get("token_sum", 0.0))
-        tokens_per_sec = token_sum / step_time_s if step_time_s > 0 else 0.0
-        console_line = _console_row(
-            cfg,
-            step=step_i,
-            metrics_host=metrics_host,
-            step_time_s=step_time_s,
-            tokens_per_sec=tokens_per_sec,
-            eval_loss=None,
-            data_stats=data_stats,
-            mem_stats=_device_memory_stats_gb(),
-        )
-        print("[chomp] dry-run complete")
-        print(console_line)
-
-        if wandb_run is not None:
-            wandb_run.finish()
-        if manager is not None:
-            manager.wait_until_finished()
-        if profile_enabled:
-            stop_trace()
-        return run_dir
+            token_sum = float(metrics_host.get("token_sum", 0.0))
+            tokens_per_sec = token_sum / step_time_s if step_time_s > 0 else 0.0
+            console_line = _console_row(
+                cfg,
+                step=step_i,
+                metrics_host=metrics_host,
+                step_time_s=step_time_s,
+                tokens_per_sec=tokens_per_sec,
+                eval_loss=None,
+                data_stats=data_stats,
+                mem_stats=_device_memory_stats_gb(),
+            )
+            print("[chomp] dry-run complete")
+            print(console_line)
+            return run_dir
+        finally:
+            try:
+                if manager is not None:
+                    manager.wait_until_finished()
+            finally:
+                _finish_run_telemetry(wandb_run, profile_enabled=profile_enabled)
 
     # Training loop
     t_compile = None
@@ -1469,6 +1511,7 @@ def run(
             use_rich=cfg.logging.console_use_rich,
         )
 
+    wandb_run, profile_enabled = _start_run_telemetry(cfg, run_dir=run_dir, dry_run=False)
     exit_code = 0
     crash_reason = None
     crash_type = None
@@ -1751,18 +1794,13 @@ def run(
         # checkpoint work has had its chance to error.
         if ckpt_errors and not exc_in_flight and exit_code == 0:
             exit_code = 1
-        if wandb_run is not None:
-            # Telemetry only; never worth masking or replacing a real failure.
-            with contextlib.suppress(Exception):
-                if crash_reason is not None:
-                    wandb_run.summary["crashed"] = True
-                    wandb_run.summary["crash_type"] = crash_type
-                    wandb_run.summary["crash_reason"] = crash_reason
-                wandb_run.finish(exit_code=exit_code)
-
-        if profile_enabled:
-            with contextlib.suppress(Exception):
-                stop_trace()
+        _finish_run_telemetry(
+            wandb_run,
+            profile_enabled=profile_enabled,
+            exit_code=exit_code,
+            crash_type=crash_type,
+            crash_reason=crash_reason,
+        )
 
         _flush_loggers()
 

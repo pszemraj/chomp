@@ -876,8 +876,11 @@ def test_resume_rejects_seq_len_mismatch(tmp_path: Path) -> None:
         run(cfg_b, config_path=None, resume="latest")
 
 
-def test_dry_run_compiles_single_step(tmp_path: Path) -> None:
+def test_dry_run_compiles_single_step(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Dry run should compile one step, write config, but not metrics."""
+    profile_events: list[str] = []
+    monkeypatch.setattr("chomp.train.start_trace", lambda _: profile_events.append("start"))
+    monkeypatch.setattr("chomp.train.stop_trace", lambda: profile_events.append("stop"))
     run_dir = tmp_path / "dry_run"
     cfg = Config(
         model=ModelConfig(backend="dummy", vocab_size=128, d_model=32, dropout=0.0),
@@ -898,6 +901,7 @@ def test_dry_run_compiles_single_step(tmp_path: Path) -> None:
             allow_cpu=True,
             log_every=1000,
             eval_every=0,
+            profile=True,
         ),
         optim=OptimConfig(warmup_steps=0),
         checkpoint=CheckpointConfig(enabled=False),
@@ -913,6 +917,7 @@ def test_dry_run_compiles_single_step(tmp_path: Path) -> None:
 
     assert (run_dir / "config_resolved.json").exists()
     assert not (run_dir / cfg.logging.metrics_file).exists()
+    assert profile_events == ["start", "stop"]
 
     data = json.loads((run_dir / "config_resolved.json").read_text())
     assert data["derived"]["optim"]["decay_steps_effective"] == cfg.train.steps
