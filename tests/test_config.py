@@ -413,17 +413,38 @@ class _DummyTokenizer:
         return self._pad
 
 
-def test_vocab_size_rounds_up_to_multiple() -> None:
-    """Vocab size should round up to configured multiple."""
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=300, d_model=32),
+def _tokenizer_resolution_cfg(
+    *,
+    model: ModelConfig | None = None,
+    tokenizer: TokenizerConfig | None = None,
+    train_steps: int = 1,
+    train_seq_len: int = 8,
+) -> Config:
+    """Create a local-text config for tokenizer-resolution tests."""
+    return Config(
+        model=model or ModelConfig(backend="dummy", vocab_size=512, d_model=32),
         data=DataConfig(
             backend="local_text",
             local_text="tokenizer config text\n",
-            tokenizer=TokenizerConfig(kind="byte", vocab_size_multiple=128),
+            tokenizer=tokenizer
+            or TokenizerConfig(kind="byte", vocab_size_multiple=128, max_doc_tokens=None),
         ),
-        train=TrainConfig(steps=1, batch_size=1, seq_len=8, grad_accum=1, allow_cpu=True),
+        train=TrainConfig(
+            steps=train_steps,
+            batch_size=1,
+            seq_len=train_seq_len,
+            grad_accum=1,
+            allow_cpu=True,
+        ),
         optim=OptimConfig(warmup_steps=0),
+    )
+
+
+def test_vocab_size_rounds_up_to_multiple() -> None:
+    """Vocab size should round up to configured multiple."""
+    cfg = _tokenizer_resolution_cfg(
+        model=ModelConfig(backend="dummy", vocab_size=300, d_model=32),
+        tokenizer=TokenizerConfig(kind="byte", vocab_size_multiple=128),
     )
     tok = _DummyTokenizer(size=256, bos=None, eos=None, pad=None)
     updated = resolve_tokenizer_config(cfg, tok)
@@ -432,7 +453,7 @@ def test_vocab_size_rounds_up_to_multiple() -> None:
 
 def test_auto_sets_special_token_ids() -> None:
     """auto_set_special_tokens should copy IDs from tokenizer to config."""
-    cfg = Config(
+    cfg = _tokenizer_resolution_cfg(
         model=ModelConfig(
             backend="dummy",
             vocab_size=512,
@@ -441,19 +462,13 @@ def test_auto_sets_special_token_ids() -> None:
             eos_token_id=1,
             pad_token_id=2,
         ),
-        data=DataConfig(
-            backend="local_text",
-            local_text="tokenizer config text\n",
-            tokenizer=TokenizerConfig(
-                kind="hf",
-                hf_name_or_path="dummy",
-                auto_set_special_tokens=True,
-                add_bos=False,
-                add_eos=False,
-            ),
+        tokenizer=TokenizerConfig(
+            kind="hf",
+            hf_name_or_path="dummy",
+            auto_set_special_tokens=True,
+            add_bos=False,
+            add_eos=False,
         ),
-        train=TrainConfig(steps=1, batch_size=1, seq_len=8, grad_accum=1, allow_cpu=True),
-        optim=OptimConfig(warmup_steps=0),
     )
     tok = _DummyTokenizer(size=512, bos=10, eos=11, pad=12)
     updated = resolve_tokenizer_config(cfg, tok)
@@ -464,7 +479,7 @@ def test_auto_sets_special_token_ids() -> None:
 
 def test_tokenizer_pad_equals_eos_warns() -> None:
     """Tokenizer with pad==eos should warn but still resolve."""
-    cfg = Config(
+    cfg = _tokenizer_resolution_cfg(
         model=ModelConfig(
             backend="dummy",
             vocab_size=512,
@@ -473,19 +488,13 @@ def test_tokenizer_pad_equals_eos_warns() -> None:
             eos_token_id=1,
             pad_token_id=2,
         ),
-        data=DataConfig(
-            backend="local_text",
-            local_text="tokenizer config text\n",
-            tokenizer=TokenizerConfig(
-                kind="hf",
-                hf_name_or_path="dummy",
-                auto_set_special_tokens=True,
-                add_bos=False,
-                add_eos=False,
-            ),
+        tokenizer=TokenizerConfig(
+            kind="hf",
+            hf_name_or_path="dummy",
+            auto_set_special_tokens=True,
+            add_bos=False,
+            add_eos=False,
         ),
-        train=TrainConfig(steps=1, batch_size=1, seq_len=8, grad_accum=1, allow_cpu=True),
-        optim=OptimConfig(warmup_steps=0),
     )
     tok = _DummyTokenizer(size=512, bos=0, eos=0, pad=0)
     with pytest.warns(UserWarning, match="pad_token_id equals model.eos_token_id"):
@@ -496,16 +505,7 @@ def test_tokenizer_pad_equals_eos_warns() -> None:
 
 def test_default_max_doc_tokens_inferred() -> None:
     """max_doc_tokens should default to 4 * seq_len when unset."""
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32),
-        data=DataConfig(
-            backend="local_text",
-            local_text="tokenizer config text\n",
-            tokenizer=TokenizerConfig(kind="byte", vocab_size_multiple=128, max_doc_tokens=None),
-        ),
-        train=TrainConfig(steps=10, batch_size=1, seq_len=16, grad_accum=1, allow_cpu=True),
-        optim=OptimConfig(warmup_steps=0),
-    )
+    cfg = _tokenizer_resolution_cfg(train_steps=10, train_seq_len=16)
     tok = _DummyTokenizer(size=256, bos=None, eos=None, pad=None)
     updated = resolve_tokenizer_config(cfg, tok)
     assert updated.data.tokenizer.max_doc_tokens == 64
@@ -513,15 +513,10 @@ def test_default_max_doc_tokens_inferred() -> None:
 
 def test_zero_max_doc_tokens_disables_truncation() -> None:
     """max_doc_tokens=0 should resolve to None (no truncation)."""
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=512, d_model=32),
-        data=DataConfig(
-            backend="local_text",
-            local_text="tokenizer config text\n",
-            tokenizer=TokenizerConfig(kind="byte", vocab_size_multiple=128, max_doc_tokens=0),
-        ),
-        train=TrainConfig(steps=10, batch_size=1, seq_len=16, grad_accum=1, allow_cpu=True),
-        optim=OptimConfig(warmup_steps=0),
+    cfg = _tokenizer_resolution_cfg(
+        tokenizer=TokenizerConfig(kind="byte", vocab_size_multiple=128, max_doc_tokens=0),
+        train_steps=10,
+        train_seq_len=16,
     )
     tok = _DummyTokenizer(size=256, bos=None, eos=None, pad=None)
     updated = resolve_tokenizer_config(cfg, tok)
