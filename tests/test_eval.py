@@ -26,10 +26,11 @@ from chomp.train import run
 from tests.helpers.hf_fakes import FakeHFIterable
 
 
-def test_eval_logging_writes_metrics(tmp_path: Path) -> None:
-    """Eval should write eval_loss to metrics file."""
-    run_dir = tmp_path / "run"
-    cfg = Config(
+def _eval_run_cfg(
+    run_dir: Path, *, steps: int = 2, checkpoint: CheckpointConfig | None = None
+) -> Config:
+    """Build a local-text run config that exercises periodic eval."""
+    return Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
         data=DataConfig(
             backend="local_text",
@@ -40,7 +41,7 @@ def test_eval_logging_writes_metrics(tmp_path: Path) -> None:
         ),
         train=TrainConfig(
             seed=0,
-            steps=2,
+            steps=steps,
             batch_size=1,
             seq_len=8,
             grad_accum=1,
@@ -51,29 +52,10 @@ def test_eval_logging_writes_metrics(tmp_path: Path) -> None:
             eval_every=1,
         ),
         optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
-        checkpoint=CheckpointConfig(enabled=False),
+        checkpoint=checkpoint or CheckpointConfig(enabled=False),
         debug=DebugConfig(nan_check=True, check_device_every=0),
         logging=LoggingConfig(project="chomp", run_dir=str(run_dir)),
     )
-
-    run(cfg, config_path=None, resume="none")
-
-    # The training entrypoint pins the eval set to the run directory.
-    assert (run_dir / "eval_tokens.json.gz").exists()
-
-    metrics_path = run_dir / cfg.logging.metrics_file
-    rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
-    assert any(row.get("eval_loss") not in (None, "") for row in rows)
-    assert any("step" in row for row in rows)
-    for row in rows:
-        for key in (
-            "eval_tokens",
-            "wall_time_s",
-            "packing_tokens",
-            "packing_capacity",
-            "device_memory_gb",
-        ):
-            assert key not in row
 
 
 def test_eval_batches_assembled_once_and_reused(
@@ -91,40 +73,28 @@ def test_eval_batches_assembled_once_and_reused(
     monkeypatch.setattr("chomp.train.build_eval_iterator", _counting_build)
 
     run_dir = tmp_path / "run_cache"
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="local_text",
-            repeat=True,
-            local_text="abcdefghijklmnopqrstuvwxyz" * 4,
-            max_eval_samples=3,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
-        ),
-        train=TrainConfig(
-            seed=0,
-            steps=2,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-            log_every=1000,
-            eval_every=1,
-        ),
-        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
-        checkpoint=CheckpointConfig(enabled=False),
-        debug=DebugConfig(nan_check=True, check_device_every=0),
-        logging=LoggingConfig(project="chomp", run_dir=str(run_dir)),
-    )
+    cfg = _eval_run_cfg(run_dir)
 
     run(cfg, config_path=None, resume="none")
+
+    # The training entrypoint pins the eval set to the run directory.
+    assert (run_dir / "eval_tokens.json.gz").exists()
 
     assert calls["n"] == 1, f"eval iterator rebuilt {calls['n']} times for 2 evals"
     metrics_path = run_dir / cfg.logging.metrics_file
     rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
     eval_rows = [row for row in rows if row.get("eval_loss") not in (None, "")]
     assert len(eval_rows) == 2  # both evals produced a loss from the cached batches
+    assert any("step" in row for row in rows)
+    for row in rows:
+        for key in (
+            "eval_tokens",
+            "wall_time_s",
+            "packing_tokens",
+            "packing_capacity",
+            "device_memory_gb",
+        ):
+            assert key not in row
 
 
 def _packed_eval_cfg(run_dir: Path, *, grad_accum: int = 1, **data_overrides: Any) -> Config:
@@ -251,37 +221,7 @@ def test_eval_fails_fast_on_zero_valid_tokens(
     )
 
     run_dir = tmp_path / "run_zero_tokens"
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="hf",
-            hf_dataset="dummy",
-            hf_name="dummy",
-            hf_split="train",
-            hf_eval_split="validation",
-            shuffle=False,
-            repeat=True,
-            packing_mode="sequential",
-            max_eval_samples=64,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
-        ),
-        train=TrainConfig(
-            seed=0,
-            steps=1,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-            log_every=1000,
-            eval_every=1,
-        ),
-        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
-        checkpoint=CheckpointConfig(enabled=False),
-        debug=DebugConfig(nan_check=True, check_device_every=0),
-        logging=LoggingConfig(project="chomp", run_dir=str(run_dir)),
-    )
+    cfg = _packed_eval_cfg(run_dir, packing_mode="sequential", max_eval_samples=64)
 
     with pytest.raises(RuntimeError, match="zero valid loss tokens"):
         run(cfg, config_path=None, resume="none")
@@ -457,31 +397,10 @@ def test_eval_cache_missing_on_resume_fails(tmp_path: Path) -> None:
 def test_run_resume_requires_eval_cache(tmp_path: Path) -> None:
     """The training entrypoint treats resume + missing eval cache as fatal."""
     run_dir = tmp_path / "run"
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="local_text",
-            repeat=True,
-            local_text="abcdefghijklmnopqrstuvwxyz" * 4,
-            max_eval_samples=3,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
-        ),
-        train=TrainConfig(
-            seed=0,
-            steps=1,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-            log_every=1000,
-            eval_every=1,
-        ),
-        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
+    cfg = _eval_run_cfg(
+        run_dir,
+        steps=1,
         checkpoint=CheckpointConfig(enabled=True, save_every=1, max_to_keep=2, async_save=False),
-        debug=DebugConfig(nan_check=True, check_device_every=0),
-        logging=LoggingConfig(project="chomp", run_dir=str(run_dir)),
     )
 
     run(cfg, config_path=None, resume="none")
