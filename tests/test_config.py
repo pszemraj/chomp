@@ -52,6 +52,74 @@ def _hf_data(*, hf_eval_split: object | None = None) -> DataConfig:
     )
 
 
+def _write_tiny_yaml_config(
+    path: Path,
+    *,
+    variables: str = "",
+    vocab_size: int = 256,
+    train_steps: int = 10,
+    train_seq_len: int | str = 32,
+    tokenizer_extra: str = "",
+) -> None:
+    """Write a tiny local-text YAML config for config-loader tests."""
+    tokenizer_extra = f"\n{tokenizer_extra.rstrip()}" if tokenizer_extra else ""
+    path.write_text(
+        f"""
+{variables}model:
+  backend: dummy
+  vocab_size: {vocab_size}
+  d_model: 32
+  dropout: 0.0
+
+data:
+  backend: local_text
+  repeat: true
+  local_text: "hello"
+  packing_mode: sequential
+  tokenizer:
+    kind: byte
+    byte_offset: 0
+    add_bos: false
+    add_eos: false{tokenizer_extra}
+
+train:
+  steps: {train_steps}
+  batch_size: 1
+  seq_len: {train_seq_len}
+  grad_accum: 1
+  jit: false
+  deterministic: true
+  allow_cpu: true
+  log_every: 1
+  eval_every: 0
+
+optim:
+  lr: 3.0e-4
+  warmup_steps: 0
+
+checkpoint:
+  enabled: true
+  save_every: 5
+  max_to_keep: 1
+  async_save: false
+
+logging:
+  project: chomp
+  run_dir: null
+  metrics_file: metrics.jsonl
+  level: INFO
+  console_use_rich: false
+  log_file: null
+  wandb:
+    enabled: false
+
+debug:
+  nan_check: true
+  check_device_every: 1
+""".lstrip()
+    )
+
+
 def test_model_and_train_validation_rejects_invalid_values() -> None:
     """Model/train validation should fail with actionable errors."""
     cases: list[tuple[Callable[[Config], Config], str]] = [
@@ -463,63 +531,10 @@ def test_zero_max_doc_tokens_disables_truncation() -> None:
 def test_load_config_for_checkpoint_resolves_variables(tmp_path: Path) -> None:
     """Variable placeholders in override configs should resolve before validation."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        """
-variables:
-  seq_len: 64
-
-model:
-  backend: dummy
-  vocab_size: 256
-  d_model: 32
-  dropout: 0.0
-
-data:
-  backend: local_text
-  repeat: true
-  local_text: "hello"
-  packing_mode: sequential
-  tokenizer:
-    kind: byte
-    byte_offset: 0
-    add_bos: false
-    add_eos: false
-
-train:
-  steps: 10
-  batch_size: 1
-  seq_len: $variables.seq_len
-  grad_accum: 1
-  jit: false
-  deterministic: true
-  allow_cpu: true
-  log_every: 1
-  eval_every: 0
-
-optim:
-  lr: 3.0e-4
-  warmup_steps: 0
-
-checkpoint:
-  enabled: true
-  save_every: 5
-  max_to_keep: 1
-  async_save: false
-
-logging:
-  project: chomp
-  run_dir: null
-  metrics_file: metrics.jsonl
-  level: INFO
-  console_use_rich: false
-  log_file: null
-  wandb:
-    enabled: false
-
-debug:
-  nan_check: true
-  check_device_every: 1
-""".lstrip()
+    _write_tiny_yaml_config(
+        config_path,
+        variables="variables:\n  seq_len: 64\n\n",
+        train_seq_len="$variables.seq_len",
     )
 
     cfg = load_config_for_checkpoint(
@@ -532,57 +547,10 @@ debug:
 def test_generate_config_applies_tokenizer_derived_fields(tmp_path: Path) -> None:
     """Generate config loading should apply tokenizer-derived fields."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        """
-model:
-  backend: dummy
-  vocab_size: 300
-  d_model: 32
-  dropout: 0.0
-
-data:
-  backend: local_text
-  repeat: true
-  local_text: "hello"
-  packing_mode: sequential
-  tokenizer:
-    kind: byte
-    byte_offset: 0
-    add_bos: false
-    add_eos: false
-    vocab_size_multiple: 128
-
-train:
-  steps: 10
-  batch_size: 1
-  seq_len: 32
-  grad_accum: 1
-  jit: false
-  deterministic: true
-  allow_cpu: true
-  log_every: 1
-  eval_every: 0
-
-optim:
-  lr: 3.0e-4
-  warmup_steps: 0
-
-checkpoint:
-  enabled: true
-  save_every: 5
-  max_to_keep: 1
-  async_save: false
-
-logging:
-  project: chomp
-  run_dir: null
-  wandb:
-    enabled: false
-
-debug:
-  nan_check: true
-  check_device_every: 1
-""".lstrip()
+    _write_tiny_yaml_config(
+        config_path,
+        vocab_size=300,
+        tokenizer_extra="    vocab_size_multiple: 128",
     )
 
     cfg = load_config_for_checkpoint(
@@ -599,44 +567,7 @@ debug:
 def test_override_casts_float_when_default_none(tmp_path: Path) -> None:
     """Optional float overrides should parse into float values."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        """
-model:
-  backend: dummy
-  vocab_size: 256
-  d_model: 32
-  dropout: 0.0
-
-data:
-  backend: local_text
-  repeat: true
-  local_text: "hello"
-  packing_mode: sequential
-  tokenizer:
-    kind: byte
-    byte_offset: 0
-    add_bos: false
-    add_eos: false
-
-train:
-  steps: 20
-  batch_size: 1
-  seq_len: 8
-  grad_accum: 1
-  jit: false
-  deterministic: true
-  allow_cpu: true
-  log_every: 1
-  eval_every: 0
-
-logging:
-  wandb:
-    enabled: false
-
-optim:
-  warmup_steps: 0
-""".lstrip()
-    )
+    _write_tiny_yaml_config(config_path, train_steps=20, train_seq_len=8)
 
     cfg = load_config(config_path, overrides=["optim.muon.consistent_rms=0.2"])
 
