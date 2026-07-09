@@ -73,8 +73,6 @@ Hard failures include:
 - objective knobs (`mask_boundary_loss`, `train_on_eos`) and eval knobs
 - batch shape invariants (`seq_len`, `batch_size`, `grad_accum`)
 - model and optimizer config, `train.deterministic`
-- the effective `xla_gpu_deterministic_ops` setting (parsed from `XLA_FLAGS`
-  at save and at resume — see [Scope of exactness](#scope-of-exactness))
 
 The packing, model, and optimizer sections are compared over the union of
 keys recorded on either side, so a knob present in only one version's
@@ -84,6 +82,11 @@ fingerprint is a hard mismatch — never silently skipped.
 transfer happens, not sample order) — except when `grain_prefetch > 0` on
 either side, where it hardens to an error because it changes the prefetch
 mechanics around the serialized iterator state.
+
+The effective `xla_gpu_deterministic_ops` setting (parsed from `XLA_FLAGS`,
+recorded at save time) is also compared and warns on drift: kernel
+determinism is opt-in and only affects low-order step numerics — see
+[Scope of exactness](#scope-of-exactness).
 
 Remaining warnings are logged so you can make an informed decision, but
 anything that changes what data the resumed run sees — or what it optimizes —
@@ -108,15 +111,23 @@ from transient HF streaming errors is a separate, best-effort mechanism that
 can replay up to `data.state_update_interval` recent documents — see
 [Data Pipeline — Transient stream recovery](data_pipeline.md#transient-stream-recovery-best-effort).
 
-Bit-exactness on GPU additionally requires deterministic XLA kernels: without
-`--xla_gpu_deterministic_ops=true`, XLA may pick nondeterministic GPU kernels
-(atomic-reduction scatters, algorithm choices sensitive to prior GPU state),
-and a resumed run drifts from the continuous one in the low-order bits of the
-optimizer state even though losses match. `chomp train` (and the test suite)
-therefore appends that flag to `XLA_FLAGS` at startup whenever NVIDIA GPUs
-are present; `chomp generate` does not, since generation makes no
-bit-exactness promise. An explicit `--xla_gpu_deterministic_ops=false` in
-`XLA_FLAGS` is respected and trades the bit-exact contract for the
-nondeterministic kernels' throughput (measured ~25-35% faster steps on a
-100M-param Megalodon smoke benchmark, RTX 5090, seq_len 2048 — see
-[Training Loop — GPU environment notes](training.md#gpu-environment-notes)).
+What resume guarantees is exact **state and data replay**: parameters,
+optimizer state, RNG, and the data iterator position restore exactly, so the
+resumed run optimizes the same objective over the same batches in the same
+order as the continuous run.
+
+What it does not guarantee by default is bit-identical **step arithmetic**
+on GPU: XLA's fast kernels are nondeterministic (atomic-reduction scatters,
+algorithm choices sensitive to prior GPU state), so a resumed run can differ
+from the continuous one in low-order floating-point bits. That drift does
+not change the data, the objective, or expected training behavior — and the
+fast kernels are the production default because deterministic ones are
+expensive (~25-35% slower steps measured on a 100M-param Megalodon smoke
+benchmark, RTX 5090, seq_len 2048).
+
+For debugging that needs atol=0 reproducibility, opt in with
+`XLA_FLAGS=--xla_gpu_deterministic_ops=true`
+([Training Loop — GPU environment notes](training.md#gpu-environment-notes)).
+The effective setting is recorded in checkpoint meta and resume warns if it
+drifted. The test suite pins the flag so the exact-resume tests verify the
+harness's replay logic without kernel-selection noise.

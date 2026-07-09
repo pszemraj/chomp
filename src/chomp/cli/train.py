@@ -12,7 +12,7 @@ import click
 from chomp.cli.main import parse_resume, print_banner
 from chomp.config import load_config
 from chomp.utils.io import setup_python_logging
-from chomp.utils.xla import configure_blackwell_xla_env, ensure_deterministic_gpu_ops
+from chomp.utils.xla import configure_blackwell_xla_env
 
 
 @click.command()
@@ -68,20 +68,19 @@ def train(
     # Logging first so subsequent errors are readable
     setup_python_logging(cfg.logging.level, use_rich=cfg.logging.console_use_rich)
 
-    # Configure XLA env quirks before JAX backend init.
+    # Configure XLA env quirks before JAX backend init. Kernel determinism
+    # (--xla_gpu_deterministic_ops) is deliberately NOT set here: fast
+    # nondeterministic kernels are the production default (~25-35% faster
+    # steps measured); bit-exact resume is an opt-in debugging mode — see
+    # docs/checkpointing.md, "Scope of exactness".
     configure_blackwell_xla_env()
-    ensure_deterministic_gpu_ops()
 
     # Deferred import: chomp.train triggers JAX init, must run after XLA env config
     from chomp.train import run
     from chomp.utils.devices import validate_default_device
-    from chomp.utils.xla import warn_if_gpu_determinism_unknown
 
     # Fail fast on CPU unless explicitly allowed
     validate_default_device(allow_cpu=cfg.train.allow_cpu)
-    # Post-init cross-check: catches GPU hosts where nvidia-smi was
-    # unavailable and the deterministic-ops default could not be applied.
-    warn_if_gpu_determinism_unknown()
 
     run_dir_path = run(cfg, config_path=config, resume=resume, dry_run=dry_run)  # type: ignore[arg-type]
     click.echo(f"[chomp] run_dir: {run_dir_path}")

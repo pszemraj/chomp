@@ -1292,13 +1292,15 @@ def test_resume_compat_checks_unknown_packing_fingerprint_keys(tmp_path: Path) -
         check_resume_compat(cfg, meta)
 
 
-def test_resume_compat_checks_gpu_determinism_setting(tmp_path: Path) -> None:
-    """A different effective xla_gpu_deterministic_ops must fail resume.
+def test_resume_compat_warns_on_gpu_determinism_drift(
+    tmp_path: Path, caplog: LogCaptureFixture
+) -> None:
+    """Kernel-determinism drift across a resume boundary warns, not blocks.
 
-    The kernel-determinism flag lives in XLA_FLAGS, not in config, so this is
-    the only guard against a resumed process silently voiding bit-exact
-    resume by running with different kernel determinism than the run that
-    wrote the checkpoint.
+    Deterministic kernels are opt-in (they cost throughput); drift changes
+    low-order step numerics only, never the data or the objective. But it is
+    the one resume-relevant setting living in XLA_FLAGS instead of config,
+    so the fingerprint comparison is the only place a user learns about it.
     """
     cfg = _base_cfg(tmp_path / "run_det_ops")
     meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
@@ -1308,8 +1310,9 @@ def test_resume_compat_checks_gpu_determinism_setting(tmp_path: Path) -> None:
         meta["data_fingerprint"]["xla_gpu_deterministic_ops"]
     )
 
-    with pytest.raises(RuntimeError, match="xla_gpu_deterministic_ops"):
-        check_resume_compat(cfg, meta)
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+        check_resume_compat(cfg, meta)  # must not raise
+    assert any("xla_gpu_deterministic_ops" in rec.message for rec in caplog.records)
 
 
 @pytest.mark.parametrize(

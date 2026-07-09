@@ -556,14 +556,15 @@ def check_resume_compat(
         train_prev.get("deterministic"),
         severity="error",
     )
-    # Same failure class at the kernel level: a resumed process with a
-    # different effective xla_gpu_deterministic_ops silently voids bit-exact
-    # resume (the value is parsed from XLA_FLAGS at save and at resume).
+    # Kernel determinism is opt-in (fast nondeterministic kernels are the
+    # default). Drift across the resume boundary changes low-order step
+    # numerics only — never the data or the objective — so it warns rather
+    # than blocking the resume (value parsed from XLA_FLAGS on both sides).
     _cmp(
         "xla_gpu_deterministic_ops",
         cur_fp.get("xla_gpu_deterministic_ops"),
         meta_fp.get("xla_gpu_deterministic_ops"),
-        severity="error",
+        severity="warning",
     )
     model_prev = meta_cfg.get("model") or {}
     model_cur = cur_cfg.get("model") or {}

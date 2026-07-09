@@ -12,10 +12,11 @@ from chomp.utils.xla import configure_blackwell_xla_env, ensure_deterministic_gp
 from tests.helpers.hf_fakes import FakeHFIterable
 
 # Ensure XLA env quirks are applied before any JAX imports in tests.
-# Deterministic GPU ops are required for the bit-exact resume tests: without
-# the flag, XLA kernel choices depend on prior GPU state, and continuous vs
-# resumed runs diverge in low-order optimizer-state bits under full-suite
-# ordering.
+# Deterministic GPU ops are pinned HERE ONLY (production does not set them —
+# fast kernels are the default): the exact-resume tests assert atol=0 state
+# equality to catch harness replay bugs, and without the flag XLA kernel
+# choices depend on prior GPU state, adding low-order optimizer-state noise
+# under full-suite ordering that has nothing to do with the harness.
 configure_blackwell_xla_env()
 ensure_deterministic_gpu_ops()
 

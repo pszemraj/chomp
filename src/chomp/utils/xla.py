@@ -100,9 +100,9 @@ def _log_prealloc_status(log: logging.Logger, prealloc: str | None) -> None:
 def deterministic_gpu_ops_setting() -> bool | None:
     """Effective xla_gpu_deterministic_ops value parsed from XLA_FLAGS.
 
-    This is the value the resume-compat fingerprint records: bit-exact resume
-    on GPU holds only when the interrupted and resumed processes agree on it.
-    Last occurrence wins, matching XLA's own flag parsing.
+    Recorded in the resume-compat fingerprint so a resumed process can warn
+    when kernel determinism drifted across the resume boundary. Last
+    occurrence wins, matching XLA's own flag parsing.
 
     :return bool | None: Parsed boolean, or None when the flag is unset.
     """
@@ -113,42 +113,16 @@ def deterministic_gpu_ops_setting() -> bool | None:
     return setting
 
 
-def warn_if_gpu_determinism_unknown(*, logger: logging.Logger | None = None) -> bool:
-    """Warn when JAX initialized a GPU backend with no determinism setting.
-
-    Fallback for hosts where nvidia-smi is unavailable (containers without
-    the binary, blocked drivers): ensure_deterministic_gpu_ops() cannot see
-    the GPU there, so XLA_FLAGS stays untouched and bit-exact resume is not
-    guaranteed. Must be called after JAX backend init — by then it is too
-    late to set the flag, so this warns instead of fixing.
-
-    :param logger: Optional logger override.
-    :return bool: True if the warning fired.
-    """
-    import jax
-
-    if jax.default_backend() != "gpu" or deterministic_gpu_ops_setting() is not None:
-        return False
-    log = logger or logging.getLogger(__name__)
-    log.warning(
-        "JAX is on a GPU backend but %s was not set (nvidia-smi unavailable at "
-        "startup?). Bit-exact resume is NOT guaranteed; export XLA_FLAGS=%s "
-        "before launch to restore the contract.",
-        _DETERMINISTIC_FLAG_PREFIX.rstrip("="),
-        _DETERMINISTIC_FLAG,
-    )
-    return True
-
-
 def ensure_deterministic_gpu_ops(*, logger: logging.Logger | None = None) -> bool:
-    """Default XLA GPU ops to deterministic so bit-exact resume actually holds.
+    """Pin XLA GPU kernel selection to deterministic algorithms.
 
-    Without --xla_gpu_deterministic_ops=true, XLA may pick nondeterministic
-    GPU kernels (atomic-reduction scatters, algorithm choices sensitive to
-    prior GPU state), so an interrupted+resumed run diverges from the
-    continuous one in the low bits of optimizer state — silently voiding the
-    harness's core resume contract. An explicit user setting in XLA_FLAGS
-    (either value) is respected; call before JAX initializes its backend.
+    NOT a production default — deterministic kernels cost real throughput
+    (~25-35% slower steps measured on a 100M-param run). The test suite calls
+    this so the exact-resume tests verify harness replay logic at atol=0
+    without XLA kernel-selection noise (kernel choices are sensitive to prior
+    GPU state); users can opt in via XLA_FLAGS for bit-exact debugging runs.
+    An explicit setting in XLA_FLAGS (either value) is respected; call before
+    JAX initializes its backend.
 
     :param logger: Optional logger override.
     :return bool: True if the flag was appended to XLA_FLAGS.
@@ -162,12 +136,7 @@ def ensure_deterministic_gpu_ops(*, logger: logging.Logger | None = None) -> boo
         return False
     existing = os.environ.get("XLA_FLAGS", "")
     os.environ["XLA_FLAGS"] = f"{existing} {_DETERMINISTIC_FLAG}".strip()
-    log.info(
-        "Setting %s for bit-exact resume. Pre-set %sfalse in XLA_FLAGS to trade "
-        "exactness for throughput.",
-        _DETERMINISTIC_FLAG,
-        _DETERMINISTIC_FLAG_PREFIX,
-    )
+    log.info("Setting %s (deterministic kernel selection).", _DETERMINISTIC_FLAG)
     return True
 
 

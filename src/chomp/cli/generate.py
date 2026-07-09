@@ -77,9 +77,7 @@ def generate(
     """
     from chomp.utils.xla import configure_blackwell_xla_env
 
-    # Configure XLA env quirks before JAX backend init. Deterministic GPU ops
-    # are deliberately NOT forced here: they exist for the training resume
-    # contract and cost throughput; generation makes no bit-exactness promise.
+    # Configure XLA env quirks before JAX backend init.
     configure_blackwell_xla_env()
 
     # Deferred imports: must run after XLA env config

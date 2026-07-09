@@ -816,9 +816,9 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
         "seq_len": cfg.train.seq_len,
         "batch_size": cfg.train.batch_size,
         "grad_accum": cfg.train.grad_accum,
-        # Not a data knob, but part of the resume identity: bit-exact resume
-        # on GPU holds only when both processes agree on XLA kernel
-        # determinism (docs/checkpointing.md, "Scope of exactness").
+        # Not a data knob: recorded so resume can warn when opt-in XLA kernel
+        # determinism drifted across the resume boundary
+        # (docs/checkpointing.md, "Scope of exactness").
         "xla_gpu_deterministic_ops": deterministic_gpu_ops_setting(),
     }
 
