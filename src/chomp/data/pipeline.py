@@ -80,6 +80,24 @@ class TextStream(Protocol):
 logger = logging.getLogger(__name__)
 
 
+class BatchAssemblyStopIteration(StopIteration):
+    """StopIteration raised by fixed-shape batch assembly.
+
+    :param int windows_consumed: Number of packed windows popped before exhaustion.
+    """
+
+    def __init__(self, *, windows_consumed: int) -> None:
+        """Initialize the exception with batch assembly progress.
+
+        :param int windows_consumed: Number of packed windows popped before exhaustion.
+        """
+        self.windows_consumed = int(windows_consumed)
+        suffix = "" if self.windows_consumed == 1 else "s"
+        super().__init__(
+            f"data exhausted after consuming {self.windows_consumed} packed window{suffix}"
+        )
+
+
 @dataclass
 class ByteTokenizer:
     """A tiny byte-level tokenizer.
@@ -905,7 +923,10 @@ def _assemble_batch(
     pos_out = np.empty((need, seq_len), dtype=np.int32)
 
     for idx in range(need):
-        seq, segs, pos_ids = next_window()  # [T]
+        try:
+            seq, segs, pos_ids = next_window()  # [T]
+        except StopIteration as exc:
+            raise BatchAssemblyStopIteration(windows_consumed=idx) from exc
         # Labels align with input_ids; the model shifts internally.
         inp = np.asarray(seq, dtype=np.int32)
         labs[idx] = _mask_labels(

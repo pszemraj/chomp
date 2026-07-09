@@ -53,7 +53,10 @@ step is written only when it is safe to resume from:
   completed step. A crash between batch fetch and step completion — or the
   stream running dry partway through assembling a batch (`repeat: false`) —
   leaves the iterator ahead of the train state, so the final save is skipped
-  (loudly) and resume uses the last periodic checkpoint.
+  (loudly) and resume uses the last periodic checkpoint. If finite data ends
+  exactly at a batch boundary before any new packed window is consumed, the
+  iterator is still aligned with the last completed step and the final
+  checkpoint is written.
 - **Validity**: the last step's metrics are re-checked for finiteness before
   the write; "latest" can never be a NaN tombstone.
 

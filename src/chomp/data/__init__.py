@@ -17,6 +17,7 @@ v0:
 from __future__ import annotations
 
 from .pipeline import (
+    BatchAssemblyStopIteration,
     build_eval_iterator,
     build_generation_text_stream,
     build_tokenizer,
@@ -30,6 +31,7 @@ from .pipeline import (
 )
 
 __all__ = [
+    "BatchAssemblyStopIteration",
     "build_eval_iterator",
     "build_generation_text_stream",
     "build_train_iterator",

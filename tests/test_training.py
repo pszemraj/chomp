@@ -339,6 +339,37 @@ def test_checkpoint_saves_final_step(tmp_path: Path) -> None:
     assert (ckpt_dir / "3").exists(), "expected final checkpoint at step 3"
 
 
+@pytest.mark.parametrize("grain_prefetch", [0, 1])
+def test_exact_eof_after_batch_boundary_saves_final_checkpoint(
+    tmp_path: Path, grain_prefetch: int
+) -> None:
+    """Exact EOF after a completed batch should still save the final checkpoint."""
+    cfg, config_src = make_small_run_cfg(tmp_path, local_text="x" * 48, decay_steps=10)
+    cfg = replace(cfg, train=replace(cfg.train, steps=10, grad_accum=1))
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            repeat=False,
+            window_shuffle_windows=0,
+            grain_prefetch=grain_prefetch,
+        ),
+    )
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=2))
+
+    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+
+    metrics_path = run_dir / cfg.logging.metrics_file
+    rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
+    assert any(row.get("data_exhausted") and row.get("step") == 3 for row in rows)
+
+    ckpt_dir = default_ckpt_dir(run_dir)
+    steps_on_disk = {int(p.name) for p in ckpt_dir.iterdir() if p.is_dir() and p.name.isdigit()}
+    assert steps_on_disk == {2, 3}, (
+        f"exact EOF must save the aligned final checkpoint, found {steps_on_disk}"
+    )
+
+
 def test_crash_between_fetch_and_step_skips_final_checkpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

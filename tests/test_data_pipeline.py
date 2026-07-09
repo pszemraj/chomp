@@ -25,6 +25,7 @@ from chomp.data.grain import _packer_stats_from_chain
 from chomp.data.hf import HFStreamingTextStream, HFStreamSpec
 from chomp.data.pack import MultipackPacker, TokenPacker
 from chomp.data.pipeline import (
+    BatchAssemblyStopIteration,
     BinPacker,
     ByteTokenizer,
     build_eval_iterator,
@@ -618,10 +619,29 @@ def test_stopiteration_mid_assembly_advances_iterator_state() -> None:
 
     it = build_train_iterator(cfg)
     state_before = json.dumps(it.get_state(), sort_keys=True, default=str)
-    with pytest.raises(StopIteration):
+    with pytest.raises(BatchAssemblyStopIteration) as exc_info:
         next(it)
+    assert exc_info.value.windows_consumed == 1
     state_after = json.dumps(it.get_state(), sort_keys=True, default=str)
     assert state_after != state_before
+
+
+def test_stopiteration_at_exact_batch_boundary_consumes_zero_windows() -> None:
+    """Exact EOF after full batches should report no partial batch consumption."""
+    cfg = make_pipeline_cfg(
+        local_text="x" * 16,
+        repeat=False,
+        window_shuffle_windows=0,
+        seq_len=8,
+        tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=False, add_eos=False),
+    )
+
+    it = build_train_iterator(cfg)
+    next(it)
+    next(it)
+    with pytest.raises(BatchAssemblyStopIteration) as exc_info:
+        next(it)
+    assert exc_info.value.windows_consumed == 0
 
 
 def test_pipeline_segment_ids_multiple_docs() -> None:

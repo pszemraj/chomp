@@ -60,6 +60,7 @@ from chomp.config import (
     strict_packed_segments,
 )
 from chomp.data import (
+    BatchAssemblyStopIteration,
     build_eval_iterator,
     build_generation_text_stream,
     build_train_iterator,
@@ -1451,14 +1452,13 @@ def run(
                     t_fetch = time.perf_counter()
                     try:
                         batch = next(data_it)
-                    except StopIteration:
-                        # Exhaustion is NOT a no-op: batch assembly pops A*B
-                        # windows one at a time, and the stream/packer may have
-                        # consumed documents (and discarded popped windows)
-                        # before running dry. data_state_aligned stays False so
-                        # the finally block skips the final checkpoint instead
-                        # of pairing the old train state with a
-                        # partially-advanced iterator.
+                    except StopIteration as exc:
+                        # Exhaustion is only misaligned if the failed fetch
+                        # popped at least one packed window. Exact EOF (or an
+                        # untrainable tail that yields zero windows) is still
+                        # aligned with the last completed train step.
+                        if isinstance(exc, BatchAssemblyStopIteration):
+                            data_state_aligned = exc.windows_consumed == 0
                         tokens_seen_host = int(tokens_seen_count)
                         step_i = int(host_step)
                         row = {
