@@ -53,16 +53,16 @@ automatically appends `--xla_gpu_enable_triton_gemm=false` to `XLA_FLAGS`
 (before JAX initializes) and warns if `XLA_PYTHON_CLIENT_PREALLOCATE` is not
 set to `false`. On other GPUs, the helper stays quiet (debug log only).
 
-XLA kernel selection on GPU is nondeterministic by default — the fast path,
-and what production training uses. For debugging runs that need bit-exact
+XLA kernel selection on GPU is nondeterministic by default. This is the fast
+path used for production training. For debugging runs that need bit-exact
 GPU numerics (e.g. comparing an interrupted+resumed run against a continuous
 one at atol=0), opt in with `XLA_FLAGS=--xla_gpu_deterministic_ops=true`.
 This is a different knob from `train.deterministic` above (dropout/RNG vs
 kernel selection), and it is expensive: measured ~25-35% slower steps on a
 100M-param Megalodon smoke benchmark (RTX 5090, seq_len 2048, bf16). The
 effective setting is recorded in checkpoint meta, and resume warns if it
-drifted across the boundary — see
-[Checkpointing — Scope of exactness](checkpointing.md#scope-of-exactness).
+drifted across the boundary; see
+[Checkpointing: scope of exactness](checkpointing.md#scope-of-exactness).
 
 ## Packed batches
 
@@ -73,7 +73,7 @@ described in [Data Pipeline](data_pipeline.md).
 ## Input-order stability
 
 Guidance for domain-ordered and long-document streams lives in
-[Packing — Window shuffling](packing.md#window-shuffling-batch-decorrelation).
+[Packing: window shuffling](packing.md#window-shuffling-batch-decorrelation).
 The supporting ablation is recorded in the
 [Comma stability study](comma_stability_matrix.md).
 
@@ -111,7 +111,7 @@ backend (dummy runs skip it silently).
 
 `chomp generate` accepts a run directory or checkpoint step directory, restores
 the stored parameters and resolved config, and uses the run-pinned tokenizer
-described in [Data Pipeline — Tokenization](data_pipeline.md#tokenization) when
+described in [Data Pipeline: tokenization](data_pipeline.md#tokenization) when
 available. Set `--temperature 0` for greedy decoding; seeded sampling is the
 default. Run `chomp generate --help` for the option list.
 

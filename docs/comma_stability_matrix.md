@@ -27,4 +27,4 @@ with the 200,000-document shuffle buffer.
   3.137 to 3.113 without reducing throughput.
 
 Operational guidance for document- and window-level shuffling is in
-[Packing — Window shuffling](packing.md#window-shuffling-batch-decorrelation).
+[Packing: window shuffling](packing.md#window-shuffling-batch-decorrelation).

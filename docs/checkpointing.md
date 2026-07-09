@@ -12,7 +12,7 @@ Each checkpoint stores three items:
 
 1) `train_state`: model parameters, optimizer state, step, RNG
 2) `data_state`: the checkpointable data path described in
-   [Data Pipeline — Iterator state and resume](data_pipeline.md#iterator-state-and-resume)
+   [Data Pipeline: iterator state and resume](data_pipeline.md#iterator-state-and-resume)
 3) `meta`: JSON metadata (config snapshot, data fingerprint, required
    non-negative `tokens_seen`, and versions)
 
@@ -43,9 +43,9 @@ On exit (clean, crash, or Ctrl-C), a final checkpoint of the last completed
 step is written only when it is safe to resume from:
 
 - **Alignment**: the train state and data iterator must correspond to the same
-  completed step. A crash between batch fetch and step completion — or the
-  stream running dry partway through assembling a batch (`repeat: false`) —
-  leaves the iterator ahead of the train state, so the final save is skipped
+  completed step. A crash between batch fetch and step completion, or the
+  stream running dry partway through assembling a batch (`repeat: false`),
+  leaves the iterator ahead of the train state. The final save is skipped
   (loudly) and resume uses the last periodic checkpoint. If finite data ends
   exactly at a batch boundary before any new packed window is consumed, the
   iterator is still aligned with the last completed step and the final
@@ -54,7 +54,7 @@ step is written only when it is safe to resume from:
   re-checked for finiteness before the write, so "latest" cannot become a NaN
   tombstone.
 
-A final save that fails on an otherwise clean exit fails the run — training
+A final save that fails on an otherwise clean exit fails the run; training
 never exits successfully with an unwritten checkpoint.
 
 ## Resume compatibility checks
@@ -75,20 +75,20 @@ Hard failures include:
 
 The packing, model, and optimizer sections are compared over the union of
 keys recorded on either side, so a knob present in only one version's
-fingerprint is a hard mismatch — never silently skipped.
+fingerprint is a hard mismatch and is never silently skipped.
 
 `data.device_put` drift is a warning (it changes where the host-to-device
-transfer happens, not sample order) — except when `grain_prefetch > 0` on
+transfer happens, not sample order), except when `grain_prefetch > 0` on
 either side, where it hardens to an error because it changes the prefetch
 mechanics around the serialized iterator state.
 
 The effective `xla_gpu_deterministic_ops` setting (parsed from `XLA_FLAGS`,
 recorded at save time) is also compared and warns on drift: kernel
-determinism is opt-in and only affects low-order step numerics — see
+determinism is opt-in and only affects low-order step numerics; see
 [Scope of exactness](#scope-of-exactness).
 
 Remaining warnings are logged so you can make an informed decision, but
-anything that changes what data the resumed run sees — or what it optimizes —
+anything that changes what data the resumed run sees or what it optimizes
 is an error, not a warning.
 
 ## Typical usage
@@ -107,8 +107,8 @@ If a mismatch is detected, resume fails fast with a detailed error.
 
 The exact-resume contract covers checkpoint save/restore. In-run recovery
 from transient HF streaming errors is a separate, best-effort mechanism that
-can replay up to `data.state_update_interval` recent documents — see
-[Data Pipeline — Transient stream recovery](data_pipeline.md#transient-stream-recovery-best-effort).
+can replay up to `data.state_update_interval` recent documents; see
+[Data Pipeline: transient stream recovery](data_pipeline.md#transient-stream-recovery-best-effort).
 
 What resume guarantees is exact **state and data replay**: parameters,
 optimizer state, RNG, and the data iterator position restore exactly, so the
@@ -118,6 +118,6 @@ order as the continuous run.
 GPU step arithmetic is not bit-identical by default because production uses
 XLA's fast nondeterministic kernels. Setup, cost, and the opt-in deterministic
 flag are documented in
-[Training — GPU environment notes](training.md#gpu-environment-notes). The
+[Training: GPU environment notes](training.md#gpu-environment-notes). The
 effective setting is recorded in checkpoint metadata, and resume warns if it
 changes.

@@ -105,7 +105,7 @@ Checkpoint resume is exact; in-run recovery from transient HF streaming
 errors is not. The stream caches a last-known-good state every
 `data.state_update_interval` documents (default 2000). When `next()` fails
 (network hiccup), iteration rebuilds from that cached state and retries with
-backoff — which can **replay up to `state_update_interval` recently yielded
+backoff, which can **replay up to `state_update_interval` recently yielded
 documents**. This is a deliberate tradeoff for long unattended runs: a rare
 duplicated slice beats a dead run. If bounding duplication matters more than
 overhead, lower `data.state_update_interval`; if strict no-replay semantics
@@ -127,13 +127,13 @@ chomp builds a fixed validation set when the run is created:
   non-zero, the shuffle seed defaults to `train.seed`.
 
 The selected tokens are **persisted to `run_dir/eval_tokens.json.gz`** together
-with an identity manifest (eval knobs) and a content hash. Every later start —
-including resume — loads that exact set instead of re-collecting from the
+with an identity manifest (eval knobs) and a content hash. Every later start,
+including resume, loads that exact set instead of re-collecting from the
 stream, so eval losses stay comparable even if the upstream dataset revision or
 split contents drift. A cache whose manifest or hash mismatches fails loudly;
 delete the run directory (not just the cache) to change eval identity.
 
-A **missing** cache on resume is also a hard error — silently recollecting
+A **missing** cache on resume is also a hard error: silently recollecting
 would compare post-resume eval losses against a different token set than every
 earlier point on the curve. `data.recreate_eval_cache: true` is the explicit
 one-shot override; after checkpoint compatibility validation succeeds, it

@@ -8,7 +8,7 @@ overrides.
 > Never use `fp16`. Megalodon's CEMA and normalization layers are unstable with fp16.
 > Use `bfloat16` compute with `float32` params/accumulation (the Megalodon defaults).
 <a id="quick-reference"></a>
-## Quick Reference
+## Quick reference
 The 10 most commonly adjusted fields for typical experiments:
 
 | Field | Type | Default | Description |
@@ -94,7 +94,7 @@ error.
 Model architecture and precision policy. Contains 36 fields.
 
 <a id="model-backend"></a>
-### Backend Selection
+### Backend selection
 <a id="model.backend"></a>
 #### `model.backend`
 ```yaml
@@ -119,7 +119,7 @@ Minimal MLP language model for smoke tests. Fast compilation, no external depend
 ---
 
 <a id="model-shared"></a>
-### Architecture (Shared)
+### Architecture (shared)
 <a id="model.vocab_size"></a>
 #### `model.vocab_size`
 ```yaml
@@ -131,7 +131,7 @@ Vocabulary size for the embedding layer.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be positive; for byte tokenizer, must be ≥ `byte_offset + 256` |
+| Constraints | Must be positive; for byte tokenizer, must be >= `byte_offset + 256` |
 
 Tokenizer preparation raises this value to at least the tokenizer vocabulary
 size, then rounds it up to `data.tokenizer.vocab_size_multiple`.
@@ -292,7 +292,7 @@ Internal chunk size for attention computation.
 |----------|-------|
 | Required | No |
 | Backend | `megalodon` only |
-| Constraints | Must be positive; must be ≤ `train.seq_len`; must divide `train.seq_len` evenly |
+| Constraints | Must be positive; must be <= `train.seq_len`; must divide `train.seq_len` evenly |
 
 If `train.seq_len % model.chunk_size != 0`, validation fails with:
 `train.seq_len (X) must be divisible by model.chunk_size (Y)`
@@ -483,7 +483,7 @@ use_checkpoint: bool = false
 ```
 
 Enable activation recomputation to reduce memory. Runtime interaction with
-deterministic mode is described in [Training — Determinism](training.md#determinism).
+deterministic mode is described in [Training: determinism](training.md#determinism).
 
 | Property | Value |
 |----------|-------|
@@ -512,7 +512,7 @@ use_associative_segment_scan: bool = true
 
 Select the parallel associative or sequential low-memory ComplexEMA scan for
 strict packed training. Inert when strict segment isolation is inactive; see
-[Packing — Segment-Isolation Semantics](packing.md#segment-isolation-semantics).
+[Packing: segment-isolation semantics](packing.md#segment-isolation-semantics).
 
 | Property | Value |
 |----------|-------|
@@ -525,7 +525,7 @@ strict packed training. Inert when strict segment isolation is inactive; see
 ---
 
 <a id="model-special-tokens"></a>
-### Special Tokens
+### Special tokens
 <a id="model.pad_token_id"></a>
 #### `model.pad_token_id`
 ```yaml
@@ -584,14 +584,14 @@ End-of-sequence token ID.
 ---
 
 <a id="model-dtype"></a>
-### Dtype Policy
+### Dtype policy
 <a id="model.param_dtype"></a>
 #### `model.param_dtype`
 ```yaml
 param_dtype: "float32" = "float32"
 ```
 
-Dtype for model parameters (weights). **Must be `float32`** — config
+Dtype for model parameters (weights). **Must be `float32`**: config
 validation rejects anything else: optimizer state follows param dtype and
 chomp has no fp32 master-param path yet (tracked in [dev.md](dev.md)), so
 bf16 params would silently mean bf16 optimizer moments. Use
@@ -615,7 +615,7 @@ Dtype for forward/backward computation.
 | Required | No |
 | Recommended | `"bfloat16"` |
 
-**Never use `fp16`** — Megalodon's CEMA and normalization layers are numerically unstable with fp16.
+**Never use `fp16`.** Megalodon's CEMA and normalization layers are numerically unstable with fp16.
 <a id="model.accum_dtype"></a>
 #### `model.accum_dtype`
 ```yaml
@@ -623,8 +623,8 @@ accum_dtype: "float32" | "bfloat16" = "float32"
 ```
 
 Dtype for **model-internal** accumulation (attention/CEMA reductions inside
-megalodon-jax). Harness-level optimizer math — micro-gradient accumulation,
-token normalization, and global-norm clipping — always runs in fp32 and
+megalodon-jax). Harness-level optimizer math (micro-gradient accumulation,
+token normalization, and global-norm clipping) always runs in fp32 and
 deliberately ignores this knob.
 
 | Property | Value |
@@ -668,7 +668,7 @@ GEMM backend selection. Currently only `"default"` is supported.
 Dataset, tokenizer, and packing configuration. Contains 27 fields.
 
 <a id="data-backend"></a>
-### Backend Selection
+### Backend selection
 <a id="data.backend"></a>
 #### `data.backend`
 ```yaml
@@ -693,7 +693,7 @@ Repeat a fixed text string. Use for offline smoke tests.
 ---
 
 <a id="data-hf"></a>
-### HF Streaming Fields
+### HF streaming fields
 These fields apply when `data.backend: hf`.
 
 <a id="data.hf_dataset"></a>
@@ -773,11 +773,11 @@ Maximum examples to use for evaluation.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be ≥ 0 |
+| Constraints | Must be >= 0 |
 
 Set to `0` to disable evaluation data collection. Selection, persistence, and
 minimum-batch behavior are described in
-[Data Pipeline — Validation set](data_pipeline.md#validation-set).
+[Data Pipeline: validation set](data_pipeline.md#validation-set).
 
 <a id="data.recreate_eval_cache"></a>
 #### `data.recreate_eval_cache`
@@ -787,14 +787,14 @@ recreate_eval_cache: bool = false
 
 Allow a resume to rebuild a missing pinned eval cache after checkpoint
 compatibility validation succeeds. See
-[Data Pipeline — Validation set](data_pipeline.md#validation-set).
+[Data Pipeline: validation set](data_pipeline.md#validation-set).
 
 **Related:** [`data.max_eval_samples`](#data.max_eval_samples)
 
 ---
 
 <a id="data-shuffle"></a>
-### Shuffling & Repeat
+### Shuffling and repeat
 <a id="data.shuffle"></a>
 #### `data.shuffle`
 ```yaml
@@ -827,7 +827,7 @@ window_shuffle_windows: int = 4096
 ```
 
 Number of packed `[T]` windows per seeded shuffle block. `0` disables; train
-only. See [Packing — Window shuffling](packing.md#window-shuffling-batch-decorrelation).
+only. See [Packing: window shuffling](packing.md#window-shuffling-batch-decorrelation).
 
 | Property | Value |
 |----------|-------|
@@ -853,7 +853,7 @@ repeat: bool = true
 ```
 
 Repeat the dataset indefinitely. Termination and final-checkpoint behavior are
-described in [Checkpointing — Final checkpoint policy](checkpointing.md#final-checkpoint-policy).
+described in [Checkpointing: final checkpoint policy](checkpointing.md#final-checkpoint-policy).
 
 | Property | Value |
 |----------|-------|
@@ -863,7 +863,7 @@ described in [Checkpointing — Final checkpoint policy](checkpointing.md#final-
 ---
 
 <a id="data-network"></a>
-### Network Resilience
+### Network resilience
 <a id="data.max_retries"></a>
 #### `data.max_retries`
 ```yaml
@@ -875,7 +875,7 @@ Maximum retries for failed network requests.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be ≥ 0 |
+| Constraints | Must be >= 0 |
 
 <a id="data.retry_delay_sec"></a>
 #### `data.retry_delay_sec`
@@ -888,7 +888,7 @@ Delay between retry attempts in seconds.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be ≥ 0 |
+| Constraints | Must be >= 0 |
 
 <a id="data.state_update_interval"></a>
 #### `data.state_update_interval`
@@ -904,12 +904,12 @@ Cache HF state every N examples for retry recovery.
 | Constraints | Must be > 0 |
 
 Smaller values limit replay after transient stream failures but add overhead;
-see [Data Pipeline — Transient stream recovery](data_pipeline.md#transient-stream-recovery-best-effort).
+see [Data Pipeline: transient stream recovery](data_pipeline.md#transient-stream-recovery-best-effort).
 
 ---
 
 <a id="data-local"></a>
-### Local Text (Debug)
+### Local text (debug)
 <a id="data.local_text"></a>
 #### `data.local_text`
 ```yaml
@@ -926,7 +926,7 @@ Fixed text content for `local_text` backend.
 ---
 
 <a id="data-packing"></a>
-### Packing Configuration
+### Packing configuration
 <a id="data.packing_mode"></a>
 #### `data.packing_mode`
 ```yaml
@@ -954,9 +954,9 @@ sub-threshold documents are flushed into padded windows rather than dropped.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be positive; when `packing_mode: bin`, must be ≥ `batch_size × grad_accum` |
+| Constraints | Must be positive; when `packing_mode: bin`, must be >= `batch_size x grad_accum` |
 
-If `packing_buffer_docs < batch_size × grad_accum` with bin packing:
+If `packing_buffer_docs < batch_size x grad_accum` with bin packing:
 `data.packing_buffer_docs must be >= train.batch_size * train.grad_accum (N), got M`
 **Related:** [`train.batch_size`](#train.batch_size), [`train.grad_accum`](#train.grad_accum), [`data.max_eval_samples`](#data.max_eval_samples)
 
@@ -980,11 +980,10 @@ packing_group_docs: int = 512
 ```
 
 Multipack lookahead group size (documents/chunks). The effective pack
-threshold is `max(packing_group_docs, batch_size * grad_accum)` — the packer
+threshold is `max(packing_group_docs, batch_size * grad_accum)`, so the packer
 also waits for enough docs to fill one full pack cycle of rows. Nothing is
 emitted until that many pending items accumulate (except the end-of-stream
-flush, which packs whatever remains), and the group is sorted each pack
-cycle — keep it modest.
+flush, which packs whatever remains), and the group is sorted each pack cycle.
 
 | Property | Value |
 |----------|-------|
@@ -1001,19 +1000,19 @@ packing_strict_segments: bool = true
 
 Require per-document model-state isolation for `bin` and `multipack`. Requires
 `mask_boundary_loss: true` and a backend with segment-reset support. Inert under
-`sequential`; see [Packing — Segment-Isolation Semantics](packing.md#segment-isolation-semantics).
+`sequential`; see [Packing: segment-isolation semantics](packing.md#segment-isolation-semantics).
 
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Requires | megalodon-jax ≥ 0.1.2 for the `megalodon` backend; `mask_boundary_loss: true` |
+| Requires | megalodon-jax >= 0.1.2 for the `megalodon` backend; `mask_boundary_loss: true` |
 
 **Related:** [`model.use_associative_segment_scan`](#model.use_associative_segment_scan), [`data.mask_boundary_loss`](#data.mask_boundary_loss)
 
 ---
 
 <a id="data-loss"></a>
-### Packed-Doc Loss Behavior
+### Packed-document loss behavior
 <a id="data.mask_boundary_loss"></a>
 #### `data.mask_boundary_loss`
 ```yaml
@@ -1043,7 +1042,7 @@ Include EOS token in loss computation.
 ---
 
 <a id="data-pipeline"></a>
-### Pipeline Settings
+### Pipeline settings
 <a id="data.grain_prefetch"></a>
 #### `data.grain_prefetch`
 ```yaml
@@ -1055,7 +1054,7 @@ Grain pipeline prefetch buffer size. `0` disables prefetching.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be ≥ 0 |
+| Constraints | Must be >= 0 |
 | Recommended | `2` for production training |
 
 <a id="data.device_put"></a>
@@ -1178,7 +1177,7 @@ Raw bytes map to `[byte_offset..byte_offset+255]`.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be ≥ 0; if `add_bos` or `add_eos` is true, must be > 0 |
+| Constraints | Must be >= 0; if `add_bos` or `add_eos` is true, must be > 0 |
 
 If using byte tokenizer with `add_bos: true` or `add_eos: true`, you must set `byte_offset > 0`
 to reserve space for special token IDs.
@@ -1253,7 +1252,7 @@ Random seed for training reproducibility.
 steps: int = 100
 ```
 
-Total training steps, as an **absolute target step count** — a resumed run
+Total training steps, as an **absolute target step count**: a resumed run
 continues until `state.step` reaches this value, not for `steps` additional
 steps. Use `--override train.steps=N` to set a different absolute target for
 an invocation.
@@ -1276,7 +1275,7 @@ Micro-batch size per gradient accumulation step.
 | Required | No |
 | Constraints | Must be positive |
 
-Effective batch size = `batch_size × grad_accum`
+Effective batch size = `batch_size x grad_accum`
 **Related:** [`train.grad_accum`](#train.grad_accum)
 
 <a id="train.seq_len"></a>
@@ -1290,7 +1289,7 @@ Sequence length in tokens.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be ≥ 8; must be divisible by `model.chunk_size` |
+| Constraints | Must be >= 8; must be divisible by `model.chunk_size` |
 
 If `seq_len % chunk_size != 0`:
 `train.seq_len (X) must be divisible by model.chunk_size (Y)`
@@ -1330,7 +1329,7 @@ deterministic: bool | null = null
 ```
 
 Control dropout and RNG determinism. `null` derives the value from dropout
-settings; see [Training — Determinism](training.md#determinism).
+settings; see [Training: determinism](training.md#determinism).
 
 | Property | Value |
 |----------|-------|
@@ -1374,7 +1373,7 @@ Run evaluation every N steps. Set to `0` to disable periodic evaluation.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be ≥ 0 |
+| Constraints | Must be >= 0 |
 
 <a id="train.generate_every"></a>
 #### `train.generate_every`
@@ -1387,7 +1386,7 @@ Run text generation every N steps. Set to `0` to disable.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be ≥ 0 |
+| Constraints | Must be >= 0 |
 
 <a id="train.generate_input_len"></a>
 #### `train.generate_input_len`
@@ -1402,7 +1401,7 @@ last `generate_input_len` tokens at random.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be positive and ≤ `train.seq_len` when set |
+| Constraints | Must be positive and <= `train.seq_len` when set |
 
 <a id="train.generate_max_tokens"></a>
 #### `train.generate_max_tokens`
@@ -1428,7 +1427,7 @@ Sampling temperature. `null` uses the Megalodon default (`1.0`).
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be ≥ 0 when set |
+| Constraints | Must be >= 0 when set |
 
 <a id="train.generate_top_k"></a>
 #### `train.generate_top_k`
@@ -1539,7 +1538,7 @@ Maximum gradient norm for clipping. Set to `0` to disable.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be ≥ 0 |
+| Constraints | Must be >= 0 |
 
 <a id="optim.warmup_steps"></a>
 #### `optim.warmup_steps`
@@ -1552,7 +1551,7 @@ Linear warmup steps.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be ≥ 0; **must be < `train.steps`** |
+| Constraints | Must be >= 0; **must be < `train.steps`** |
 
 If `warmup_steps >= train.steps`:
 `optim.warmup_steps (X) must be < train.steps (Y)`
@@ -2059,7 +2058,7 @@ disable periodic checks.
 ---
 
 <a id="index"></a>
-## Field Index
+## Field index
 All configuration fields by section:
 
 **model** (36 fields): [`backend`](#model.backend), [`vocab_size`](#model.vocab_size), [`d_model`](#model.d_model), [`dropout`](#model.dropout), [`model_dim`](#model.model_dim), [`num_layers`](#model.num_layers), [`num_heads`](#model.num_heads), [`z_dim`](#model.z_dim), [`value_dim`](#model.value_dim), [`ffn_hidden_dim`](#model.ffn_hidden_dim), [`cema_ndim`](#model.cema_ndim), [`chunk_size`](#model.chunk_size), [`max_cache_len`](#model.max_cache_len), [`cache_unbounded`](#model.cache_unbounded), [`norm_num_groups`](#model.norm_num_groups), [`norm_eps`](#model.norm_eps), [`rope_base`](#model.rope_base), [`swiglu`](#model.swiglu), [`rescale_nffn`](#model.rescale_nffn), [`scale_emb`](#model.scale_emb), [`norm_affine`](#model.norm_affine), [`attention_dropout`](#model.attention_dropout), [`hidden_dropout`](#model.hidden_dropout), [`pad_token_id`](#model.pad_token_id), [`bos_token_id`](#model.bos_token_id), [`eos_token_id`](#model.eos_token_id), [`max_positions`](#model.max_positions), [`init_mode`](#model.init_mode), [`use_checkpoint`](#model.use_checkpoint), [`output_size`](#model.output_size), [`use_associative_segment_scan`](#model.use_associative_segment_scan), [`param_dtype`](#model.param_dtype), [`compute_dtype`](#model.compute_dtype), [`accum_dtype`](#model.accum_dtype), [`softmax_dtype`](#model.softmax_dtype), [`gemm_backend`](#model.gemm_backend)

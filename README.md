@@ -12,7 +12,7 @@ git clone https://github.com/pszemraj/chomp.git && cd chomp
 pip install -e .
 ```
 
-## Quick Start
+## Quick start
 
 ```bash
 # Smoke test (CPU, offline)
@@ -31,7 +31,7 @@ chomp train configs/zyda2_100m_2048.yaml --run-dir runs/my_run --resume latest
 chomp generate runs/my_run --prompt "Hello world" --max-tokens 64
 ```
 
-## Configs
+## Configurations
 
 | Config                         | Description                |
 | ------------------------------ | -------------------------- |
@@ -42,19 +42,19 @@ chomp generate runs/my_run --prompt "Hello world" --max-tokens 64
 Personal top-level configs in `configs/custom/` are gitignored. Reusable
 experiment suites can be tracked in named subdirectories there.
 
-## Key Features
+## Key features
 
 - **Fixed shapes**: compile once, no dynamic padding
 - **Resumable**: checkpoints train state + data iterator position
 - **Streaming**: HF datasets with sequential/bin/multipack packing and boundary-aware loss masking
 - **Tokenizer alignment**: auto-rounds vocab size and sets special token IDs
 
-## Docs
+## Documentation
 
-- [Config Reference](docs/config-reference.md) - field/type/default reference
-- [Training](docs/training.md) - train step behavior, generation, and metrics
-- [Data Pipeline](docs/data_pipeline.md) - stream-to-batch path and eval-set construction
-- [Packing](docs/packing.md) - packing strategy and boundary-masking semantics
-- [Optimization](docs/optimization.md) - optimizer behavior and Muon sweep guidance
-- [Checkpointing](docs/checkpointing.md) - save/restore/resume contract
-- [Development Guide](docs/dev.md) - lint, format, test workflow
+- [Config Reference](docs/config-reference.md): field/type/default reference
+- [Training](docs/training.md): train step behavior, generation, and metrics
+- [Data Pipeline](docs/data_pipeline.md): stream-to-batch path and eval-set construction
+- [Packing](docs/packing.md): packing strategy and boundary-masking semantics
+- [Optimization](docs/optimization.md): optimizer behavior and Muon sweep guidance
+- [Checkpointing](docs/checkpointing.md): save/restore/resume contract
+- [Development Guide](docs/dev.md): lint, format, test workflow

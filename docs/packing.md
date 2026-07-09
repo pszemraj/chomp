@@ -56,7 +56,7 @@ Shared by both packed modes:
   downstream: windows that cannot fill one complete `[A, B, T]` batch are
   dropped at batch assembly, and eval raises if zero batches result.
 
-## Segment-Isolation Semantics
+## Segment-isolation semantics
 
 `sequential` keeps stream semantics: the corpus is treated as one continuous
 token stream, no segment metadata reaches the model, and segment IDs are used
@@ -65,9 +65,9 @@ only for loss masking and diagnostics.
 `bin` and `multipack` with `data.packing_strict_segments: true` (the default)
 enable strict packed semantics. Both modes place multiple unrelated documents
 in one sequence, and for a recurrent-state architecture cross-document bleed
-means CEMA/TimestepNorm contamination, not just attention leakage — so
+means CEMA/TimestepNorm contamination, not just attention leakage, so
 isolation is required by default wherever documents are packed. With
-megalodon-jax >= 0.1.2 this is **full state isolation** — each packed document
+megalodon-jax >= 0.1.2 this is **full state isolation**: each packed document
 computes as if it were run alone:
 
 - segment-isolated attention (masked by contiguous segment *runs*, so a reused
@@ -81,7 +81,7 @@ computes as if it were run alone:
 chomp gates this path on the backend's `supports_segment_reset` capability
 flag and fails fast at startup if the installed megalodon-jax predates it
 (older versions accepted the same kwargs but only isolated attention).
-Independently of packing mode, chomp requires **megalodon-jax ≥ 0.1.2 across
+Independently of packing mode, chomp requires **megalodon-jax >= 0.1.2 across
 the board**: every megalodon model build (train and generate) enforces the
 version floor, so a stale environment fails immediately rather than running
 degraded semantics anywhere.
@@ -104,8 +104,8 @@ Costs and notes:
 
 ### Non-strict operation: CEMA/TimestepNorm state crosses boundaries
 
-Under `sequential` — and under `bin`/`multipack` with an explicit
-`data.packing_strict_segments: false` — no segment metadata reaches the model:
+Under `sequential`, and under `bin`/`multipack` with an explicit
+`data.packing_strict_segments: false`, no segment metadata reaches the model:
 recurrent/normalization state flows across packed document boundaries. For
 `sequential` this is the intended continuous-stream semantics. For the packed
 modes it is deliberate cross-document bleed that must be opted into; the
@@ -138,14 +138,14 @@ Guidance:
 - This is default hygiene for any streaming corpus that is not known to be
   globally pre-mixed, not a fix for one dataset. High-risk inputs are
   **domain-ordered or long-document corpora**: source-concatenated mixes
-  (Common Pile derivatives), arXiv/books/legal/PDF dumps, code dumps —
+  (Common Pile derivatives), arXiv/books/legal/PDF dumps, code dumps, or
   anything stored as "all of source A, then all of source B", or with
   documents spanning many `seq_len` windows.
 - Long-document corpora: `sequential` + `window_shuffle_windows` (default) +
   a large `shuffle_buffer_size` (e.g. `200_000`). The document-level shuffle
   buffer fights source/domain/shard-order homogeneity of the stream; the
   window shuffle fights within-document, adjacent-window homogeneity. They
-  are complementary — neither replaces the other.
+  are complementary; neither replaces the other.
 - `bin`/`multipack` mainly improve utilization on short-document mixes
   (Zyda-2, SmolLM2-style); on long-document corpora most windows are
   full-capacity chunks and bin packing adds no utilization benefit.
