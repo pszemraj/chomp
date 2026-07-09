@@ -222,6 +222,13 @@ def test_data_and_logging_validation_rejects_invalid_values() -> None:
             ),
             "packing_group_docs",
         ),
+        (
+            lambda cfg: replace(
+                cfg,
+                data=replace(cfg.data, packing_mode="multipack", packing_max_docs_per_bin=0),
+            ),
+            "packing_max_docs_per_bin",
+        ),
         (lambda cfg: replace(cfg, data=replace(cfg.data, packing_mode="unknown")), "packing_mode"),
         (
             lambda cfg: replace(cfg, data=replace(cfg.data, max_eval_samples=-1)),

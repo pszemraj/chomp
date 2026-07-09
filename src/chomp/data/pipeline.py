@@ -955,6 +955,35 @@ def _assemble_batch(
     return batch
 
 
+def _build_packer(cfg: Config) -> TokenPacker | BinPacker | MultipackPacker:
+    """Create the configured token packer."""
+    common: dict[str, Any] = {
+        "seq_len": cfg.train.seq_len,
+        "add_bos": cfg.data.tokenizer.add_bos,
+        "add_eos": cfg.data.tokenizer.add_eos,
+        "bos_id": cfg.model.bos_token_id,
+        "eos_id": cfg.model.eos_token_id,
+        "max_doc_tokens": cfg.data.tokenizer.max_doc_tokens,
+    }
+    if cfg.data.packing_mode == "bin":
+        return BinPacker(
+            **common,
+            bins_per_pack=int(cfg.train.grad_accum) * int(cfg.train.batch_size),
+            buffer_docs=cfg.data.packing_buffer_docs,
+            max_docs_per_bin=cfg.data.packing_max_docs_per_bin,
+            pad_id=cfg.model.pad_token_id,
+        )
+    if cfg.data.packing_mode == "multipack":
+        return MultipackPacker(
+            **common,
+            bins_per_pack=int(cfg.train.grad_accum) * int(cfg.train.batch_size),
+            group_docs=cfg.data.packing_group_docs,
+            max_docs_per_bin=cfg.data.packing_max_docs_per_bin,
+            pad_id=cfg.model.pad_token_id,
+        )
+    return TokenPacker(**common)
+
+
 class _SequenceProducer:
     """Produces packed [T] windows from a text stream + packer.
 
@@ -981,42 +1010,7 @@ class _SequenceProducer:
         else:
             self._text_stream = _build_backend_text_stream(cfg)
 
-        # Packer
-        if cfg.data.packing_mode == "bin":
-            self._packer = BinPacker(
-                seq_len=cfg.train.seq_len,
-                add_bos=cfg.data.tokenizer.add_bos,
-                add_eos=cfg.data.tokenizer.add_eos,
-                bos_id=cfg.model.bos_token_id,
-                eos_id=cfg.model.eos_token_id,
-                max_doc_tokens=cfg.data.tokenizer.max_doc_tokens,
-                bins_per_pack=int(cfg.train.grad_accum) * int(cfg.train.batch_size),
-                buffer_docs=cfg.data.packing_buffer_docs,
-                max_docs_per_bin=cfg.data.packing_max_docs_per_bin,
-                pad_id=cfg.model.pad_token_id,
-            )
-        elif cfg.data.packing_mode == "multipack":
-            self._packer = MultipackPacker(
-                seq_len=cfg.train.seq_len,
-                add_bos=cfg.data.tokenizer.add_bos,
-                add_eos=cfg.data.tokenizer.add_eos,
-                bos_id=cfg.model.bos_token_id,
-                eos_id=cfg.model.eos_token_id,
-                max_doc_tokens=cfg.data.tokenizer.max_doc_tokens,
-                bins_per_pack=int(cfg.train.grad_accum) * int(cfg.train.batch_size),
-                group_docs=cfg.data.packing_group_docs,
-                max_docs_per_bin=cfg.data.packing_max_docs_per_bin,
-                pad_id=cfg.model.pad_token_id,
-            )
-        else:
-            self._packer = TokenPacker(
-                seq_len=cfg.train.seq_len,
-                add_bos=cfg.data.tokenizer.add_bos,
-                add_eos=cfg.data.tokenizer.add_eos,
-                bos_id=cfg.model.bos_token_id,
-                eos_id=cfg.model.eos_token_id,
-                max_doc_tokens=cfg.data.tokenizer.max_doc_tokens,
-            )
+        self._packer = _build_packer(cfg)
 
     def _push_next_document(self) -> None:
         """Fetch one item from the text stream and add it to the packer."""

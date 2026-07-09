@@ -855,6 +855,15 @@ def _validate_data(cfg: Config) -> None:
             "data.packing_mode must be 'sequential', 'bin', or 'multipack', "
             f"got {cfg.data.packing_mode!r}"
         )
+    if (
+        cfg.data.packing_mode in ("bin", "multipack")
+        and cfg.data.packing_max_docs_per_bin is not None
+        and cfg.data.packing_max_docs_per_bin <= 0
+    ):
+        _vfail(
+            "data.packing_max_docs_per_bin must be positive when set, "
+            f"got {cfg.data.packing_max_docs_per_bin}"
+        )
     if cfg.data.packing_mode == "bin":
         if cfg.data.packing_buffer_docs <= 0:
             _vfail(
@@ -866,11 +875,6 @@ def _validate_data(cfg: Config) -> None:
             _vfail(
                 "data.packing_buffer_docs must be >= train.batch_size * train.grad_accum "
                 f"({min_docs}), got {cfg.data.packing_buffer_docs}"
-            )
-        if cfg.data.packing_max_docs_per_bin is not None and cfg.data.packing_max_docs_per_bin <= 0:
-            _vfail(
-                "data.packing_max_docs_per_bin must be positive when set, "
-                f"got {cfg.data.packing_max_docs_per_bin}"
             )
     if cfg.data.packing_mode == "multipack" and cfg.data.packing_group_docs <= 0:
         _vfail(
