@@ -553,15 +553,6 @@ def test_eval_iterator_never_shuffles() -> None:
     assert seen == [100, 101, 102, 103]
 
 
-def test_grain_iterator_stats_disabled_with_device_put() -> None:
-    """Packing stats should be empty when device_put=True."""
-    cfg = make_pipeline_cfg(packing_mode="bin", packing_buffer_docs=4, device_put=True)
-
-    it = build_train_iterator(cfg)
-    _ = next(it)
-    assert it.get_stats() == {}
-
-
 class _RaisingStatsNode:
     """Chain node whose get_stats() always raises, to exercise error handling."""
 

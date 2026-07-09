@@ -46,9 +46,9 @@ def test_print_banner_outputs_expected_text(capsys: object) -> None:
     assert captured.out.rstrip("\n") == BANNER
 
 
-def test_parse_resume_accepts_valid_variants() -> None:
-    """parse_resume should normalize valid alias and numeric variants."""
-    for raw, expected in [
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
         ("none", "none"),
         ("no", "none"),
         ("false", "none"),
@@ -60,22 +60,26 @@ def test_parse_resume_accepts_valid_variants() -> None:
         ("100", 100),
         ("5000", 5000),
         ("  42  ", 42),
-    ]:
-        assert parse_resume(raw) == expected
+    ],
+)
+def test_parse_resume_accepts_valid_variants(raw: str, expected: object) -> None:
+    """parse_resume should normalize valid alias and numeric variants."""
+    assert parse_resume(raw) == expected
 
 
-def test_parse_resume_rejects_negative_step() -> None:
-    """parse_resume should reject negative step numbers."""
-    for raw in ["-1", "-100"]:
-        with pytest.raises(click.BadParameter, match="non-negative"):
-            parse_resume(raw)
-
-
-def test_parse_resume_rejects_invalid_strings() -> None:
+@pytest.mark.parametrize(
+    ("raw", "match"),
+    [
+        ("-1", "non-negative"),
+        ("-100", "non-negative"),
+        ("invalid", "Invalid resume value"),
+        ("step100", "Invalid resume value"),
+    ],
+)
+def test_parse_resume_rejects_invalid_values(raw: str, match: str) -> None:
     """parse_resume should reject unparseable resume values."""
-    for raw in ["invalid", "step100"]:
-        with pytest.raises(click.BadParameter, match="Invalid resume value"):
-            parse_resume(raw)
+    with pytest.raises(click.BadParameter, match=match):
+        parse_resume(raw)
 
 
 def test_resolve_checkpoint_with_run_dir(trained_small_run: tuple[Config, Path]) -> None:

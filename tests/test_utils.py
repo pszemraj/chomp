@@ -136,16 +136,17 @@ def test_dummy_param_count() -> None:
     assert n == expected
 
 
-def test_finite_check_rejects_nan_loss() -> None:
-    """NaN loss should raise RuntimeError."""
-    with pytest.raises(RuntimeError, match="loss"):
-        _check_finite_metrics({"loss": float("nan"), "grad_norm": 1.0}, step=3)
-
-
-def test_finite_check_rejects_inf_grad_norm() -> None:
-    """Inf grad_norm should raise RuntimeError."""
-    with pytest.raises(RuntimeError, match="grad_norm"):
-        _check_finite_metrics({"loss": 1.0, "grad_norm": float("inf")}, step=3)
+@pytest.mark.parametrize(
+    ("metrics", "match"),
+    [
+        ({"loss": float("nan"), "grad_norm": 1.0}, "loss"),
+        ({"loss": 1.0, "grad_norm": float("inf")}, "grad_norm"),
+    ],
+)
+def test_finite_check_rejects_nonfinite_metrics(metrics: dict[str, float], match: str) -> None:
+    """Non-finite metrics should raise RuntimeError with the metric name."""
+    with pytest.raises(RuntimeError, match=match):
+        _check_finite_metrics(metrics, step=3)
 
 
 def test_configure_blackwell_sets_flags_and_warns(

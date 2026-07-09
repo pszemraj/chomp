@@ -1074,10 +1074,8 @@ class _SequenceProducer:
 
         :param dict[str, Any] state: State dict from get_state().
         """
-        if "text" in state:
-            self._text_stream.set_state(state["text"])
-        if "packer" in state:
-            self._packer.set_state(state["packer"])
+        self._text_stream.set_state(state["text"])
+        self._packer.set_state(state["packer"])
 
     def get_stats(self) -> dict[str, int]:
         """Return packer-level document stats if available.
