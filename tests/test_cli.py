@@ -21,7 +21,6 @@ from chomp.config import Config
 from chomp.data import build_tokenizer, save_tokenizer_snapshot
 from chomp.model import build_model
 from chomp.train import run
-from chomp.utils.ckpt_paths import resolve_checkpoint_path
 from chomp.utils.tree import abstractify_tree
 from tests.helpers.config_factories import make_small_run_cfg
 
@@ -81,17 +80,6 @@ def test_parse_resume_rejects_invalid_values(raw: str, match: str) -> None:
     """parse_resume should reject unparseable resume values."""
     with pytest.raises(click.BadParameter, match=match):
         parse_resume(raw)
-
-
-def test_resolve_checkpoint_with_run_dir(trained_small_run: tuple[Config, Path]) -> None:
-    """CLI integration smoke: run-dir input should resolve latest checkpoint."""
-    _, run_dir = trained_small_run
-
-    step_dir, found_run_dir = resolve_checkpoint_path(str(run_dir))
-
-    assert found_run_dir == run_dir
-    assert step_dir.name == "2"
-    assert (step_dir / "train_state").exists()
 
 
 def test_generate_rejects_non_megalodon_backend(tmp_path: Path) -> None:

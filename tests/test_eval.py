@@ -24,6 +24,7 @@ from chomp.config import (
 from chomp.data import build_tokenizer, load_or_create_eval_texts
 from chomp.train import run
 from tests.helpers.hf_fakes import FakeHFIterable
+from tests.helpers.io import read_jsonl
 
 
 def _eval_run_cfg(
@@ -82,7 +83,7 @@ def test_eval_batches_assembled_once_and_reused(
 
     assert calls["n"] == 1, f"eval iterator rebuilt {calls['n']} times for 2 evals"
     metrics_path = run_dir / cfg.logging.metrics_file
-    rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
+    rows = read_jsonl(metrics_path)
     eval_rows = [row for row in rows if row.get("eval_loss") not in (None, "")]
     assert len(eval_rows) == 2  # both evals produced a loss from the cached batches
     assert any("step" in row for row in rows)
@@ -169,7 +170,7 @@ def test_eval_flushes_partial_buffer_at_stream_end(
     run(cfg, config_path=None, resume="none")
 
     metrics_path = run_dir / cfg.logging.metrics_file
-    rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
+    rows = read_jsonl(metrics_path)
     eval_rows = [row for row in rows if row.get("eval_loss") not in (None, "")]
     assert eval_rows, "flushed eval windows should have produced an eval loss"
 

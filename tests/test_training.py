@@ -56,6 +56,7 @@ from chomp.types import Batch, TrainState
 from chomp.utils.tree import abstractify_tree
 from tests.helpers.assertions import tree_allclose
 from tests.helpers.config_factories import make_small_run_cfg
+from tests.helpers.io import read_jsonl
 
 
 def _base_cfg(run_dir: Path) -> Config:
@@ -386,7 +387,7 @@ def test_exact_eof_after_batch_boundary_saves_final_checkpoint(
     run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
 
     metrics_path = run_dir / cfg.logging.metrics_file
-    rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
+    rows = read_jsonl(metrics_path)
     assert any(row.get("data_exhausted") and row.get("step") == 3 for row in rows)
 
     ckpt_dir = default_ckpt_dir(run_dir)
@@ -501,7 +502,7 @@ def test_exhaustion_mid_assembly_skips_final_checkpoint(tmp_path: Path) -> None:
     run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
 
     metrics_path = run_dir / cfg.logging.metrics_file
-    rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
+    rows = read_jsonl(metrics_path)
     assert any(row.get("data_exhausted") for row in rows)
     loss_step3 = [row["loss"] for row in rows if row.get("step") == 3 and "loss" in row]
     assert len(loss_step3) == 1
@@ -515,7 +516,7 @@ def test_exhaustion_mid_assembly_skips_final_checkpoint(tmp_path: Path) -> None:
     # Resume from the aligned periodic checkpoint: batch 3 replays bit-exactly
     # (same loss), then the stream exhausts again without new checkpoints.
     run(cfg, config_path=str(config_src), resume="latest", dry_run=False)
-    rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
+    rows = read_jsonl(metrics_path)
     loss_step3_replayed = [row["loss"] for row in rows if row.get("step") == 3 and "loss" in row]
     assert len(loss_step3_replayed) == 2
     assert loss_step3_replayed[0] == loss_step3_replayed[1]
@@ -569,7 +570,7 @@ def test_resume_bit_exact_with_prefetch_and_window_shuffle(tmp_path: Path) -> No
     # Per-step losses agree exactly across the resume boundary (steps 4-6 ran
     # from the restored mid-window prefetching iterator).
     def _losses(run_dir: Path) -> dict[int, float]:
-        rows = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
+        rows = read_jsonl(run_dir / "metrics.jsonl")
         return {int(r["step"]): r["loss"] for r in rows if "loss" in r and "step" in r}
 
     losses_cont = _losses(run_dir_cont)
@@ -648,7 +649,7 @@ def test_resume_bit_exact_through_exhaustion_flush(tmp_path: Path) -> None:
     run(cfg_resume, config_path=str(config_src), resume="latest", dry_run=False)
 
     def _losses(run_dir: Path) -> dict[int, float]:
-        rows = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
+        rows = read_jsonl(run_dir / "metrics.jsonl")
         return {int(r["step"]): r["loss"] for r in rows if "loss" in r and "step" in r}
 
     losses_cont = _losses(run_dir_cont)
@@ -1074,7 +1075,7 @@ def test_training_crash_marks_wandb_failed_and_logs(
     assert dummy_wandb.finish_calls == [1]
 
     metrics_path = run_dir / cfg.logging.metrics_file
-    rows = [json.loads(line) for line in metrics_path.read_text().splitlines() if line.strip()]
+    rows = read_jsonl(metrics_path)
     assert any(row.get("crash") for row in rows)
 
     log_text = (run_dir / cfg.logging.log_file).read_text()
@@ -1114,7 +1115,7 @@ def test_tokens_seen_matches_exact_loss_tokens(tmp_path: Path) -> None:
     run(cfg, config_path=None, resume="none")
 
     metrics_path = Path(cfg.logging.run_dir) / cfg.logging.metrics_file
-    rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
+    rows = read_jsonl(metrics_path)
     train_rows = [row for row in rows if "loss_tokens" in row]
     assert len(train_rows) == cfg.train.steps
 
