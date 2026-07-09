@@ -42,7 +42,15 @@ from chomp.config import (
 )
 from chomp.data import build_train_iterator, data_fingerprint, prepare_tokenizer_and_config
 from chomp.model import build_model, supports_packed_segments, training_loss
-from chomp.train import _build_checkpoint_manager, build_optimizer, init_train_state, run
+from chomp.train import (
+    _METRICS_FILE_DROP,
+    _WANDB_DROP,
+    _build_checkpoint_manager,
+    _project_metrics,
+    build_optimizer,
+    init_train_state,
+    run,
+)
 from chomp.types import Batch, TrainState
 from chomp.utils.tree import abstractify_tree, tree_allclose
 from tests.helpers.config_factories import make_small_run_cfg
@@ -959,6 +967,29 @@ class DummyWandbRun:
     def finish(self, *, exit_code: int = 0) -> None:
         """Record the finish exit code."""
         self.finish_calls.append(exit_code)
+
+
+def test_metrics_sinks_receive_distinct_projections() -> None:
+    """Local and W&B telemetry should retain their sink-specific details."""
+    row = {
+        "step": 7,
+        "loss": 1.5,
+        "wall_time_s": 2.0,
+        "packing_tokens": 11,
+        "device_memory_gb": 3.0,
+        "peak_memory_gb": 4.0,
+    }
+
+    local = _project_metrics(row, drop=_METRICS_FILE_DROP)
+    wandb = _project_metrics(row, drop=_WANDB_DROP)
+
+    assert local == {"step": 7, "loss": 1.5, "peak_memory_gb": 4.0}
+    assert wandb == {
+        "loss": 1.5,
+        "wall_time_s": 2.0,
+        "packing_tokens": 11,
+        "device_memory_gb": 3.0,
+    }
 
 
 class DummyIter:

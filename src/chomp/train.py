@@ -277,7 +277,7 @@ def _maybe_init_wandb(cfg: Config, *, run_dir: Path, dry_run: bool) -> Any | Non
     :return Any | None: W&B run object or None if disabled.
     """
     wandb_cfg = cfg.logging.wandb
-    if wandb_cfg.enabled and wandb_cfg.mode != "disabled" and not dry_run:
+    if wandb_cfg.enabled and not dry_run:
         try:
             import wandb
         except Exception as exc:  # pragma: no cover - optional runtime dependency
@@ -551,11 +551,23 @@ def _emit_generation_output(
     tqdm.write(f"Generated: {generated_text}")
 
 
-# Keys logged to wandb but dropped from the local metrics file, and vice versa.
+# Detailed pipeline and device metrics belong in W&B; the local file keeps the
+# compact, resume-oriented training record. W&B supplies its own step axis and
+# exposes current device memory instead of the process-lifetime peak.
 _METRICS_FILE_DROP = frozenset(
     {"wall_time_s", "packing_tokens", "packing_capacity", "eval_tokens", "device_memory_gb"}
 )
-_WANDB_DROP = _METRICS_FILE_DROP | {"step", "peak_memory_gb"}
+_WANDB_DROP = frozenset({"step", "peak_memory_gb"})
+
+
+def _project_metrics(row: dict[str, Any], *, drop: frozenset[str]) -> dict[str, Any]:
+    """Project a complete metrics row onto one telemetry sink.
+
+    :param dict[str, Any] row: Complete metrics row.
+    :param frozenset[str] drop: Keys omitted from the sink.
+    :return dict[str, Any]: Metrics accepted by the sink.
+    """
+    return {key: value for key, value in row.items() if key not in drop}
 
 
 def _console_row(
@@ -1611,10 +1623,10 @@ def run(
                         if step_i == (start_step + 1) and t_compile is not None:
                             row["first_step_compile_time_s"] = float(t_compile)
 
-                        mw.write({k: v for k, v in row.items() if k not in _METRICS_FILE_DROP})
+                        mw.write(_project_metrics(row, drop=_METRICS_FILE_DROP))
                         if wandb_run is not None:
                             wandb_run.log(
-                                {k: v for k, v in row.items() if k not in _WANDB_DROP},
+                                _project_metrics(row, drop=_WANDB_DROP),
                                 step=step_i,
                             )
 

@@ -171,9 +171,13 @@ Metrics are written to `logging.metrics_file` every `train.log_every` steps
 - `peak_memory_gb` (best-effort, device-dependent)
 - `eval_loss` (only when eval runs)
 
-If `logging.wandb.enabled=true`, the same rows are also logged to Weights & Biases.
-chomp also uploads `config_original.yaml` as a W&B artifact at run start, and W&B
-logs go to the default `./wandb` directory (or `WANDB_DIR` if set).
+If `logging.wandb.enabled=true`, Weights & Biases receives the training rows plus
+detailed wall-clock, packing-capacity, eval-token, and current-device-memory
+metrics. The local file instead retains the process peak-memory value and its
+explicit `step` field. chomp also uploads `config_original.yaml` as a W&B
+artifact at run start, and W&B logs go to the default `./wandb` directory (or
+`WANDB_DIR` if set). Set `logging.wandb.enabled=false` to disable W&B; `mode`
+selects online or offline logging only.
 
 Console output is throttled by `train.log_every` and prints a compact
 one-line summary (loss, grad norm, LR, step time, throughput, optional eval

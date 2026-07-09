@@ -2055,7 +2055,7 @@ W&B run name. `null` auto-generates.
 <a id="logging.wandb.mode"></a>
 #### `logging.wandb.mode`
 ```yaml
-mode: "online" | "offline" | "disabled" = "online"
+mode: "online" | "offline" = "online"
 ```
 
 W&B sync mode.
@@ -2063,7 +2063,7 @@ W&B sync mode.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be one of `"online"`, `"offline"`, `"disabled"` |
+| Constraints | Must be one of `"online"`, `"offline"` |
 
 <a id="logging.wandb.tags"></a>
 #### `logging.wandb.tags`

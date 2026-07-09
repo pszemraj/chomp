@@ -336,7 +336,7 @@ class WandbConfig:
     project: str | None = None
     entity: str | None = None
     run_name: str | None = None
-    mode: Literal["online", "offline", "disabled"] = "online"
+    mode: Literal["online", "offline"] = "online"
     tags: tuple[str, ...] = ()
 
 
@@ -926,11 +926,8 @@ def _validate_logging(cfg: Config) -> None:
     """Validate logging-related config fields."""
     if cfg.logging.log_file is not None and not str(cfg.logging.log_file).strip():
         _vfail("logging.log_file must be a non-empty string or null")
-    if cfg.logging.wandb.mode not in ("online", "offline", "disabled"):
-        _vfail(
-            "logging.wandb.mode must be 'online', 'offline', or 'disabled', "
-            f"got {cfg.logging.wandb.mode!r}"
-        )
+    if cfg.logging.wandb.mode not in ("online", "offline"):
+        _vfail(f"logging.wandb.mode must be 'online' or 'offline', got {cfg.logging.wandb.mode!r}")
 
 
 def _validate_tokenizer(cfg: Config) -> None:
