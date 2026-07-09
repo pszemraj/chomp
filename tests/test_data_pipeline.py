@@ -174,6 +174,33 @@ def test_ffd_leftover_requeue_preserves_arrival_order(mode: str) -> None:
     assert pending == [_doc(20, 8), _doc(30, 9)]
 
 
+def test_ffd_queue_policies_remain_distinct() -> None:
+    """Bin consumes the full pool while multipack consumes one bounded group."""
+    common: dict[str, Any] = {
+        "seq_len": 8,
+        "add_bos": False,
+        "add_eos": False,
+        "bos_id": 1,
+        "eos_id": 2,
+        "max_doc_tokens": None,
+        "bins_per_pack": 2,
+        "max_docs_per_bin": None,
+        "pad_id": 0,
+    }
+    bin_packer = BinPacker(buffer_docs=3, **common)
+    multipack = MultipackPacker(group_docs=3, **common)
+    for packer in (bin_packer, multipack):
+        packer.add_document(_doc(10, 2))
+        packer.add_document(_doc(20, 2))
+        # Adds two chunks at once, taking the queue past the threshold.
+        packer.add_document(_doc(30, 12))
+        _ = packer.pop_seq_with_metadata()
+        _ = packer.pop_seq_with_metadata()
+
+    assert bin_packer.get_state()["pending_docs"] == []
+    assert multipack.get_state()["pending_docs"] == [_doc(30, 4)]
+
+
 @pytest.mark.parametrize("make_packer", [_bin_packer, _multipack_packer])
 def test_ffd_packer_flushes_pending_docs_at_stream_end(
     make_packer: Callable[[], Any],

@@ -957,7 +957,11 @@ def _assemble_batch(
 
 
 def _build_packer(cfg: Config) -> TokenPacker | BinPacker | MultipackPacker:
-    """Create the configured token packer."""
+    """Create the configured token packer.
+
+    :param Config cfg: Training configuration.
+    :return TokenPacker | BinPacker | MultipackPacker: Configured packer.
+    """
     common: dict[str, Any] = {
         "seq_len": cfg.train.seq_len,
         "add_bos": cfg.data.tokenizer.add_bos,
