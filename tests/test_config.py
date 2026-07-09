@@ -37,6 +37,21 @@ def _base_cfg() -> Config:
     )
 
 
+def _hf_data(*, hf_eval_split: object | None = None) -> DataConfig:
+    """Create HF data config for validation tests."""
+    return DataConfig(
+        backend="hf",
+        hf_dataset="dummy",
+        hf_name="dummy",
+        hf_split="train",
+        hf_eval_split=hf_eval_split,  # type: ignore[arg-type]
+        text_key="text",
+        shuffle=False,
+        repeat=True,
+        tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+    )
+
+
 def test_model_and_train_validation_rejects_invalid_values() -> None:
     """Model/train validation should fail with actionable errors."""
     cases: list[tuple[Callable[[Config], Config], str]] = [
@@ -260,18 +275,7 @@ def test_strict_packed_rejects_disabled_boundary_masking(mode: str) -> None:
 def test_hf_eval_split_allows_null() -> None:
     """hf_eval_split=None should validate and imply train-split eval fallback."""
     cfg = _base_cfg()
-    hf_data = DataConfig(
-        backend="hf",
-        hf_dataset="dummy",
-        hf_name="dummy",
-        hf_split="train",
-        hf_eval_split=None,
-        text_key="text",
-        shuffle=False,
-        repeat=True,
-        tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
-    )
-    validate_config(replace(cfg, data=hf_data))
+    validate_config(replace(cfg, data=_hf_data()))
 
 
 def test_hf_eval_split_default_is_null() -> None:
@@ -279,23 +283,12 @@ def test_hf_eval_split_default_is_null() -> None:
     assert DataConfig().hf_eval_split is None
 
 
-def test_hf_eval_split_rejects_non_string_types() -> None:
+@pytest.mark.parametrize("bad_split", [False, 0, 1.5, [], {}])
+def test_hf_eval_split_rejects_non_string_types(bad_split: object) -> None:
     """hf_eval_split must be either None or a non-empty string."""
-    for bad_split in [False, 0, 1.5, [], {}]:
-        cfg = _base_cfg()
-        hf_data = DataConfig(
-            backend="hf",
-            hf_dataset="dummy",
-            hf_name="dummy",
-            hf_split="train",
-            hf_eval_split=bad_split,  # type: ignore[arg-type]
-            text_key="text",
-            shuffle=False,
-            repeat=True,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
-        )
-        with pytest.raises(ValueError, match="hf_eval_split"):
-            validate_config(replace(cfg, data=hf_data))
+    cfg = _base_cfg()
+    with pytest.raises(ValueError, match="hf_eval_split"):
+        validate_config(replace(cfg, data=_hf_data(hf_eval_split=bad_split)))
 
 
 def test_muon_defaults_reflect_sweep_results() -> None:
