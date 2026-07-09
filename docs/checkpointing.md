@@ -110,8 +110,11 @@ Bit-exactness on GPU additionally requires deterministic XLA kernels: without
 `--xla_gpu_deterministic_ops=true`, XLA may pick nondeterministic GPU kernels
 (atomic-reduction scatters, algorithm choices sensitive to prior GPU state),
 and a resumed run drifts from the continuous one in the low-order bits of the
-optimizer state even though losses match. The `chomp` CLI (and the test
-suite) therefore appends that flag to `XLA_FLAGS` at startup whenever NVIDIA
-GPUs are present. An explicit `--xla_gpu_deterministic_ops=false` in
-`XLA_FLAGS` is respected and trades the bit-exact contract for whatever
-throughput the nondeterministic kernels buy.
+optimizer state even though losses match. `chomp train` (and the test suite)
+therefore appends that flag to `XLA_FLAGS` at startup whenever NVIDIA GPUs
+are present; `chomp generate` does not, since generation makes no
+bit-exactness promise. An explicit `--xla_gpu_deterministic_ops=false` in
+`XLA_FLAGS` is respected and trades the bit-exact contract for the
+nondeterministic kernels' throughput (measured ~25-35% faster steps on a
+100M-param Megalodon smoke benchmark, RTX 5090, seq_len 2048 — see
+[Training Loop — GPU environment notes](training.md#gpu-environment-notes)).
