@@ -18,6 +18,7 @@ import pytest
 from _pytest.logging import LogCaptureFixture
 
 from chomp.ckpt import (
+    CheckpointMeta,
     build_meta,
     check_resume_compat,
     default_ckpt_dir,
@@ -86,6 +87,22 @@ def _base_cfg(run_dir: Path) -> Config:
     )
 
 
+def _checkpoint_record(cfg: Config, *, step: int = 0, tokens_seen: int = 0) -> CheckpointMeta:
+    """Build production-format metadata for resume compatibility tests.
+
+    :param Config cfg: Configuration captured by the checkpoint.
+    :param int step: Completed training step.
+    :param int tokens_seen: Cumulative loss-token count.
+    :return CheckpointMeta: Production checkpoint metadata record.
+    """
+    return build_meta(
+        step=step,
+        config=cfg.to_dict(),
+        data_fingerprint=data_fingerprint(cfg),
+        tokens_seen=tokens_seen,
+    )
+
+
 def _make_state() -> TrainState:
     """Create a minimal TrainState for testing.
 
@@ -114,7 +131,7 @@ def _saved_step1_checkpoint(
     ckpt_dir = default_ckpt_dir(run_dir)
     mgr = make_manager(ckpt_dir, max_to_keep=2, save_every=1, async_save=async_save)
 
-    meta = build_meta(step=1, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg))
+    meta = _checkpoint_record(cfg, step=1)
     save(mgr, step=1, train_state=state, data_iter=data_it, meta=meta)
     mgr.wait_until_finished()
     return cfg, state, mgr, ckpt_dir
@@ -188,7 +205,7 @@ def test_checkpoint_data_state_roundtrip(tmp_path: Path) -> None:
         opt_state={"m": jnp.array([0.5], dtype=jnp.float32)},
         rng=jax.random.PRNGKey(0),
     )
-    meta = build_meta(step=2, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg))
+    meta = _checkpoint_record(cfg, step=2)
     save(mgr, step=2, train_state=state, data_iter=data_it, meta=meta)
     mgr.wait_until_finished()
 
@@ -239,7 +256,7 @@ def test_max_to_keep_prunes_checkpoints(tmp_path: Path) -> None:
     mgr = make_manager(ckpt_dir, max_to_keep=2, save_every=1, async_save=False)
 
     for step in (1, 2, 3):
-        meta = build_meta(step=step, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg))
+        meta = _checkpoint_record(cfg, step=step)
         save(
             mgr,
             step=step,
@@ -249,7 +266,7 @@ def test_max_to_keep_prunes_checkpoints(tmp_path: Path) -> None:
         )
         mgr.wait_until_finished()
 
-    meta = build_meta(step=4, config=cfg.to_dict(), data_fingerprint=data_fingerprint(cfg))
+    meta = _checkpoint_record(cfg, step=4)
     save(
         mgr,
         step=4,
@@ -1162,7 +1179,7 @@ def test_resume_compat_rejects_multipack_knob_changes(tmp_path: Path) -> None:
             max_eval_samples=0,
         ),
     )
-    meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
+    meta = _checkpoint_record(cfg).to_dict()
 
     check_resume_compat(cfg, meta)  # identical config resumes cleanly
 
@@ -1175,7 +1192,7 @@ def test_resume_compat_rejects_multipack_knob_changes(tmp_path: Path) -> None:
         check_resume_compat(changed_strict, meta)
 
     binc = replace(cfg, data=replace(cfg.data, packing_mode="bin", packing_buffer_docs=8))
-    bin_meta = {"config": binc.to_dict(), "data_fingerprint": data_fingerprint(binc)}
+    bin_meta = _checkpoint_record(binc).to_dict()
     bin_changed = replace(binc, data=replace(binc.data, packing_strict_segments=False))
     with pytest.raises(RuntimeError, match="packing_strict_segments"):
         check_resume_compat(bin_changed, bin_meta)
@@ -1190,7 +1207,7 @@ def test_resume_compat_ignores_inert_packing_knobs(tmp_path: Path) -> None:
     """
     cfg = _base_cfg(tmp_path / "run_inert")
     assert cfg.data.packing_mode == "sequential"
-    meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
+    meta = _checkpoint_record(cfg).to_dict()
 
     drifted = replace(
         cfg,
@@ -1205,7 +1222,7 @@ def test_resume_compat_ignores_inert_packing_knobs(tmp_path: Path) -> None:
     check_resume_compat(drifted, meta)  # must not raise
 
     mp = replace(cfg, data=replace(cfg.data, packing_mode="multipack", packing_group_docs=8))
-    mp_meta = {"config": mp.to_dict(), "data_fingerprint": data_fingerprint(mp)}
+    mp_meta = _checkpoint_record(mp).to_dict()
     mp_drifted = replace(
         mp, data=replace(mp.data, packing_buffer_docs=mp.data.packing_buffer_docs + 1)
     )
@@ -1221,10 +1238,21 @@ def test_resume_compat_checks_unknown_packing_fingerprint_keys(tmp_path: Path) -
     hand-enumerated comparison list.
     """
     cfg = _base_cfg(tmp_path / "run_unknown_key")
-    meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
+    meta = _checkpoint_record(cfg).to_dict()
     meta["data_fingerprint"]["packing"]["future_knob"] = 3
 
     with pytest.raises(RuntimeError, match="future_knob"):
+        check_resume_compat(cfg, meta)
+
+
+@pytest.mark.parametrize("tokens_seen", [None, -1, True, 1.5])
+def test_resume_compat_requires_valid_token_count(tmp_path: Path, tokens_seen: Any) -> None:
+    """Exact resume must reject absent, negative, boolean, or non-integer counts."""
+    cfg = _base_cfg(tmp_path / "run_invalid_tokens")
+    meta = _checkpoint_record(cfg).to_dict()
+    meta["tokens_seen"] = tokens_seen
+
+    with pytest.raises(RuntimeError, match="invalid tokens_seen"):
         check_resume_compat(cfg, meta)
 
 
@@ -1239,7 +1267,7 @@ def test_resume_compat_warns_on_gpu_determinism_drift(
     so the fingerprint comparison is the only place a user learns about it.
     """
     cfg = _base_cfg(tmp_path / "run_det_ops")
-    meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
+    meta = _checkpoint_record(cfg).to_dict()
     # Whatever this process's effective setting is (True on GPU hosts via
     # conftest, None on CPU-only), record something else in the checkpoint.
     meta["data_fingerprint"]["xla_gpu_deterministic_ops"] = not bool(
@@ -1285,7 +1313,7 @@ def test_resume_compat_rejects_stream_and_objective_drift(
     """Every knob that changes data order, iterator-state shape, or the
     objective must hard-error on resume, not warn."""
     cfg = _base_cfg(tmp_path / "run_drift")
-    meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
+    meta = _checkpoint_record(cfg).to_dict()
     with pytest.raises(RuntimeError, match=match):
         check_resume_compat(mutate(cfg), meta)
 
@@ -1296,14 +1324,14 @@ def test_resume_compat_device_put_drift(tmp_path: Path, caplog: LogCaptureFixtur
     thread whose serialized state a restore must line up against, so the
     mismatch hardens to an error."""
     cfg = _base_cfg(tmp_path / "run_dput")
-    meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
+    meta = _checkpoint_record(cfg).to_dict()
     drifted = replace(cfg, data=replace(cfg.data, device_put=not cfg.data.device_put))
     with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
         check_resume_compat(drifted, meta)  # must not raise
     assert any("device_put" in rec.message for rec in caplog.records)
 
     pf = replace(cfg, data=replace(cfg.data, grain_prefetch=2))
-    pf_meta = {"config": pf.to_dict(), "data_fingerprint": data_fingerprint(pf)}
+    pf_meta = _checkpoint_record(pf).to_dict()
     pf_drifted = replace(pf, data=replace(pf.data, device_put=not pf.data.device_put))
     with pytest.raises(RuntimeError, match="device_put"):
         check_resume_compat(pf_drifted, pf_meta)
@@ -1324,7 +1352,7 @@ def test_resume_compat_rejects_hf_shuffle_buffer_drift(tmp_path: Path) -> None:
             shuffle_buffer_size=10_000,
         ),
     )
-    meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
+    meta = _checkpoint_record(cfg).to_dict()
     drifted = replace(cfg, data=replace(cfg.data, shuffle_buffer_size=200_000))
     with pytest.raises(RuntimeError, match="shuffle_buffer_size"):
         check_resume_compat(drifted, meta)
@@ -1335,17 +1363,14 @@ def test_resume_compat_rejects_local_window_shuffle_seed_drift(tmp_path: Path) -
     cfg = _base_cfg(tmp_path / "run_window_seed")
     assert cfg.data.backend == "local_text"
     assert cfg.data.window_shuffle_windows > 0
-    meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
+    meta = _checkpoint_record(cfg).to_dict()
 
     drifted = replace(cfg, data=replace(cfg.data, seed=cfg.data.seed + 1))
     with pytest.raises(RuntimeError, match="window_shuffle_seed"):
         check_resume_compat(drifted, meta)
 
     disabled = replace(cfg, data=replace(cfg.data, window_shuffle_windows=0))
-    disabled_meta = {
-        "config": disabled.to_dict(),
-        "data_fingerprint": data_fingerprint(disabled),
-    }
+    disabled_meta = _checkpoint_record(disabled).to_dict()
     disabled_drifted = replace(disabled, data=replace(disabled.data, seed=disabled.data.seed + 1))
     check_resume_compat(disabled_drifted, disabled_meta)
 
@@ -1365,7 +1390,7 @@ def test_resume_compat_rejects_hf_repeat_drift(tmp_path: Path) -> None:
             repeat=True,
         ),
     )
-    meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
+    meta = _checkpoint_record(cfg).to_dict()
     drifted = replace(cfg, data=replace(cfg.data, repeat=False))
     with pytest.raises(RuntimeError, match="data.repeat"):
         check_resume_compat(drifted, meta)

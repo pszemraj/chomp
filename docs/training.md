@@ -184,4 +184,5 @@ one-line summary (loss, grad norm, LR, step time, throughput, optional eval
 loss, packing utilization, and best-effort device memory). Full logs from
 third-party libraries are written to `logging.log_file` under the run directory.
 
-`tokens_seen` resumes from checkpoint metadata when available.
+`tokens_seen` is required checkpoint metadata and resumes exactly; a checkpoint
+without a valid non-negative count is rejected.

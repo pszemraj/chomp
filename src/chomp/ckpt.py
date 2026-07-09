@@ -47,7 +47,7 @@ class CheckpointMeta:
 
     step: int
     timestamp: str
-    tokens_seen: int | None
+    tokens_seen: int
 
     # Versions for debugging (not for strict gating in v0)
     python: str
@@ -89,14 +89,14 @@ def build_meta(
     step: int,
     config: dict[str, Any],
     data_fingerprint: dict[str, Any],
-    tokens_seen: int | None = None,
+    tokens_seen: int,
 ) -> CheckpointMeta:
     """Build checkpoint metadata with version info and config snapshot.
 
     :param int step: Current training step.
     :param dict[str, Any] config: Full config dict for reproducibility.
     :param dict[str, Any] data_fingerprint: Data pipeline fingerprint.
-    :param int | None tokens_seen: Optional cumulative token count for resume accounting.
+    :param int tokens_seen: Cumulative loss-token count for exact resume accounting.
     :return CheckpointMeta: Populated metadata object.
     """
     import platform
@@ -109,7 +109,7 @@ def build_meta(
         orbax=_safe_version("orbax-checkpoint"),
         chomp=_chomp_version,
         megalodon_jax=_safe_version("megalodon-jax"),
-        tokens_seen=int(tokens_seen) if tokens_seen is not None else None,
+        tokens_seen=int(tokens_seen),
         config=config,
         data_fingerprint=data_fingerprint,
     )
@@ -371,6 +371,11 @@ def check_resume_compat(
     if not isinstance(meta_cfg, dict) or not isinstance(meta_fp, dict):
         raise RuntimeError(
             "Checkpoint meta is missing config/data_fingerprint; cannot verify resume compatibility."
+        )
+    tokens_seen = meta.get("tokens_seen")
+    if isinstance(tokens_seen, bool) or not isinstance(tokens_seen, int) or tokens_seen < 0:
+        raise RuntimeError(
+            "Checkpoint meta has missing or invalid tokens_seen; cannot resume exact accounting."
         )
 
     errors: list[str] = []

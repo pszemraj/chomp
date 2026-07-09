@@ -1339,11 +1339,8 @@ def run(
 
     host_step = int(start_step)
     step_i = int(host_step)
-    tokens_seen_base = 0
-    if resume_meta and resume_meta.get("tokens_seen") is not None:
-        tokens_seen_base = int(resume_meta["tokens_seen"])
     # Host-side Python int: avoids int32 overflow without jax_enable_x64.
-    tokens_seen_count = int(tokens_seen_base)
+    tokens_seen_count = 0 if resume_meta is None else int(resume_meta["tokens_seen"])
     last_saved_step: int = -1
     # True whenever `state` and `data_it` correspond to the same completed
     # step. False in the window between consuming a batch and finishing its
