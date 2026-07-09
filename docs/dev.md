@@ -16,7 +16,7 @@ All project commands should run inside the `mega-jax` conda environment.
 conda run --name mega-jax <command>
 ```
 
-## Lint And Format
+## Lint and format
 
 Run Ruff in fix mode, then format:
 
@@ -53,7 +53,7 @@ Skip slow tests explicitly:
 conda run --name mega-jax pytest -q -m "not slow"
 ```
 
-## Test Layout
+## Test layout
 
 Tests are organized by source module (not by micro-feature):
 
@@ -65,8 +65,8 @@ Tests are organized by source module (not by micro-feature):
   checkpointing, and resume behavior
 - [`tests/test_optimizer.py`](../tests/test_optimizer.py): Muon optimizer labeling and grad accumulation
   equivalence
-- [`tests/test_utils.py`](../tests/test_utils.py): device placement, init sanity, param counting,
-  token counters, finite-metric checks, and XLA env helpers
+- [`tests/test_utils.py`](../tests/test_utils.py): device placement, init sanity,
+  parameter counting, finite-metric checks, and XLA environment helpers
 - [`tests/test_cli.py`](../tests/test_cli.py): CLI banner and generate command behavior
 - [`tests/test_eval.py`](../tests/test_eval.py): eval logging and eval text selection
 - [`tests/test_ckpt_paths.py`](../tests/test_ckpt_paths.py): checkpoint path/config resolution

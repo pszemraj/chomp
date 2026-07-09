@@ -21,8 +21,9 @@ For `optim.name=muon`, the harness uses explicit parameter partitioning:
 - AdamW is applied everywhere else (including embeddings, norms, and CEMA
   parameters).
 
-This avoids the common footgun where non-Muon parameters silently become NadamW
-(or receive Muon updates) due to optimizer coupling.
+By default, the projection whitelist excludes embeddings and other non-matmul
+matrices. `optim.muon.allow_tied_embed` adds the token embedding, while
+`optim.muon.allow_all_2d` replaces the whitelist with every 2D tensor.
 
 ## Why Muon needs special handling
 
@@ -40,10 +41,9 @@ In practice that means:
 - When `optim.muon.consistent_rms=null`, we skip Muon shape scaling
   (`scale_by_shape`) to preserve the earlier Muon-only behavior.
 
-## Muon sweep: 10k-step comparison (current state)
+## Muon sweep: 10k-step comparison
 
-To ground the defaults in something concrete, we ran a controlled 10k-step
-comparison on a 200M Megalodon config (see
+A controlled 10k-step comparison used a 200M Megalodon config (see
 [`configs/custom/muon-lr-scale-10k/`](../configs/custom/muon-lr-scale-10k/)):
 
 - Train steps: 10,000
@@ -62,14 +62,14 @@ conda run --name mega-jax chomp train configs/custom/muon-lr-scale-10k/muon_lr10
 All values below are eval loss at step 10,000 (lower is better).
 
 | Optimizer | Muon scale | consistent_rms | Eval loss @ 10k |
-|---|---:|---:|---:|
-| AdamW | - | - | 3.50916 |
-| Muon | 150 | null | 3.26316 |
-| Muon | 100 | null | **3.25314** |
+| --------- | ---------: | -------------: | --------------: |
+| AdamW     |          - |              - |         3.50916 |
+| Muon      |        150 |           null |         3.26316 |
+| Muon      |        100 |           null |       **3.25314** |
 
 ### Takeaways
 
-- Muon clearly beats AdamW at 10k steps in this setup.
+- Muon reduced eval loss relative to AdamW in this setup.
 - `optim.muon.lr_scale=100` slightly edges out `150`.
 - We continue to keep `optim.muon.consistent_rms=null` until a focused sweep
   shows a benefit.

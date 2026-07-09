@@ -1,7 +1,8 @@
 # Configuration Reference
 
-chomp uses frozen dataclasses for configuration. YAML files map directly to the
-config tree, and dot-path overrides are supported from the CLI.
+chomp uses frozen dataclasses for configuration. YAML (recommended) and JSON
+files map directly to the config tree, and scalar fields support CLI dot-path
+overrides.
 
 > [!IMPORTANT]
 > Never use `fp16`. Megalodon's CEMA and normalization layers are unstable with fp16.
@@ -24,8 +25,9 @@ The 10 most commonly adjusted fields for typical experiments:
 | [`checkpoint.save_every`](#checkpoint.save_every) | `int` | `5000` | Steps between checkpoints |
 
 <a id="cli-override"></a>
-## CLI Override Syntax
-Override any field using dot-path notation:
+## CLI override syntax
+
+Override scalar fields using dot-path notation:
 
 ```bash
 chomp train configs/my_config.yaml \
@@ -41,12 +43,15 @@ Nested fields use multiple dots:
 --override logging.wandb.enabled=true
 ```
 
-Overrides are parsed as YAML scalars. This means optional fields with `null`
-defaults can still be set to numbers or booleans (e.g.,
-`--override optim.muon.consistent_rms=0.2`). Use quotes to force a string.
+Optional fields with `null` defaults are parsed as YAML scalars, so they can be
+set to numbers or booleans (for example,
+`--override optim.muon.consistent_rms=0.2`). To preserve a string that resembles
+a YAML scalar, include YAML quotes inside the shell argument, such as
+`--override 'train.profile_dir="123"'`. Set list-valued fields such as
+`logging.wandb.tags` in the config file rather than through `--override`.
 
 > [!NOTE]
-> Unknown keys or invalid values fail fast during validation with actionable error messages.
+> Unknown keys and validated constraint violations fail before training starts.
 
 Runtime behavior: [Training Loop](training.md), [Data Pipeline](data_pipeline.md),
 [Packing and Boundary Semantics](packing.md), [Optimization and Optimizers](optimization.md),
@@ -128,8 +133,8 @@ Vocabulary size for the embedding layer.
 | Required | No |
 | Constraints | Must be positive; for byte tokenizer, must be ≥ `byte_offset + 256` |
 
-When using an HF tokenizer, vocab size is automatically aligned to
-`data.tokenizer.vocab_size_multiple` (default: 128) and at least the tokenizer vocab size.
+Tokenizer preparation raises this value to at least the tokenizer vocabulary
+size, then rounds it up to `data.tokenizer.vocab_size_multiple`.
 <a id="model.dropout"></a>
 #### `model.dropout`
 ```yaml
@@ -230,6 +235,7 @@ Dimension of the complex exponential moving average (CEMA) state.
 |----------|-------|
 | Required | No |
 | Backend | `megalodon` only |
+| Constraints | Must be divisible by `num_heads` |
 | Recommended | `model_dim // 2` |
 
 <a id="model.value_dim"></a>
@@ -244,6 +250,7 @@ Dimension of value projections in attention.
 |----------|-------|
 | Required | No |
 | Backend | `megalodon` only |
+| Constraints | Must be divisible by `num_heads` |
 | Recommended | Equal to `model_dim` |
 
 <a id="model.ffn_hidden_dim"></a>
@@ -297,12 +304,13 @@ If `train.seq_len % model.chunk_size != 0`, validation fails with:
 max_cache_len: int | null = null
 ```
 
-Maximum cache length for inference. `null` means unlimited.
+Fixed inference KV-cache length. `null` uses `model.chunk_size`.
 
 | Property | Value |
 |----------|-------|
 | Required | No |
 | Backend | `megalodon` only |
+| Constraints | Must be at least `model.chunk_size` when set |
 
 Training never uses cache. This field only affects inference mode.
 <a id="model.cache_unbounded"></a>
@@ -311,7 +319,8 @@ Training never uses cache. This field only affects inference mode.
 cache_unbounded: bool = false
 ```
 
-Allow unbounded cache growth during inference.
+Disable chunk-boundary cache resets during inference. The JIT-compatible cache
+remains bounded by `model.max_cache_len`.
 
 | Property | Value |
 |----------|-------|
@@ -330,6 +339,7 @@ Number of groups for GroupNorm layers.
 |----------|-------|
 | Required | No |
 | Backend | `megalodon` only |
+| Constraints | Must be positive; must divide `model.model_dim` evenly |
 
 <a id="model.norm_eps"></a>
 #### `model.norm_eps`
@@ -343,6 +353,7 @@ Epsilon for normalization layers.
 |----------|-------|
 | Required | No |
 | Backend | `megalodon` only |
+| Constraints | Must be positive |
 
 <a id="model.rope_base"></a>
 #### `model.rope_base`
@@ -350,7 +361,7 @@ Epsilon for normalization layers.
 rope_base: float | null = null
 ```
 
-Base for rotary position embeddings. `null` uses the model's default.
+Base for rotary position embeddings. `null` uses `10000.0`.
 
 | Property | Value |
 |----------|-------|
@@ -566,7 +577,7 @@ End-of-sequence token ID.
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be in `[0, vocab_size)` |
+| Constraints | Must be in `[0, vocab_size)` when `add_eos: true` |
 
 **Related:** [`data.tokenizer.add_eos`](#data.tokenizer.add_eos), [`data.train_on_eos`](#data.train_on_eos)
 
@@ -619,6 +630,7 @@ deliberately ignores this knob.
 | Property | Value |
 |----------|-------|
 | Required | No |
+| Constraints | Must be at least as precise as `model.compute_dtype` |
 | Recommended | `"float32"` |
 
 <a id="model.softmax_dtype"></a>
@@ -729,8 +741,8 @@ Dataset split for training.
 hf_eval_split: str | null = null
 ```
 
-Preferred split for evaluation. Falls back to train split if missing.
-Set to `null` to skip eval-split lookup and always derive eval texts from train.
+Preferred split for evaluation. Falls back to `data.hf_split` if loading or
+collection fails. Set to `null` to use `data.hf_split` directly.
 
 | Property | Value |
 |----------|-------|
@@ -1146,7 +1158,8 @@ Round model vocab size up to this multiple for GPU-aligned embeddings.
 auto_set_special_tokens: bool = true
 ```
 
-Automatically update model config with tokenizer's special token IDs.
+For HF tokenizers, update model config with tokenizer-provided special token
+IDs. Inert for the byte tokenizer.
 
 | Property | Value |
 |----------|-------|
@@ -1207,13 +1220,14 @@ Append EOS token to each document.
 max_doc_tokens: int | null = null
 ```
 
-Truncate documents to this many tokens before packing. `null` defaults to
-`4 * train.seq_len` at runtime. Set to `0` (or a negative value) to disable truncation.
+Truncate documents to this many tokens before BOS/EOS insertion. `null`
+defaults to `4 * train.seq_len`; values less than or equal to `0` disable
+truncation.
 
 | Property | Value |
 |----------|-------|
 | Required | No |
-| Constraints | Must be positive when set (0 or negative disables truncation) |
+| Constraints | Positive values set the cap; values <= 0 disable it |
 
 ---
 
@@ -1334,7 +1348,8 @@ Allow training on CPU (for debugging only).
 |----------|-------|
 | Required | No |
 
-If `false` and no GPU is available, training fails immediately with an assertion error.
+If `false` and no GPU is available, training fails immediately with a
+`RuntimeError`.
 <a id="train.log_every"></a>
 #### `train.log_every`
 ```yaml
@@ -1459,7 +1474,7 @@ Enable JAX profiler trace collection.
 profile_dir: str | null = null
 ```
 
-Directory for profiler traces. `null` uses a default location.
+Directory for profiler traces. `null` uses `<run_dir>/trace`.
 
 | Property | Value |
 |----------|-------|
@@ -1701,9 +1716,9 @@ Allow Muon updates on all 2D tensors (overrides the projection-weight whitelist)
 allow_tied_embed: bool = false
 ```
 
-Allow Muon updates on the tied token embedding matrix (`model.embed.weight`).
-If `false` (default), Muon applies to 2D weight matrices named `*.weight` and
-excludes embeddings. If `true`, Muon applies to all 2D tensors.
+Add the tied token embedding matrix (`model.embed.weight`) to the normal Muon
+projection whitelist. `optim.muon.allow_all_2d` is the separate switch for all
+2D tensors.
 
 | Property | Value |
 |----------|-------|
@@ -1951,7 +1966,7 @@ Enable W&B logging.
 project: str | null = null
 ```
 
-W&B project name.
+W&B project name. `null` uses `logging.project`.
 
 | Property | Value |
 |----------|-------|
@@ -1975,7 +1990,7 @@ W&B entity (username or team).
 run_name: str | null = null
 ```
 
-W&B run name. `null` auto-generates.
+W&B run name. `null` uses the run-directory name.
 
 | Property | Value |
 |----------|-------|
@@ -2006,7 +2021,7 @@ W&B run tags.
 |----------|-------|
 | Required | No |
 
-YAML should provide a list; tags are stored internally as a tuple.
+Set tags as a YAML or JSON list.
 
 ---
 
@@ -2020,7 +2035,8 @@ Debug configuration. Contains 2 fields.
 nan_check: bool = true
 ```
 
-Check for NaN/Inf in loss every step.
+Check loss and gradient norm on synchronized steps (first, log/eval, and
+checkpoint steps) and before final checkpointing.
 
 | Property | Value |
 |----------|-------|
@@ -2033,7 +2049,8 @@ Check for NaN/Inf in loss every step.
 check_device_every: int = 100
 ```
 
-Verify GPU backend every N steps.
+Verify batch device placement every N steps. Values less than or equal to `0`
+disable periodic checks.
 
 | Property | Value |
 |----------|-------|

@@ -41,8 +41,8 @@ to `[B, T]` views.
 
 `data.tokenizer.kind` selects the tokenizer:
 
-- `hf`: `transformers.AutoTokenizer` (default)
-- `byte`: a simple byte-level tokenizer for infrastructure bring-up
+- `byte` (default): a simple byte-level tokenizer for infrastructure bring-up
+- `hf`: `transformers.AutoTokenizer` for real pretraining
 
 When using `hf`, chomp resolves tokenizer-dependent model settings
 (`model.vocab_size`, special token IDs) before training starts.
@@ -92,10 +92,9 @@ When stats are enabled (`data.device_put: false`), iterator stats include:
 
 ## Iterator state and resume
 
-The iterator exposes a JSON-serializable state dict containing:
-
-- HF stream cursor (`datasets` state dict)
-- packer buffer contents
+The iterator exposes checkpointable state containing the source cursor (HF or
+local text), packer buffered/ready queues, window-shuffle replay progress, and
+enabled prefetch-wrapper state.
 
 This is checkpointed alongside the model so resume does not rely on `.skip()`
 or re-streaming.
@@ -119,10 +118,10 @@ the run.
 
 chomp builds a fixed validation set when the run is created:
 
-- If `data.hf_eval_split` is set and the HF dataset has that split, it takes the
-  first `data.max_eval_samples` examples from that split.
-- Otherwise it takes the first `data.max_eval_samples` examples from the
-  (shuffled) training split.
+- If `data.hf_eval_split` is set, chomp tries that split first and then
+  `data.hf_split` if loading or collection fails.
+- Each candidate uses the configured `data.shuffle` behavior and contributes
+  at most `data.max_eval_samples` examples.
 - Set `data.hf_eval_split: null` to skip eval-split lookup and always use train.
 - For train-split fallback, if `data.seed` is left at `0` and `train.seed` is
   non-zero, the shuffle seed defaults to `train.seed`.

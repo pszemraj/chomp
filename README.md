@@ -18,7 +18,7 @@ pip install -e .
 # Smoke test (CPU, offline)
 chomp train configs/debug_smoke.yaml
 
-# Dry run (validate config, compile one step, exit)
+# Dry run (validate config, execute one step, exit)
 chomp train configs/debug_smoke.yaml --dry-run
 
 # Train with checkpoints

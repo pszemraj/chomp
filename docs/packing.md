@@ -25,15 +25,15 @@ all emitting fixed-length windows of `seq_len`:
      deferred within each buffer refill.
 
 3) **Multipack packer** (`data.packing_mode: multipack`)
-   - Uses grouped First-Fit-Decreasing packing over `data.packing_group_docs`
-     candidates and emits `A*B` packed sequences per cycle.
-   - Emits per-segment `position_ids` (reset to `0` at each packed segment).
+   - Uses grouped First-Fit-Decreasing packing over
+     `max(data.packing_group_docs, A*B)` candidates and emits `A*B` packed
+     sequences per cycle.
    - Intended for strict packed training semantics with segment-aware attention.
 
 Each window follows the [Data Pipeline batch contract](data_pipeline.md#batch-contract).
 Segment IDs identify packed document runs, and position IDs reset within each
-run. Padding uses `model.pad_token_id`, `segment_id=0`, and a false attention
-mask.
+run. Bin and multipack output pad with `model.pad_token_id`, `segment_id=0`,
+and a false attention mask.
 
 Key bin-packing knobs:
 
@@ -130,8 +130,8 @@ deterministic shuffle of packed `[T]` windows between the packer and batch
 assembly. Disjoint blocks of that many windows are permuted, so a
 244-window document contributes a few rows per batch instead of every row.
 Resume remains exact: the shuffle checkpoints only the upstream state at the
-window start plus two counters and replays deterministically. Eval batches are
-never shuffled.
+window start plus permutation progress, then reconstructs and replays the
+window deterministically. Eval batches are never shuffled.
 
 Guidance:
 

@@ -13,7 +13,8 @@ Each checkpoint stores three items:
 1) `train_state`: model parameters, optimizer state, step, RNG
 2) `data_state`: the checkpointable data path described in
    [Data Pipeline — Iterator state and resume](data_pipeline.md#iterator-state-and-resume)
-3) `meta`: JSON metadata (config snapshot + data fingerprint + versions)
+3) `meta`: JSON metadata (config snapshot, data fingerprint, required
+   non-negative `tokens_seen`, and versions)
 
 The run directory also includes a tokenizer snapshot under `tokenizer/` and
 the pinned eval token set `eval_tokens.json.gz`. Eval cache creation, drift
@@ -32,10 +33,9 @@ Checkpoint frequency is controlled by:
 If async saving is enabled, the manager waits on exit to avoid partial writes.
 Orbax enforces `checkpoint.max_to_keep` for retained checkpoints.
 
-Save steps force a metrics sync so the finite-loss/grad-norm check
-(`debug.nan_check`) always runs before the write — a step with non-finite
-metrics is never persisted as a resume point, even when the save cadence does
-not land on a logging step.
+When `debug.nan_check` is enabled, save steps force a metrics sync so the
+finite-loss/grad-norm check runs before the write. A non-finite step is then
+rejected even when the save cadence does not land on a logging step.
 
 ## Final checkpoint policy
 
@@ -50,8 +50,9 @@ step is written only when it is safe to resume from:
   exactly at a batch boundary before any new packed window is consumed, the
   iterator is still aligned with the last completed step and the final
   checkpoint is written.
-- **Validity**: the last step's metrics are re-checked for finiteness before
-  the write; "latest" can never be a NaN tombstone.
+- **Validity**: when `debug.nan_check` is enabled, the last step's metrics are
+  re-checked for finiteness before the write, so "latest" cannot become a NaN
+  tombstone.
 
 A final save that fails on an otherwise clean exit fails the run — training
 never exits successfully with an unwritten checkpoint.
@@ -59,6 +60,8 @@ never exits successfully with an unwritten checkpoint.
 ## Resume compatibility checks
 
 On resume, chomp compares the checkpoint metadata against the current config.
+Missing or invalid `tokens_seen` metadata is also rejected so cumulative token
+accounting resumes exactly.
 Hard failures include:
 
 - data source identity (`hf_dataset`, `hf_name`, `split`, `text_key`)

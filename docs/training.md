@@ -37,6 +37,8 @@ Deterministic runs are recommended for resume and regression tests. Note that
 in `megalodon-jax`, activation checkpointing is disabled when
 `train.deterministic=true`. If you want checkpointing with deterministic math,
 set `train.deterministic=false` and keep all dropout rates at `0.0`.
+Enable activation checkpointing with `model.use_checkpoint`; it is orthogonal
+to gradient accumulation.
 
 ## GPU environment notes
 
@@ -77,9 +79,9 @@ The supporting ablation is recorded in the
 
 ## Evaluation
 
-If `train.eval_every > 0`, chomp runs a full pass over the pinned eval token
-set and logs `eval_loss`. Eval text selection, cache identity checks, packed
-eval flushing, and zero-batch/zero-token failures are documented in
+If `train.eval_every > 0` and `data.max_eval_samples > 0`, chomp runs a full
+pass over the pinned eval token set and logs `eval_loss`. Eval text selection,
+cache identity checks, packed eval flushing, and zero-batch/zero-token failures are documented in
 [Data Pipeline validation set](data_pipeline.md#validation-set).
 
 Eval batches are assembled once and cached host-side for the whole run; device
@@ -105,11 +107,19 @@ Optional sampling controls (`train.generate_temperature`, `train.generate_top_k`
 defaults apply. Generation is currently only enabled for the `megalodon`
 backend (dummy runs skip it silently).
 
+### Standalone generation
+
+`chomp generate` accepts a run directory or checkpoint step directory, restores
+the stored parameters and resolved config, and uses the run-pinned tokenizer
+described in [Data Pipeline — Tokenization](data_pipeline.md#tokenization) when
+available. Set `--temperature 0` for greedy decoding; seeded sampling is the
+default. Run `chomp generate --help` for the option list.
+
 ## Dry run
 
-Use `chomp train <config.yaml> --dry-run` to validate config, build the tokenizer/model/data
-pipeline, and compile one step before exiting. W&B logging is skipped in dry-run
-mode to avoid creating noisy runs.
+Use `chomp train <config.yaml> --dry-run` to validate config, build the
+tokenizer/model/data pipeline, and execute one step before exiting. The step
+compiles when `train.jit` is enabled. W&B logging is skipped in dry-run mode.
 
 `config_resolved.json` includes a small `derived` section; for example
 `derived.optim.decay_steps_effective` records the effective LR schedule horizon.
@@ -124,14 +134,19 @@ Metrics are written to `logging.metrics_file` every `train.log_every` steps
 - `lr`
 - `loss_tokens` (exact compiled `token_sum` for that step)
 - `tokens_seen` (cumulative exact compiled `token_sum`)
-- `tokens_per_sec` (actual valid tokens / step_time_s)
+- `step_time_s`, `data_wait_s`
+- `tokens_per_sec` (model step) and `tokens_per_sec_e2e` (including data wait)
 - `packing_mode`, `packing_utilization` (when iterator stats are enabled)
+- `docs_seen`, `docs_truncated`, `docs_added_this_batch` (when available)
 - `loss_tokens_host` (host recomputed valid-loss tokens from labels + masks)
 - `boundary_transitions` (count of in-batch segment transitions)
 - `docs_per_seq_mean`, `docs_per_seq_min`, `docs_per_seq_max` (document-density summary)
 - `first_step_compile_time_s` (first logged step after compile)
 - `peak_memory_gb` (best-effort, device-dependent)
 - `eval_loss` (only when eval runs)
+- `lr_muon` (Muon runs only)
+
+Data exhaustion and crashes append event rows to the same file.
 
 If `logging.wandb.enabled=true`, Weights & Biases receives the training rows plus
 detailed wall-clock, packing-capacity, eval-token, and current-device-memory
@@ -144,4 +159,5 @@ selects online or offline logging only.
 Console output is throttled by `train.log_every` and prints a compact
 one-line summary (loss, grad norm, LR, step time, throughput, optional eval
 loss, packing utilization, and best-effort device memory). Full logs from
-third-party libraries are written to `logging.log_file` under the run directory.
+third-party libraries are written to `logging.log_file` under the run directory
+when that field is not `null`.
