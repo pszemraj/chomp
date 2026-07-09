@@ -64,10 +64,28 @@ Two environment flags are helpful on newer GPUs:
 - `XLA_FLAGS=--xla_gpu_enable_triton_gemm=false` if Triton GEMM causes
   `CUDA_ERROR_OUT_OF_MEMORY` on RTX 5090 with `jax/jaxlib 0.8.2`.
 
-When `chomp train` detects an RTX 50xx (Blackwell) GPU, it automatically appends
-`--xla_gpu_enable_triton_gemm=false` to `XLA_FLAGS` and warns if
-`XLA_PYTHON_CLIENT_PREALLOCATE` is not set to `false`. On other GPUs, the helper
-stays quiet (debug log only).
+`chomp train` adjusts `XLA_FLAGS` automatically at startup (before JAX
+initializes) when it detects NVIDIA GPUs via `nvidia-smi`:
+
+- On RTX 50xx (Blackwell) GPUs it appends `--xla_gpu_enable_triton_gemm=false`
+  and warns if `XLA_PYTHON_CLIENT_PREALLOCATE` is not set to `false`; other
+  GPUs skip this (debug log only).
+- On **any** NVIDIA GPU it appends `--xla_gpu_deterministic_ops=true`, which
+  the bit-exact resume contract requires
+  ([Checkpointing — Scope of exactness](checkpointing.md#scope-of-exactness)).
+  This is a different knob from `train.deterministic` above: that one controls
+  dropout/RNG, this one controls XLA kernel selection. Deterministic kernels
+  cost throughput — measured ~25-35% slower steps on a 100M-param Megalodon
+  smoke benchmark (RTX 5090, seq_len 2048, bf16); the cost is
+  workload-dependent. To trade bit-exact resume for that throughput, export
+  `XLA_FLAGS=--xla_gpu_deterministic_ops=false` — an explicit setting (either
+  value) is always respected, recorded in checkpoint meta, and enforced on
+  resume.
+
+If `nvidia-smi` is unavailable (some containers), neither flag can be applied
+automatically; when JAX still comes up on a GPU backend, `chomp train` logs a
+warning that bit-exact resume is not guaranteed until the flag is exported
+manually.
 
 ## Attention and loss masking
 
