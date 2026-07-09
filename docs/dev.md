@@ -1,7 +1,7 @@
 # Development Guide
 
-This page covers common developer tasks: linting, formatting, running tests, and
-finding the right test file.
+Common developer tasks: linting, formatting, running tests, and finding the
+right test file.
 
 > [!IMPORTANT]
 > Backward compatibility is **not** a requirement right now. It is acceptable to
@@ -69,7 +69,7 @@ Tests are organized by source module (not by micro-feature):
   token counters, finite-metric checks, and XLA env helpers
 - [`tests/test_cli.py`](../tests/test_cli.py): CLI banner and generate command behavior
 - [`tests/test_eval.py`](../tests/test_eval.py): eval logging and eval text selection
-- [`tests/test_checkpoints.py`](../tests/test_checkpoints.py): checkpoint path/config resolution
+- [`tests/test_ckpt_paths.py`](../tests/test_ckpt_paths.py): checkpoint path/config resolution
 
 Shared helper modules:
 

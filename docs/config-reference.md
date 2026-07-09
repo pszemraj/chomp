@@ -48,18 +48,9 @@ defaults can still be set to numbers or booleans (e.g.,
 > [!NOTE]
 > Unknown keys or invalid values fail fast during validation with actionable error messages.
 
-## Scope
-
-This page is the canonical reference for config schema: field names, types,
-defaults, and constraints.
-
-For conceptual/runtime behavior, use the topic docs:
-
-- Training runtime: [Training Loop](training.md)
-- Data stream and eval-set construction: [Data Pipeline](data_pipeline.md)
-- Packing and boundary semantics: [Packing and Boundary Semantics](packing.md)
-- Optimizer behavior and sweeps: [Optimization and Optimizers](optimization.md)
-- Checkpoint/resume contract: [Checkpointing and Resume](checkpointing.md)
+Runtime behavior: [Training Loop](training.md), [Data Pipeline](data_pipeline.md),
+[Packing and Boundary Semantics](packing.md), [Optimization and Optimizers](optimization.md),
+[Checkpointing and Resume](checkpointing.md).
 
 <a id="variables"></a>
 ## Variables and interpolation
@@ -100,7 +91,7 @@ tracked in named subdirectories such as
 
 <a id="model"></a>
 ## model (ModelConfig)
-Model architecture and precision policy. Contains 35 fields.
+Model architecture and precision policy. Contains 36 fields.
 
 <a id="model-backend"></a>
 ### Backend Selection
@@ -669,7 +660,7 @@ GEMM backend selection. Currently only `"default"` is supported.
 
 <a id="data"></a>
 ## data (DataConfig)
-Dataset, tokenizer, and packing configuration. Contains 23 fields.
+Dataset, tokenizer, and packing configuration. Contains 27 fields.
 
 <a id="data-backend"></a>
 ### Backend Selection
@@ -2148,7 +2139,7 @@ All configuration fields by section:
 
 **model** (36 fields): [`backend`](#model.backend), [`vocab_size`](#model.vocab_size), [`d_model`](#model.d_model), [`dropout`](#model.dropout), [`model_dim`](#model.model_dim), [`num_layers`](#model.num_layers), [`num_heads`](#model.num_heads), [`z_dim`](#model.z_dim), [`value_dim`](#model.value_dim), [`ffn_hidden_dim`](#model.ffn_hidden_dim), [`cema_ndim`](#model.cema_ndim), [`chunk_size`](#model.chunk_size), [`max_cache_len`](#model.max_cache_len), [`cache_unbounded`](#model.cache_unbounded), [`norm_num_groups`](#model.norm_num_groups), [`norm_eps`](#model.norm_eps), [`rope_base`](#model.rope_base), [`swiglu`](#model.swiglu), [`rescale_nffn`](#model.rescale_nffn), [`scale_emb`](#model.scale_emb), [`norm_affine`](#model.norm_affine), [`attention_dropout`](#model.attention_dropout), [`hidden_dropout`](#model.hidden_dropout), [`pad_token_id`](#model.pad_token_id), [`bos_token_id`](#model.bos_token_id), [`eos_token_id`](#model.eos_token_id), [`max_positions`](#model.max_positions), [`init_mode`](#model.init_mode), [`use_checkpoint`](#model.use_checkpoint), [`output_size`](#model.output_size), [`use_associative_segment_scan`](#model.use_associative_segment_scan), [`param_dtype`](#model.param_dtype), [`compute_dtype`](#model.compute_dtype), [`accum_dtype`](#model.accum_dtype), [`softmax_dtype`](#model.softmax_dtype), [`gemm_backend`](#model.gemm_backend)
 
-**data** (23 fields): [`backend`](#data.backend), [`hf_dataset`](#data.hf_dataset), [`hf_name`](#data.hf_name), [`hf_split`](#data.hf_split), [`hf_eval_split`](#data.hf_eval_split), [`text_key`](#data.text_key), [`shuffle`](#data.shuffle), [`shuffle_buffer_size`](#data.shuffle_buffer_size), [`seed`](#data.seed), [`repeat`](#data.repeat), [`max_retries`](#data.max_retries), [`retry_delay_sec`](#data.retry_delay_sec), [`state_update_interval`](#data.state_update_interval), [`local_text`](#data.local_text), [`packing_mode`](#data.packing_mode), [`packing_buffer_docs`](#data.packing_buffer_docs), [`packing_max_docs_per_bin`](#data.packing_max_docs_per_bin), [`mask_boundary_loss`](#data.mask_boundary_loss), [`train_on_eos`](#data.train_on_eos), [`grain_prefetch`](#data.grain_prefetch), [`max_eval_samples`](#data.max_eval_samples), [`tokenizer`](#data.tokenizer), [`device_put`](#data.device_put)
+**data** (27 fields): [`backend`](#data.backend), [`hf_dataset`](#data.hf_dataset), [`hf_name`](#data.hf_name), [`hf_split`](#data.hf_split), [`hf_eval_split`](#data.hf_eval_split), [`text_key`](#data.text_key), [`shuffle`](#data.shuffle), [`shuffle_buffer_size`](#data.shuffle_buffer_size), [`window_shuffle_windows`](#data.window_shuffle_windows), [`seed`](#data.seed), [`repeat`](#data.repeat), [`max_retries`](#data.max_retries), [`retry_delay_sec`](#data.retry_delay_sec), [`state_update_interval`](#data.state_update_interval), [`local_text`](#data.local_text), [`packing_mode`](#data.packing_mode), [`packing_buffer_docs`](#data.packing_buffer_docs), [`packing_max_docs_per_bin`](#data.packing_max_docs_per_bin), [`packing_group_docs`](#data.packing_group_docs), [`packing_strict_segments`](#data.packing_strict_segments), [`mask_boundary_loss`](#data.mask_boundary_loss), [`train_on_eos`](#data.train_on_eos), [`grain_prefetch`](#data.grain_prefetch), [`max_eval_samples`](#data.max_eval_samples), [`recreate_eval_cache`](#data.recreate_eval_cache), [`tokenizer`](#data.tokenizer), [`device_put`](#data.device_put)
 
 **data.tokenizer** (10 fields): [`kind`](#data.tokenizer.kind), [`hf_name_or_path`](#data.tokenizer.hf_name_or_path), [`hf_use_fast`](#data.tokenizer.hf_use_fast), [`hf_trust_remote_code`](#data.tokenizer.hf_trust_remote_code), [`vocab_size_multiple`](#data.tokenizer.vocab_size_multiple), [`auto_set_special_tokens`](#data.tokenizer.auto_set_special_tokens), [`byte_offset`](#data.tokenizer.byte_offset), [`add_bos`](#data.tokenizer.add_bos), [`add_eos`](#data.tokenizer.add_eos), [`max_doc_tokens`](#data.tokenizer.max_doc_tokens)
 
@@ -2168,4 +2159,4 @@ All configuration fields by section:
 
 **debug** (2 fields): [`nan_check`](#debug.nan_check), [`check_device_every`](#debug.check_device_every)
 
-**Total: 127 fields**
+**Total: 132 fields**

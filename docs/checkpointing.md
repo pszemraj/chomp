@@ -3,13 +3,8 @@
 chomp uses Orbax to checkpoint **both** training state and data iterator state.
 Resume is treated as a contract, not a best-effort feature.
 
-## Scope
-
-This page is the home for save/restore/resume semantics.
-
-- For checkpoint field defaults/types: [Config Reference](config-reference.md) (`checkpoint.*`)
-- For training-loop runtime behavior after resume: [Training Loop](training.md)
-- For data iterator state details: [Data Pipeline](data_pipeline.md)
+Related: [Config Reference](config-reference.md) (`checkpoint.*`),
+[Training Loop](training.md), [Data Pipeline](data_pipeline.md).
 
 ## What is saved
 
@@ -21,11 +16,9 @@ Each checkpoint stores three items:
 3) `meta`: JSON metadata (config snapshot + data fingerprint + versions)
 
 The run directory also includes a tokenizer snapshot under `tokenizer/` and
-the pinned eval token set `eval_tokens.json.gz` (created once at run start,
-reloaded on every resume so eval losses stay comparable even if the upstream
-dataset drifts). If that file is missing when resuming, resume fails hard;
-`data.recreate_eval_cache: true` is the explicit override (eval curves across
-the boundary are then not comparable).
+the pinned eval token set `eval_tokens.json.gz`. Eval cache creation, drift
+checks, and the `data.recreate_eval_cache` override are covered in
+[Data Pipeline validation set](data_pipeline.md#validation-set).
 
 ## Save cadence
 

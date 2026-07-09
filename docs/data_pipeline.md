@@ -1,15 +1,9 @@
 # Data Pipeline
 
-This document describes the streaming data path and the fixed-shape batch
-contract that the trainer relies on.
+Streaming data path, eval-set construction, and the fixed-shape batch contract.
 
-## Scope
-
-This page is the home for stream-to-batch flow and eval-set construction.
-
-- For field-level defaults/types: [Config Reference](config-reference.md) (`data.*`)
-- For packing strategy and masking semantics: [Packing and Boundary Semantics](packing.md)
-- For how batches are consumed during training: [Training Loop](training.md)
+Related: [Config Reference](config-reference.md) (`data.*`),
+[Packing and Boundary Semantics](packing.md), [Training Loop](training.md).
 
 ## Overview
 
@@ -17,7 +11,7 @@ chomp always uses the same data path, even in debug mode:
 
 1) **HF streaming** (`datasets`) or `local_text` (debug)
 2) **Tokenizer** (`data.tokenizer.kind`)
-3) **Packer** (sequential or bin)
+3) **Packer** (sequential, bin, or multipack)
 4) **Grain iterator** (prefetch + checkpointable state)
 5) **Batch** tensors `[A, B, T]`
 
@@ -38,7 +32,7 @@ Where:
 
 - `A = train.grad_accum`
 - `B = train.batch_size`
-- `T = train.seq_len` (single source of truth)
+- `T = train.seq_len`
 
 Inside the compiled train step, the batch is sliced along the microbatch axis
 to `[B, T]` views.
@@ -152,17 +146,3 @@ still emits windows. If eval cannot fill even one complete `[A, B, T]` batch
 (too few packed windows for `grad_accum * batch_size` rows), or emits batches
 whose labels are entirely masked (zero valid loss tokens), training raises
 instead of silently emitting a null eval loss.
-
-## Key config knobs
-
-Use [Config Reference](config-reference.md) as the canonical source for `data.*` and related
-`train.*` shape knobs. The most operationally important fields for this page
-are:
-
-- `data.backend`, `data.hf_*`, `data.text_key`
-- `data.hf_eval_split`, `data.max_eval_samples`
-- `data.shuffle`, `data.shuffle_buffer_size`, `data.seed`, `data.repeat`
-- `data.window_shuffle_windows`
-- `data.packing_mode`, `data.packing_buffer_docs`, `data.packing_group_docs`
-- `data.packing_max_docs_per_bin`, `data.packing_strict_segments`
-- `train.seq_len`, `train.batch_size`, `train.grad_accum`

@@ -1,14 +1,10 @@
 # Optimization and Optimizers
 
-This document focuses on optimizer behavior in the training harness, with a
-special emphasis on Muon support and recent sweep results.
+Optimizer behavior in the training harness, with emphasis on Muon support and
+recent sweep results.
 
-## Scope
-
-This page is the home for optimizer behavior and tuning guidance.
-
-- For field-level defaults/types: [Config Reference](config-reference.md) (`optim.*`)
-- For train-step runtime behavior and metrics: [Training Loop](training.md)
+Related: [Config Reference](config-reference.md) (`optim.*`),
+[Training Loop](training.md).
 
 ## Supported optimizers
 

@@ -46,12 +46,12 @@ experiment suites can be tracked in named subdirectories there.
 
 - **Fixed shapes**: compile once, no dynamic padding
 - **Resumable**: checkpoints train state + data iterator position
-- **Streaming**: HF datasets with bin packing and boundary-aware loss masking
+- **Streaming**: HF datasets with sequential/bin/multipack packing and boundary-aware loss masking
 - **Tokenizer alignment**: auto-rounds vocab size and sets special token IDs
 
 ## Docs
 
-- [Config Reference](docs/config-reference.md) - canonical field/type/default reference
+- [Config Reference](docs/config-reference.md) - field/type/default reference
 - [Training](docs/training.md) - train step behavior, generation, and metrics
 - [Data Pipeline](docs/data_pipeline.md) - stream-to-batch path and eval-set construction
 - [Packing](docs/packing.md) - packing strategy and boundary-masking semantics

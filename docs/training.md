@@ -1,17 +1,10 @@
 # Training Loop
 
-This doc summarizes the training step behavior and the metrics logged in
-`metrics.jsonl`.
+Training step behavior and metrics written to `metrics.jsonl`.
 
-## Scope
-
-This page is the home for runtime training-loop behavior.
-
-- For field-by-field config defaults and types: [Config Reference](config-reference.md)
-- For optimizer internals and sweep guidance: [Optimization and Optimizers](optimization.md)
-- For data stream, packing, and eval-set construction: [Data Pipeline](data_pipeline.md)
-- For boundary masking semantics: [Packing and Boundary Semantics](packing.md)
-- For save/restore/resume policy: [Checkpointing and Resume](checkpointing.md)
+Related: [Config Reference](config-reference.md),
+[Optimization and Optimizers](optimization.md), [Data Pipeline](data_pipeline.md),
+[Packing and Boundary Semantics](packing.md), [Checkpointing and Resume](checkpointing.md).
 
 ## Development notes
 
@@ -33,14 +26,9 @@ boundary masks.
 
 ## Optimizer selection
 
-`optim.name` selects the optimizer:
-
-- `adamw` (default)
-- `muon`: applies Muon to selected matrix parameters and AdamW elsewhere.
-
-The train loop treats both as one optimizer step per outer iteration; details
-about Muon parameter partitioning, `optim.muon.*` behavior, and sweep-backed
-defaults live in [Optimization and Optimizers](optimization.md).
+The train loop treats `adamw` and `muon` as one optimizer step per outer
+iteration. Muon parameter partitioning, `optim.muon.*` behavior, and
+sweep-backed defaults live in [Optimization and Optimizers](optimization.md).
 For exact knob definitions, see [Config Reference](config-reference.md) (`optim.*`).
 
 ## Determinism
@@ -121,24 +109,13 @@ startup time.
 
 ## Evaluation
 
-If `train.eval_every > 0`, chomp runs a full pass over the eval token set and
-logs `eval_loss`. The set is collected once when the run is created, persisted
-to `run_dir/eval_tokens.json.gz`, and reloaded on every later start — resumed
-runs evaluate on exactly the same tokens even if the upstream dataset drifted.
-Eval text selection policy (eval split vs train fallback) is documented in
-[Data Pipeline](data_pipeline.md).
+If `train.eval_every > 0`, chomp runs a full pass over the pinned eval token
+set and logs `eval_loss`. Eval text selection, cache identity checks, packed
+eval flushing, and zero-batch/zero-token failures are documented in
+[Data Pipeline validation set](data_pipeline.md#validation-set).
 
-Eval batches are assembled once and cached host-side for the whole run; the
-device transfer happens per batch each eval, so no device memory is held
-between evals.
-
-For `bin` and `multipack`, the packers flush their remaining pending documents
-into padded windows once the eval doc set is exhausted, so small eval sets
-still evaluate. Eval fails fast at runtime if the set cannot fill even one
-complete `[A, B, T]` batch (too few packed windows for `grad_accum *
-batch_size` rows) or if every emitted label is masked out (zero valid loss
-tokens — broken boundary masking or pathological short docs). There is no
-silent `eval_loss: null` outcome.
+Eval batches are assembled once and cached host-side for the whole run; device
+transfer happens per batch each eval, so no device memory is held between evals.
 
 ## Generation samples
 
