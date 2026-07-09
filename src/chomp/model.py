@@ -31,7 +31,28 @@ from chomp.config import Config, dtype_from_str
 if TYPE_CHECKING:
     from chomp.types import Batch
 
+from chomp.types import IGNORE_INDEX
+
 # ------------------------------ Dummy backend ------------------------------
+
+
+def causal_loss_mask(
+    labels: jax.Array,
+    attention_mask: jax.Array | None,
+    *,
+    ignore_index: int = IGNORE_INDEX,
+) -> jax.Array:
+    """Return the valid causal-label mask after the one-token shift.
+
+    :param jax.Array labels: Label IDs of shape [B, T].
+    :param jax.Array | None attention_mask: Optional attention mask [B, T].
+    :param int ignore_index: Label value excluded from loss.
+    :return jax.Array: Boolean validity mask of shape [B, T - 1].
+    """
+    valid = labels[:, 1:] != ignore_index
+    if attention_mask is not None:
+        valid = valid & attention_mask[:, 1:].astype(bool)
+    return valid
 
 
 class DummyLM(eqx.Module):
@@ -119,10 +140,7 @@ class DummyLM(eqx.Module):
             return jnp.zeros((), dtype=jnp.float32)
 
         # Build mask for valid positions
-        valid = shift_labels != ignore_index
-        if attention_mask is not None:
-            # Apply attention mask (shifted)
-            valid = valid & attention_mask[:, 1:].astype(bool)
+        valid = causal_loss_mask(labels, attention_mask, ignore_index=ignore_index)
 
         # Compute cross-entropy
         per_pos = optax.softmax_cross_entropy_with_integer_labels(shift_logits, shift_labels)

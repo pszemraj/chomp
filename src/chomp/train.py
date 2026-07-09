@@ -71,7 +71,7 @@ from chomp.data import (
     save_tokenizer_snapshot,
     tokenizer_snapshot_hash,
 )
-from chomp.model import build_model, supports_packed_segments, training_loss
+from chomp.model import build_model, causal_loss_mask, supports_packed_segments, training_loss
 from chomp.types import IGNORE_INDEX, Batch, TrainState
 from chomp.utils.devices import assert_batch_on_device
 from chomp.utils.io import MetricsWriter, add_file_logging, create_run_dir
@@ -81,19 +81,18 @@ from chomp.utils.tree import abstractify_tree, param_count
 logger = logging.getLogger(__name__)
 
 
-def _count_tokens(labels: jax.Array, attention_mask: jax.Array | None) -> jax.Array:
+def _count_tokens(labels: jax.Array, attention_mask: jax.Array) -> jax.Array:
     """Count valid tokens after the causal shift (for correct GA normalization).
 
     :param jax.Array labels: Label tensor of shape [B, T].
-    :param attention_mask: Optional mask tensor of shape [B, T].
+    :param jax.Array attention_mask: Mask tensor of shape [B, T].
     :return jax.Array: Scalar count of valid (non-ignored, non-masked) tokens.
     """
 
-    shift_labels = labels[:, 1:]
-    valid = shift_labels != IGNORE_INDEX
-    if attention_mask is not None:
-        valid = valid & attention_mask[:, 1:].astype(bool)
-    return jnp.sum(valid, dtype=jnp.int32)
+    return jnp.sum(
+        causal_loss_mask(labels, attention_mask, ignore_index=IGNORE_INDEX),
+        dtype=jnp.int32,
+    )
 
 
 def _check_finite_metrics(metrics: dict[str, Any], *, step: int) -> None:
@@ -703,19 +702,18 @@ def _is_muon_eligible(leaf: Any, path_str: str, *, allow_all_2d: bool, allow_emb
 
 def _muon_param_stats(
     params: Any, *, allow_all_2d: bool, allow_embed: bool
-) -> tuple[int, int, int, int, list[str]]:
+) -> tuple[int, int, int, list[str]]:
     """Return Muon/Adam tensor counts and a sample of Muon paths.
 
     :param Any params: Parameter pytree.
     :param bool allow_all_2d: If True, apply Muon to all 2D tensors.
     :param bool allow_embed: If True, allow Muon on tied embedding weights.
-    :return tuple: (muon_tensors, adam_tensors, muon_2d, total_2d, muon_paths).
+    :return tuple: (muon_tensors, adam_tensors, total_2d, muon_paths).
     """
     flat, _ = jax.tree_util.tree_flatten_with_path(params)
     total_tensors = 0
     total_2d = 0
     muon_tensors = 0
-    muon_2d = 0
     muon_paths: list[str] = []
     for path, leaf in flat:
         if not hasattr(leaf, "ndim"):
@@ -726,10 +724,9 @@ def _muon_param_stats(
         path_str = _path_to_str(path)
         if _is_muon_eligible(leaf, path_str, allow_all_2d=allow_all_2d, allow_embed=allow_embed):
             muon_tensors += 1
-            muon_2d += 1
             muon_paths.append(path_str)
     adam_tensors = total_tensors - muon_tensors
-    return muon_tensors, adam_tensors, muon_2d, total_2d, muon_paths
+    return muon_tensors, adam_tensors, total_2d, muon_paths
 
 
 def _muon_weight_dim_numbers(params: Any, *, allow_all_2d: bool, allow_embed: bool = False) -> Any:
@@ -786,7 +783,6 @@ def build_optimizer(
         end_value=cfg.optim.lr * cfg.optim.min_lr_ratio,
     )
 
-    transforms = []
     # NOTE: grad clipping is done manually in make_train_step to avoid
     # computing global_norm twice (once for clipping, once for logging).
 
@@ -800,21 +796,21 @@ def build_optimizer(
                 "optim.muon.allow_all_2d=true will apply Muon to all 2D tensors, including "
                 "non-matmul parameters (e.g., embed.weight, attn.gamma/beta, cema.gamma_*)."
             )
-        muon_tensors, adam_tensors, muon_2d, total_2d, muon_paths = _muon_param_stats(
+        muon_tensors, adam_tensors, total_2d, muon_paths = _muon_param_stats(
             params, allow_all_2d=allow_all_2d, allow_embed=allow_embed
         )
         logger.info(
             "Muon param split: %s muon / %s adam tensors; 2D coverage %s/%s",
             muon_tensors,
             adam_tensors,
-            muon_2d,
+            muon_tensors,
             total_2d,
         )
         if muon_paths:
             sample = ", ".join(muon_paths[:5])
             logger.info("Muon sample params: %s", sample)
 
-        if muon_2d == 0:
+        if muon_tensors == 0:
             logger.warning(
                 "optim.name=muon selected but no muon-eligible parameters were found; "
                 "falling back to AdamW for all parameters."
@@ -857,7 +853,7 @@ def build_optimizer(
             :return Any: Pytree of MuonDimensionNumbers for Muon params.
             """
             # The Muon transform only sees Muon-labeled leaves, so use all-2D mode.
-            return _muon_weight_dim_numbers(tree, allow_all_2d=True, allow_embed=allow_embed)
+            return _muon_weight_dim_numbers(tree, allow_all_2d=True)
 
         muon_transforms = [
             optax.contrib.scale_by_muon(
@@ -890,22 +886,19 @@ def build_optimizer(
             mask=_weight_decay_mask,
             nesterov=adam_cfg.nesterov,
         )
-        transforms.append(optax.multi_transform({"muon": muon_tx, "adam": adam_tx}, label_fn))
+        tx = optax.multi_transform({"muon": muon_tx, "adam": adam_tx}, label_fn)
     else:
         adam_cfg = cfg.optim.adam
-        transforms.append(
-            optax.adamw(
-                learning_rate=schedule,
-                b1=adam_cfg.b1,
-                b2=adam_cfg.b2,
-                eps=adam_cfg.eps,
-                weight_decay=cfg.optim.weight_decay,
-                mask=_weight_decay_mask,
-                nesterov=adam_cfg.nesterov,
-            )
+        tx = optax.adamw(
+            learning_rate=schedule,
+            b1=adam_cfg.b1,
+            b2=adam_cfg.b2,
+            eps=adam_cfg.eps,
+            weight_decay=cfg.optim.weight_decay,
+            mask=_weight_decay_mask,
+            nesterov=adam_cfg.nesterov,
         )
 
-    tx = optax.chain(*transforms)
     return tx, schedule
 
 
