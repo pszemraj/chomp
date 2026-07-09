@@ -1310,9 +1310,8 @@ steps: int = 100
 
 Total training steps, as an **absolute target step count** — a resumed run
 continues until `state.step` reaches this value, not for `steps` additional
-steps. The CLI `--max-steps` override has the same absolute semantics
-(`target = min(train.steps, max_steps)`): resuming at step 50k with
-`--max-steps 10000` trains zero steps.
+steps. Use `--override train.steps=N` to set a different absolute target for
+an invocation.
 
 | Property | Value |
 |----------|-------|

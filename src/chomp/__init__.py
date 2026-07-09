@@ -10,7 +10,7 @@ Implemented so far:
 - model integration (dummy or Megalodon-JAX)
 - single-GPU train_step with scan-based grad accumulation
 - Orbax checkpointing + resume (train_state + data iterator state)
-- minimal HF streaming + tokenize + pack iterator (no Grain yet)
+- Grain-backed HF streaming, tokenization, packing, shuffle, and prefetch
 """
 
 from __future__ import annotations

@@ -190,11 +190,7 @@ def resolve_checkpoint_path(
 
     step_dir = _latest_step_dir(path)
     if step_dir is not None:
-        run_dir = None
-        if path.name == "checkpoints":
-            run_dir = _find_run_dir_upwards(path.parent)
-        else:
-            run_dir = _find_run_dir_upwards(path)
+        run_dir = _find_run_dir_upwards(path)
         if run_dir is None:
             run_dir = _infer_run_dir_from_meta(step_dir)
         return step_dir, run_dir

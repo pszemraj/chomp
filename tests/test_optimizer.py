@@ -249,7 +249,7 @@ def test_grad_accum_equivalence_dummy_local_text() -> None:
 
     params, static = build_model(cfg, key=k_model)
     tx, sched = build_optimizer(cfg, params)
-    state0 = init_train_state(cfg, params=params, tx=tx, key=key)
+    state0 = init_train_state(params=params, tx=tx, key=key)
 
     # Build one batch via the real pipeline
     it = build_train_iterator(cfg)
@@ -393,7 +393,7 @@ def test_bf16_params_accumulate_grads_in_fp32(model_accum_dtype: str) -> None:
         params,
     )
     tx, sched = build_optimizer(cfg, params)
-    state0 = init_train_state(cfg, params=params, tx=tx, key=key)
+    state0 = init_train_state(params=params, tx=tx, key=key)
 
     batch = jax.device_put(next(build_train_iterator(cfg)))
     train_step = make_train_step(cfg, static=static, tx=tx, lr_schedule=sched)

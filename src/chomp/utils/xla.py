@@ -12,8 +12,7 @@ _DETERMINISTIC_FLAG_PREFIX = "--xla_gpu_deterministic_ops="
 _DETERMINISTIC_FLAG = _DETERMINISTIC_FLAG_PREFIX + "true"
 _PREALLOC_ENV = "XLA_PYTHON_CLIENT_PREALLOCATE"
 _RTX_RE = re.compile(r"RTX\s*(\d{4})", re.IGNORECASE)
-_CONFIG_DONE = False
-_LAST_RESULT: bool | None = None
+_CONFIG_RESULT: bool | None = None
 
 
 def _query_nvidia_gpu_names() -> list[str]:
@@ -42,22 +41,10 @@ def _is_rtx_50xx(name: str) -> bool:
     match = _RTX_RE.search(name)
     if not match:
         return False
-    try:
-        model_num = int(match.group(1))
-    except ValueError:
-        return False
+    model_num = int(match.group(1))
     if model_num < 5000 or model_num >= 5100:
         return False
     return not (model_num == 5000 and "geforce" not in name.lower())
-
-
-def _detect_blackwell(names: list[str]) -> list[str]:
-    """Filter GPU names for RTX 50xx matches.
-
-    :param list[str] names: GPU name strings.
-    :return list[str]: Names that match the RTX 50xx pattern.
-    """
-    return [name for name in names if _is_rtx_50xx(name)]
 
 
 def _update_xla_flags(existing: str) -> tuple[str, bool]:
@@ -151,22 +138,20 @@ def configure_blackwell_xla_env(
     :param bool force: If True, re-run even if already configured.
     :return bool: True if an RTX 50xx GPU was detected.
     """
-    global _CONFIG_DONE, _LAST_RESULT
-    if _CONFIG_DONE and not force:
-        return bool(_LAST_RESULT)
+    global _CONFIG_RESULT
+    if _CONFIG_RESULT is not None and not force:
+        return _CONFIG_RESULT
 
     log = logger or logging.getLogger(__name__)
     names = _query_nvidia_gpu_names()
     if not names:
         log.debug("No NVIDIA GPUs detected via nvidia-smi; skipping Blackwell XLA setup.")
-        _CONFIG_DONE = True
-        _LAST_RESULT = False
+        _CONFIG_RESULT = False
         return False
-    blackwell = _detect_blackwell(names)
+    blackwell = [name for name in names if _is_rtx_50xx(name)]
     if not blackwell:
         log.debug("NVIDIA GPU(s) detected but not RTX 50xx: %s", ", ".join(names))
-        _CONFIG_DONE = True
-        _LAST_RESULT = False
+        _CONFIG_RESULT = False
         return False
 
     log.info("Detected RTX 50xx GPU(s): %s", ", ".join(blackwell))
@@ -185,6 +170,5 @@ def configure_blackwell_xla_env(
     prealloc = os.environ.get(_PREALLOC_ENV)
     _log_prealloc_status(log, prealloc)
 
-    _CONFIG_DONE = True
-    _LAST_RESULT = True
+    _CONFIG_RESULT = True
     return True

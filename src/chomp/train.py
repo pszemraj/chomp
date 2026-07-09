@@ -334,7 +334,7 @@ def _build_model_state(
     key, k_model = jax.random.split(key)
     params, static = build_model(cfg, key=k_model)
     tx, schedule = build_optimizer(cfg, params)
-    state0 = init_train_state(cfg, params=params, tx=tx, key=key)
+    state0 = init_train_state(params=params, tx=tx, key=key)
     abstract_state = abstractify_tree(state0)
     return params, static, tx, schedule, state0, abstract_state
 
@@ -910,11 +910,10 @@ def build_optimizer(
 
 
 def init_train_state(
-    cfg: Config, *, params: Any, tx: optax.GradientTransformation, key: jax.Array
+    *, params: Any, tx: optax.GradientTransformation, key: jax.Array
 ) -> TrainState:
     """Initialize a fresh TrainState at step 0.
 
-    :param Config cfg: Training configuration (unused but kept for API consistency).
     :param Any params: Model parameters.
     :param optax.GradientTransformation tx: Optimizer transform.
     :param jax.Array key: PRNG key for dropout.
@@ -1186,7 +1185,6 @@ def run(
     config_path: str | None = None,
     resume: Literal["none", "latest"] | int = "none",
     dry_run: bool = False,
-    max_steps: int | None = None,
 ) -> Path:
     """Run a training job and return the run directory.
 
@@ -1198,7 +1196,6 @@ def run(
     :param config_path: Optional path to the source YAML config file.
     :param resume: Resume mode - "none" (fresh), "latest", or specific step number.
     :param bool dry_run: If True, compile and run a single step, then exit early.
-    :param max_steps: Optional cap on steps for this invocation (<= train.steps).
     :raises RuntimeError: If resume requested but checkpointing is disabled.
     :return Path: Path to the run directory.
     """
@@ -1325,10 +1322,6 @@ def run(
     # Determine starting step from TrainState
     start_step = int(jax.device_get(state.step))
     target_steps = cfg.train.steps
-    if max_steps is not None:
-        if max_steps <= 0:
-            raise ValueError(f"max_steps must be positive, got {max_steps}")
-        target_steps = min(target_steps, int(max_steps))
 
     if start_step >= target_steps:
         print(f"[chomp] start_step ({start_step}) >= target steps ({target_steps}); nothing to do")

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import click
 
-from chomp._version import __version__
+from chomp import __version__
 
 BANNER = f"""
            __

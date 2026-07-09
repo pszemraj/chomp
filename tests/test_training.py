@@ -290,7 +290,7 @@ def test_checkpoint_restore_allows_forward(tmp_path: Path) -> None:
     cfg, tokenizer = prepare_tokenizer_and_config(cfg)
     params, static = build_model(cfg, key=jax.random.PRNGKey(0))
     tx, _ = build_optimizer(cfg, params)
-    state0 = init_train_state(cfg, params=params, tx=tx, key=jax.random.PRNGKey(1))
+    state0 = init_train_state(params=params, tx=tx, key=jax.random.PRNGKey(1))
     abstract_state = abstractify_tree(state0)
 
     data_it = build_train_iterator(cfg, tokenizer=tokenizer)
@@ -426,7 +426,7 @@ def test_crash_between_fetch_and_step_skips_final_checkpoint(
     params, static = build_model(cfg_ref, key=jax.random.PRNGKey(0))
     tx, _ = build_optimizer(cfg_ref, params)
     abstract_state = abstractify_tree(
-        init_train_state(cfg_ref, params=params, tx=tx, key=jax.random.PRNGKey(1))
+        init_train_state(params=params, tx=tx, key=jax.random.PRNGKey(1))
     )
 
     states = []
@@ -559,7 +559,7 @@ def test_resume_bit_exact_with_prefetch_and_window_shuffle(tmp_path: Path) -> No
     params, _static = build_model(cfg_ref, key=jax.random.PRNGKey(0))
     tx, _ = build_optimizer(cfg_ref, params)
     abstract_state = abstractify_tree(
-        init_train_state(cfg_ref, params=params, tx=tx, key=jax.random.PRNGKey(1))
+        init_train_state(params=params, tx=tx, key=jax.random.PRNGKey(1))
     )
     states = []
     for run_dir in (run_dir_cont, run_dir_int):
@@ -636,7 +636,7 @@ def test_resume_bit_exact_through_exhaustion_flush(tmp_path: Path) -> None:
     params, _static = build_model(cfg_ref, key=jax.random.PRNGKey(0))
     tx, _ = build_optimizer(cfg_ref, params)
     abstract_state = abstractify_tree(
-        init_train_state(cfg_ref, params=params, tx=tx, key=jax.random.PRNGKey(1))
+        init_train_state(params=params, tx=tx, key=jax.random.PRNGKey(1))
     )
     states = []
     for run_dir in (run_dir_cont, run_dir_int):
@@ -1053,7 +1053,7 @@ def test_training_crash_marks_wandb_failed_and_logs(
     )
 
     with pytest.raises(RuntimeError, match="kaboom"):
-        run(cfg, config_path=None, resume="none", dry_run=False, max_steps=1)
+        run(cfg, config_path=None, resume="none", dry_run=False)
 
     assert dummy_wandb.finish_calls == [1]
 
@@ -1111,7 +1111,7 @@ def test_crash_does_not_save_future_checkpoint(
     )
 
     with pytest.raises(RuntimeError, match="kaboom"):
-        run(cfg, config_path=None, resume="none", dry_run=False, max_steps=1)
+        run(cfg, config_path=None, resume="none", dry_run=False)
 
     ckpt_dir = default_ckpt_dir(run_dir)
     assert ckpt_dir.exists()
