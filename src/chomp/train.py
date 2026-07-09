@@ -353,6 +353,44 @@ def _build_checkpoint_manager(cfg: Config, run_dir: Path) -> Any | None:
     )
 
 
+def _save_training_checkpoint(
+    manager: Any,
+    *,
+    step: int,
+    cfg: Config,
+    tokenizer_hash: str | None,
+    tokens_seen: int,
+    train_state: TrainState,
+    data_iter: Any,
+    force: bool = False,
+) -> None:
+    """Save train/data state with the standard chomp checkpoint metadata.
+
+    :param manager: Checkpoint manager.
+    :param int step: Completed training step to save.
+    :param Config cfg: Training configuration.
+    :param str | None tokenizer_hash: Hash of the run tokenizer snapshot.
+    :param int tokens_seen: Cumulative exact loss-token count.
+    :param TrainState train_state: Train state to checkpoint.
+    :param data_iter: Data iterator to checkpoint.
+    :param bool force: Whether to force an off-cadence save.
+    """
+    meta = build_meta(
+        step=step,
+        config=cfg.to_dict(),
+        data_fingerprint=data_fingerprint(cfg, tokenizer_snapshot_hash=tokenizer_hash),
+        tokens_seen=int(tokens_seen),
+    )
+    save(
+        manager,
+        step=step,
+        train_state=train_state,
+        data_iter=data_iter,
+        meta=meta,
+        force=force,
+    )
+
+
 def _maybe_restore_state(
     *,
     resume: Literal["none", "latest"] | int,
@@ -1532,21 +1570,14 @@ def run(
 
                     # Checkpoint save (after state updated + finite-checked)
                     if save_interval:
-                        tokens_seen_ckpt = int(tokens_seen_count)
-                        meta = build_meta(
-                            step=step_i,
-                            config=cfg.to_dict(),
-                            data_fingerprint=data_fingerprint(
-                                cfg, tokenizer_snapshot_hash=tokenizer_hash
-                            ),
-                            tokens_seen=tokens_seen_ckpt,
-                        )
-                        save(
+                        _save_training_checkpoint(
                             manager,
                             step=step_i,
+                            cfg=cfg,
+                            tokenizer_hash=tokenizer_hash,
+                            tokens_seen=int(tokens_seen_count),
                             train_state=state,
                             data_iter=data_it,
-                            meta=meta,
                         )
                         last_saved_step = step_i
 
@@ -1700,20 +1731,14 @@ def run(
                     ckpt_errors.append(exc)
             if final_state_valid:
                 try:
-                    meta = build_meta(
-                        step=final_step,
-                        config=cfg.to_dict(),
-                        data_fingerprint=data_fingerprint(
-                            cfg, tokenizer_snapshot_hash=tokenizer_hash
-                        ),
-                        tokens_seen=int(tokens_seen_count),
-                    )
-                    save(
+                    _save_training_checkpoint(
                         manager,
                         step=final_step,
+                        cfg=cfg,
+                        tokenizer_hash=tokenizer_hash,
+                        tokens_seen=int(tokens_seen_count),
                         train_state=state,
                         data_iter=data_it,
-                        meta=meta,
                         force=True,
                     )
                 except Exception as exc:
