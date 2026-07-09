@@ -1362,9 +1362,7 @@ def run(
         # never held between evals.
         if not eval_batches_cache:
             host_cfg = dc_replace(cfg, data=dc_replace(cfg.data, device_put=False))
-            eval_batches_cache.extend(
-                build_eval_iterator(host_cfg, tokens=eval_tokens, tokenizer=tokenizer)
-            )
+            eval_batches_cache.extend(build_eval_iterator(host_cfg, tokens=eval_tokens))
         total_loss = 0.0
         total_tokens = 0.0
         batch_count = 0

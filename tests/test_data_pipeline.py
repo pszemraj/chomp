@@ -332,8 +332,20 @@ def test_ffd_packer_state_rejects_corrupt_queues(
         packer.set_state(state)
 
 
-def test_token_packer_legacy_state_normalizes_large_segment_ids() -> None:
-    """TokenPacker should accept legacy large segment IDs and preserve boundaries."""
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        ({"remaining_tokens": [10], "remaining_segments": [0]}, "remaining_segments"),
+        ({"next_segment_id": 3}, "next_segment_id"),
+        ({"docs_seen": -1}, "invalid document counters"),
+        ({"docs_seen": 1, "docs_truncated": 2}, "invalid document counters"),
+    ],
+    ids=["invalid_segment", "invalid_next_segment", "negative_counter", "truncated_gt_seen"],
+)
+def test_token_packer_state_rejects_invalid_current_state(
+    mutation: dict[str, Any], match: str
+) -> None:
+    """TokenPacker rejects state outside its current compact-ID invariants."""
     packer = TokenPacker(
         seq_len=8,
         add_bos=False,
@@ -343,43 +355,16 @@ def test_token_packer_legacy_state_normalizes_large_segment_ids() -> None:
         max_doc_tokens=None,
     )
 
-    legacy_state = {
-        "remaining_tokens": [10, 11, 12, 20, 21, 30, 31, 32],
-        "remaining_segments": [
-            2_147_483_600,
-            2_147_483_600,
-            2_147_483_600,
-            2_147_483_601,
-            2_147_483_601,
-            2_147_483_602,
-            2_147_483_602,
-            2_147_483_602,
-        ],
-        "next_segment_id": 2_147_483_603,
-        "docs_seen": 3,
+    state = {
+        "remaining_tokens": [],
+        "remaining_segments": [],
+        "next_segment_id": 1,
+        "docs_seen": 0,
         "docs_truncated": 0,
     }
-    packer.set_state(legacy_state)
-
-    assert packer.can_pop()
-    _, segs, _ = packer.pop_seq_with_metadata()
-    assert segs.dtype == np.int32
-    assert np.all(segs > 0)
-
-    boundary = segs[1:] != segs[:-1]
-    np.testing.assert_array_equal(
-        boundary,
-        np.asarray([False, False, True, False, True, False, False], dtype=bool),
-    )
-
-    # Adding a new document after restore should remain safe and deterministic.
-    packer.add_document([41, 42, 43, 44, 45, 46, 47, 48])
-    seq2, segs2, _ = packer.pop_seq_with_metadata()
-    assert seq2.shape == (8,)
-    np.testing.assert_array_equal(segs2, np.ones((8,), dtype=np.int32))
-
-    state = packer.get_state()
-    assert int(state["next_segment_id"]) in (1, 2)
+    state.update(mutation)
+    with pytest.raises(ValueError, match=match):
+        packer.set_state(state)
 
 
 def test_grain_iterator_state_roundtrip() -> None:
@@ -565,8 +550,7 @@ def test_eval_iterator_never_shuffles() -> None:
     """Eval batches must come out in strict document order regardless of W."""
     cfg = _window_shuffle_cfg(window=4096)
     tokens = [[100 + i] * 6 for i in range(8)]
-    tokenizer = ByteTokenizer(byte_offset=4)
-    it = build_eval_iterator(cfg, tokens=tokens, tokenizer=tokenizer)
+    it = build_eval_iterator(cfg, tokens=tokens)
 
     seen = _row_doc_tokens(next(it)) + _row_doc_tokens(next(it))
     assert seen == [100, 101, 102, 103]

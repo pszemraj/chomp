@@ -15,7 +15,6 @@ Tokenization + packing happen elsewhere.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import time
 from collections.abc import Iterator
@@ -62,16 +61,15 @@ class HFStreamingTextStream:
     test in tests/test_data_pipeline.py).
     """
 
-    def __init__(self, spec: HFStreamSpec, *, epoch0: int = 0):
+    def __init__(self, spec: HFStreamSpec):
         """Initialize the streaming text stream.
 
         :param HFStreamSpec spec: Dataset specification.
-        :param int epoch0: Starting epoch number (default 0).
         """
         self._spec = spec
-        self._epoch = int(epoch0)
-        self._ds = None
-        self._it: Iterator[dict[str, Any]] | None = None
+        self._epoch = 0
+        self._ds: datasets.IterableDataset
+        self._it: Iterator[dict[str, Any]]
         self._n_since_state = 0
         self._last_state: dict[str, Any] | None = None
         self._build()
@@ -91,10 +89,8 @@ class HFStreamingTextStream:
             streaming=True,
         )
 
-        # Keep only the text column (smaller item dicts, less accidental schema drift)
-        # Some older datasets versions may not support select_columns in streaming.
-        with contextlib.suppress(Exception):
-            ds = ds.select_columns([self._spec.text_key])
+        # Keep only the text column (smaller item dicts, less accidental schema drift).
+        ds = ds.select_columns([self._spec.text_key])
 
         if self._spec.shuffle:
             ds = ds.shuffle(
@@ -164,9 +160,6 @@ class HFStreamingTextStream:
         return text
 
     def __next__(self) -> str:
-        if self._it is None or self._ds is None:
-            self._build()
-
         # Retry loop for transient failures
         for attempt in range(self._spec.max_retries + 1):
             try:
@@ -208,8 +201,6 @@ class HFStreamingTextStream:
             Better to fail the save than write a checkpoint that silently
             cannot resume exactly.
         """
-        if self._ds is None:
-            self._build()
         try:
             hf_state = self._ds.state_dict()  # type: ignore[attr-defined]
         except Exception as e:
@@ -235,7 +226,7 @@ class HFStreamingTextStream:
             rather than resume silently wrong.
         :raises Exception: If load_state_dict fails (better to crash than silently reset).
         """
-        epoch = int(state.get("epoch", 0))
+        epoch = int(state["epoch"])
         hf_state = state.get("hf_state")
         self._epoch = epoch
 
@@ -299,46 +290,4 @@ class LocalTextStream:
 
         :param dict[str, Any] state: State dict from get_state().
         """
-        self._i = int(state.get("i", 0))
-
-
-class ListTokenStream:
-    """Stream over a fixed list of tokenized documents."""
-
-    def __init__(self, *, tokens: list[list[int]], repeat: bool = True):
-        """Initialize the list-backed token stream.
-
-        :param list[list[int]] tokens: Ordered list of tokenized documents.
-        :param bool repeat: Whether to loop when reaching the end.
-        """
-        self._tokens = [list(x) for x in tokens]
-        self._repeat = bool(repeat)
-        self._i = 0
-
-    def __iter__(self) -> ListTokenStream:
-        return self
-
-    def __next__(self) -> list[int]:
-        if not self._tokens:
-            raise StopIteration
-        if self._i >= len(self._tokens):
-            if not self._repeat:
-                raise StopIteration
-            self._i = 0
-        item = self._tokens[self._i]
-        self._i += 1
-        return item
-
-    def get_state(self) -> dict[str, Any]:
-        """Capture stream state for checkpointing.
-
-        :return dict[str, Any]: State dict with current index.
-        """
-        return {"i": int(self._i)}
-
-    def set_state(self, state: dict[str, Any]) -> None:
-        """Restore stream state from a checkpoint.
-
-        :param dict[str, Any] state: State dict from get_state().
-        """
-        self._i = int(state.get("i", 0))
+        self._i = int(state["i"])

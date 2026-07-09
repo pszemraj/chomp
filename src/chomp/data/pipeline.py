@@ -26,7 +26,7 @@ import gzip
 import hashlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -38,7 +38,7 @@ from chomp.types import IGNORE_INDEX, Batch
 from chomp.utils.xla import deterministic_gpu_ops_setting
 
 from .grain import effective_window_shuffle_seed
-from .hf import HFStreamingTextStream, HFStreamSpec, ListTokenStream, LocalTextStream
+from .hf import HFStreamingTextStream, HFStreamSpec, LocalTextStream
 from .pack import BinPacker, MultipackPacker, TokenPacker
 
 
@@ -435,13 +435,7 @@ def save_tokenizer_snapshot(
 
     record = {
         "kind": cfg.data.tokenizer.kind,
-        "vocab_size": int(cfg.model.vocab_size),
         "byte_offset": cfg.data.tokenizer.byte_offset,
-        "add_bos": cfg.data.tokenizer.add_bos,
-        "add_eos": cfg.data.tokenizer.add_eos,
-        "bos_token_id": int(cfg.model.bos_token_id),
-        "eos_token_id": int(cfg.model.eos_token_id),
-        "pad_token_id": int(cfg.model.pad_token_id),
     }
     (tok_dir / "tokenizer.json").write_text(
         json.dumps(record, indent=2, sort_keys=True),
@@ -471,7 +465,7 @@ def load_tokenizer_snapshot(run_dir: Path, cfg: Config) -> Tokenizer:
         kind = record.get("kind")
         if kind != "byte":
             raise RuntimeError(f"Tokenizer snapshot kind mismatch: expected 'byte', found {kind!r}")
-        return ByteTokenizer(byte_offset=int(record.get("byte_offset", 0)))
+        return ByteTokenizer(byte_offset=int(record["byte_offset"]))
 
     if tok_cfg.kind == "hf":
         return HFTokenizer(
@@ -1001,11 +995,18 @@ class _SequenceProducer:
     Implements `get_state`/`set_state` for resume correctness.
     """
 
-    def __init__(self, cfg: Config, *, tokenizer: Tokenizer, text_stream: TextStream | None = None):
+    def __init__(
+        self,
+        cfg: Config,
+        *,
+        tokenizer: Tokenizer | None,
+        text_stream: Iterator[TextItem] | None = None,
+    ):
         """Initialize the sequence producer.
 
         :param Config cfg: Training configuration.
-        :param Tokenizer tokenizer: Tokenizer for encoding text.
+        :param Tokenizer | None tokenizer: Tokenizer for string items; None is
+            valid only for pre-tokenized streams.
         :param text_stream: Optional text stream override (used for eval datasets).
         :raises ValueError: If data.backend is unknown.
         """
@@ -1023,6 +1024,8 @@ class _SequenceProducer:
         """Fetch one item from the text stream and add it to the packer."""
         item = next(self._text_stream)
         if isinstance(item, str):
+            if self._tok is None:
+                raise RuntimeError("A tokenizer is required for string stream items")
             ids = self._tok.encode(item)
         elif isinstance(item, list):
             ids = item
@@ -1083,62 +1086,37 @@ class _SequenceProducer:
 
         :return dict[str, int]: Stats like docs_seen/docs_truncated.
         """
-        if hasattr(self._packer, "get_stats"):
-            return dict(self._packer.get_stats())
-        return {}
+        return dict(self._packer.get_stats())
 
 
-class TrainBatchIterator:
-    """An iterator that yields fixed-shape `Batch` objects.
+class _EvalBatchIterator:
+    """One-pass iterator that assembles fixed-shape evaluation batches.
 
     This is the data side of the compile-once contract:
     - Every `__next__` yields arrays of exactly the same shape & dtype.
 
-    Batches are assembled directly from `_SequenceProducer` output order (no
-    shuffling); eval relies on this via `build_eval_iterator`.
-
-    It also implements `get_state`/`set_state` for resume correctness.
+    Batches are assembled directly from pre-tokenized documents in source
+    order; evaluation is finite, unshuffled, and never checkpointed.
     """
 
-    def __init__(self, cfg: Config, *, tokenizer: Tokenizer, text_stream: TextStream | None = None):
-        """Initialize the training batch iterator.
+    def __init__(self, cfg: Config, *, tokens: list[list[int]]):
+        """Initialize the evaluation batch iterator.
 
         :param Config cfg: Training configuration.
-        :param Tokenizer tokenizer: Tokenizer for encoding text.
-        :param text_stream: Optional text stream override (used for eval datasets).
-        :raises ValueError: If data.backend is unknown.
+        :param list[list[int]] tokens: Ordered pre-tokenized documents.
         """
-        self._producer = _SequenceProducer(cfg, tokenizer=tokenizer, text_stream=text_stream)
+        self._producer = _SequenceProducer(
+            cfg,
+            tokenizer=None,
+            text_stream=iter([list(document) for document in tokens]),
+        )
         self._spec = _BatchAssemblySpec.from_config(cfg)
 
-    def __iter__(self) -> TrainBatchIterator:
+    def __iter__(self) -> _EvalBatchIterator:
         return self
 
     def __next__(self) -> Batch:
         return _assemble_batch(self._producer.next_window, self._spec)
-
-    # -------- checkpoint hooks --------
-
-    def get_state(self) -> dict[str, Any]:
-        """Capture current iterator state for checkpointing.
-
-        :return dict[str, Any]: State dict with text stream and packer state.
-        """
-        return self._producer.get_state()
-
-    def set_state(self, state: dict[str, Any]) -> None:
-        """Restore iterator state from a checkpoint.
-
-        :param dict[str, Any] state: State dict from get_state().
-        """
-        self._producer.set_state(state)
-
-    def get_stats(self) -> dict[str, int]:
-        """Return packer-level document stats if available.
-
-        :return dict[str, int]: Stats like docs_seen/docs_truncated.
-        """
-        return self._producer.get_stats()
 
 
 def build_train_iterator(cfg: Config, *, tokenizer: Tokenizer | None = None) -> Any:
@@ -1156,13 +1134,11 @@ def build_train_iterator(cfg: Config, *, tokenizer: Tokenizer | None = None) -> 
     return build_grain_iterator(cfg, tokenizer=tokenizer)
 
 
-def build_eval_iterator(cfg: Config, *, tokens: list[list[int]], tokenizer: Tokenizer) -> Any:
+def build_eval_iterator(cfg: Config, *, tokens: list[list[int]]) -> Any:
     """Build a one-pass evaluation iterator from tokenized docs.
 
     :param Config cfg: Training configuration.
     :param list[list[int]] tokens: Tokenized evaluation documents.
-    :param Tokenizer tokenizer: Tokenizer instance.
     :return Any: Iterator yielding fixed-shape Batch objects.
     """
-    text_stream = ListTokenStream(tokens=tokens, repeat=False)
-    return TrainBatchIterator(cfg, tokenizer=tokenizer, text_stream=text_stream)
+    return _EvalBatchIterator(cfg, tokens=tokens)

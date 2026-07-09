@@ -235,12 +235,24 @@ class PackerState:
             raise ValueError(
                 f"remaining_segments length ({len(segs)}) must match remaining_tokens ({len(toks)})"
             )
+        if any(int(segment_id) not in (1, 2) for segment_id in segs):
+            raise ValueError("remaining_segments must contain only current segment IDs 1 or 2")
+        next_segment_id = int(d["next_segment_id"])
+        if next_segment_id not in (1, 2):
+            raise ValueError(f"next_segment_id must be 1 or 2, got {next_segment_id}")
+        docs_seen = int(d["docs_seen"])
+        docs_truncated = int(d["docs_truncated"])
+        if docs_seen < 0 or docs_truncated < 0 or docs_truncated > docs_seen:
+            raise ValueError(
+                "invalid document counters: expected 0 <= docs_truncated <= docs_seen, "
+                f"got docs_truncated={docs_truncated}, docs_seen={docs_seen}"
+            )
         return PackerState(
             remaining_tokens=toks,
             remaining_segments=segs,
-            next_segment_id=int(d["next_segment_id"]),
-            docs_seen=int(d["docs_seen"]),
-            docs_truncated=int(d["docs_truncated"]),
+            next_segment_id=next_segment_id,
+            docs_seen=docs_seen,
+            docs_truncated=docs_truncated,
         )
 
 
@@ -291,37 +303,6 @@ class TokenPacker:
         """
         return 2 if int(segment_id) == 1 else 1
 
-    @classmethod
-    def _normalize_state_segments(
-        cls, segments: list[int], next_segment_id: int
-    ) -> tuple[list[int], int]:
-        """Normalize restored segment IDs while preserving boundary transitions.
-
-        Legacy checkpoints may store very large monotonically increasing segment IDs.
-        We collapse those IDs to an internal {1,2} representation to avoid int32
-        overflow while preserving every segment transition.
-
-        :param list[int] segments: Restored segment IDs aligned with remaining tokens.
-        :param int next_segment_id: Restored next segment ID.
-        :return tuple[list[int], int]: Normalized segments and next internal segment ID.
-        """
-        if not segments:
-            if int(next_segment_id) in (1, 2):
-                return [], int(next_segment_id)
-            return [], 1
-
-        normalized = [1]
-        current = 1
-        prev = int(segments[0])
-        for raw in segments[1:]:
-            raw_int = int(raw)
-            if raw_int != prev:
-                current = cls._flip_segment_id(current)
-            normalized.append(current)
-            prev = raw_int
-
-        return normalized, cls._flip_segment_id(current)
-
     @staticmethod
     def _reindex_popped_segments(segs: np.ndarray) -> np.ndarray:
         """Reindex one output window to compact positive segment IDs.
@@ -332,9 +313,6 @@ class TokenPacker:
         :param np.ndarray segs: Internal segment IDs for one sequence window.
         :return np.ndarray: Compacted segment IDs, starting at 1.
         """
-        if segs.size == 0:
-            return segs.astype(np.int32, copy=False)
-
         boundary = np.empty(segs.size, dtype=np.int64)
         boundary[0] = 1
         boundary[1:] = segs[1:] != segs[:-1]
@@ -421,11 +399,8 @@ class TokenPacker:
         """
         st = PackerState.from_dict(state)
         self._token_buf.load_remaining(st.remaining_tokens)
-        normalized_segments, next_segment_id = self._normalize_state_segments(
-            st.remaining_segments, int(st.next_segment_id)
-        )
-        self._segment_buf.load_remaining(normalized_segments)
-        self._next_segment_id = int(next_segment_id)
+        self._segment_buf.load_remaining(st.remaining_segments)
+        self._next_segment_id = int(st.next_segment_id)
         self._docs_seen = int(st.docs_seen)
         self._docs_truncated = int(st.docs_truncated)
 
