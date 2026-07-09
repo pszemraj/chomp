@@ -71,7 +71,13 @@ from chomp.data import (
     save_tokenizer_snapshot,
     tokenizer_snapshot_hash,
 )
-from chomp.model import build_model, causal_loss_mask, supports_packed_segments, training_loss
+from chomp.model import (
+    build_model,
+    causal_loss_mask,
+    generate_tokens,
+    supports_packed_segments,
+    training_loss,
+)
 from chomp.types import IGNORE_INDEX, Batch, TrainState
 from chomp.utils.devices import assert_batch_on_device
 from chomp.utils.io import MetricsWriter, add_file_logging, create_run_dir
@@ -1422,45 +1428,28 @@ def run(
             return
 
         try:
-            from megalodon_jax import generate as mega_generate
-        except Exception as exc:  # pragma: no cover - optional runtime dependency
+            gen_tokens, next_key = generate_tokens(
+                params,
+                static,
+                prompt_tokens=prompt_tokens,
+                max_new_tokens=gen_settings.max_new_tokens,
+                bos_token_id=cfg.model.bos_token_id,
+                eos_token_id=cfg.model.eos_token_id,
+                temperature=gen_settings.temperature,
+                top_k=gen_settings.top_k,
+                top_p=gen_settings.top_p,
+                key=gen_key,
+            )
+        except ImportError as exc:  # pragma: no cover - optional runtime dependency
             logger.warning("Generation requested but megalodon_jax unavailable: %s", exc)
             gen_settings = None
             return
-
-        model = eqx.combine(params, static)
-        needs_key = gen_settings.temperature is None or gen_settings.temperature > 0
-        key = gen_key if needs_key else None
-        gen_kwargs: dict[str, Any] = {
-            "bos_token_id": int(cfg.model.bos_token_id),
-            "eos_token_id": int(cfg.model.eos_token_id),
-        }
-        if gen_settings.temperature is not None:
-            gen_kwargs["temperature"] = float(gen_settings.temperature)
-        if gen_settings.top_k is not None:
-            gen_kwargs["top_k"] = int(gen_settings.top_k)
-        if gen_settings.top_p is not None:
-            gen_kwargs["top_p"] = float(gen_settings.top_p)
-
-        prompt_ids = jnp.asarray(prompt_tokens, dtype=jnp.int32)[None, :]
-        try:
-            output_ids, _cache, next_key = mega_generate(
-                model,
-                prompt_ids,
-                gen_settings.max_new_tokens,
-                key=key,
-                **gen_kwargs,
-            )
         except Exception as exc:
             logger.warning("Generation failed at step %d: %s", step, exc)
             return
 
         if next_key is not None:
             gen_key = next_key
-
-        output_host = jax.device_get(output_ids)
-        output_tokens = [int(x) for x in output_host[0].tolist()]
-        gen_tokens = output_tokens[len(prompt_tokens) :]
 
         prompt_text = _safe_decode(tokenizer, prompt_tokens, label="prompt")
         generated_text = _safe_decode(tokenizer, gen_tokens, label="generated")

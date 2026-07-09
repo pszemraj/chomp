@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import click
 
 from chomp.utils.ckpt_paths import load_config_for_checkpoint, resolve_checkpoint_path
@@ -81,13 +79,11 @@ def generate(
     configure_blackwell_xla_env()
 
     # Deferred imports: must run after XLA env config
-    import equinox as eqx
     import jax
-    import jax.numpy as jnp
 
     from chomp.ckpt import restore_params_only
-    from chomp.data.pipeline import build_tokenizer, resolve_tokenizer_config
-    from chomp.model import build_model
+    from chomp.data.pipeline import load_tokenizer_snapshot, prepare_tokenizer_and_config
+    from chomp.model import build_model, generate_tokens
     from chomp.utils.tree import abstractify_tree
 
     # Find checkpoint and load config
@@ -110,10 +106,15 @@ def generate(
             f"Found {cfg.model.backend!r} in the checkpoint config."
         )
 
-    # Build tokenizer and resolve tokenizer-derived config fields
-    # (vocab_size rounding, special token IDs) before model build
-    tokenizer = build_tokenizer(cfg)
-    cfg = resolve_tokenizer_config(cfg, tokenizer)
+    # Prefer the run-pinned tokenizer so mutable upstream tokenizer revisions
+    # cannot reinterpret the restored embedding rows.
+    tokenizer = None
+    if run_dir is not None and (run_dir / "tokenizer").exists():
+        try:
+            tokenizer = load_tokenizer_snapshot(run_dir, cfg)
+        except Exception as exc:
+            raise click.ClickException(str(exc)) from exc
+    cfg, tokenizer = prepare_tokenizer_and_config(cfg, tokenizer=tokenizer)
 
     # Build model skeleton for abstract shapes
     key = jax.random.key(seed)
@@ -127,50 +128,32 @@ def generate(
     except FileNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    # Import generation function
-    try:
-        from megalodon_jax import generate as mega_generate
-    except ImportError as e:
-        raise click.ClickException(
-            "megalodon_jax is required for generation. Install with: pip install megalodon-jax"
-        ) from e
-
     # Tokenize prompt
     prompt_tokens = tokenizer.encode(prompt)
     if not prompt_tokens:
         raise click.ClickException("Prompt tokenized to empty sequence")
 
-    prompt_ids = jnp.asarray(prompt_tokens, dtype=jnp.int32)[None, :]
-
-    # Build generation kwargs
-    gen_kwargs: dict[str, Any] = {
-        "bos_token_id": int(cfg.model.bos_token_id),
-        "eos_token_id": int(cfg.model.eos_token_id),
-    }
-    gen_kwargs["temperature"] = temperature
-    if top_k is not None:
-        gen_kwargs["top_k"] = top_k
-    if top_p is not None:
-        gen_kwargs["top_p"] = top_p
-
-    # Combine model
-    model = eqx.combine(params, static)
-
     # Generate
     click.echo("Generating...")
-    needs_key = temperature > 0
-    output_ids, _cache, _next_key = mega_generate(
-        model,
-        prompt_ids,
-        max_tokens,
-        key=gen_key if needs_key else None,
-        **gen_kwargs,
-    )
-
-    # Decode output
-    output_host = jax.device_get(output_ids)
-    output_tokens = [int(x) for x in output_host[0].tolist()]
-    gen_tokens = output_tokens[len(prompt_tokens) :]
+    try:
+        gen_tokens, _next_key = generate_tokens(
+            params,
+            static,
+            prompt_tokens=prompt_tokens,
+            max_new_tokens=max_tokens,
+            bos_token_id=cfg.model.bos_token_id,
+            eos_token_id=cfg.model.eos_token_id,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            key=gen_key,
+        )
+    except ImportError as exc:
+        raise click.ClickException(
+            "megalodon_jax is required for generation. Install with: pip install megalodon-jax"
+        ) from exc
+    except Exception as exc:
+        raise click.ClickException(f"Generation failed: {exc}") from exc
 
     generated_text = tokenizer.decode(gen_tokens)
 

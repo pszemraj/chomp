@@ -325,6 +325,60 @@ def training_loss(
     )
 
 
+def generate_tokens(
+    params: Any,
+    static: Any,
+    *,
+    prompt_tokens: list[int],
+    max_new_tokens: int,
+    bos_token_id: int,
+    eos_token_id: int,
+    temperature: float | None,
+    top_k: int | None,
+    top_p: float | None,
+    key: jax.Array | None,
+) -> tuple[list[int], jax.Array | None]:
+    """Generate continuation token IDs with the Megalodon backend.
+
+    :param Any params: Model parameters from ``eqx.partition``.
+    :param Any static: Static model components from ``eqx.partition``.
+    :param list[int] prompt_tokens: Non-empty tokenized prompt.
+    :param int max_new_tokens: Maximum continuation length.
+    :param int bos_token_id: Beginning-of-sequence token ID.
+    :param int eos_token_id: End-of-sequence token ID.
+    :param float | None temperature: Sampling temperature; 0 selects greedy decoding.
+    :param int | None top_k: Optional top-k cutoff.
+    :param float | None top_p: Optional nucleus-sampling threshold.
+    :param jax.Array | None key: Sampling key; ignored for greedy decoding.
+    :raises ImportError: If ``megalodon_jax`` is unavailable.
+    :return tuple[list[int], jax.Array | None]: Continuation tokens and next sampling key.
+    """
+    from megalodon_jax import generate as mega_generate
+
+    prompt_ids = jnp.asarray(prompt_tokens, dtype=jnp.int32)[None, :]
+    generation_kwargs: dict[str, Any] = {
+        "bos_token_id": int(bos_token_id),
+        "eos_token_id": int(eos_token_id),
+    }
+    if temperature is not None:
+        generation_kwargs["temperature"] = float(temperature)
+    if top_k is not None:
+        generation_kwargs["top_k"] = int(top_k)
+    if top_p is not None:
+        generation_kwargs["top_p"] = float(top_p)
+
+    sampling_key = key if temperature is None or temperature > 0 else None
+    output_ids, _cache, next_key = mega_generate(
+        eqx.combine(params, static),
+        prompt_ids,
+        int(max_new_tokens),
+        key=sampling_key,
+        **generation_kwargs,
+    )
+    output_tokens = [int(token) for token in jax.device_get(output_ids)[0].tolist()]
+    return output_tokens[len(prompt_tokens) :], next_key
+
+
 def supports_packed_segments(params: Any, static: Any) -> bool:
     """Return True if the model backend supports full packed-segment isolation.
 
