@@ -73,6 +73,8 @@ Hard failures include:
 - objective knobs (`mask_boundary_loss`, `train_on_eos`) and eval knobs
 - batch shape invariants (`seq_len`, `batch_size`, `grad_accum`)
 - model and optimizer config, `train.deterministic`
+- the effective `xla_gpu_deterministic_ops` setting (parsed from `XLA_FLAGS`
+  at save and at resume — see [Scope of exactness](#scope-of-exactness))
 
 The packing, model, and optimizer sections are compared over the union of
 keys recorded on either side, so a knob present in only one version's

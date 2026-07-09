@@ -1215,6 +1215,26 @@ def test_resume_compat_checks_unknown_packing_fingerprint_keys(tmp_path: Path) -
         check_resume_compat(cfg, meta)
 
 
+def test_resume_compat_checks_gpu_determinism_setting(tmp_path: Path) -> None:
+    """A different effective xla_gpu_deterministic_ops must fail resume.
+
+    The kernel-determinism flag lives in XLA_FLAGS, not in config, so this is
+    the only guard against a resumed process silently voiding bit-exact
+    resume by running with different kernel determinism than the run that
+    wrote the checkpoint.
+    """
+    cfg = _base_cfg(tmp_path / "run_det_ops")
+    meta = {"config": cfg.to_dict(), "data_fingerprint": data_fingerprint(cfg)}
+    # Whatever this process's effective setting is (True on GPU hosts via
+    # conftest, None on CPU-only), record something else in the checkpoint.
+    meta["data_fingerprint"]["xla_gpu_deterministic_ops"] = not bool(
+        meta["data_fingerprint"]["xla_gpu_deterministic_ops"]
+    )
+
+    with pytest.raises(RuntimeError, match="xla_gpu_deterministic_ops"):
+        check_resume_compat(cfg, meta)
+
+
 @pytest.mark.parametrize(
     ("mutate", "match"),
     [

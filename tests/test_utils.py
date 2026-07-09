@@ -232,3 +232,49 @@ def test_deterministic_gpu_ops_skips_without_gpu(monkeypatch: pytest.MonkeyPatch
 
     assert xla.ensure_deterministic_gpu_ops() is False
     assert os.environ.get("XLA_FLAGS") == "--keep"
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ("", None),
+        ("--foo=bar", None),
+        ("--xla_gpu_deterministic_ops=true", True),
+        ("--xla_gpu_deterministic_ops=false", False),
+        ("--xla_gpu_deterministic_ops=false --xla_gpu_deterministic_ops=true", True),
+    ],
+)
+def test_deterministic_gpu_ops_setting_parses_flags(
+    monkeypatch: pytest.MonkeyPatch, flags: str, expected: bool | None
+) -> None:
+    """Effective setting parses from XLA_FLAGS; last occurrence wins.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest monkeypatch fixture.
+    :param str flags: XLA_FLAGS value to parse.
+    :param bool | None expected: Expected parsed setting.
+    """
+    monkeypatch.setenv("XLA_FLAGS", flags)
+    assert xla.deterministic_gpu_ops_setting() is expected
+
+
+def test_gpu_determinism_unknown_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    """GPU backend + unset flag warns; a set flag (or CPU backend) stays quiet.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest monkeypatch fixture.
+    :param LogCaptureFixture caplog: Log capture fixture.
+    """
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+
+    monkeypatch.setenv("XLA_FLAGS", "")
+    assert xla.warn_if_gpu_determinism_unknown() is True
+    assert any("Bit-exact resume" in rec.message for rec in caplog.records)
+
+    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_deterministic_ops=false")
+    assert xla.warn_if_gpu_determinism_unknown() is False
+
+    monkeypatch.setattr(jax, "default_backend", lambda: "cpu")
+    monkeypatch.setenv("XLA_FLAGS", "")
+    assert xla.warn_if_gpu_determinism_unknown() is False

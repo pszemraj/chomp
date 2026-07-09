@@ -97,6 +97,49 @@ def _log_prealloc_status(log: logging.Logger, prealloc: str | None) -> None:
         log.info("%s=%s", _PREALLOC_ENV, prealloc)
 
 
+def deterministic_gpu_ops_setting() -> bool | None:
+    """Effective xla_gpu_deterministic_ops value parsed from XLA_FLAGS.
+
+    This is the value the resume-compat fingerprint records: bit-exact resume
+    on GPU holds only when the interrupted and resumed processes agree on it.
+    Last occurrence wins, matching XLA's own flag parsing.
+
+    :return bool | None: Parsed boolean, or None when the flag is unset.
+    """
+    setting: bool | None = None
+    for tok in os.environ.get("XLA_FLAGS", "").split():
+        if tok.startswith(_DETERMINISTIC_FLAG_PREFIX):
+            setting = tok[len(_DETERMINISTIC_FLAG_PREFIX) :].strip().lower() == "true"
+    return setting
+
+
+def warn_if_gpu_determinism_unknown(*, logger: logging.Logger | None = None) -> bool:
+    """Warn when JAX initialized a GPU backend with no determinism setting.
+
+    Fallback for hosts where nvidia-smi is unavailable (containers without
+    the binary, blocked drivers): ensure_deterministic_gpu_ops() cannot see
+    the GPU there, so XLA_FLAGS stays untouched and bit-exact resume is not
+    guaranteed. Must be called after JAX backend init — by then it is too
+    late to set the flag, so this warns instead of fixing.
+
+    :param logger: Optional logger override.
+    :return bool: True if the warning fired.
+    """
+    import jax
+
+    if jax.default_backend() != "gpu" or deterministic_gpu_ops_setting() is not None:
+        return False
+    log = logger or logging.getLogger(__name__)
+    log.warning(
+        "JAX is on a GPU backend but %s was not set (nvidia-smi unavailable at "
+        "startup?). Bit-exact resume is NOT guaranteed; export XLA_FLAGS=%s "
+        "before launch to restore the contract.",
+        _DETERMINISTIC_FLAG_PREFIX.rstrip("="),
+        _DETERMINISTIC_FLAG,
+    )
+    return True
+
+
 def ensure_deterministic_gpu_ops(*, logger: logging.Logger | None = None) -> bool:
     """Default XLA GPU ops to deterministic so bit-exact resume actually holds.
 
@@ -114,10 +157,10 @@ def ensure_deterministic_gpu_ops(*, logger: logging.Logger | None = None) -> boo
     if not _query_nvidia_gpu_names():
         return False
 
-    existing = os.environ.get("XLA_FLAGS", "")
-    if any(tok.startswith(_DETERMINISTIC_FLAG_PREFIX) for tok in existing.split()):
+    if deterministic_gpu_ops_setting() is not None:
         log.info("XLA_FLAGS already sets xla_gpu_deterministic_ops; leaving it as-is.")
         return False
+    existing = os.environ.get("XLA_FLAGS", "")
     os.environ["XLA_FLAGS"] = f"{existing} {_DETERMINISTIC_FLAG}".strip()
     log.info(
         "Setting %s for bit-exact resume. Pre-set %sfalse in XLA_FLAGS to trade "

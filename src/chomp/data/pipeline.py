@@ -35,6 +35,7 @@ import numpy as np
 
 from chomp.config import Config, validate_config
 from chomp.types import IGNORE_INDEX, Batch
+from chomp.utils.xla import deterministic_gpu_ops_setting
 
 from .hf import HFStreamingTextStream, HFStreamSpec, ListTokenStream, LocalTextStream
 from .pack import BinPacker, MultipackPacker, TokenPacker
@@ -815,6 +816,10 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
         "seq_len": cfg.train.seq_len,
         "batch_size": cfg.train.batch_size,
         "grad_accum": cfg.train.grad_accum,
+        # Not a data knob, but part of the resume identity: bit-exact resume
+        # on GPU holds only when both processes agree on XLA kernel
+        # determinism (docs/checkpointing.md, "Scope of exactness").
+        "xla_gpu_deterministic_ops": deterministic_gpu_ops_setting(),
     }
 
 
