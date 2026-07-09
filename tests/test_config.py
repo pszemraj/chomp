@@ -15,6 +15,7 @@ from chomp.config import (
     OptimConfig,
     TokenizerConfig,
     TrainConfig,
+    build_config,
     load_config,
     validate_config,
 )
@@ -78,6 +79,31 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
     for mutate, match in cases:
         with pytest.raises(ValueError, match=match):
             validate_config(mutate(_base_cfg()))
+
+
+def test_build_config_rejects_unknown_top_level_sections() -> None:
+    """Top-level config typos should fail instead of being silently ignored."""
+    data = _base_cfg().to_dict()
+    data["trian"] = {"steps": 10}
+
+    with pytest.raises(ValueError, match="unknown top-level"):
+        build_config(data)
+
+
+def test_build_config_allows_resolved_derived_section() -> None:
+    """config_resolved.json includes derived metadata that is not schema input."""
+    data = _base_cfg().to_dict()
+    data["derived"] = {"optim": {"decay_steps_effective": 1}}
+
+    cfg = build_config(data)
+
+    assert cfg == _base_cfg()
+
+
+def test_override_rejects_empty_dotted_path_component() -> None:
+    """Malformed dot-path overrides should fail before attribute lookup."""
+    with pytest.raises(ValueError, match="Invalid override path"):
+        build_config(_base_cfg().to_dict(), overrides=["train..steps=2"])
 
 
 def test_optim_validation_rejects_invalid_values() -> None:

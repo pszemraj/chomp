@@ -19,10 +19,11 @@ Design stance (hard-earned):
 
 from __future__ import annotations
 
+import json
 import re
 import warnings
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -398,7 +399,7 @@ def _set_by_dotted_path(obj: Any, path: str, raw_value: str) -> Any:
     """
 
     parts = path.split(".")
-    if len(parts) < 1:
+    if any(not part for part in parts):
         raise ValueError(f"Invalid override path: {path!r}")
 
     # Walk to the parent
@@ -418,22 +419,10 @@ def _set_by_dotted_path(obj: Any, path: str, raw_value: str) -> Any:
     new = _cast_like(old, raw_value)
 
     # Rebuild dataclasses from the bottom up (frozen dataclasses)
-    cur_new = _replace_dataclass(cur, **{leaf: new})
+    cur_new = replace(cur, **{leaf: new})
     for parent, field in reversed(parents):
-        cur_new = _replace_dataclass(parent, **{field: cur_new})
+        cur_new = replace(parent, **{field: cur_new})
     return cur_new
-
-
-def _replace_dataclass(obj: Any, **kwargs: Any) -> Any:
-    """Create a new dataclass instance with specified fields replaced.
-
-    :param Any obj: Frozen dataclass to copy.
-    :param kwargs: Field names and their new values.
-    :return Any: New dataclass instance with updated fields.
-    """
-    from dataclasses import replace
-
-    return replace(obj, **kwargs)
 
 
 def _cast_like(old: Any, raw: str) -> Any:
@@ -472,6 +461,32 @@ def _cast_like(old: Any, raw: str) -> Any:
     return raw
 
 
+def read_config_mapping(path: str | Path) -> dict[str, Any]:
+    """Read a YAML or JSON config mapping from disk.
+
+    :param path: Path to a YAML or JSON file.
+    :raises FileNotFoundError: If the path does not exist.
+    :raises ValueError: If parsing fails or the top-level value is not a mapping.
+    :return dict[str, Any]: Parsed top-level mapping.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+    try:
+        with path.open() as f:
+            if path.suffix == ".json":
+                data = json.load(f) or {}
+            else:
+                data = yaml.safe_load(f) or {}
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in {path}: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid YAML in {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"Config file must be a mapping, got {type(data).__name__}")
+    return data
+
+
 def build_config(data: dict[str, Any], overrides: Iterable[str] | None = None) -> Config:
     """Build and validate a Config from a raw nested mapping.
 
@@ -506,13 +521,10 @@ def load_config(path: str | Path, overrides: Iterable[str] | None = None) -> Con
 
     :param path: Path to the YAML config file.
     :param overrides: Optional list of dot-path overrides (e.g., ["train.steps=2000"]).
-    :raises ValueError: If override format is invalid or path does not exist.
+    :raises ValueError: If override format is invalid or config parsing fails.
     :return Config: Validated configuration object.
     """
-    path = Path(path)
-    with path.open("r") as f:
-        data = yaml.safe_load(f) or {}
-    return build_config(data, overrides)
+    return build_config(read_config_mapping(path), overrides)
 
 
 _VAR_INLINE_RE = re.compile(r"\{\$variables\.([A-Za-z0-9_.-]+)\}")
@@ -611,6 +623,11 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
     :param dict[str, Any] data: Nested dictionary from YAML parsing.
     :return Config: Fully constructed Config with all sub-configs.
     """
+
+    allowed = {"model", "data", "train", "optim", "checkpoint", "logging", "debug", "derived"}
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        _vfail(f"unknown top-level config section(s): {', '.join(unknown)}")
 
     model = ModelConfig(**(data.get("model") or {}))
     train = TrainConfig(**(data.get("train") or {}))

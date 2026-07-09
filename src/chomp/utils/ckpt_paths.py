@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from chomp.ckpt import resolve_ckpt_root
-from chomp.config import build_config
+from chomp.config import build_config, read_config_mapping
 
 
 def _is_step_dir(path: Path) -> bool:
@@ -72,33 +72,6 @@ def _read_json(path: Path) -> dict[str, Any]:
     return data
 
 
-def _read_config_override(config_override: str) -> dict[str, Any]:
-    """Read a config override file (YAML or JSON) into a dict.
-
-    :param str config_override: Path to override config file.
-    :return dict[str, Any]: Parsed config mapping.
-    """
-    config_path = Path(config_override)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config override not found: {config_path}")
-    if config_path.suffix in {".yaml", ".yml"}:
-        import yaml
-
-        try:
-            with config_path.open() as f:
-                data = yaml.safe_load(f) or {}
-        except yaml.YAMLError as exc:
-            raise ValueError(f"Invalid YAML in {config_path}: {exc}") from exc
-    else:
-        try:
-            data = _read_json(config_path)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid JSON in {config_path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ValueError(f"Config override must be a mapping, got {type(data).__name__}")
-    return data
-
-
 def _read_run_dir_config(run_dir: Path) -> dict[str, Any]:
     """Read config_resolved.json from a run directory.
 
@@ -110,10 +83,7 @@ def _read_run_dir_config(run_dir: Path) -> dict[str, Any]:
         raise FileNotFoundError(
             f"config_resolved.json not found in {run_dir}. Use --config to provide a config file."
         )
-    try:
-        return _read_json(config_path)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Corrupted config_resolved.json in {run_dir}: {exc}") from exc
+    return read_config_mapping(config_path)
 
 
 def _read_meta_config(step_dir: Path) -> dict[str, Any] | None:
@@ -150,7 +120,7 @@ def load_config_for_checkpoint(
     :raises FileNotFoundError: If no config source can be found.
     """
     if config_override:
-        return build_config(_read_config_override(config_override))
+        return build_config(read_config_mapping(config_override))
 
     if run_dir is not None:
         try:
