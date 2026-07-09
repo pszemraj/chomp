@@ -8,11 +8,16 @@ from typing import Any
 
 import pytest
 
-from chomp.utils.xla import configure_blackwell_xla_env
+from chomp.utils.xla import configure_blackwell_xla_env, ensure_deterministic_gpu_ops
 from tests.helpers.hf_fakes import FakeHFIterable
 
 # Ensure XLA env quirks are applied before any JAX imports in tests.
+# Deterministic GPU ops are required for the bit-exact resume tests: without
+# the flag, XLA kernel choices depend on prior GPU state, and continuous vs
+# resumed runs diverge in low-order optimizer-state bits under full-suite
+# ordering.
 configure_blackwell_xla_env()
+ensure_deterministic_gpu_ops()
 
 # Tests should not rely on users exporting preallocation flags.
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")

@@ -8,6 +8,8 @@ import re
 import subprocess
 
 _TRITON_FLAG = "--xla_gpu_enable_triton_gemm=false"
+_DETERMINISTIC_FLAG_PREFIX = "--xla_gpu_deterministic_ops="
+_DETERMINISTIC_FLAG = _DETERMINISTIC_FLAG_PREFIX + "true"
 _PREALLOC_ENV = "XLA_PYTHON_CLIENT_PREALLOCATE"
 _RTX_RE = re.compile(r"RTX\s*(\d{4})", re.IGNORECASE)
 _CONFIG_DONE = False
@@ -93,6 +95,37 @@ def _log_prealloc_status(log: logging.Logger, prealloc: str | None) -> None:
         )
     else:
         log.info("%s=%s", _PREALLOC_ENV, prealloc)
+
+
+def ensure_deterministic_gpu_ops(*, logger: logging.Logger | None = None) -> bool:
+    """Default XLA GPU ops to deterministic so bit-exact resume actually holds.
+
+    Without --xla_gpu_deterministic_ops=true, XLA may pick nondeterministic
+    GPU kernels (atomic-reduction scatters, algorithm choices sensitive to
+    prior GPU state), so an interrupted+resumed run diverges from the
+    continuous one in the low bits of optimizer state — silently voiding the
+    harness's core resume contract. An explicit user setting in XLA_FLAGS
+    (either value) is respected; call before JAX initializes its backend.
+
+    :param logger: Optional logger override.
+    :return bool: True if the flag was appended to XLA_FLAGS.
+    """
+    log = logger or logging.getLogger(__name__)
+    if not _query_nvidia_gpu_names():
+        return False
+
+    existing = os.environ.get("XLA_FLAGS", "")
+    if any(tok.startswith(_DETERMINISTIC_FLAG_PREFIX) for tok in existing.split()):
+        log.info("XLA_FLAGS already sets xla_gpu_deterministic_ops; leaving it as-is.")
+        return False
+    os.environ["XLA_FLAGS"] = f"{existing} {_DETERMINISTIC_FLAG}".strip()
+    log.info(
+        "Setting %s for bit-exact resume. Pre-set %sfalse in XLA_FLAGS to trade "
+        "exactness for throughput.",
+        _DETERMINISTIC_FLAG,
+        _DETERMINISTIC_FLAG_PREFIX,
+    )
+    return True
 
 
 def configure_blackwell_xla_env(

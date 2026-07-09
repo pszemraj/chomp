@@ -105,3 +105,13 @@ The exact-resume contract covers checkpoint save/restore. In-run recovery
 from transient HF streaming errors is a separate, best-effort mechanism that
 can replay up to `data.state_update_interval` recent documents — see
 [Data Pipeline — Transient stream recovery](data_pipeline.md#transient-stream-recovery-best-effort).
+
+Bit-exactness on GPU additionally requires deterministic XLA kernels: without
+`--xla_gpu_deterministic_ops=true`, XLA may pick nondeterministic GPU kernels
+(atomic-reduction scatters, algorithm choices sensitive to prior GPU state),
+and a resumed run drifts from the continuous one in the low-order bits of the
+optimizer state even though losses match. The `chomp` CLI (and the test
+suite) therefore appends that flag to `XLA_FLAGS` at startup whenever NVIDIA
+GPUs are present. An explicit `--xla_gpu_deterministic_ops=false` in
+`XLA_FLAGS` is respected and trades the bit-exact contract for whatever
+throughput the nondeterministic kernels buy.

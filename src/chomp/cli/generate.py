@@ -75,10 +75,11 @@ def generate(
     :param int seed: Random seed for sampling.
     :param config_override: Path to override config file (optional).
     """
-    from chomp.utils.xla import configure_blackwell_xla_env
+    from chomp.utils.xla import configure_blackwell_xla_env, ensure_deterministic_gpu_ops
 
     # Configure XLA env quirks before JAX backend init.
     configure_blackwell_xla_env()
+    ensure_deterministic_gpu_ops()
 
     # Deferred imports: must run after XLA env config
     import equinox as eqx

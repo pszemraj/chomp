@@ -12,7 +12,7 @@ import click
 from chomp.cli.main import parse_resume, print_banner
 from chomp.config import load_config
 from chomp.utils.io import setup_python_logging
-from chomp.utils.xla import configure_blackwell_xla_env
+from chomp.utils.xla import configure_blackwell_xla_env, ensure_deterministic_gpu_ops
 
 
 @click.command()
@@ -70,6 +70,7 @@ def train(
 
     # Configure XLA env quirks before JAX backend init.
     configure_blackwell_xla_env()
+    ensure_deterministic_gpu_ops()
 
     # Deferred import: chomp.train triggers JAX init, must run after XLA env config
     from chomp.train import run
