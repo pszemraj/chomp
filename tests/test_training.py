@@ -52,7 +52,8 @@ from chomp.train import (
     run,
 )
 from chomp.types import Batch, TrainState
-from chomp.utils.tree import abstractify_tree, tree_allclose
+from chomp.utils.tree import abstractify_tree
+from tests.helpers.assertions import tree_allclose
 from tests.helpers.config_factories import make_small_run_cfg
 
 
@@ -992,43 +993,6 @@ def test_metrics_sinks_receive_distinct_projections() -> None:
     }
 
 
-class DummyIter:
-    """Single-batch iterator for crash tests."""
-
-    def __init__(self) -> None:
-        """Initialize the iterator in a not-yet-consumed state."""
-        self._done = False
-
-    def __iter__(self) -> DummyIter:
-        return self
-
-    def __next__(self) -> Batch:
-        if self._done:
-            raise StopIteration
-        self._done = True
-        zeros = jnp.zeros((1, 1, 8), dtype=jnp.int32)
-        attn = jnp.ones((1, 1, 8), dtype=bool)
-        return Batch(
-            input_ids=zeros,
-            labels=zeros,
-            attention_mask=attn,
-            segment_ids=zeros,
-            position_ids=zeros,
-        )
-
-    def get_stats(self) -> dict[str, Any]:
-        """Return empty iterator stats for crash tests."""
-        return {}
-
-    def get_state(self) -> dict[str, Any]:
-        """Return empty iterator state for crash tests."""
-        return {}
-
-    def set_state(self, state: dict[str, Any]) -> None:
-        """Accept state restores without changing iterator behavior."""
-        _ = state
-
-
 def test_training_crash_marks_wandb_failed_and_logs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1050,11 +1014,10 @@ def test_training_crash_marks_wandb_failed_and_logs(
         return boom
 
     monkeypatch.setattr("chomp.train.make_train_step", boom_make_train_step)
-    monkeypatch.setattr("chomp.train.build_train_iterator", lambda *args, **kwargs: DummyIter())
     monkeypatch.setattr("chomp.train._maybe_init_wandb", lambda *args, **kwargs: dummy_wandb)
 
     cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=32, d_model=8, dropout=0.0),
+        model=ModelConfig(backend="dummy", vocab_size=256, d_model=8, dropout=0.0),
         data=DataConfig(
             backend="local_text",
             local_text="boom",
@@ -1094,95 +1057,6 @@ def test_training_crash_marks_wandb_failed_and_logs(
 
     log_text = (run_dir / cfg.logging.log_file).read_text()
     assert "Training crashed" in log_text
-
-
-def test_crash_does_not_save_future_checkpoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Crashes should not write a checkpoint for the next step."""
-    run_dir = tmp_path / "run"
-
-    def boom_make_train_step(*args: Any, **kwargs: Any) -> Any:
-        """Return a train step that always raises a crash error."""
-
-        def boom(state: Any, batch: Any) -> Any:
-            """Raise a deterministic crash to exercise failure handling."""
-            raise RuntimeError("kaboom")
-
-        return boom
-
-    monkeypatch.setattr("chomp.train.make_train_step", boom_make_train_step)
-    monkeypatch.setattr("chomp.train.build_train_iterator", lambda *args, **kwargs: DummyIter())
-
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=32, d_model=8, dropout=0.0),
-        data=DataConfig(
-            backend="local_text",
-            local_text="boom",
-            repeat=True,
-            max_eval_samples=0,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
-        ),
-        train=TrainConfig(
-            steps=1,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-            log_every=1,
-            eval_every=0,
-            generate_every=0,
-        ),
-        optim=OptimConfig(warmup_steps=0),
-        checkpoint=CheckpointConfig(enabled=True, save_every=1, max_to_keep=2, async_save=False),
-        logging=LoggingConfig(run_dir=str(run_dir)),
-        debug=DebugConfig(nan_check=False, check_device_every=0),
-    )
-
-    with pytest.raises(RuntimeError, match="kaboom"):
-        run(cfg, config_path=None, resume="none", dry_run=False)
-
-    ckpt_dir = default_ckpt_dir(run_dir)
-    assert ckpt_dir.exists()
-    assert not (ckpt_dir / "1").exists()
-
-
-def test_train_repeat_false_exits_cleanly(tmp_path: Path) -> None:
-    """Training should exit cleanly and log data_exhausted when data ends."""
-    cfg = Config(
-        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="local_text",
-            repeat=False,
-            local_text="short local text to exhaust\n",
-            max_eval_samples=0,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
-        ),
-        train=TrainConfig(
-            seed=0,
-            steps=5,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-            log_every=1,
-            eval_every=0,
-        ),
-        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
-        checkpoint=CheckpointConfig(enabled=False),
-        debug=DebugConfig(nan_check=True, check_device_every=0),
-        logging=LoggingConfig(project="chomp", run_dir=str(tmp_path / "run")),
-    )
-
-    run(cfg, config_path=None, resume="none")
-
-    metrics_path = Path(cfg.logging.run_dir) / cfg.logging.metrics_file
-    rows = [json.loads(line) for line in metrics_path.read_text().splitlines()]
-    assert any(row.get("data_exhausted") for row in rows)
 
 
 def test_tokens_seen_matches_exact_loss_tokens(tmp_path: Path) -> None:

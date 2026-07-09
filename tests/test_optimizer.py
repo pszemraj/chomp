@@ -27,7 +27,7 @@ from chomp.train import (
     make_train_step,
 )
 from chomp.types import Batch
-from chomp.utils.tree import tree_allclose
+from tests.helpers.assertions import tree_allclose
 
 
 @pytest.fixture(scope="module")
