@@ -6,12 +6,6 @@ Related: [Config Reference](config-reference.md),
 [Optimization and Optimizers](optimization.md), [Data Pipeline](data_pipeline.md),
 [Packing and Boundary Semantics](packing.md), [Checkpointing and Resume](checkpointing.md).
 
-## Development notes
-
-For linting, formatting, and the module-based test layout, see [Development Guide](dev.md).
-In particular, training-loop and checkpoint/resume behaviors now live in
-[`tests/test_training.py`](../tests/test_training.py).
-
 ## Train step contract
 
 The compiled `train_step`:
@@ -68,44 +62,18 @@ effective setting is recorded in checkpoint meta, and resume warns if it
 drifted across the boundary — see
 [Checkpointing — Scope of exactness](checkpointing.md#scope-of-exactness).
 
-## Attention and loss masking
+## Packed batches
 
-The training step consumes already-packed fixed-shape batches. Stream semantics,
-segment IDs, and boundary-related masking behavior are defined in
-[Packing and Boundary Semantics](packing.md), and their placement in the data
-path is defined in [Data Pipeline](data_pipeline.md).
+Packing modes, segment isolation, position IDs, and loss masking are defined in
+[Packing and Boundary Semantics](packing.md). The stream-to-batch path is
+described in [Data Pipeline](data_pipeline.md).
 
-When `data.packing_mode` is `bin` or `multipack` and
-`data.packing_strict_segments=true` (the default), the step also forwards
-`segment_ids` and `position_ids` into the backend model for strict packed
-semantics. With megalodon-jax >= 0.1.2 this means full state isolation per
-packed document (attention, RoPE positions, ComplexEMA, and TimestepNorm all
-reset at segment boundaries); chomp verifies the backend's
-`supports_segment_reset` capability flag at startup and fails fast otherwise.
-See [Packing — Segment-Isolation Semantics](packing.md#segment-isolation-semantics).
+## Input-order stability
 
-## Loss-stability recipe
-
-This is default hygiene for **domain-ordered or long-document streaming
-corpora** — any stream whose document order is not globally mixed — not a
-dataset-specific fix. Validated on Comma (2026-07, 100m 5k-step ablation; see
-[Packing — Window shuffling](packing.md#window-shuffling-batch-decorrelation)):
-
-- `data.window_shuffle_windows: 4096` (the default) — decorrelates batches from
-  raw packer order; cut step-to-step |Δloss| ~31% and worst grad-norm spikes
-  ~5x, at zero throughput cost.
-- `data.shuffle_buffer_size: 200000` — fights domain ordering of the source
-  stream; this is what removes the train-loss-below-eval memorization
-  signature on domain-ordered corpora (Common Pile family). Pre-mixed corpora
-  (Zyda-2, SmolLM2 mixes) are healthy even at 10k, but the large buffer is
-  cheap insurance.
-- Watch `docs_added_this_batch` and per-interval `docs_seen` deltas in
-  metrics.jsonl; sustained near-zero pulls mean the stream is draining
-  buffered content from few documents.
-
-Smoke configs intentionally keep a small `shuffle_buffer_size`: the HF shuffle
-buffer must fill before the first batch, so 200k docs would dominate smoke-test
-startup time.
+Guidance for domain-ordered and long-document streams lives in
+[Packing — Window shuffling](packing.md#window-shuffling-batch-decorrelation).
+The supporting ablation is recorded in the
+[Comma stability study](comma_stability_matrix.md).
 
 ## Evaluation
 
@@ -146,12 +114,6 @@ mode to avoid creating noisy runs.
 `config_resolved.json` includes a small `derived` section; for example
 `derived.optim.decay_steps_effective` records the effective LR schedule horizon.
 
-## Gradient checkpointing
-
-Megalodon supports activation checkpointing via `model.use_checkpoint`. This is
-orthogonal to gradient accumulation and does not change the batch contract.
-In `megalodon-jax`, checkpointing is gated on `train.deterministic=false`.
-
 ## Metrics
 
 Metrics are written to `logging.metrics_file` every `train.log_every` steps
@@ -183,6 +145,3 @@ Console output is throttled by `train.log_every` and prints a compact
 one-line summary (loss, grad norm, LR, step time, throughput, optional eval
 loss, packing utilization, and best-effort device memory). Full logs from
 third-party libraries are written to `logging.log_file` under the run directory.
-
-`tokens_seen` is required checkpoint metadata and resumes exactly; a checkpoint
-without a valid non-negative count is rejected.

@@ -11,8 +11,8 @@ Related: [Config Reference](config-reference.md) (`checkpoint.*`),
 Each checkpoint stores three items:
 
 1) `train_state`: model parameters, optimizer state, step, RNG
-2) `data_state`: iterator state (HF cursor + packer buffer) via Grain's
-   checkpoint handler
+2) `data_state`: the checkpointable data path described in
+   [Data Pipeline — Iterator state and resume](data_pipeline.md#iterator-state-and-resume)
 3) `meta`: JSON metadata (config snapshot + data fingerprint + versions)
 
 The run directory also includes a tokenizer snapshot under `tokenizer/` and
@@ -112,18 +112,9 @@ optimizer state, RNG, and the data iterator position restore exactly, so the
 resumed run optimizes the same objective over the same batches in the same
 order as the continuous run.
 
-What it does not guarantee by default is bit-identical **step arithmetic**
-on GPU: XLA's fast kernels are nondeterministic (atomic-reduction scatters,
-algorithm choices sensitive to prior GPU state), so a resumed run can differ
-from the continuous one in low-order floating-point bits. That drift does
-not change the data, the objective, or expected training behavior — and the
-fast kernels are the production default because deterministic ones are
-expensive (~25-35% slower steps measured on a 100M-param Megalodon smoke
-benchmark, RTX 5090, seq_len 2048).
-
-For debugging that needs atol=0 reproducibility, opt in with
-`XLA_FLAGS=--xla_gpu_deterministic_ops=true`
-([Training Loop — GPU environment notes](training.md#gpu-environment-notes)).
-The effective setting is recorded in checkpoint meta and resume warns if it
-drifted. The test suite pins the flag so the exact-resume tests verify the
-harness's replay logic without kernel-selection noise.
+GPU step arithmetic is not bit-identical by default because production uses
+XLA's fast nondeterministic kernels. Setup, cost, and the opt-in deterministic
+flag are documented in
+[Training — GPU environment notes](training.md#gpu-environment-notes). The
+effective setting is recorded in checkpoint metadata, and resume warns if it
+changes.

@@ -30,16 +30,10 @@ all emitting fixed-length windows of `seq_len`:
    - Emits per-segment `position_ids` (reset to `0` at each packed segment).
    - Intended for strict packed training semantics with segment-aware attention.
 
-From each window we derive:
-
-- `input_ids`: tokens `[0..T-1]`
-- `labels`: tokens `[0..T-1]` (model shifts internally)
-- `segment_ids`: packed document IDs for each token
-- `position_ids`: per-segment position IDs
-- `attention_mask`: `True` for real tokens, `False` for padding
-
-The bin packer pads to fixed length; pad positions use `model.pad_token_id` and
-`segment_id=0`.
+Each window follows the [Data Pipeline batch contract](data_pipeline.md#batch-contract).
+Segment IDs identify packed document runs, and position IDs reset within each
+run. Padding uses `model.pad_token_id`, `segment_id=0`, and a false attention
+mask.
 
 Key bin-packing knobs:
 
@@ -155,9 +149,6 @@ Guidance:
 - `bin`/`multipack` mainly improve utilization on short-document mixes
   (Zyda-2, SmolLM2-style); on long-document corpora most windows are
   full-capacity chunks and bin packing adds no utilization benefit.
-- Watch `docs_added_this_batch` in the metrics: it collapses toward 0 when a
-  single giant document is draining through consecutive batches (the failure
-  mode window shuffling removes), and is bursty-but-nonzero when healthy.
 
 ## Boundary-aware loss masking
 
@@ -182,12 +173,3 @@ The batch contract now includes `position_ids` for all packing modes.
 For `bin` and `multipack` under strict segment isolation, they are consumed by
 the backend to reset positions at each packed segment boundary. Otherwise they
 are informational.
-
-## Future work
-
-Near-term packing work focuses on:
-
-- further multipack efficiency tuning and diagnostics
-- benchmarking strict multipack (full isolation) vs sequential + window
-  shuffle on short-document mixes, now that megalodon-jax 0.1.2 makes strict
-  mode fully correct (previously "expensive partial correctness")

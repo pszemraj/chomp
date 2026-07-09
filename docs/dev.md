@@ -73,29 +73,15 @@ Tests are organized by source module (not by micro-feature):
 
 Shared helper modules:
 
+- [`tests/helpers/assertions.py`](../tests/helpers/assertions.py): structured JAX
+  equality checks
 - [`tests/helpers/config_factories.py`](../tests/helpers/config_factories.py): reusable tiny
   train/checkpoint configs
 - [`tests/helpers/hf_fakes.py`](../tests/helpers/hf_fakes.py): reusable fake HF streaming iterables
+- [`tests/helpers/io.py`](../tests/helpers/io.py): test artifact readers
 
 High-risk invariants remain isolated for visibility:
 
 - [`tests/test_compile_stability.py`](../tests/test_compile_stability.py)
 - [`tests/test_cache_policy.py`](../tests/test_cache_policy.py)
 - [`tests/test_gpu_smoke.py`](../tests/test_gpu_smoke.py)
-
-## Nice-to-Haves (Later)
-
-- Make `tokens_seen` exact when iterator stats are missing (e.g., `device_put=True`),
-  by accumulating `token_sum` in-step or storing a counter in `TrainState`.
-- Optional perf knob: skip grad-norm computation when clipping is disabled and
-  grad-norm logging is off.
-- TODO: vectorize `_assemble_batch` (data/pipeline.py) — currently a Python
-  loop over `grad_accum * batch_size` windows per step. Fine at current batch
-  geometry; revisit only if profiling shows it in `data_wait_s` at very large
-  accumulation or tiny seq_len. (2026-07 review deferral.)
-- TODO: fp32 master-param path to support `param_dtype: bfloat16` — grad
-  accumulation, normalization, and clipping already run in fp32 (hardcoded in
-  `make_train_step`), but optimizer moments (adam mu/nu, muon momentum) follow
-  param dtype. Config validation rejects non-fp32 params until this exists;
-  implementing it is the prerequisite for re-allowing them. (2026-07 review
-  deferral.)

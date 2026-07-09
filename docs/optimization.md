@@ -74,41 +74,6 @@ All values below are eval loss at step 10,000 (lower is better).
 - We continue to keep `optim.muon.consistent_rms=null` until a focused sweep
   shows a benefit.
 
-## Current recommended defaults
-
-Based on the sweep above, the defaults are now:
-
-- `optim.muon.lr_scale: 100.0`
-- `optim.muon.consistent_rms: null`
-
-These defaults only matter when `optim.name=muon`.
-
-## Next steps and good follow-up sweeps
-
-If you want to iterate further, here are the highest-value next experiments:
-
-1) Sweep Muon LR scale around the new default (if you want to refine)
-
-- Try: 80, 90, 100, 110, 125, 150
-- Keep `optim.muon.consistent_rms=null` while tuning scale.
-
-2) Revisit `consistent_rms` after scale tuning
-
-- Try enabling it (`0.2`) only after identifying a stable LR scale.
-- If you enable it, re-tune `optim.muon.lr_scale` from scratch.
-
-3) Adam-side tuning for the non-Muon group
-
-Muon runs still depend heavily on the AdamW group. Consider experimenting with:
-
-- `optim.adam.b2=0.95` (common for LLMs)
-- Adam weight decay masking (for example, excluding embeddings)
-
-4) Repeat the sweep on a second config
-
-- For example: a slightly larger model or different packing mode
-- Avoid drawing conclusions from a single config
-
 ## Notes and cautions
 
 - These are still short-horizon results (10k steps). They are useful for

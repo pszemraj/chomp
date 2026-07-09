@@ -82,11 +82,6 @@ Variables can be nested (dot paths are supported). Resolution happens before
 CLI overrides are applied, and missing/circular references raise a validation
 error.
 
-Store personal experiment configs under
-[`configs/custom/`](../configs/custom/). Top-level `configs/custom/*.yaml` and
-`configs/custom/*.yml` files are ignored, while reusable experiment suites can be
-tracked in named subdirectories such as
-[`configs/custom/muon-lr-scale-10k/`](../configs/custom/muon-lr-scale-10k/).
 ---
 
 <a id="model"></a>
@@ -115,6 +110,7 @@ Full Megalodon architecture from `megalodon_jax`. Use for real training.
 ##### dummy
 
 Minimal MLP language model for smoke tests. Fast compilation, no external dependencies.
+
 ---
 
 <a id="model-shared"></a>
@@ -149,6 +145,7 @@ Dropout rate used by the model backend (dummy and Megalodon).
 | Range | `[0.0, 1.0]` |
 
 Setting dropout > 0 disables deterministic training unless `train.deterministic: true` is explicit.
+
 ---
 
 <a id="model-dummy"></a>
@@ -474,7 +471,8 @@ Weight initialization scheme.
 use_checkpoint: bool = false
 ```
 
-Enable gradient checkpointing (activation recomputation) to reduce memory.
+Enable activation recomputation to reduce memory. Runtime interaction with
+deterministic mode is described in [Training — Determinism](training.md#determinism).
 
 | Property | Value |
 |----------|-------|
@@ -482,8 +480,6 @@ Enable gradient checkpointing (activation recomputation) to reduce memory.
 | Backend | `megalodon` only |
 | Recommended | `true` for large models or long sequences |
 
-In `megalodon-jax`, checkpointing is disabled when `train.deterministic=true`.
-Set `train.deterministic=false` (with dropout at 0.0 if desired) to enable it.
 <a id="model.output_size"></a>
 #### `model.output_size`
 ```yaml
@@ -503,12 +499,9 @@ Override output projection size. `-1` uses `vocab_size`.
 use_associative_segment_scan: bool = true
 ```
 
-Selects the segmented ComplexEMA implementation used for strict packed
-training (megalodon-jax ≥ 0.1.2). `true` runs a parallel associative scan
-(fast, but materializes `(L, B, D, N)` complex64 intermediates); `false`
-falls back to a sequential `lax.scan` with O(1) memory. Only consulted when
-`segment_ids` reach the model, i.e. `data.packing_mode: bin` or `multipack`
-with `data.packing_strict_segments: true`; inert otherwise.
+Select the parallel associative or sequential low-memory ComplexEMA scan for
+strict packed training. Inert when strict segment isolation is inactive; see
+[Packing — Segment-Isolation Semantics](packing.md#segment-isolation-semantics).
 
 | Property | Value |
 |----------|-------|
@@ -684,6 +677,7 @@ Stream data from HuggingFace datasets. Use for real training.
 ##### local_text
 
 Repeat a fixed text string. Use for offline smoke tests.
+
 ---
 
 <a id="data-hf"></a>
@@ -769,20 +763,9 @@ Maximum examples to use for evaluation.
 | Required | No |
 | Constraints | Must be ≥ 0 |
 
-Evaluation tokens are collected once when the run is created and **persisted to
-`run_dir/eval_tokens.json.gz`** (identity manifest + content hash); every later
-start — including resume — loads that exact set, so eval losses stay comparable
-even if the upstream streaming dataset drifts. If the evaluation split is
-missing, chomp uses the first `max_eval_samples` examples from the shuffled
-training stream. For this train-split fallback path, if `data.seed: 0`
-(default) and `train.seed` is non-zero, the shuffle seed defaults to
-`train.seed`.
-
-With packed modes, the packers flush their remaining pending documents into
-padded windows once the eval doc set is exhausted, so values below the pack
-threshold still evaluate. The eval set must still yield enough packed windows
-to fill at least one complete `[A, B, T]` batch (`grad_accum * batch_size`
-rows) — evaluation raises at runtime otherwise.
+Set to `0` to disable evaluation data collection. Selection, persistence, and
+minimum-batch behavior are described in
+[Data Pipeline — Validation set](data_pipeline.md#validation-set).
 
 <a id="data.recreate_eval_cache"></a>
 #### `data.recreate_eval_cache`
@@ -790,18 +773,12 @@ rows) — evaluation raises at runtime otherwise.
 recreate_eval_cache: bool = false
 ```
 
-One-shot operational override for resume. A resume normally requires the
-pinned eval set (`run_dir/eval_tokens.json.gz`) to exist — a missing cache is
-a hard error because recollecting it would silently change what eval losses
-are measured on. Setting this to `true` (typically via
-`--override data.recreate_eval_cache=true`) allows the resume to rebuild the
-cache, with a loud warning that eval curves before and after the boundary are
-not comparable. The replacement is persisted only after checkpoint
-compatibility validation succeeds, so a rejected resume cannot poison the run
-directory. It has no effect when the cache is present and is not part of the
-data fingerprint.
+Allow a resume to rebuild a missing pinned eval cache after checkpoint
+compatibility validation succeeds. See
+[Data Pipeline — Validation set](data_pipeline.md#validation-set).
 
 **Related:** [`data.max_eval_samples`](#data.max_eval_samples)
+
 ---
 
 <a id="data-shuffle"></a>
@@ -837,11 +814,8 @@ Buffer size for shuffle operation.
 window_shuffle_windows: int = 4096
 ```
 
-Number of packed `[T]` windows to buffer and shuffle (disjoint blocks, seeded)
-between the packer and batch assembly. `0` disables. Without it, every batch is
-a contiguous slice of packer output, so one long document can dominate several
-consecutive batches on long-document corpora. Applies to the train iterator
-only; eval batches are never shuffled.
+Number of packed `[T]` windows per seeded shuffle block. `0` disables; train
+only. See [Packing — Window shuffling](packing.md#window-shuffling-batch-decorrelation).
 
 | Property | Value |
 |----------|-------|
@@ -854,9 +828,7 @@ only; eval batches are never shuffled.
 seed: int = 0
 ```
 
-Random seed for data shuffling. This seeds both HF document shuffling and the
-packed-window shuffle; changing it while either active is a hard resume
-compatibility error because it changes future batch order.
+Random seed for HF document shuffling and packed-window shuffling.
 
 | Property | Value |
 |----------|-------|
@@ -868,14 +840,8 @@ compatibility error because it changes future batch order.
 repeat: bool = true
 ```
 
-Repeat the dataset indefinitely. Part of the data fingerprint for both
-backends: changing it between save and resume is a hard resume-compat error
-(it decides whether the stream rolls into the next epoch or terminates).
-
-With `repeat: false`, a stream that runs dry partway through assembling a
-batch ends the run **without a final checkpoint** — partial consumption makes
-the iterator state unalignable with the train state; resume from the last
-periodic checkpoint (see [Training](training.md)).
+Repeat the dataset indefinitely. Termination and final-checkpoint behavior are
+described in [Checkpointing — Final checkpoint policy](checkpointing.md#final-checkpoint-policy).
 
 | Property | Value |
 |----------|-------|
@@ -925,13 +891,9 @@ Cache HF state every N examples for retry recovery.
 | Required | No |
 | Constraints | Must be > 0 |
 
-Smaller values provide better recovery from network failures but add overhead.
+Smaller values limit replay after transient stream failures but add overhead;
+see [Data Pipeline — Transient stream recovery](data_pipeline.md#transient-stream-recovery-best-effort).
 
-Note the recovery semantics: rebuilding from the cached state after a
-transient stream error can **replay up to this many recent documents**
-(checkpoint resume stays exact; only in-run recovery is best-effort). This
-value bounds the replay window — see
-[Data Pipeline — Transient stream recovery](data_pipeline.md#transient-stream-recovery-best-effort).
 ---
 
 <a id="data-local"></a>
@@ -959,33 +921,14 @@ Fixed text content for `local_text` backend.
 packing_mode: "sequential" | "bin" | "multipack" = "sequential"
 ```
 
-Token packing strategy. See [Packing and Boundary Semantics](packing.md) for
-trade-offs and guidance by corpus type.
+Token packing strategy. Mode behavior and trade-offs are defined in
+[Packing and Boundary Semantics](packing.md#packing-modes).
 
 | Property | Value |
 |----------|-------|
 | Required | No |
 | Valid values | `"sequential"`, `"bin"`, `"multipack"` |
 
-##### sequential
-
-Stream documents and concatenate tokens sequentially. Simple and deterministic.
-
-##### bin
-
-First-fit-decreasing bin packing over a `packing_buffer_docs` buffer. Better
-packing efficiency but requires buffering documents, and is a length-based
-local reorder (large documents pulled forward within each refill), not a
-stream-order-preserving mode. Packs multiple documents per sequence, so
-[`packing_strict_segments`](#data.packing_strict_segments) applies (strict by
-default).
-
-##### multipack
-
-Grouped first-fit-decreasing packing over a `packing_group_docs` lookahead
-pool, emitting segment-local `position_ids`. Packs multiple documents per
-sequence, so [`packing_strict_segments`](#data.packing_strict_segments)
-applies (strict by default).
 <a id="data.packing_buffer_docs"></a>
 #### `data.packing_buffer_docs`
 ```yaml
@@ -1044,21 +987,9 @@ cycle — keep it modest.
 packing_strict_segments: bool = true
 ```
 
-When `packing_mode` is `bin` or `multipack`, forward
-`segment_ids`/`position_ids` to the model for strict packed semantics. With
-megalodon-jax ≥ 0.1.2 this is full per-document state isolation:
-segment-run-masked attention, per-segment RoPE resets, and
-ComplexEMA/TimestepNorm state resets at every boundary, with cross-segment
-label pairs excluded from the loss by the backend. Training fails fast if the
-backend does not advertise the `supports_segment_reset` capability flag
-(older versions isolated attention only). Strict mode bypasses the FFT CEMA
-path and costs ~2x attention FLOPs on packed rows; see
-[Packing](packing.md#segment-isolation-semantics).
-
-Requires `mask_boundary_loss: true` (config error otherwise: the backend
-excludes cross-segment pairs from the loss while host-side token counts would
-still include them, silently changing gradient normalization). Set to `false`
-only for deliberate cross-document state bleed. Inert under `sequential`.
+Require per-document model-state isolation for `bin` and `multipack`. Requires
+`mask_boundary_loss: true` and a backend with segment-reset support. Inert under
+`sequential`; see [Packing — Segment-Isolation Semantics](packing.md#segment-isolation-semantics).
 
 | Property | Value |
 |----------|-------|
@@ -1384,15 +1315,13 @@ Enable JIT compilation of the training step.
 deterministic: bool | null = null
 ```
 
-Force deterministic training. `null` auto-derives from dropout settings.
+Control dropout and RNG determinism. `null` derives the value from dropout
+settings; see [Training — Determinism](training.md#determinism).
 
 | Property | Value |
 |----------|-------|
 | Required | No |
 
-When `null`: deterministic if all dropout rates are 0.0.
-In `megalodon-jax`, `train.deterministic=true` disables activation checkpointing
-even if `model.use_checkpoint=true`.
 <a id="train.allow_cpu"></a>
 #### `train.allow_cpu`
 ```yaml
@@ -2078,6 +2007,7 @@ W&B run tags.
 | Required | No |
 
 YAML should provide a list; tags are stored internally as a tuple.
+
 ---
 
 <a id="debug"></a>
@@ -2109,31 +2039,6 @@ Verify GPU backend every N steps.
 |----------|-------|
 | Required | No |
 
----
-
-<a id="validation"></a>
-## Validation Rules & Constraints
-chomp validates all configuration at load time with actionable error messages.
-
-### Cross-Field Dependencies
-
-| Constraint | Error Message |
-|------------|---------------|
-| `train.seq_len % model.chunk_size == 0` | `train.seq_len (X) must be divisible by model.chunk_size (Y)` |
-| `model.chunk_size <= train.seq_len` | `model.chunk_size (X) must be <= train.seq_len (Y)` |
-| `train.generate_input_len <= train.seq_len` | `train.generate_input_len must be <= train.seq_len (X), got Y` |
-| `model.model_dim % model.num_heads == 0` | `model.model_dim (X) must be divisible by model.num_heads (Y)` |
-| `optim.warmup_steps < train.steps` | `optim.warmup_steps (X) must be < train.steps (Y)` |
-| `data.packing_buffer_docs >= batch_size × grad_accum` (bin mode) | `data.packing_buffer_docs must be >= train.batch_size * train.grad_accum (N), got M` |
-| `byte_offset > 0` when `add_bos` or `add_eos` (byte tokenizer) | `byte tokenizer with add_bos/add_eos requires data.tokenizer.byte_offset > 0` |
-
-### Critical Gotchas
-
-- **Do not use `fp16`**. Use the dtype policy described at
-  [`model.param_dtype`](#model.param_dtype), [`model.compute_dtype`](#model.compute_dtype),
-  [`model.accum_dtype`](#model.accum_dtype), and [`model.softmax_dtype`](#model.softmax_dtype).
-- Keep `pad_token_id` different from `eos_token_id`; see
-  [`model.pad_token_id`](#model.pad_token_id) and [`model.eos_token_id`](#model.eos_token_id).
 ---
 
 <a id="index"></a>
