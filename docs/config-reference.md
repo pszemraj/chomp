@@ -92,8 +92,10 @@ CLI overrides are applied, and missing/circular references raise a validation
 error.
 
 Store personal experiment configs under
-[`configs/custom/`](../configs/custom/). The directory is tracked via `.gitkeep`,
-but `configs/custom/*.yaml` and `configs/custom/*.yml` are ignored.
+[`configs/custom/`](../configs/custom/). Top-level `configs/custom/*.yaml` and
+`configs/custom/*.yml` files are ignored, while reusable experiment suites can be
+tracked in named subdirectories such as
+[`configs/custom/muon-lr-scale-10k/`](../configs/custom/muon-lr-scale-10k/).
 ---
 
 <a id="model"></a>

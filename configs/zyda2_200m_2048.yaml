@@ -93,7 +93,7 @@ logging:
     entity: null
     run_name: null
     mode: online
-    tags: ["zyda2", "200m", "seq2048", "chunk2048", "default"]
+    tags: ["zyda2", "200m", "seq2048", "chunk1024", "default"]
 
 debug:
   nan_check: true

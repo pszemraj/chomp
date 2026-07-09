@@ -39,7 +39,8 @@ chomp generate runs/my_run --prompt "Hello world" --max-tokens 64
 | [`configs/zyda2_100m_2048.yaml`](configs/zyda2_100m_2048.yaml) | 100M Megalodon on Zyda-2   |
 | [`configs/zyda2_200m_2048.yaml`](configs/zyda2_200m_2048.yaml) | 200M Megalodon on Zyda-2   |
 
-Local configs go in `configs/custom/` (gitignored).
+Personal top-level configs in `configs/custom/` are gitignored. Reusable
+experiment suites can be tracked in named subdirectories there.
 
 ## Key Features
 
