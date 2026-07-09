@@ -50,6 +50,25 @@ def _doc(token: int, length: int) -> list[int]:
     return [token] * length
 
 
+def _hf_stream_spec(**overrides: Any) -> HFStreamSpec:
+    """Create a deterministic HF stream spec for tests."""
+    params: dict[str, Any] = {
+        "dataset": "dummy",
+        "name": "dummy",
+        "split": "train",
+        "text_key": "text",
+        "shuffle": False,
+        "shuffle_buffer_size": 8,
+        "seed": 0,
+        "repeat": False,
+        "max_retries": 0,
+        "retry_delay_sec": 0.0,
+        "state_update_interval": 2,
+    }
+    params.update(overrides)
+    return HFStreamSpec(**params)
+
+
 def _bin_packer() -> BinPacker:
     """Standard tiny BinPacker for packer-level tests."""
     return BinPacker(
@@ -748,20 +767,7 @@ def test_hf_state_roundtrip(patch_hf_load_dataset: Callable[..., dict[str, int]]
     """HF stream should resume to same position after state roundtrip."""
     patch_hf_load_dataset([{"text": "alpha"}, {"text": "bravo"}, {"text": "charlie"}])
 
-    spec = HFStreamSpec(
-        dataset="dummy",
-        name="dummy",
-        split="train",
-        text_key="text",
-        shuffle=False,
-        shuffle_buffer_size=8,
-        seed=0,
-        repeat=False,
-        max_retries=0,
-        retry_delay_sec=0.0,
-        state_update_interval=2,
-    )
-
+    spec = _hf_stream_spec()
     stream = HFStreamingTextStream(spec)
     _ = next(stream)
     _ = next(stream)
@@ -779,20 +785,7 @@ def test_hf_set_state_raises_on_missing_hf_state(
     """set_state must fail loud when hf_state is missing, not silently rebuild."""
     patch_hf_load_dataset([{"text": "alpha"}, {"text": "bravo"}])
 
-    spec = HFStreamSpec(
-        dataset="dummy",
-        name="dummy",
-        split="train",
-        text_key="text",
-        shuffle=False,
-        shuffle_buffer_size=8,
-        seed=0,
-        repeat=False,
-        max_retries=0,
-        retry_delay_sec=0.0,
-        state_update_interval=2,
-    )
-
+    spec = _hf_stream_spec()
     stream = HFStreamingTextStream(spec)
     with pytest.raises(RuntimeError, match="hf_state"):
         stream.set_state({"epoch": 0, "hf_state": None})
@@ -806,20 +799,7 @@ def test_hf_retry_rebuild_roundtrip(patch_hf_load_dataset: Callable[..., dict[st
     record: dict[str, Any] = {"fail_consumed": False}
     calls = patch_hf_load_dataset(items, fail_at=1, record=record)
 
-    spec = HFStreamSpec(
-        dataset="dummy",
-        name="dummy",
-        split="train",
-        text_key="text",
-        shuffle=False,
-        shuffle_buffer_size=8,
-        seed=0,
-        repeat=False,
-        max_retries=1,
-        retry_delay_sec=0.0,
-        state_update_interval=1,
-    )
-
+    spec = _hf_stream_spec(max_retries=1, state_update_interval=1)
     stream = HFStreamingTextStream(spec)
     assert next(stream) == "alpha"
     assert next(stream) == "bravo"
