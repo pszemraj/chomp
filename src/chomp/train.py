@@ -1655,6 +1655,10 @@ def _run_impl(
                         break
                     # Fetch batch (host) and (optionally) device_put
                     step_i = int(host_step) + 1
+                    collect_data_stats = (step_i % cfg.train.log_every) == 0 or (
+                        eval_step is not None and eval_every > 0 and (step_i % eval_every) == 0
+                    )
+                    data_it.set_collect_stats(collect_data_stats)
                     data_state_aligned = False
                     t_fetch = time.perf_counter()
                     try:

@@ -26,6 +26,11 @@ synchronize queued work and verify the current host count against the compiled
 int32 counter. Evaluation likewise accumulates all batch totals on device and
 synchronizes once per pass.
 
+Full packing diagnostics scan attention and segment arrays only for batches
+whose global step will log or evaluate. Non-observable steps still compute the
+exact shifted loss-token count required for accounting, but skip the redundant
+Python-side diagnostic scan.
+
 ## Optimizer selection
 
 The train loop treats `adamw` and `muon` as one optimizer step per outer

@@ -981,6 +981,24 @@ def test_pipeline_multipack_position_ids_and_stats() -> None:
     assert stats["packing_capacity"] == batch.segment_ids.size
 
 
+def test_packing_array_diagnostics_can_skip_without_losing_token_count() -> None:
+    """Non-log steps should avoid full batch stats while preserving exact accounting."""
+    cfg = make_pipeline_cfg(window_shuffle_tokens=0)
+    iterator = build_train_iterator(cfg)
+    iterator.set_collect_stats(False)
+
+    _ = next(iterator)
+
+    skipped_stats = iterator.get_stats()
+    assert "packing_capacity" not in skipped_stats
+    assert skipped_stats["docs_seen"] > 0
+    assert iterator.get_loss_tokens() > 0
+
+    iterator.set_collect_stats(True)
+    _ = next(iterator)
+    assert iterator.get_stats()["packing_capacity"] > 0
+
+
 def test_hf_pipeline_segment_ids_and_label_mask(
     patch_hf_load_dataset: Callable[..., dict[str, int]],
 ) -> None:

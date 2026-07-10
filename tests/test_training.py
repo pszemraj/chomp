@@ -1438,6 +1438,7 @@ def test_tokens_seen_matches_host_counts_between_sync_points(tmp_path: Path) -> 
     rows = read_jsonl(metrics_path)
     train_rows = [row for row in rows if "loss_tokens" in row]
     assert len(train_rows) == 1
+    assert train_rows[0]["packing_utilization"] > 0
     assert int(train_rows[0]["loss_tokens"]) == expected_counts[-1]
     assert int(train_rows[0]["tokens_seen"]) == sum(expected_counts)
 

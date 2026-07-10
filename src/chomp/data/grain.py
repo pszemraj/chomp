@@ -66,6 +66,7 @@ class GrainTrainBatchIterator:
         self._enable_stats = bool(enable_stats)
         self._last_stats: dict[str, float | int | str] = {}
         self._last_loss_tokens: int | None = None
+        self._collect_next_stats = True
 
     def __iter__(self) -> GrainTrainBatchIterator:
         return self
@@ -74,7 +75,7 @@ class GrainTrainBatchIterator:
         envelope = next(self._it)
         batch = envelope.batch
         self._last_loss_tokens = int(envelope.loss_tokens_host)
-        if not self._enable_stats:
+        if not self._enable_stats or not self._collect_next_stats:
             self._last_stats = {}
             return batch
         attn = np.asarray(batch.attention_mask, dtype=bool)
@@ -120,6 +121,7 @@ class GrainTrainBatchIterator:
         self._it.set_state(state)
         self._last_stats = {}
         self._last_loss_tokens = None
+        self._collect_next_stats = True
 
     def get_loss_tokens(self) -> int:
         """Return the exact valid-target count paired with the last batch.
@@ -130,6 +132,16 @@ class GrainTrainBatchIterator:
         if self._last_loss_tokens is None:
             raise RuntimeError("No batch is available for host loss-token accounting")
         return self._last_loss_tokens
+
+    def set_collect_stats(self, enabled: bool) -> None:
+        """Choose whether the next consumed batch computes full packing diagnostics.
+
+        Exact loss-token counting is unaffected; it is carried in the batch
+        envelope and remains available on every step.
+
+        :param bool enabled: Whether to scan the next batch for diagnostics.
+        """
+        self._collect_next_stats = bool(enabled)
 
     def checkpoint_target(self) -> Any:
         """Return the Grain iterator used for Orbax checkpointing.
