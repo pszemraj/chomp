@@ -172,35 +172,30 @@ class ModelArrayClassification:
     decay: bool
 
 
-_MUON_WEIGHT_PATHS = (
-    ".attn.wz.weight",
-    ".attn.wv.weight",
-    ".attn.wr.weight",
-    ".attn.wh1.weight",
-    ".attn.wh2.weight",
-    ".ffn.fc1.weight",
-    ".ffn.fc2.weight",
-    ".ffn.fc3.weight",
-    "lm_head.weight",
-)
+def _optimizer_group(
+    cfg: Config,
+    leaf: Any,
+    classification: ModelArrayClassification,
+) -> str:
+    """Return the optimizer group for one classified model array.
 
-
-def is_muon_eligible(leaf: Any, path: str, *, allow_all_2d: bool, allow_embed: bool) -> bool:
-    """Return whether one trainable array belongs to the Muon optimizer group.
-
+    :param Config cfg: Model and optimizer configuration.
     :param Any leaf: Candidate parameter leaf.
-    :param str path: Stable dotted model path.
-    :param bool allow_all_2d: Whether every matrix is explicitly eligible.
-    :param bool allow_embed: Whether tied token embeddings are eligible.
-    :return bool: True when Muon should optimize the leaf.
+    :param ModelArrayClassification classification: Explicit model-family assignment.
+    :return str: ``fixed``, ``muon``, or ``adam``.
     """
-    if not hasattr(leaf, "ndim") or leaf.ndim != 2:
-        return False
-    return (
-        allow_all_2d
-        or (path.endswith(".weight") and any(token in path for token in _MUON_WEIGHT_PATHS))
-        or (allow_embed and path.endswith("embed.weight"))
-    )
+    if not classification.trainable:
+        return "fixed"
+    muon = cfg.optim.muon
+    if cfg.optim.name != "muon" or not hasattr(leaf, "ndim") or leaf.ndim != 2:
+        return "adam"
+    if (
+        muon.allow_all_2d
+        or classification.family == "projection"
+        or (muon.allow_tied_embed and classification.family == "embedding")
+    ):
+        return "muon"
+    return "adam"
 
 
 def classify_model_array(cfg: Config, path: str) -> ModelArrayClassification:
@@ -309,6 +304,29 @@ def parameter_decay_mask(cfg: Config, params: Any) -> Any:
     return treedef.unflatten(mask)
 
 
+def parameter_optimizer_groups(cfg: Config, params: Any) -> Any:
+    """Return the optimizer group for every trainable parameter leaf.
+
+    :param Config cfg: Model and optimizer configuration.
+    :param Any params: Trainable parameter pytree.
+    :return Any: Pytree containing ``muon`` or ``adam`` labels.
+    """
+
+    def label(path: tuple[Any, ...], leaf: Any) -> str:
+        """Classify one optimizer leaf from its model family.
+
+        :param tuple[Any, ...] path: JAX pytree path.
+        :param Any leaf: Parameter leaf.
+        :return str: Optimizer group label.
+        """
+        if not eqx.is_array(leaf):
+            return "adam"
+        classification = classify_model_array(cfg, path_to_str(path))
+        return _optimizer_group(cfg, leaf, classification)
+
+    return jax.tree_util.tree_map_with_path(label, params)
+
+
 def build_parameter_manifest(cfg: Config, params: Any, static: Any) -> dict[str, Any]:
     """Build the complete parameter/buffer and optimizer assignment manifest.
 
@@ -325,17 +343,7 @@ def build_parameter_manifest(cfg: Config, params: Any, static: Any) -> dict[str,
             continue
         path_str = path_to_str(path)
         classification = classify_model_array(cfg, path_str)
-        if not classification.trainable:
-            optimizer_group = "fixed"
-        elif cfg.optim.name == "muon" and is_muon_eligible(
-            leaf,
-            path_str,
-            allow_all_2d=cfg.optim.muon.allow_all_2d,
-            allow_embed=cfg.optim.muon.allow_tied_embed,
-        ):
-            optimizer_group = "muon"
-        else:
-            optimizer_group = "adam"
+        optimizer_group = _optimizer_group(cfg, leaf, classification)
         counts[optimizer_group] = counts.get(optimizer_group, 0) + 1
         entries.append(
             {

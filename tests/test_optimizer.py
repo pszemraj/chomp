@@ -19,6 +19,7 @@ from chomp.model import (
     build_parameter_manifest,
     classify_model_array,
     parameter_decay_mask,
+    parameter_optimizer_groups,
     training_loss,
 )
 from chomp.train import (
@@ -65,15 +66,6 @@ def megalodon_parts() -> tuple[Config, Any, Any]:
 def megalodon_params(megalodon_parts: tuple[Config, Any, Any]) -> Any:
     """Return the trainable partition from the shared Megalodon fixture."""
     return megalodon_parts[1]
-
-
-def _label_map(dim_nums: Any) -> dict[str, bool]:
-    """Create a mapping from parameter path to muon eligibility.
-
-    :param Any dim_nums: Muon dimension numbers pytree.
-    :return dict[str, bool]: Map of path string to muon eligibility.
-    """
-    return {path: dim is not None for path, dim in _dim_map(dim_nums).items()}
 
 
 def _dim_map(dim_nums: Any) -> dict[str, MuonDimensionNumbers | None]:
@@ -190,55 +182,46 @@ def test_parameter_contract_covers_supported_model_variants(
         assert any(entry["path"] == "lm_head.weight" for entry in manifest["arrays"])
 
 
-def test_muon_param_labels_whitelist_excludes_embed(megalodon_params: Any) -> None:
+def test_muon_param_labels_whitelist_excludes_embed(
+    megalodon_parts: tuple[Config, Any, Any],
+) -> None:
     """Muon labels should include projection weights but exclude embeddings."""
-    params = megalodon_params
-    dim_nums = _muon_weight_dim_numbers(params, allow_all_2d=False)
-    mapping = _label_map(dim_nums)
+    cfg, params, _ = megalodon_parts
+    cfg = replace(cfg, optim=replace(cfg.optim, name="muon"))
+    mapping = _leaf_map(parameter_optimizer_groups(cfg, params))
 
-    assert mapping["model.embed.weight"] is False
-    assert mapping["model.layers.[0].attn.wz.weight"] is True
-    assert mapping["model.layers.[0].ffn.fc1.weight"] is True
-    assert mapping["model.layers.[0].attn.gamma"] is False
-    assert mapping["model.layers.[0].attn.timenorm.weight"] is False
-    assert mapping["model.layers.[0].ffn.norm.weight"] is False
+    assert mapping["model.embed.weight"] == "adam"
+    assert mapping["model.layers.[0].attn.wz.weight"] == "muon"
+    assert mapping["model.layers.[0].ffn.fc1.weight"] == "muon"
+    assert mapping["model.layers.[0].attn.gamma"] == "adam"
+    assert mapping["model.layers.[0].attn.timenorm.weight"] == "adam"
+    assert mapping["model.layers.[0].ffn.norm.weight"] == "adam"
 
 
-def test_muon_param_labels_allow_all_2d(megalodon_params: Any) -> None:
+def test_muon_param_labels_allow_all_2d(megalodon_parts: tuple[Config, Any, Any]) -> None:
     """allow_all_2d should label every 2D tensor as muon."""
-    params = megalodon_params
-    dim_nums = _muon_weight_dim_numbers(params, allow_all_2d=True)
-    mapping = _label_map(dim_nums)
+    cfg, params, _ = megalodon_parts
+    muon = replace(cfg.optim.muon, allow_all_2d=True)
+    cfg = replace(cfg, optim=replace(cfg.optim, name="muon", muon=muon))
+    mapping = _leaf_map(parameter_optimizer_groups(cfg, params))
 
-    assert mapping["model.embed.weight"] is True
+    assert mapping["model.embed.weight"] == "muon"
 
 
-def test_muon_param_labels_allow_tied_embed(megalodon_params: Any) -> None:
+def test_muon_param_labels_allow_tied_embed(megalodon_parts: tuple[Config, Any, Any]) -> None:
     """allow_embed should include the tied embedding matrix."""
-    params = megalodon_params
-    dim_nums = _muon_weight_dim_numbers(params, allow_all_2d=False, allow_embed=True)
-    mapping = _label_map(dim_nums)
+    cfg, params, _ = megalodon_parts
+    muon = replace(cfg.optim.muon, allow_tied_embed=True)
+    cfg = replace(cfg, optim=replace(cfg.optim, name="muon", muon=muon))
+    mapping = _leaf_map(parameter_optimizer_groups(cfg, params))
 
-    assert mapping["model.embed.weight"] is True
-
-
-def test_muon_param_labels_allow_tied_embed_root_path() -> None:
-    """allow_embed should include root-level embed weights."""
-    params = {
-        "embed": {"weight": jnp.ones((2, 2), dtype=jnp.float32)},
-        "proj": {"weight": jnp.ones((2, 2), dtype=jnp.float32)},
-    }
-    dim_nums = _muon_weight_dim_numbers(params, allow_all_2d=False, allow_embed=True)
-    mapping = _label_map(dim_nums)
-
-    assert mapping["embed.weight"] is True
-    assert mapping["proj.weight"] is False
+    assert mapping["model.embed.weight"] == "muon"
 
 
 def test_muon_dim_numbers_match_eqx_orientation(megalodon_params: Any) -> None:
     """Muon dimension numbers should treat eqx Linear weights as (out, in)."""
     params = megalodon_params
-    dim_nums = _muon_weight_dim_numbers(params, allow_all_2d=False)
+    dim_nums = _muon_weight_dim_numbers(params)
     dims = _dim_map(dim_nums)
 
     spec = dims["model.layers.[0].attn.wz.weight"]

@@ -77,8 +77,8 @@ from chomp.model import (
     build_parameter_manifest,
     causal_loss_mask,
     generate_tokens,
-    is_muon_eligible,
     parameter_decay_mask,
+    parameter_optimizer_groups,
     supports_packed_segments,
     training_loss,
     write_parameter_manifest,
@@ -819,52 +819,42 @@ def _flush_loggers() -> None:
             handler.flush()
 
 
-def _muon_param_stats(
-    params: Any, *, allow_all_2d: bool, allow_embed: bool
-) -> tuple[int, int, int, list[str]]:
+def _muon_param_stats(params: Any, groups: Any) -> tuple[int, int, int, list[str]]:
     """Return Muon/Adam tensor counts and a sample of Muon paths.
 
     :param Any params: Parameter pytree.
-    :param bool allow_all_2d: If True, apply Muon to all 2D tensors.
-    :param bool allow_embed: If True, allow Muon on tied embedding weights.
+    :param Any groups: Optimizer-group pytree from ``parameter_optimizer_groups``.
     :return tuple: (muon_tensors, adam_tensors, total_2d, muon_paths).
     """
     flat, _ = jax.tree_util.tree_flatten_with_path(params)
+    group_leaves = jax.tree_util.tree_leaves(groups)
     total_tensors = 0
     total_2d = 0
     muon_tensors = 0
     muon_paths: list[str] = []
-    for path, leaf in flat:
+    for (path, leaf), group in zip(flat, group_leaves, strict=True):
         if not hasattr(leaf, "ndim"):
             continue
         total_tensors += 1
         if leaf.ndim == 2:
             total_2d += 1
-        path_str = path_to_str(path)
-        if is_muon_eligible(leaf, path_str, allow_all_2d=allow_all_2d, allow_embed=allow_embed):
+        if group == "muon":
             muon_tensors += 1
-            muon_paths.append(path_str)
+            muon_paths.append(path_to_str(path))
     adam_tensors = total_tensors - muon_tensors
     return muon_tensors, adam_tensors, total_2d, muon_paths
 
 
-def _muon_weight_dim_numbers(params: Any, *, allow_all_2d: bool, allow_embed: bool = False) -> Any:
-    """Return Muon dimension specs for eligible parameters.
+def _muon_weight_dim_numbers(params: Any) -> Any:
+    """Return Muon dimension specs for matrices in a Muon-masked pytree.
 
     :param Any params: Parameter pytree.
-    :param bool allow_all_2d: If True, apply Muon to all 2D tensors.
-    :param bool allow_embed: If True, allow Muon on tied embedding weights.
     :return Any: Pytree of MuonDimensionNumbers (muon) or None (adam).
     """
     muon_dims = optax.contrib.MuonDimensionNumbers(reduction_axis=(1,), output_axis=(0,))
     flat, treedef = jax.tree_util.tree_flatten_with_path(params)
     dim_nums = [
-        muon_dims
-        if is_muon_eligible(
-            leaf, path_to_str(path), allow_all_2d=allow_all_2d, allow_embed=allow_embed
-        )
-        else None
-        for path, leaf in flat
+        muon_dims if hasattr(leaf, "ndim") and leaf.ndim == 2 else None for _path, leaf in flat
     ]
     return treedef.unflatten(dim_nums)
 
@@ -908,15 +898,14 @@ def build_optimizer(
     if cfg.optim.name == "muon":
         muon_cfg = cfg.optim.muon
         adam_cfg = cfg.optim.adam
-        allow_all_2d = muon_cfg.allow_all_2d
-        allow_embed = muon_cfg.allow_tied_embed
-        if cfg.model.backend == "megalodon" and allow_all_2d:
+        if cfg.model.backend == "megalodon" and muon_cfg.allow_all_2d:
             logger.warning(
                 "optim.muon.allow_all_2d=true will apply Muon to all 2D tensors, including "
                 "non-matmul parameters (e.g., embed.weight, attn.gamma/beta, cema.gamma_*)."
             )
+        optimizer_groups = parameter_optimizer_groups(cfg, params)
         muon_tensors, adam_tensors, total_2d, muon_paths = _muon_param_stats(
-            params, allow_all_2d=allow_all_2d, allow_embed=allow_embed
+            params, optimizer_groups
         )
         logger.info(
             "Muon param split: %s muon / %s adam tensors; 2D coverage %s/%s",
@@ -935,26 +924,6 @@ def build_optimizer(
                 "falling back to AdamW for all parameters."
             )
 
-        def label_fn(tree: Any) -> Any:
-            """Return optimizer labels for each parameter leaf.
-
-            multi_transform requires a label for EVERY leaf, so non-array
-            leaves label "adam" (is_muon_eligible is False for them).
-
-            :param Any tree: Parameter pytree.
-            :return Any: Pytree of labels ("muon" or "adam").
-            """
-            flat, treedef = jax.tree_util.tree_flatten_with_path(tree)
-            labels = [
-                "muon"
-                if is_muon_eligible(
-                    leaf, path_to_str(path), allow_all_2d=allow_all_2d, allow_embed=allow_embed
-                )
-                else "adam"
-                for path, leaf in flat
-            ]
-            return treedef.unflatten(labels)
-
         def muon_schedule(step: jax.Array) -> jax.Array:
             """Return the Muon learning rate schedule.
 
@@ -972,7 +941,7 @@ def build_optimizer(
             :return Any: Pytree of MuonDimensionNumbers for Muon params.
             """
             # The Muon transform only sees Muon-labeled leaves, so use all-2D mode.
-            return _muon_weight_dim_numbers(tree, allow_all_2d=True)
+            return _muon_weight_dim_numbers(tree)
 
         muon_transforms = [
             optax.contrib.scale_by_muon(
@@ -1007,7 +976,12 @@ def build_optimizer(
             mask=lambda tree: parameter_decay_mask(cfg, tree),
             nesterov=adam_cfg.nesterov,
         )
-        tx = optax.multi_transform({"muon": muon_tx, "adam": adam_tx}, label_fn)
+        # Equinox model pytrees are callable, so Optax would mistake the label
+        # pytree itself for a label function. Return the precomputed groups from
+        # a wrapper instead of reclassifying parameters on every invocation.
+        tx = optax.multi_transform(
+            {"muon": muon_tx, "adam": adam_tx}, lambda _params: optimizer_groups
+        )
     else:
         adam_cfg = cfg.optim.adam
         tx = optax.adamw(
