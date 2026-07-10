@@ -14,10 +14,12 @@ Each checkpoint stores three items:
 2) `data_state`: the checkpointable data path described in
    [Data Pipeline: iterator state and resume](data_pipeline.md#iterator-state-and-resume)
 3) `meta`: JSON metadata (config snapshot, data fingerprint, required
-   non-negative `tokens_seen`, and versions)
+   non-negative `tokens_seen`, parameter-manifest hash, and versions)
 
 The run directory also includes a required tokenizer snapshot under `tokenizer/` and
-the pinned eval token set `eval_tokens.json.gz`. Eval cache creation, drift
+the pinned eval token set `eval_tokens.json.gz`. It also contains
+`parameter-manifest.json`, which lists every trainable parameter and fixed
+buffer with its optimizer group and decay policy. Eval cache creation, drift
 checks, and the `data.recreate_eval_cache` override are covered in
 [Data Pipeline validation set](data_pipeline.md#validation-set).
 
@@ -44,13 +46,11 @@ On exit (clean, crash, or Ctrl-C), a final checkpoint of the last completed
 step is written only when it is safe to resume from:
 
 - **Alignment**: the train state and data iterator must correspond to the same
-  completed step. A crash between batch fetch and step completion, or the
-  stream running dry partway through assembling a batch (`repeat: false`),
-  leaves the iterator ahead of the train state. The final save is skipped
-  (loudly) and resume uses the last periodic checkpoint. If finite data ends
-  exactly at a batch boundary before any new packed window is consumed, the
-  iterator is still aligned with the last completed step and the final
-  checkpoint is written.
+  completed step. A crash between batch fetch and step completion leaves the
+  iterator ahead of the train state, so the final save is skipped (loudly) and
+  resume uses the last periodic checkpoint. Finite streams right-pad their
+  final window and missing batch rows; after that batch completes, exact EOF is
+  aligned and the final checkpoint is written.
 - **Validity**: when `debug.nan_check` is enabled, the last step's metrics are
   re-checked for finiteness before the write, so "latest" cannot become a NaN
   tombstone.
@@ -74,6 +74,8 @@ Hard failures include:
 - objective knobs (`mask_boundary_loss`, `train_on_eos`) and eval knobs
 - batch shape invariants (`seq_len`, `batch_size`, `grad_accum`)
 - model and optimizer config, `train.deterministic`
+- the complete parameter/fixed-buffer, optimizer-group, and decay assignment
+  through the parameter-manifest hash
 
 The packing, model, and optimizer sections are compared over the union of
 keys recorded on either side, so a knob present in only one version's

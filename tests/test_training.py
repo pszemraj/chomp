@@ -107,6 +107,7 @@ def _checkpoint_record(cfg: Config, *, step: int = 0, tokens_seen: int = 0) -> C
         step=step,
         config=cfg.to_dict(),
         data_fingerprint=data_fingerprint(cfg),
+        parameter_manifest_hash="test-parameter-manifest",
         tokens_seen=tokens_seen,
     )
 
@@ -1096,6 +1097,9 @@ def test_dry_run_compiles_single_step(tmp_path: Path, monkeypatch: pytest.Monkey
     run(cfg, config_path=None, resume="none", dry_run=True)
 
     assert (run_dir / "config_resolved.json").exists()
+    manifest = json.loads((run_dir / "parameter-manifest.json").read_text())
+    assert manifest["group_counts"] == {"adam": 2}
+    assert {entry["family"] for entry in manifest["arrays"]} == {"embedding", "projection"}
     assert not (run_dir / cfg.logging.metrics_file).exists()
     assert profile_events == ["start", "stop"]
 
@@ -1381,6 +1385,20 @@ def test_resume_compat_rejects_multipack_knob_changes(tmp_path: Path) -> None:
     bin_changed = replace(binc, data=replace(binc.data, packing_strict_segments=False))
     with pytest.raises(RuntimeError, match="packing_strict_segments"):
         check_resume_compat(bin_changed, bin_meta)
+
+
+def test_resume_compat_hard_gates_parameter_manifest(tmp_path: Path) -> None:
+    """Resume must reject any change to trainable, optimizer, or decay assignments."""
+    cfg = _base_cfg(tmp_path / "run_manifest_compat")
+    meta = _checkpoint_record(cfg).to_dict()
+
+    check_resume_compat(cfg, meta, parameter_manifest_hash="test-parameter-manifest")
+    with pytest.raises(RuntimeError, match="parameter_manifest_hash"):
+        check_resume_compat(cfg, meta, parameter_manifest_hash="changed-parameter-manifest")
+
+    del meta["parameter_manifest_hash"]
+    with pytest.raises(RuntimeError, match="parameter_manifest_hash"):
+        check_resume_compat(cfg, meta, parameter_manifest_hash="test-parameter-manifest")
 
 
 def test_resume_compat_ignores_inert_packing_knobs(tmp_path: Path) -> None:

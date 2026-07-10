@@ -14,12 +14,26 @@ Related: [Config Reference](config-reference.yaml) (`optim.*`),
 - `muon`: Muon on a safe whitelist of projection weight matrices, AdamW on the
   rest.
 
+At startup, the model adapter classifies every array as a trainable parameter
+or fixed buffer. Unknown Megalodon-JAX array paths fail startup, which prevents
+a dependency update from silently changing the trained model. The resulting
+`parameter-manifest.json` records each path, shape, dtype, family, optimizer
+group, and weight-decay status. Its hash is a hard checkpoint-resume input.
+
+Megalodon's `rotary.inv_freq` arrays are derived RoPE constants. They remain in
+the fixed model partition, never enter optimizer state, and remain bit-identical
+through training. Trainable CEMA coefficients remain parameters.
+
 For `optim.name=muon`, the harness uses explicit parameter partitioning:
 
 - Muon is applied only to matmul-style projection weights (for Megalodon:
   `attn.wz/wv/wr/wh1/wh2`, `ffn.fc1/fc2/fc3`, and `lm_head`).
 - AdamW is applied everywhere else (including embeddings, norms, and CEMA
   parameters).
+
+AdamW decay is also path-aware. It applies to token embeddings and dense
+projection weights. Biases, norm/scale parameters, attention affine offsets,
+and all CEMA coefficients receive no decoupled weight decay.
 
 By default, the projection whitelist excludes embeddings and other non-matmul
 matrices. `optim.muon.allow_tied_embed` adds the token embedding, while

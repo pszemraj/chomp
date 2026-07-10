@@ -72,16 +72,20 @@ from chomp.data import (
 )
 from chomp.model import (
     build_model,
+    build_parameter_manifest,
     causal_loss_mask,
     generate_tokens,
+    is_muon_eligible,
+    parameter_decay_mask,
     supports_packed_segments,
     training_loss,
+    write_parameter_manifest,
 )
 from chomp.types import IGNORE_INDEX, Batch, TrainState
 from chomp.utils.devices import assert_batch_on_device
 from chomp.utils.io import MetricsWriter, add_file_logging, create_run_dir
 from chomp.utils.profiling import start_trace, step_annotation, stop_trace
-from chomp.utils.tree import abstractify_tree, param_count
+from chomp.utils.tree import abstractify_tree, param_count, path_to_str
 
 logger = logging.getLogger(__name__)
 
@@ -427,6 +431,7 @@ def _save_training_checkpoint(
     step: int,
     cfg: Config,
     tokenizer_hash: str | None,
+    parameter_manifest_hash: str,
     tokens_seen: int,
     train_state: TrainState,
     data_iter: Any,
@@ -438,6 +443,7 @@ def _save_training_checkpoint(
     :param int step: Completed training step to save.
     :param Config cfg: Training configuration.
     :param str | None tokenizer_hash: Hash of the run tokenizer snapshot.
+    :param str parameter_manifest_hash: Hash of model/optimizer leaf assignments.
     :param int tokens_seen: Cumulative exact loss-token count.
     :param TrainState train_state: Train state to checkpoint.
     :param data_iter: Data iterator to checkpoint.
@@ -447,6 +453,7 @@ def _save_training_checkpoint(
         step=step,
         config=cfg.to_dict(),
         data_fingerprint=data_fingerprint(cfg, tokenizer_snapshot_hash=tokenizer_hash),
+        parameter_manifest_hash=parameter_manifest_hash,
         tokens_seen=int(tokens_seen),
     )
     save(
@@ -468,6 +475,7 @@ def _maybe_restore_state(
     data_it: Any,
     cfg: Config,
     tokenizer_hash: str | None,
+    parameter_manifest_hash: str,
 ) -> tuple[TrainState, dict[str, Any] | None]:
     """Restore state if requested, otherwise return the initial state.
 
@@ -478,6 +486,7 @@ def _maybe_restore_state(
     :param Any data_it: Data iterator to restore.
     :param Config cfg: Training configuration.
     :param str | None tokenizer_hash: Optional tokenizer snapshot hash for resume checks.
+    :param str parameter_manifest_hash: Current model/optimizer manifest hash.
     :return tuple: (TrainState, meta) where meta is checkpoint metadata if restored.
     """
     if resume == "none":
@@ -497,7 +506,12 @@ def _maybe_restore_state(
     # A pipeline schema or source mismatch must fail without reading up to a
     # full document/packed shuffle window from an incompatible source.
     meta = restore_meta_at_step(manager, step=step_r)
-    check_resume_compat(cfg, meta, tokenizer_snapshot_hash=tokenizer_hash)
+    check_resume_compat(
+        cfg,
+        meta,
+        tokenizer_snapshot_hash=tokenizer_hash,
+        parameter_manifest_hash=parameter_manifest_hash,
+    )
     _, state, restored_meta = restore_at_step(
         manager,
         step=step_r,
@@ -686,105 +700,12 @@ def _console_row(
     return " | ".join(parts)
 
 
-def _weight_decay_mask(params: Any) -> Any:
-    """Apply weight decay to matrix-like parameters (ndim >= 2).
-
-    :param Any params: Parameter pytree.
-    :return Any: Boolean mask pytree with True for parameters that should have weight decay.
-    """
-
-    def mask_one(x: Any) -> bool:
-        """Return True if x is a tensor with ndim >= 2.
-
-        :param Any x: Leaf value from parameter pytree.
-        :return bool: True if weight decay should apply.
-        """
-        if not hasattr(x, "ndim"):
-            return False
-        return x.ndim >= 2
-
-    return jax.tree_util.tree_map(mask_one, params)
-
-
-_MUON_WEIGHT_WHITELIST = (
-    ".attn.wz.weight",
-    ".attn.wv.weight",
-    ".attn.wr.weight",
-    ".attn.wh1.weight",
-    ".attn.wh2.weight",
-    ".ffn.fc1.weight",
-    ".ffn.fc2.weight",
-    ".ffn.fc3.weight",
-    "lm_head.weight",
-)
-
-
 def _flush_loggers() -> None:
     """Flush all log handlers to ensure crash logs are written."""
     root = logging.getLogger()
     for handler in list(root.handlers):
         with contextlib.suppress(Exception):
             handler.flush()
-
-
-def _path_to_str(path: tuple[Any, ...]) -> str:
-    """Convert a JAX tree path to a dotted string.
-
-    :param tuple[Any, ...] path: Path elements from tree_flatten_with_path.
-    :return str: Dotted path string (with list indices in brackets).
-    """
-    parts: list[str] = []
-    for key in path:
-        if hasattr(key, "name"):
-            parts.append(str(key.name))
-        elif hasattr(key, "key"):
-            parts.append(str(key.key))
-        elif hasattr(key, "idx"):
-            parts.append(f"[{key.idx}]")
-        else:
-            parts.append(str(key))
-    return ".".join(parts)
-
-
-def _is_muon_weight_path(path_str: str) -> bool:
-    """Return True if a path refers to a muon-eligible weight matrix.
-
-    :param str path_str: Dotted parameter path.
-    :return bool: True if the path should use Muon.
-    """
-    if not path_str.endswith(".weight"):
-        return False
-    return any(token in path_str for token in _MUON_WEIGHT_WHITELIST)
-
-
-def _is_embed_weight_path(path_str: str) -> bool:
-    """Return True if a path refers to the token embedding weight.
-
-    :param str path_str: Dotted parameter path.
-    :return bool: True if the path is the embedding weight.
-    """
-    return path_str.endswith("embed.weight")
-
-
-def _is_muon_eligible(leaf: Any, path_str: str, *, allow_all_2d: bool, allow_embed: bool) -> bool:
-    """Single source of truth for Muon eligibility of a parameter leaf.
-
-    Non-array leaves and non-2D tensors are never eligible (optimizer stats,
-    labeling, and dimension numbers must all agree on this).
-
-    :param Any leaf: Parameter leaf.
-    :param str path_str: Dotted parameter path.
-    :param bool allow_all_2d: If True, apply Muon to all 2D tensors.
-    :param bool allow_embed: If True, allow Muon on tied embedding weights.
-    :return bool: True if the leaf should use Muon.
-    """
-    if not hasattr(leaf, "ndim") or leaf.ndim != 2:
-        return False
-    return (
-        allow_all_2d
-        or _is_muon_weight_path(path_str)
-        or (allow_embed and _is_embed_weight_path(path_str))
-    )
 
 
 def _muon_param_stats(
@@ -808,8 +729,8 @@ def _muon_param_stats(
         total_tensors += 1
         if leaf.ndim == 2:
             total_2d += 1
-        path_str = _path_to_str(path)
-        if _is_muon_eligible(leaf, path_str, allow_all_2d=allow_all_2d, allow_embed=allow_embed):
+        path_str = path_to_str(path)
+        if is_muon_eligible(leaf, path_str, allow_all_2d=allow_all_2d, allow_embed=allow_embed):
             muon_tensors += 1
             muon_paths.append(path_str)
     adam_tensors = total_tensors - muon_tensors
@@ -828,8 +749,8 @@ def _muon_weight_dim_numbers(params: Any, *, allow_all_2d: bool, allow_embed: bo
     flat, treedef = jax.tree_util.tree_flatten_with_path(params)
     dim_nums = [
         muon_dims
-        if _is_muon_eligible(
-            leaf, _path_to_str(path), allow_all_2d=allow_all_2d, allow_embed=allow_embed
+        if is_muon_eligible(
+            leaf, path_to_str(path), allow_all_2d=allow_all_2d, allow_embed=allow_embed
         )
         else None
         for path, leaf in flat
@@ -907,7 +828,7 @@ def build_optimizer(
             """Return optimizer labels for each parameter leaf.
 
             multi_transform requires a label for EVERY leaf, so non-array
-            leaves label "adam" (_is_muon_eligible is False for them).
+            leaves label "adam" (is_muon_eligible is False for them).
 
             :param Any tree: Parameter pytree.
             :return Any: Pytree of labels ("muon" or "adam").
@@ -915,8 +836,8 @@ def build_optimizer(
             flat, treedef = jax.tree_util.tree_flatten_with_path(tree)
             labels = [
                 "muon"
-                if _is_muon_eligible(
-                    leaf, _path_to_str(path), allow_all_2d=allow_all_2d, allow_embed=allow_embed
+                if is_muon_eligible(
+                    leaf, path_to_str(path), allow_all_2d=allow_all_2d, allow_embed=allow_embed
                 )
                 else "adam"
                 for path, leaf in flat
@@ -959,7 +880,9 @@ def build_optimizer(
             )
         muon_transforms.extend(
             [
-                optax.add_decayed_weights(muon_weight_decay, mask=_weight_decay_mask),
+                optax.add_decayed_weights(
+                    muon_weight_decay, mask=lambda tree: parameter_decay_mask(cfg, tree)
+                ),
                 optax.scale_by_learning_rate(muon_schedule),
             ]
         )
@@ -970,7 +893,7 @@ def build_optimizer(
             b2=adam_cfg.b2,
             eps=adam_cfg.eps,
             weight_decay=cfg.optim.weight_decay,
-            mask=_weight_decay_mask,
+            mask=lambda tree: parameter_decay_mask(cfg, tree),
             nesterov=adam_cfg.nesterov,
         )
         tx = optax.multi_transform({"muon": muon_tx, "adam": adam_tx}, label_fn)
@@ -982,7 +905,7 @@ def build_optimizer(
             b2=adam_cfg.b2,
             eps=adam_cfg.eps,
             weight_decay=cfg.optim.weight_decay,
-            mask=_weight_decay_mask,
+            mask=lambda tree: parameter_decay_mask(cfg, tree),
             nesterov=adam_cfg.nesterov,
         )
 
@@ -1311,6 +1234,13 @@ def run(
 
     params, static, tx, schedule, state0, abstract_state = _build_model_state(cfg)
     _validate_packing_capabilities(cfg, params=params, static=static)
+    parameter_manifest = build_parameter_manifest(cfg, params, static)
+    parameter_manifest_hash = str(parameter_manifest["sha256"])
+    logger.info(
+        "Parameter manifest %s: %s",
+        parameter_manifest_hash,
+        parameter_manifest["group_counts"],
+    )
 
     # Log param count once
     n_params = param_count(params)
@@ -1332,7 +1262,9 @@ def run(
             data_it=data_it,
             cfg=cfg,
             tokenizer_hash=tokenizer_hash,
+            parameter_manifest_hash=parameter_manifest_hash,
         )
+        write_parameter_manifest(run_dir, parameter_manifest)
 
         if eval_tokens is None:
             # Reaching here means check_resume_compat accepted the restored
@@ -1651,6 +1583,7 @@ def run(
                             step=step_i,
                             cfg=cfg,
                             tokenizer_hash=tokenizer_hash,
+                            parameter_manifest_hash=parameter_manifest_hash,
                             tokens_seen=int(tokens_seen_count),
                             train_state=state,
                             data_iter=data_it,
@@ -1812,6 +1745,7 @@ def run(
                         step=final_step,
                         cfg=cfg,
                         tokenizer_hash=tokenizer_hash,
+                        parameter_manifest_hash=parameter_manifest_hash,
                         tokens_seen=int(tokens_seen_count),
                         train_state=state,
                         data_iter=data_it,

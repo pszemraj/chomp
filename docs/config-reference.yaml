@@ -186,6 +186,7 @@ model:
   # Required: no.
   # Valid: null or > 0.
   # Use: RoPE frequency base. Change it only as part of a deliberate long-context scaling strategy.
+  # Derived inverse-frequency arrays are fixed buffers and never optimized.
   rope_base: null
 
   # Key: model.swiglu
@@ -930,8 +931,9 @@ optim:
   # Default: 0.01.
   # Required: no.
   # Valid: >= 0; zero disables weight decay.
-  # Use: AdamW decay coefficient. The exact mask includes array leaves with ndim >= 2 and excludes
-  # vectors/biases. Muon-labeled matrices additionally multiply it by muon.weight_decay_mult.
+  # Use: AdamW decay coefficient. The explicit model-aware mask includes token embeddings and dense
+  # projection weights. It excludes biases, norms/scales, attention affine offsets, fixed RoPE
+  # buffers, and CEMA coefficients. Muon matrices additionally multiply it by muon.weight_decay_mult.
   weight_decay: 0.01
 
   # Key: optim.grad_clip_norm

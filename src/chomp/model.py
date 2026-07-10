@@ -19,6 +19,10 @@ Backends:
 
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import equinox as eqx
@@ -27,6 +31,7 @@ import jax.numpy as jnp
 import optax
 
 from chomp.config import Config, dtype_from_str
+from chomp.utils.tree import path_to_str
 
 if TYPE_CHECKING:
     from chomp.types import Batch
@@ -157,6 +162,229 @@ class DummyLM(eqx.Module):
 # isolation (supports_segment_reset). pyproject pins a verified implementation
 # commit; this runtime floor also protects editable/stale environments.
 _MIN_MEGALODON_JAX = "0.1.2"
+_PARAMETER_MANIFEST_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class ModelArrayClassification:
+    """Role assigned to one array leaf by the model adapter."""
+
+    trainable: bool
+    family: str
+    decay: bool
+
+
+_MUON_WEIGHT_PATHS = (
+    ".attn.wz.weight",
+    ".attn.wv.weight",
+    ".attn.wr.weight",
+    ".attn.wh1.weight",
+    ".attn.wh2.weight",
+    ".ffn.fc1.weight",
+    ".ffn.fc2.weight",
+    ".ffn.fc3.weight",
+    "lm_head.weight",
+)
+
+
+def is_muon_eligible(leaf: Any, path: str, *, allow_all_2d: bool, allow_embed: bool) -> bool:
+    """Return whether one trainable array belongs to the Muon optimizer group.
+
+    :param Any leaf: Candidate parameter leaf.
+    :param str path: Stable dotted model path.
+    :param bool allow_all_2d: Whether every matrix is explicitly eligible.
+    :param bool allow_embed: Whether tied token embeddings are eligible.
+    :return bool: True when Muon should optimize the leaf.
+    """
+    if not hasattr(leaf, "ndim") or leaf.ndim != 2:
+        return False
+    return (
+        allow_all_2d
+        or (path.endswith(".weight") and any(token in path for token in _MUON_WEIGHT_PATHS))
+        or (allow_embed and path.endswith("embed.weight"))
+    )
+
+
+def classify_model_array(cfg: Config, path: str) -> ModelArrayClassification:
+    """Classify one backend array as a parameter or fixed buffer.
+
+    This is a fail-closed adapter for the pinned Megalodon-JAX model layout.
+    A dependency update that introduces an unknown array must be reviewed and
+    classified before training can start; silently treating every float array
+    as learned previously caused RoPE inverse frequencies to enter AdamW.
+
+    :param Config cfg: Model/optimizer configuration.
+    :param str path: Stable dotted array path.
+    :raises RuntimeError: If a backend array has no explicit classification.
+    :return ModelArrayClassification: Training family and decay policy.
+    """
+    if cfg.model.backend == "dummy":
+        if path.endswith("embed.weight"):
+            return ModelArrayClassification(True, "embedding", True)
+        if path.endswith("proj.weight"):
+            return ModelArrayClassification(True, "projection", True)
+    elif cfg.model.backend == "megalodon":
+        if path.endswith(".attn.inner.rotary.inv_freq"):
+            return ModelArrayClassification(False, "fixed_rope", False)
+        if path.endswith("embed.weight"):
+            return ModelArrayClassification(True, "embedding", True)
+        if path.endswith("lm_head.weight"):
+            return ModelArrayClassification(True, "projection", True)
+        if path.endswith("lm_head.bias"):
+            return ModelArrayClassification(True, "bias", False)
+
+        linear_modules = (
+            ".attn.wz.",
+            ".attn.wv.",
+            ".attn.wr.",
+            ".attn.wh1.",
+            ".attn.wh2.",
+            ".ffn.fc1.",
+            ".ffn.fc2.",
+            ".ffn.fc3.",
+        )
+        if any(module in path for module in linear_modules):
+            if path.endswith(".weight"):
+                return ModelArrayClassification(True, "projection", True)
+            if path.endswith(".bias"):
+                return ModelArrayClassification(True, "bias", False)
+
+        cema_names = ("alpha", "delta", "theta", "gamma_real", "gamma_imag", "omega")
+        if ".attn.cema." in path and path.rsplit(".", 1)[-1] in cema_names:
+            return ModelArrayClassification(True, "cema", False)
+
+        norm_paths = (
+            ".attn.timenorm.weight",
+            ".attn.timenorm.bias",
+            ".attn.rmsnorm.gamma",
+            ".ffn.norm.weight",
+            ".ffn.norm.bias",
+            "model.norm.weight",
+            "model.norm.bias",
+        )
+        if any(path.endswith(suffix) for suffix in norm_paths):
+            return ModelArrayClassification(True, "norm", False)
+        if path.endswith(".attn.gamma") or path.endswith(".attn.beta"):
+            return ModelArrayClassification(True, "attention_affine", False)
+
+    raise RuntimeError(
+        f"Unclassified {cfg.model.backend} model array {path!r}. Chomp fails closed when the "
+        "pinned model layout changes; classify this leaf as a trainable parameter or fixed "
+        "buffer before training."
+    )
+
+
+def _parameter_filter_spec(cfg: Config, model: Any) -> Any:
+    """Build the Equinox partition filter from explicit array classifications.
+
+    :param Config cfg: Model configuration.
+    :param Any model: Complete backend model.
+    :return Any: Boolean filter pytree accepted by :func:`equinox.partition`.
+    """
+
+    def classify(path: tuple[Any, ...], leaf: Any) -> bool:
+        """Return trainable status for one pytree leaf.
+
+        :param tuple[Any, ...] path: JAX pytree path.
+        :param Any leaf: Model leaf at the path.
+        :return bool: Whether the leaf belongs in the trainable partition.
+        """
+        if not eqx.is_array(leaf):
+            return False
+        return classify_model_array(cfg, path_to_str(path)).trainable
+
+    return jax.tree_util.tree_map_with_path(classify, model)
+
+
+def parameter_decay_mask(cfg: Config, params: Any) -> Any:
+    """Return the explicit model-aware AdamW decay mask.
+
+    :param Config cfg: Model/optimizer configuration.
+    :param Any params: Trainable parameter pytree.
+    :return Any: Boolean pytree; true only for embeddings and projection weights.
+    """
+    flat, treedef = jax.tree_util.tree_flatten_with_path(params)
+    mask = [
+        classify_model_array(cfg, path_to_str(path)).decay if eqx.is_array(leaf) else False
+        for path, leaf in flat
+    ]
+    return treedef.unflatten(mask)
+
+
+def build_parameter_manifest(cfg: Config, params: Any, static: Any) -> dict[str, Any]:
+    """Build the complete parameter/buffer and optimizer assignment manifest.
+
+    :param Config cfg: Model and optimizer configuration.
+    :param Any params: Trainable model partition.
+    :param Any static: Fixed model partition.
+    :return dict[str, Any]: JSON-serializable manifest with a deterministic hash.
+    """
+    model = eqx.combine(params, static)
+    entries: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    for path, leaf in jax.tree_util.tree_flatten_with_path(model)[0]:
+        if not eqx.is_array(leaf):
+            continue
+        path_str = path_to_str(path)
+        classification = classify_model_array(cfg, path_str)
+        if not classification.trainable:
+            optimizer_group = "fixed"
+        elif cfg.optim.name == "muon" and is_muon_eligible(
+            leaf,
+            path_str,
+            allow_all_2d=cfg.optim.muon.allow_all_2d,
+            allow_embed=cfg.optim.muon.allow_tied_embed,
+        ):
+            optimizer_group = "muon"
+        else:
+            optimizer_group = "adam"
+        counts[optimizer_group] = counts.get(optimizer_group, 0) + 1
+        entries.append(
+            {
+                "path": path_str,
+                "shape": [int(dim) for dim in leaf.shape],
+                "dtype": str(leaf.dtype),
+                "trainable": classification.trainable,
+                "family": classification.family,
+                "optimizer_group": optimizer_group,
+                "decay": classification.decay,
+            }
+        )
+
+    payload: dict[str, Any] = {
+        "schema_version": _PARAMETER_MANIFEST_SCHEMA_VERSION,
+        "backend": cfg.model.backend,
+        "group_counts": dict(sorted(counts.items())),
+        "arrays": entries,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    payload["sha256"] = hashlib.sha256(canonical).hexdigest()
+    return payload
+
+
+def write_parameter_manifest(run_dir: Path, manifest: dict[str, Any]) -> Path:
+    """Validate or atomically persist the run's parameter manifest.
+
+    :param Path run_dir: Training run directory.
+    :param dict[str, Any] manifest: Manifest from :func:`build_parameter_manifest`.
+    :raises RuntimeError: If an existing run artifact differs.
+    :return Path: Manifest path.
+    """
+    path = Path(run_dir) / "parameter-manifest.json"
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"Parameter manifest at {path} is unreadable") from exc
+        if existing != manifest:
+            raise RuntimeError(
+                f"Parameter manifest at {path} does not match the current model/optimizer contract"
+            )
+        return path
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    return path
 
 
 def _require_megalodon_jax_version() -> None:
@@ -198,13 +426,14 @@ def _require_megalodon_jax_version() -> None:
 def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
     """Build model and return (params, static).
 
-    We always partition immediately:
-      params, static = eqx.partition(model, eqx.is_array)
+    We always partition immediately using the backend's explicit parameter
+    contract. Ordinary arrays are not assumed trainable: derived RoPE
+    frequencies remain in the static partition.
 
     Why?
     - We never want to stash full Modules in TrainState
     - It keeps checkpointing straightforward
-    - It forces us to be explicit about what is 'learned' vs 'static'
+    - It makes the learned-versus-fixed distinction executable and fail-closed
 
     :param Config cfg: Model configuration.
     :param jax.Array key: PRNG key for model initialization.
@@ -272,7 +501,7 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
     else:  # pragma: no cover
         raise ValueError(f"Unknown model.backend: {cfg.model.backend!r}")
 
-    params, static = eqx.partition(model, eqx.is_array)
+    params, static = eqx.partition(model, _parameter_filter_spec(cfg, model))
     return params, static
 
 

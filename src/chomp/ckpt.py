@@ -62,6 +62,9 @@ class CheckpointMeta:
     # Minimal data fingerprint
     data_fingerprint: dict[str, Any]
 
+    # Executable model/optimizer leaf contract
+    parameter_manifest_hash: str
+
     def to_dict(self) -> dict[str, Any]:
         """Convert metadata to a JSON-serializable dictionary.
 
@@ -89,6 +92,7 @@ def build_meta(
     step: int,
     config: dict[str, Any],
     data_fingerprint: dict[str, Any],
+    parameter_manifest_hash: str,
     tokens_seen: int,
 ) -> CheckpointMeta:
     """Build checkpoint metadata with version info and config snapshot.
@@ -96,6 +100,7 @@ def build_meta(
     :param int step: Current training step.
     :param dict[str, Any] config: Full config dict for reproducibility.
     :param dict[str, Any] data_fingerprint: Data pipeline fingerprint.
+    :param str parameter_manifest_hash: Hash of trainable/fixed and optimizer assignments.
     :param int tokens_seen: Cumulative loss-token count for exact resume accounting.
     :return CheckpointMeta: Populated metadata object.
     """
@@ -112,6 +117,7 @@ def build_meta(
         tokens_seen=int(tokens_seen),
         config=config,
         data_fingerprint=data_fingerprint,
+        parameter_manifest_hash=str(parameter_manifest_hash),
     )
 
 
@@ -369,13 +375,18 @@ def restore_params_only(step_dir: Path, abstract_params: Any) -> Any:
 
 
 def check_resume_compat(
-    cfg: Config, meta: dict[str, Any] | None, *, tokenizer_snapshot_hash: str | None = None
+    cfg: Config,
+    meta: dict[str, Any] | None,
+    *,
+    tokenizer_snapshot_hash: str | None = None,
+    parameter_manifest_hash: str | None = None,
 ) -> None:
     """Validate checkpoint metadata against current config.
 
     :param Config cfg: Current training configuration.
     :param meta: Checkpoint metadata dict (or None if missing).
     :param str | None tokenizer_snapshot_hash: Optional tokenizer snapshot hash for strict checks.
+    :param str | None parameter_manifest_hash: Current model/optimizer manifest hash.
     :raises RuntimeError: If meta is missing or config mismatches are found.
     """
 
@@ -413,6 +424,14 @@ def check_resume_compat(
                 warnings.append(msg)
 
     cur_fp = data_fingerprint(cfg, tokenizer_snapshot_hash=tokenizer_snapshot_hash)
+
+    if parameter_manifest_hash is not None:
+        _cmp(
+            "parameter_manifest_hash",
+            parameter_manifest_hash,
+            meta.get("parameter_manifest_hash"),
+            severity="error",
+        )
 
     _cmp(
         "data_pipeline_schema_version",

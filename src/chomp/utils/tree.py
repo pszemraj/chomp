@@ -7,6 +7,25 @@ from typing import Any
 import jax
 
 
+def path_to_str(path: tuple[Any, ...]) -> str:
+    """Convert a JAX tree path to a stable dotted string.
+
+    :param tuple[Any, ...] path: Path elements from tree_flatten_with_path.
+    :return str: Dotted path string with list indices in brackets.
+    """
+    parts: list[str] = []
+    for key in path:
+        if hasattr(key, "name"):
+            parts.append(str(key.name))
+        elif hasattr(key, "key"):
+            parts.append(str(key.key))
+        elif hasattr(key, "idx"):
+            parts.append(f"[{key.idx}]")
+        else:
+            parts.append(str(key))
+    return ".".join(parts)
+
+
 def param_count(params: Any) -> int:
     """Count total number of scalar parameters in a params pytree.
 

@@ -10,44 +10,61 @@ import jax
 import jax.numpy as jnp
 import optax
 import pytest
-from megalodon_jax.config import MegalodonConfig
-from megalodon_jax.model import MegalodonForCausalLM
 from optax.contrib import MuonDimensionNumbers
 
 from chomp.config import Config, DataConfig, ModelConfig, OptimConfig, TokenizerConfig, TrainConfig
 from chomp.data.pipeline import build_train_iterator
-from chomp.model import build_model, training_loss
+from chomp.model import (
+    build_model,
+    build_parameter_manifest,
+    classify_model_array,
+    parameter_decay_mask,
+    training_loss,
+)
 from chomp.train import (
     _muon_lr_from_adam,
     _muon_weight_dim_numbers,
-    _path_to_str,
-    _weight_decay_mask,
     build_optimizer,
     init_train_state,
     make_train_step,
 )
 from chomp.types import Batch
+from chomp.utils.tree import path_to_str
 from tests.helpers.assertions import tree_allclose
 
 
 @pytest.fixture(scope="module")
-def megalodon_params() -> Any:
-    """Small Megalodon parameter pytree, built once per module.
+def megalodon_parts() -> tuple[Config, Any, Any]:
+    """Small classified Megalodon model, built once per module.
 
     Consumers only read it (JAX arrays are immutable; optimizer calls do not
     mutate params), so module scope is safe and avoids 8 model builds.
 
-    :return Any: Filtered parameter pytree.
+    :return tuple[Config, Any, Any]: Config, trainable params, and fixed partition.
     """
-    cfg = MegalodonConfig(
-        vocab_size=128,
-        model_dim=32,
-        num_layers=2,
-        num_heads=1,
-        chunk_size=16,
+    cfg = Config(
+        model=ModelConfig(
+            backend="megalodon",
+            vocab_size=128,
+            model_dim=32,
+            num_layers=2,
+            num_heads=1,
+            z_dim=16,
+            value_dim=32,
+            ffn_hidden_dim=64,
+            cema_ndim=4,
+            chunk_size=16,
+            norm_num_groups=4,
+        )
     )
-    model = MegalodonForCausalLM(cfg, key=jax.random.PRNGKey(0))
-    return eqx.filter(model, eqx.is_array)
+    params, static = build_model(cfg, key=jax.random.PRNGKey(0))
+    return cfg, params, static
+
+
+@pytest.fixture(scope="module")
+def megalodon_params(megalodon_parts: tuple[Config, Any, Any]) -> Any:
+    """Return the trainable partition from the shared Megalodon fixture."""
+    return megalodon_parts[1]
 
 
 def _label_map(dim_nums: Any) -> dict[str, bool]:
@@ -71,7 +88,7 @@ def _dim_map(dim_nums: Any) -> dict[str, MuonDimensionNumbers | None]:
         return node is None or isinstance(node, MuonDimensionNumbers)
 
     flat_dims, _ = jax.tree_util.tree_flatten_with_path(dim_nums, is_leaf=_is_leaf)
-    return {_path_to_str(path): dim for path, dim in flat_dims}
+    return {path_to_str(path): dim for path, dim in flat_dims}
 
 
 def _leaf_map(tree: Any) -> dict[str, Any]:
@@ -81,7 +98,96 @@ def _leaf_map(tree: Any) -> dict[str, Any]:
     :return dict[str, Any]: Map of path string to leaf value.
     """
     flat, _ = jax.tree_util.tree_flatten_with_path(tree)
-    return {_path_to_str(path): leaf for path, leaf in flat}
+    return {path_to_str(path): leaf for path, leaf in flat}
+
+
+def test_parameter_contract_keeps_rope_fixed(
+    megalodon_parts: tuple[Config, Any, Any],
+) -> None:
+    """RoPE frequencies stay outside optimizer state and unchanged after an update."""
+    cfg, params, static = megalodon_parts
+    param_paths = _leaf_map(params)
+    assert "model.layers.[0].attn.inner.rotary.inv_freq" not in param_paths
+
+    manifest = build_parameter_manifest(cfg, params, static)
+    entries = {entry["path"]: entry for entry in manifest["arrays"]}
+    rope_path = "model.layers.[0].attn.inner.rotary.inv_freq"
+    assert entries[rope_path] == {
+        "path": rope_path,
+        "shape": [8],
+        "dtype": "float32",
+        "trainable": False,
+        "family": "fixed_rope",
+        "optimizer_group": "fixed",
+        "decay": False,
+    }
+
+    cfg = replace(cfg, optim=replace(cfg.optim, lr=1e-3, weight_decay=0.1, warmup_steps=0))
+    tx, _ = build_optimizer(cfg, params)
+    opt_state = tx.init(params)
+    zeros = jax.tree_util.tree_map(jnp.zeros_like, params)
+    updates, _ = tx.update(zeros, opt_state, params)
+    updated = optax.apply_updates(params, updates)
+    before = _leaf_map(eqx.combine(params, static))
+    after = _leaf_map(eqx.combine(updated, static))
+    assert jnp.array_equal(before[rope_path], after[rope_path])
+    assert not jnp.array_equal(before["model.embed.weight"], after["model.embed.weight"])
+
+
+def test_parameter_decay_policy_is_model_aware(
+    megalodon_parts: tuple[Config, Any, Any],
+) -> None:
+    """Only embeddings and dense projections receive decoupled weight decay."""
+    cfg, params, _ = megalodon_parts
+    decay = _leaf_map(parameter_decay_mask(cfg, params))
+    assert decay["model.embed.weight"] is True
+    assert decay["model.layers.[0].attn.wz.weight"] is True
+    assert decay["model.layers.[0].ffn.fc1.weight"] is True
+    assert decay["model.layers.[0].attn.gamma"] is False
+    assert decay["model.layers.[0].attn.cema.gamma_real"] is False
+    assert decay["model.layers.[0].attn.timenorm.weight"] is False
+
+
+def test_parameter_contract_fails_closed_on_unknown_array() -> None:
+    """A changed dependency layout must be classified before training proceeds."""
+    with pytest.raises(RuntimeError, match="Unclassified megalodon model array"):
+        classify_model_array(Config(), "model.layers.[0].future_array")
+
+
+@pytest.mark.parametrize(
+    "model_updates",
+    [
+        pytest.param({"swiglu": True}, id="swiglu"),
+        pytest.param({"norm_affine": False}, id="no-norm-affine"),
+        pytest.param({"output_size": 96}, id="untied-head"),
+    ],
+)
+def test_parameter_contract_covers_supported_model_variants(
+    model_updates: dict[str, Any],
+) -> None:
+    """Every array in each supported Megalodon layout must classify explicitly."""
+    base = ModelConfig(
+        backend="megalodon",
+        vocab_size=128,
+        model_dim=32,
+        num_layers=1,
+        num_heads=1,
+        z_dim=16,
+        value_dim=32,
+        ffn_hidden_dim=64,
+        cema_ndim=4,
+        chunk_size=16,
+        norm_num_groups=4,
+    )
+    cfg = Config(model=replace(base, **model_updates))
+    params, static = build_model(cfg, key=jax.random.PRNGKey(1))
+    manifest = build_parameter_manifest(cfg, params, static)
+    fixed = [entry for entry in manifest["arrays"] if not entry["trainable"]]
+    assert [entry["family"] for entry in fixed] == ["fixed_rope"]
+    if model_updates.get("swiglu"):
+        assert any(entry["path"].endswith("ffn.fc3.weight") for entry in manifest["arrays"])
+    if model_updates.get("output_size"):
+        assert any(entry["path"] == "lm_head.weight" for entry in manifest["arrays"])
 
 
 def test_muon_param_labels_whitelist_excludes_embed(megalodon_params: Any) -> None:
@@ -209,7 +315,7 @@ def test_muon_non_muon_params_use_plain_adamw(megalodon_params: Any) -> None:
         b2=cfg.optim.adam.b2,
         eps=cfg.optim.adam.eps,
         weight_decay=cfg.optim.weight_decay,
-        mask=_weight_decay_mask,
+        mask=lambda tree: parameter_decay_mask(cfg, tree),
         nesterov=cfg.optim.adam.nesterov,
     )
     adam_state = adam_tx.init(params)
