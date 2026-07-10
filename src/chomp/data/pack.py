@@ -421,11 +421,20 @@ class TokenPacker(_PackerBase):
         :return tuple: (tokens, segment_ids, position_ids) arrays of shape [seq_len].
         """
 
+        tokens, segs = self.pop_seq_with_segments()
+        return tokens, segs, _positions_from_segments(segs)
+
+    def pop_seq_with_segments(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return tokens and segment IDs without materializing position IDs.
+
+        :raises RuntimeError: If token/segment buffers are misaligned.
+        :return tuple[np.ndarray, np.ndarray]: Fixed-length token and segment arrays.
+        """
         if self._token_buf.size != self._segment_buf.size:
             raise RuntimeError("token/segment buffers are misaligned")
         tokens = self._token_buf.take(self.seq_len)
         segs = self._reindex_popped_segments(self._segment_buf.take(self.seq_len))
-        return tokens, segs, _positions_from_segments(segs)
+        return tokens, segs
 
     def get_state(self) -> dict[str, Any]:
         """Capture packer state for checkpointing.
@@ -819,10 +828,18 @@ class _FFDPackerBase(_PackerBase):
         :raises RuntimeError: If called before any sequences are ready.
         :return tuple: (tokens, segment_ids, position_ids) arrays of shape [seq_len].
         """
+        tokens, segs = self.pop_seq_with_segments()
+        return tokens, segs, _positions_from_segments(segs)
+
+    def pop_seq_with_segments(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return tokens and segment IDs without materializing position IDs.
+
+        :raises RuntimeError: If called before any sequences are ready.
+        :return tuple[np.ndarray, np.ndarray]: Fixed-length token and segment arrays.
+        """
         if not self.can_pop():
             raise RuntimeError(f"{self._mode_name} packer has no ready sequences")
-        tokens, segs = self._ready.popleft()
-        return tokens, segs, _positions_from_segments(segs)
+        return self._ready.popleft()
 
     def get_state(self) -> dict[str, Any]:
         """Capture packer state for checkpointing.

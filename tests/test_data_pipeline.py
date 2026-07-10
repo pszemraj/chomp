@@ -21,7 +21,11 @@ from chomp.config import (
     TokenizerConfig,
     TrainConfig,
 )
-from chomp.data.grain import _packer_stats_from_chain, effective_window_shuffle_seed
+from chomp.data.grain import (
+    _make_grain_iter_classes,
+    _packer_stats_from_chain,
+    effective_window_shuffle_seed,
+)
 from chomp.data.hf import HFStreamingTextStream, HFStreamSpec
 from chomp.data.pack import MultipackPacker, TokenPacker
 from chomp.data.pipeline import (
@@ -923,6 +927,20 @@ def test_packer_alignment_after_restore() -> None:
     for batch_a, batch_b in zip(cont, resumed, strict=True):
         for arr_a, arr_b in zip(batch_a, batch_b, strict=True):
             np.testing.assert_array_equal(arr_a, arr_b)
+
+
+def test_grain_shuffle_source_does_not_buffer_position_ids() -> None:
+    """Packed shuffle rows should hold only tokens and segment IDs."""
+    import grain.python as grain
+
+    cfg = make_pipeline_cfg(window_shuffle_windows=8)
+    train_dataset_type, _, _ = _make_grain_iter_classes(grain)
+    dataset = train_dataset_type(cfg=cfg, tokenizer=ByteTokenizer(byte_offset=4))
+
+    window = next(iter(dataset))
+
+    assert len(window) == 2
+    assert all(array.shape == (cfg.train.seq_len,) for array in window)
 
 
 def test_train_on_eos_false_masks_eos_labels() -> None:

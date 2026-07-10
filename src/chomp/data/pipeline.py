@@ -39,9 +39,9 @@ from chomp.utils.xla import deterministic_gpu_ops_setting
 
 from .grain import effective_window_shuffle_seed
 from .hf import HFStreamingTextStream, HFStreamSpec, LocalTextStream
-from .pack import BinPacker, MultipackPacker, TokenPacker
+from .pack import BinPacker, MultipackPacker, TokenPacker, _positions_from_segments
 
-DATA_PIPELINE_SCHEMA_VERSION = 1
+DATA_PIPELINE_SCHEMA_VERSION = 2
 
 
 class Tokenizer(Protocol):
@@ -914,7 +914,7 @@ class _BatchAssemblySpec:
 
 
 def _assemble_batch(
-    next_window: Callable[[], tuple[np.ndarray, np.ndarray, np.ndarray]],
+    next_window: Callable[[], tuple[np.ndarray, np.ndarray]],
     spec: _BatchAssemblySpec,
 ) -> Batch:
     """Assemble one fixed-shape [A, B, T] Batch from packed [T] windows.
@@ -923,7 +923,7 @@ def _assemble_batch(
     attention mask from segment IDs, reshape, optional device transfer);
     used by both the Grain train path and the eval iterator.
 
-    :param next_window: Callable yielding (tokens, segment_ids, position_ids) [T] arrays.
+    :param next_window: Callable yielding (tokens, segment_ids) [T] arrays.
     :param _BatchAssemblySpec spec: Assembly knobs extracted from the config.
     :return Batch: Fixed-shape batch of [A, B, T] arrays.
     """
@@ -936,7 +936,7 @@ def _assemble_batch(
 
     for idx in range(need):
         try:
-            seq, segs, pos_ids = next_window()  # [T]
+            seq, segs = next_window()  # [T]
         except StopIteration as exc:
             raise BatchAssemblyStopIteration(windows_consumed=idx) from exc
         # Labels align with input_ids; the model shifts internally.
@@ -950,7 +950,7 @@ def _assemble_batch(
         )
         inps[idx] = inp
         segs_out[idx] = np.asarray(segs, dtype=np.int32)
-        pos_out[idx] = np.asarray(pos_ids, dtype=np.int32)
+        pos_out[idx] = _positions_from_segments(segs_out[idx])
 
     valid_targets = (labs[:, 1:] != IGNORE_INDEX) & (segs_out[:, 1:] > 0)
     if not np.any(valid_targets):
@@ -1060,12 +1060,12 @@ class _SequenceProducer:
             )
         self._packer.add_document(ids)
 
-    def next_window(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Pop the next [T] token/segment/position sequence from the packer.
+    def next_window(self) -> tuple[np.ndarray, np.ndarray]:
+        """Pop the next [T] token and segment-ID arrays from the packer.
 
         :raises StopIteration: When the text stream is exhausted and the
             packer has nothing left to emit.
-        :return tuple[np.ndarray, np.ndarray, np.ndarray]: Tokens, segment IDs, position IDs.
+        :return tuple[np.ndarray, np.ndarray]: Token and segment-ID arrays.
         """
         while not self._packer.can_pop():
             try:
@@ -1078,11 +1078,10 @@ class _SequenceProducer:
                 if not self._packer.can_pop():
                     raise
                 break
-        seq, segs, pos = self._packer.pop_seq_with_metadata()
+        seq, segs = self._packer.pop_seq_with_segments()
         return (
             np.asarray(seq, dtype=np.int32),
             np.asarray(segs, dtype=np.int32),
-            np.asarray(pos, dtype=np.int32),
         )
 
     # -------- checkpoint hooks --------

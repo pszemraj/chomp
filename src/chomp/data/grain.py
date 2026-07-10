@@ -197,7 +197,7 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
 
             self._producer = _SequenceProducer(cfg, tokenizer=tokenizer)
 
-        def __next__(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        def __next__(self) -> tuple[np.ndarray, np.ndarray]:
             return self._producer.next_window()
 
         def get_state(self) -> dict[str, Any]:

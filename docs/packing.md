@@ -133,6 +133,11 @@ Resume remains exact: the shuffle checkpoints only the upstream state at the
 window start plus permutation progress, then reconstructs and replays the
 window deterministically. Eval batches are never shuffled.
 
+The shuffle window stores only int32 token and segment-ID arrays. Position IDs
+are derived from segment IDs during batch assembly after shuffling, saving one
+`[window_shuffle_windows, seq_len]` array (about 32 MiB at the default
+4096x2048 geometry).
+
 Guidance:
 
 - This is default hygiene for any streaming corpus that is not known to be
