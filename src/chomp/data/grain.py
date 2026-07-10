@@ -28,6 +28,32 @@ class _BatchEnvelope:
     pipeline_stats: dict[str, Any]
 
 
+def _batch_segment_stats(segment_ids: Any) -> dict[str, float | int]:
+    """Compute packing diagnostics from one fixed-shape segment-ID batch.
+
+    :param Any segment_ids: Array with positive packed segments and zero padding.
+    :return dict[str, float | int]: Utilization, boundary, and segment-density metrics.
+    """
+    segs = np.asarray(segment_ids)
+    tokens_used = int(np.count_nonzero(segs))
+    capacity = int(segs.size)
+    flat_segs = segs.reshape(-1, segs.shape[-1])
+    boundaries = (
+        (flat_segs[:, 1:] != flat_segs[:, :-1]) & (flat_segs[:, 1:] > 0) & (flat_segs[:, :-1] > 0)
+    )
+    has_tokens = np.any(flat_segs > 0, axis=1)
+    segments_per_seq = np.where(has_tokens, 1 + boundaries.sum(axis=1), 0)
+    return {
+        "packing_tokens": tokens_used,
+        "packing_capacity": capacity,
+        "packing_utilization": float(tokens_used / capacity),
+        "boundary_transitions": int(np.count_nonzero(boundaries)),
+        "segments_per_seq_mean": float(np.mean(segments_per_seq)),
+        "segments_per_seq_min": int(np.min(segments_per_seq)),
+        "segments_per_seq_max": int(np.max(segments_per_seq)),
+    }
+
+
 def effective_window_shuffle_seed(cfg: Config) -> int:
     """Return the deterministic seed consumed by packed-window shuffling.
 
@@ -79,36 +105,12 @@ class GrainTrainBatchIterator:
         if not self._enable_stats or not self._collect_next_stats:
             self._last_stats = dict(envelope.pipeline_stats)
             return batch
-        segs = np.asarray(batch.segment_ids)
-        attn = segs > 0
-
-        tokens_used = int(np.count_nonzero(attn))
-        capacity = int(attn.size)
-        utilization = float(tokens_used / capacity) if capacity > 0 else 0.0
-        # Reshape commutes with the per-last-axis boundary op, so one [rows, T-1]
-        # array serves both the global count and per-sequence segment counts.
-        flat_segs = segs.reshape(-1, segs.shape[-1])
-        seq_boundary = (
-            (flat_segs[:, 1:] != flat_segs[:, :-1])
-            & (flat_segs[:, 1:] > 0)
-            & (flat_segs[:, :-1] > 0)
-        )
-        boundary_transitions = int(np.count_nonzero(seq_boundary))
-
-        has_tokens = np.any(flat_segs > 0, axis=1)
-        segments_per_seq = np.where(has_tokens, 1 + seq_boundary.sum(axis=1), 0).astype(np.int32)
         self._last_stats = dict(envelope.pipeline_stats)
+        self._last_stats.update(_batch_segment_stats(batch.segment_ids))
         self._last_stats.update(
             {
                 "packing_mode": self._packing_mode,
-                "packing_tokens": tokens_used,
-                "packing_capacity": capacity,
-                "packing_utilization": utilization,
                 "loss_tokens_host": self._last_loss_tokens,
-                "boundary_transitions": boundary_transitions,
-                "segments_per_seq_mean": float(np.mean(segments_per_seq)),
-                "segments_per_seq_min": int(np.min(segments_per_seq)),
-                "segments_per_seq_max": int(np.max(segments_per_seq)),
             }
         )
         return batch

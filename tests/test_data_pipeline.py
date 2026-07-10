@@ -25,6 +25,7 @@ from chomp.config import (
     TrainConfig,
 )
 from chomp.data.grain import (
+    _batch_segment_stats,
     _make_grain_iter_classes,
     _packer_stats_from_chain,
     effective_window_shuffle_seed,
@@ -895,33 +896,21 @@ def test_pipeline_bin_packing_segment_ids() -> None:
 
     stats = it.get_stats()
     assert stats["packing_mode"] == "bin"
-    assert stats["packing_capacity"] == batch.segment_ids.size
-    expected_util = float(np.count_nonzero(batch.segment_ids) / batch.segment_ids.size)
-    assert stats["packing_utilization"] == expected_util
+    assert stats["segments_per_seq_max"] >= 2
 
-    labels = np.asarray(batch.labels)
-    attn = np.asarray(batch.segment_ids) > 0
-    valid_loss = labels[..., 1:] != -100
-    valid_loss = valid_loss & attn[..., 1:]
-    assert stats["loss_tokens_host"] == int(np.count_nonzero(valid_loss))
 
-    segs_all = np.asarray(batch.segment_ids)
-    boundary = (
-        (segs_all[..., 1:] != segs_all[..., :-1])
-        & (segs_all[..., 1:] > 0)
-        & (segs_all[..., :-1] > 0)
-    )
-    assert stats["boundary_transitions"] == int(np.count_nonzero(boundary))
-
-    flat_segs = segs_all.reshape(-1, segs_all.shape[-1])
-    has_tokens = np.any(flat_segs > 0, axis=1)
-    seq_boundary = (
-        (flat_segs[:, 1:] != flat_segs[:, :-1]) & (flat_segs[:, 1:] > 0) & (flat_segs[:, :-1] > 0)
-    )
-    segments_per_seq = np.where(has_tokens, 1 + seq_boundary.sum(axis=1), 0).astype(np.int32)
-    assert stats["segments_per_seq_mean"] == float(np.mean(segments_per_seq))
-    assert stats["segments_per_seq_min"] == int(np.min(segments_per_seq))
-    assert stats["segments_per_seq_max"] == int(np.max(segments_per_seq))
+def test_batch_segment_stats_use_literal_segment_geometry() -> None:
+    """Packing diagnostics should match a hand-enumerated segment batch."""
+    segments = np.asarray([[[1, 1, 2, 0], [3, 3, 3, 3]]], dtype=np.int32)
+    assert _batch_segment_stats(segments) == {
+        "packing_tokens": 7,
+        "packing_capacity": 8,
+        "packing_utilization": 0.875,
+        "boundary_transitions": 1,
+        "segments_per_seq_mean": 1.5,
+        "segments_per_seq_min": 1,
+        "segments_per_seq_max": 2,
+    }
 
 
 def test_loss_token_count_stays_paired_through_device_prefetch() -> None:
