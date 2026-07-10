@@ -59,6 +59,8 @@ Tests are organized by source module (not by micro-feature):
 
 - [`tests/test_config.py`](../tests/test_config.py): config validation, variables, tokenizer-derived updates,
   and generate-time config loading
+- [`tests/test_config_reference.py`](../tests/test_config_reference.py): annotated config key, default,
+  type, and inline-contract drift checks
 - [`tests/test_data_pipeline.py`](../tests/test_data_pipeline.py): packing, segment IDs, HF streaming/state,
   tokenizer decode, and tokenizer snapshot behavior
 - [`tests/test_training.py`](../tests/test_training.py): training loop behavior, crash handling, dry-run,

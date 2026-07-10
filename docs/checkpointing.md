@@ -3,7 +3,7 @@
 chomp uses Orbax to checkpoint **both** training state and data iterator state.
 Resume is treated as a contract, not a best-effort feature.
 
-Related: [Config Reference](config-reference.md) (`checkpoint.*`),
+Related: [Config Reference](config-reference.yaml) (`checkpoint.*`),
 [Training Loop](training.md), [Data Pipeline](data_pipeline.md).
 
 ## What is saved

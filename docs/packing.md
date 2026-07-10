@@ -3,7 +3,7 @@
 Packing turns variable-length documents into fixed training sequences and
 applies boundary-related loss masking.
 
-Related: [Data Pipeline](data_pipeline.md), [Config Reference](config-reference.md)
+Related: [Data Pipeline](data_pipeline.md), [Config Reference](config-reference.yaml)
 (`data.packing_*`, `data.mask_boundary_loss`, `data.train_on_eos`).
 
 ## Packing modes

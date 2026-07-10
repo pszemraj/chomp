@@ -51,7 +51,7 @@ experiment suites can be tracked in named subdirectories there.
 
 ## Documentation
 
-- [Config Reference](docs/config-reference.md): field/type/default reference
+- [Config Reference](docs/config-reference.yaml): annotated, copyable field/type/default reference
 - [Training](docs/training.md): train step behavior, generation, and metrics
 - [Data Pipeline](docs/data_pipeline.md): stream-to-batch path and eval-set construction
 - [Packing](docs/packing.md): packing strategy and boundary-masking semantics

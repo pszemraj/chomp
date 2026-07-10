@@ -3,7 +3,7 @@
 Optimizer behavior in the training harness, with emphasis on Muon support and
 recent sweep results.
 
-Related: [Config Reference](config-reference.md) (`optim.*`),
+Related: [Config Reference](config-reference.yaml) (`optim.*`),
 [Training Loop](training.md).
 
 ## Supported optimizers

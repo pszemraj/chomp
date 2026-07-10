@@ -2,7 +2,7 @@
 
 Streaming data path, eval-set construction, and the fixed-shape batch contract.
 
-Related: [Config Reference](config-reference.md) (`data.*`),
+Related: [Config Reference](config-reference.yaml) (`data.*`),
 [Packing and Boundary Semantics](packing.md), [Training Loop](training.md).
 
 ## Overview
@@ -46,7 +46,7 @@ to `[B, T]` views.
 
 When using `hf`, chomp resolves tokenizer-dependent model settings
 (`model.vocab_size`, special token IDs) before training starts.
-Tokenizer knobs are defined in [Config Reference](config-reference.md) under
+Tokenizer knobs are defined in [Config Reference](config-reference.yaml) under
 `data.tokenizer.*`.
 
 chomp saves a tokenizer snapshot under `run_dir/tokenizer` and will prefer that

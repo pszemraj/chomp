@@ -2,7 +2,7 @@
 
 Training step behavior and metrics written to `metrics.jsonl`.
 
-Related: [Config Reference](config-reference.md),
+Related: [Config Reference](config-reference.yaml),
 [Optimization and Optimizers](optimization.md), [Data Pipeline](data_pipeline.md),
 [Packing and Boundary Semantics](packing.md), [Checkpointing and Resume](checkpointing.md).
 
@@ -23,7 +23,7 @@ boundary masks.
 The train loop treats `adamw` and `muon` as one optimizer step per outer
 iteration. Muon parameter partitioning, `optim.muon.*` behavior, and
 sweep-backed defaults live in [Optimization and Optimizers](optimization.md).
-For exact knob definitions, see [Config Reference](config-reference.md) (`optim.*`).
+For exact knob definitions, see [Config Reference](config-reference.yaml) (`optim.*`).
 
 ## Determinism
 
