@@ -1850,9 +1850,6 @@ def _run_impl(
                 mw.write(row)
                 if wandb_run is not None:
                     with contextlib.suppress(Exception):
-                        wandb_run.summary["crashed"] = True
-                        wandb_run.summary["crash_type"] = crash_type
-                        wandb_run.summary["crash_reason"] = crash_reason
                         wandb_run.log(
                             {
                                 "crash": True,

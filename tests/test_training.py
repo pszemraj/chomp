@@ -26,7 +26,6 @@ from chomp.ckpt import (
     default_ckpt_dir,
     make_manager,
     restore_at_step,
-    restore_latest,
     restore_params_only,
     save,
     validate_checkpoint_steps,
@@ -205,8 +204,8 @@ def test_async_checkpoint_roundtrip(
 
     abstract_state = abstractify_tree(state)
     data_it_restore = build_train_iterator(cfg)
-    step, restored, _meta = restore_latest(
-        mgr, abstract_train_state=abstract_state, data_iter=data_it_restore
+    step, restored, _meta = restore_at_step(
+        mgr, step=1, abstract_train_state=abstract_state, data_iter=data_it_restore
     )
     assert step == 1
     assert tree_allclose(restored.params, state.params, rtol=0.0, atol=0.0)
@@ -319,8 +318,8 @@ def test_checkpoint_data_state_roundtrip(
     expected = next(data_it)
     data_it_restore = build_train_iterator(cfg, tokenizer=tokenizer)
     abstract_state = abstractify_tree(state)
-    step, _restored, _meta = restore_latest(
-        mgr, abstract_train_state=abstract_state, data_iter=data_it_restore
+    step, _restored, _meta = restore_at_step(
+        mgr, step=2, abstract_train_state=abstract_state, data_iter=data_it_restore
     )
     assert step == 2
     restored_batch = next(data_it_restore)
@@ -515,8 +514,10 @@ def test_checkpoint_restore_allows_forward(
             async_save=cfg.checkpoint.async_save,
         )
     )
-    step, state, _meta = restore_latest(
-        manager, abstract_train_state=abstract_state, data_iter=data_it
+    latest = manager.latest_step()
+    assert latest is not None
+    step, state, _meta = restore_at_step(
+        manager, step=int(latest), abstract_train_state=abstract_state, data_iter=data_it
     )
     assert step >= 1
 

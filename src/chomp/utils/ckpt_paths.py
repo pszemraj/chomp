@@ -23,24 +23,18 @@ def _is_step_dir(path: Path) -> bool:
     return path.is_dir() and (path / "train_state").exists()
 
 
-def _list_step_dirs(root: Path) -> list[Path]:
-    """List numeric step directories under a checkpoint root.
-
-    :param Path root: Checkpoint root directory.
-    :return list[Path]: Sorted list of numeric step directories.
-    """
-    steps = [p for p in root.iterdir() if p.is_dir() and p.name.isdigit()]
-    steps.sort(key=lambda p: int(p.name))
-    return steps
-
-
 def _latest_step_dir(root: Path) -> Path | None:
     """Return the latest step dir with train_state, if any.
 
     :param Path root: Checkpoint root directory.
     :return Path | None: Latest step directory or None if not found.
     """
-    for step_dir in reversed(_list_step_dirs(root)):
+    step_dirs = sorted(
+        (path for path in root.iterdir() if path.is_dir() and path.name.isdigit()),
+        key=lambda path: int(path.name),
+        reverse=True,
+    )
+    for step_dir in step_dirs:
         if _is_step_dir(step_dir):
             return step_dir
     return None

@@ -354,37 +354,6 @@ def save(
         )
 
 
-def restore_latest(
-    manager: ocp.CheckpointManager,
-    *,
-    abstract_train_state: Any,
-    data_iter: Any,
-) -> tuple[int, Any, dict[str, Any] | None]:
-    """Restore latest checkpoint.
-
-    Notes:
-    - `abstract_train_state` should be a tree of ShapeDtypeStruct matching TrainState.
-    - `data_state` is restored via Grain's checkpoint handler.
-
-    :param ocp.CheckpointManager manager: Orbax checkpoint manager.
-    :param Any abstract_train_state: ShapeDtypeStruct tree for restoration target.
-    :param Any data_iter: Data iterator to restore via Grain's handler.
-    :raises FileNotFoundError: If no checkpoints exist.
-    :return tuple: (step, train_state, meta).
-    """
-
-    latest = manager.latest_step()
-    if latest is None:
-        raise FileNotFoundError(f"No checkpoints found in {manager.directory}")
-
-    return _restore_step(
-        manager,
-        step=int(latest),
-        abstract_train_state=abstract_train_state,
-        data_iter=data_iter,
-    )
-
-
 def restore_at_step(
     manager: ocp.CheckpointManager,
     *,
