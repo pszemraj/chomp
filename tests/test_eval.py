@@ -23,8 +23,8 @@ from chomp.config import (
 )
 from chomp.data import (
     build_eval_iterator,
-    build_generation_text_stream,
     build_tokenizer,
+    load_generation_prompt_tokens,
     load_or_create_eval_tokens,
 )
 from chomp.train import run
@@ -503,12 +503,14 @@ def test_null_eval_split_wires_complementary_content_partitions(
     cfg = replace(cfg, data=replace(cfg.data, hf_eval_split=None, shuffle=True, seed=0))
     tok = build_tokenizer(cfg)
     tokens = load_or_create_eval_tokens(cfg, tokenizer=tok)
-    _ = build_generation_text_stream(cfg)
+    prompts = load_generation_prompt_tokens(cfg, tokenizer=tok, max_samples=2)
 
     assert tokens == [tok.encode("train-0"), tok.encode("train-1")]
+    assert len(prompts) == 2
     assert len(seen_specs) == 2
     assert seen_specs[0].content_partition == "eval"
     assert seen_specs[1].content_partition == "train"
+    assert seen_specs[1].shuffle is False
     assert seen_specs[0].seed == cfg.data.seed
     assert seen_specs[0].shuffle_buffer_size == cfg.data.shuffle_buffer_size
     assert seen_specs[0].shuffle_buffer_bytes == cfg.data.shuffle_buffer_bytes

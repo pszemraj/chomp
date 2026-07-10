@@ -862,9 +862,9 @@ train:
   # Required: no.
   # Valid: >= 0; zero disables periodic generation.
   # Use: exact global-step sample interval for non-dry Megalodon runs; set 0 if samples are unwanted.
-  # It uses an independent training-split stream and does not affect optimization. Generation stream
-  # and RNG state are not checkpointed, so they restart on resume. Startup/exhaustion failures disable
-  # sampling; individual generation failures warn and training continues.
+  # It samples from a bounded pool of up to 16 unshuffled training-split documents and does not affect
+  # optimization. The prompt RNG is not checkpointed, so prompt selection restarts on resume. Prompt
+  # loading failures disable sampling; individual generation failures warn and training continues.
   generate_every: 5000
 
   # Key: train.generate_input_len

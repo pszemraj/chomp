@@ -63,9 +63,9 @@ from chomp.config import (
 )
 from chomp.data import (
     build_eval_iterator,
-    build_generation_text_stream,
     build_train_iterator,
     data_fingerprint,
+    load_generation_prompt_tokens,
     load_or_create_eval_tokens,
     load_tokenizer_snapshot,
     prepare_tokenizer_and_config,
@@ -271,19 +271,19 @@ def _setup_run_dir_and_tokenizer(
     Path,
     list[list[int]] | None,
     GenerationSettings | None,
-    Any | None,
+    list[list[int]] | None,
     jax.Array | None,
     random.Random | None,
 ]:
-    """Prepare run directory, tokenizer snapshot, eval tokens, and generation stream.
+    """Prepare run artifacts, cached eval tokens, and generation prompts.
 
     :param Config cfg: Training configuration.
     :param str | None config_path: Optional config path for run_dir bookkeeping.
     :param bool allow_existing: Whether to reuse an existing run directory.
     :param bool dry_run: If True, skip heavy data/generation setup.
-    :return tuple[Config, Any, Path, Path, list[list[int]] | None, GenerationSettings | None, Any | None, jax.Array | None, random.Random | None]:
+    :return tuple[Config, Any, Path, Path, list[list[int]] | None, GenerationSettings | None, list[list[int]] | None, jax.Array | None, random.Random | None]:
         Updated config, tokenizer, run/metrics paths, optional deferred eval
-        tokens, generation settings, stream, key, and RNG.
+        tokens, generation settings, prompt pool, key, and RNG.
     """
     tokenizer = None
     if allow_existing and cfg.logging.run_dir is not None:
@@ -323,7 +323,7 @@ def _setup_run_dir_and_tokenizer(
         )
 
     gen_settings: GenerationSettings | None = None
-    gen_stream = None
+    gen_prompts = None
     gen_key = None
     gen_rng = None
     if not dry_run:
@@ -336,11 +336,13 @@ def _setup_run_dir_and_tokenizer(
             gen_settings = None
         if gen_settings is not None:
             try:
-                gen_stream = build_generation_text_stream(cfg, seed_offset=1)
+                gen_prompts = load_generation_prompt_tokens(cfg, tokenizer=tokenizer)
+                if not gen_prompts:
+                    raise RuntimeError("generation prompt source produced no documents")
                 gen_key = jax.random.PRNGKey(cfg.train.seed + 1234)
                 gen_rng = random.Random(cfg.train.seed + 5678)
             except Exception as exc:
-                logger.warning("Failed to initialize generation stream: %s", exc)
+                logger.warning("Failed to initialize generation prompts: %s", exc)
                 gen_settings = None
 
     return (
@@ -350,7 +352,7 @@ def _setup_run_dir_and_tokenizer(
         metrics_path,
         eval_tokens,
         gen_settings,
-        gen_stream,
+        gen_prompts,
         gen_key,
         gen_rng,
     )
@@ -1321,7 +1323,7 @@ def _run_impl(
         metrics_path,
         eval_tokens,
         gen_settings,
-        gen_stream,
+        gen_prompts,
         gen_key,
         gen_rng,
     ) = _setup_run_dir_and_tokenizer(
@@ -1389,7 +1391,6 @@ def _run_impl(
     except BaseException:
         _close_manager_after_failure(manager, phase="training setup")
         _close_iterator_after_failure(data_it, label="training data iterator", phase="setup")
-        _close_iterator_after_failure(gen_stream, label="generation stream", phase="setup")
         raise
 
     if dry_run:
@@ -1578,20 +1579,10 @@ def _run_impl(
         :param int step: Current training step.
         :param Any params: Model parameters.
         """
-        nonlocal gen_key, gen_rng, gen_settings, gen_stream
-        if gen_settings is None or gen_stream is None or gen_rng is None:
+        nonlocal gen_key, gen_settings
+        if gen_settings is None or not gen_prompts or gen_rng is None:
             return
-        try:
-            item = next(gen_stream)
-        except StopIteration:
-            logger.warning("Generation stream exhausted; disabling generation.")
-            _close_iterator(gen_stream, label="generation stream")
-            gen_settings = None
-            gen_stream = None
-            return
-
-        text = item if isinstance(item, str) else str(item)
-        tokens = tokenizer.encode(text)
+        tokens = gen_prompts[gen_rng.randrange(len(gen_prompts))]
         prompt_tokens = _select_prompt_tokens(
             tokens,
             input_len=gen_settings.input_len,
@@ -1641,9 +1632,6 @@ def _run_impl(
         _close_manager_after_failure(manager, phase="telemetry setup")
         _close_iterator_after_failure(
             data_it, label="training data iterator", phase="telemetry setup"
-        )
-        _close_iterator_after_failure(
-            gen_stream, label="generation stream", phase="telemetry setup"
         )
         raise
     exit_code = 0
@@ -1779,7 +1767,7 @@ def _run_impl(
 
                     if (
                         gen_settings is not None
-                        and gen_stream is not None
+                        and gen_prompts
                         and (step_i % gen_settings.every) == 0
                     ):
                         _run_generation_sample(step_i, state.params)
@@ -1937,15 +1925,11 @@ def _run_impl(
                 logger.exception("Closing the checkpoint manager failed")
                 finalization_errors.append(exc)
 
-        for iterator, label in (
-            (data_it, "training data iterator"),
-            (gen_stream, "generation stream"),
-        ):
-            try:
-                _close_iterator(iterator, label=label)
-            except Exception as exc:
-                logger.exception("Closing %s failed", label)
-                finalization_errors.append(exc)
+        try:
+            _close_iterator(data_it, label="training data iterator")
+        except Exception as exc:
+            logger.exception("Closing training data iterator failed")
+            finalization_errors.append(exc)
 
         # Checkpoint or iterator finalization failures fail the run (raise
         # below), so W&B's exit code must agree. Finish telemetry only after

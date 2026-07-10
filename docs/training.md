@@ -103,9 +103,10 @@ transfer happens per batch each eval, so no device memory is held between evals.
 ## Generation samples
 
 If `train.generate_every > 0`, chomp periodically samples a prompt from a
-separate stream of the training split and runs `megalodon_jax.generate`,
-printing both the prompt and generated continuation to the console (Rich panels
-when enabled).
+bounded pool of up to 16 unshuffled training-split documents and runs
+`megalodon_jax.generate`, printing both the prompt and generated continuation
+to the console (Rich panels when enabled). The pool avoids retaining a second
+production-sized document-shuffle window during training.
 
 Default behaviors (when the `generate_*` fields are `null`):
 

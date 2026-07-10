@@ -760,17 +760,28 @@ def _build_backend_text_stream(cfg: Config, *, seed_offset: int = 0) -> TextStre
     raise ValueError(f"Unknown data.backend: {cfg.data.backend!r}")
 
 
-def build_generation_text_stream(cfg: Config, *, seed_offset: int = 1) -> TextStream:
-    """Build a text stream for periodic generation prompts.
+def load_generation_prompt_tokens(
+    cfg: Config, *, tokenizer: Tokenizer, max_samples: int = 16
+) -> list[list[int]]:
+    """Load a small bounded prompt pool without a document-shuffle buffer.
 
-    Uses the training split but with a seed offset so sampling stays
-    independent from the training iterator.
+    Periodic generation is diagnostic and not checkpointed. Reading a bounded,
+    unshuffled pool avoids retaining a second production-sized HF shuffle
+    window for the lifetime of the run.
 
     :param Config cfg: Training configuration.
-    :param int seed_offset: Offset added to the dataset shuffle seed.
-    :return TextStream: Streaming text iterator.
+    :param Tokenizer tokenizer: Tokenizer for prompt documents.
+    :param int max_samples: Maximum prompt documents to retain.
+    :return list[list[int]]: Tokenized training-source prompts.
     """
-    return _build_backend_text_stream(cfg, seed_offset=seed_offset)
+    if max_samples <= 0:
+        return []
+    prompt_cfg = replace(
+        cfg,
+        data=replace(cfg.data, shuffle=False, repeat=False),
+    )
+    texts = _collect_texts(_build_backend_text_stream(prompt_cfg), max_samples)
+    return [tokenizer.encode(text) for text in texts]
 
 
 def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None) -> dict[str, Any]:
