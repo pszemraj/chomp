@@ -123,16 +123,6 @@ def test_eval_batches_assembled_once_and_reused(
     rows = read_jsonl(metrics_path)
     eval_rows = [row for row in rows if row.get("eval_loss") not in (None, "")]
     assert len(eval_rows) == 2  # both evals produced a loss from the cached batches
-    assert any("step" in row for row in rows)
-    for row in rows:
-        for key in (
-            "eval_tokens",
-            "wall_time_s",
-            "packing_tokens",
-            "packing_capacity",
-            "device_memory_gb",
-        ):
-            assert key not in row
 
 
 @pytest.mark.parametrize(

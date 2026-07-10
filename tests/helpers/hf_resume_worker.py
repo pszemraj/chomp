@@ -62,10 +62,11 @@ def main() -> None:
     stream = HFStreamingTextStream(_spec())
 
     if mode == "prepare":
-        _ = [next(stream) for _ in range(23)]
+        consumed = [next(stream) for _ in range(23)]
         with state_path.open("wb") as handle:
             pickle.dump(stream.get_state(), handle)
         continuation = [next(stream) for _ in range(41)]
+        assert len(set(consumed + continuation)) == len(consumed + continuation)
     elif mode == "resume":
         with state_path.open("rb") as handle:
             state = pickle.load(handle)

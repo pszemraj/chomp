@@ -1046,41 +1046,6 @@ def test_hf_close_honors_remote_parquet_shutdown_grace(
         next(stream)
 
 
-def test_real_hf_iterable_shuffled_state_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Owned document shuffle must resume exactly over a real HF iterable."""
-    import datasets
-
-    def _items() -> Any:
-        """Yield identifiable local documents through the real HF state machinery."""
-        for index in range(101):
-            yield {"text": f"document-{index:03d}"}
-
-    def _load_dataset(
-        dataset: str,
-        *,
-        name: str,
-        split: str,
-        streaming: bool,
-        revision: str | None,
-    ) -> Any:
-        _ = (dataset, name, split, streaming, revision)
-        return datasets.IterableDataset.from_generator(_items)
-
-    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
-    spec = _hf_stream_spec(shuffle=True, shuffle_buffer_size=17, seed=29)
-    stream = HFStreamingTextStream(spec)
-    consumed = [next(stream) for _ in range(23)]
-    state = stream.get_state()
-    expected = [next(stream) for _ in range(41)]
-
-    resumed = HFStreamingTextStream(spec)
-    resumed.set_state(state)
-    actual = [next(resumed) for _ in range(41)]
-
-    assert actual == expected
-    assert len(set(consumed + expected)) == len(consumed + expected)
-
-
 def test_real_hf_iterable_resume_is_exact_across_fresh_processes(tmp_path: Path) -> None:
     """Serialized real-HF state should reproduce continuation in a new interpreter."""
     worker = Path(__file__).parent / "helpers" / "hf_resume_worker.py"
