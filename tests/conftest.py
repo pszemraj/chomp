@@ -39,7 +39,7 @@ def patch_hf_load_dataset(monkeypatch: pytest.MonkeyPatch) -> Callable[..., dict
 
     The returned function accepts either a list of items (served for every
     split) or a mapping of split -> items; extra kwargs are forwarded to
-    FakeHFIterable (on_shuffle, fail_at, record). It returns a dict whose
+    FakeHFIterable (fail_at, record). It returns a dict whose
     "builds" key counts loader invocations.
     """
     import datasets
@@ -51,9 +51,9 @@ def patch_hf_load_dataset(monkeypatch: pytest.MonkeyPatch) -> Callable[..., dict
         calls = {"builds": 0}
 
         def _load_dataset(
-            dataset: str, *, name: str, split: str, streaming: bool
+            dataset: str, *, name: str, split: str, streaming: bool, revision: str | None
         ) -> FakeHFIterable:
-            _ = (dataset, name, streaming)
+            _ = (dataset, name, streaming, revision)
             calls["builds"] += 1
             data = items[split] if isinstance(items, dict) else items
             return FakeHFIterable(items=data, **fake_kwargs)

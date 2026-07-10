@@ -1,9 +1,8 @@
 """Hugging Face streaming dataset wrapper.
 
-This module exists because HF streaming is *almost* a perfect fit for pretraining,
-but you need a little engineering around it:
-- deterministic(ish) shuffling via `.shuffle(buffer_size, seed)`
-- resumability via `state_dict()` / `load_state_dict()`
+This module adds the state that pretraining needs around HF streaming:
+- deterministic, resume-safe fixed-window document shuffling
+- resumability via the source dataset's `state_dict()` / `load_state_dict()`
 - network hiccup resistance (retry + rebuild-from-last-state)
 
 We start with Zyphra/Zyda-2's `sample-100BT` config because it has a common schema
@@ -26,6 +25,38 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_UINT64_MASK = 2**64 - 1
+_SPLITMIX_INCREMENT = 0x9E3779B97F4A7C15
+
+
+def _splitmix64(value: int) -> int:
+    """Mix one unsigned 64-bit value deterministically.
+
+    :param int value: Integer state to mix.
+    :return int: Mixed unsigned 64-bit value.
+    """
+    value = (int(value) + _SPLITMIX_INCREMENT) & _UINT64_MASK
+    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & _UINT64_MASK
+    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & _UINT64_MASK
+    return (value ^ (value >> 31)) & _UINT64_MASK
+
+
+def _shuffle_window(items: list[str], *, seed: int, epoch: int, window_index: int) -> None:
+    """Shuffle a document window with an implementation-owned permutation.
+
+    :param list[str] items: Text documents to shuffle in place.
+    :param int seed: Configured base shuffle seed.
+    :param int epoch: Source epoch number.
+    :param int window_index: Zero-based window number within the epoch.
+    """
+    state = _splitmix64(seed)
+    state ^= _splitmix64(epoch)
+    state ^= _splitmix64(window_index)
+    for index in range(len(items) - 1, 0, -1):
+        state = _splitmix64(state)
+        swap_index = state % (index + 1)
+        items[index], items[swap_index] = items[swap_index], items[index]
+
 
 @dataclass(frozen=True)
 class HFStreamSpec:
@@ -35,6 +66,7 @@ class HFStreamSpec:
     name: str
     split: str
     text_key: str
+    revision: str | None
     shuffle: bool
     shuffle_buffer_size: int
     seed: int
@@ -52,10 +84,16 @@ class HFStreamingTextStream:
       - `__next__` yielding `str`
       - `get_state()` / `set_state()` for checkpointing
 
-    **Correct restore ordering** (important):
-      1) rebuild dataset for epoch
-      2) load_state_dict
-      3) create iterator (`iter(ds)`)
+    HF's own ``IterableDataset.shuffle()`` does not serialize documents still
+    resident in its read-ahead buffer. This wrapper therefore keeps the HF
+    source unshuffled and owns fixed-window document mixing. A shuffled
+    checkpoint stores the source state at the beginning of the current window,
+    its deterministic window index, and the output cursor. Restore replays the
+    source window and reconstructs the same permutation without storing the
+    documents themselves.
+
+    Correct source restore ordering is rebuild dataset, load state, then create
+    its iterator.
 
     We have an explicit test for this ordering (see the HF state roundtrip
     test in tests/test_data_pipeline.py).
@@ -72,6 +110,10 @@ class HFStreamingTextStream:
         self._it: Iterator[dict[str, Any]]
         self._n_since_state = 0
         self._last_state: dict[str, Any] | None = None
+        self._window: list[str] = []
+        self._window_cursor = 0
+        self._window_index = 0
+        self._window_parent_state: dict[str, Any] | None = None
         self._build()
 
     def _load_ds_for_epoch(self, epoch: int) -> datasets.IterableDataset:
@@ -87,16 +129,12 @@ class HFStreamingTextStream:
             name=self._spec.name,
             split=self._spec.split,
             streaming=True,
+            revision=self._spec.revision,
         )
 
         # Keep only the text column (smaller item dicts, less accidental schema drift).
         ds = ds.select_columns([self._spec.text_key])
 
-        if self._spec.shuffle:
-            ds = ds.shuffle(
-                seed=int(self._spec.seed) + int(epoch),
-                buffer_size=int(self._spec.shuffle_buffer_size),
-            )
         return ds
 
     def _build(self) -> None:
@@ -105,18 +143,22 @@ class HFStreamingTextStream:
         self._it = iter(self._ds)
         self._n_since_state = 0
         self._last_state = None
+        self._window = []
+        self._window_cursor = 0
+        self._window_index = 0
+        self._window_parent_state = None
 
     def __iter__(self) -> HFStreamingTextStream:
         return self
 
     def _record_state(self) -> None:
-        """Cache state_dict periodically for retry recovery."""
+        """Cache compact stream state periodically for retry recovery."""
         self._n_since_state += 1
         if self._n_since_state < self._spec.state_update_interval:
             return
         self._n_since_state = 0
         try:
-            self._last_state = self._ds.state_dict()  # type: ignore[attr-defined]
+            self._last_state = self.get_state()
         except Exception:
             logger.warning(
                 "HF stream state_dict() failed during periodic caching; "
@@ -130,9 +172,7 @@ class HFStreamingTextStream:
         if self._last_state is None:
             return
         try:
-            self._ds = self._load_ds_for_epoch(self._epoch)
-            self._ds.load_state_dict(self._last_state)  # type: ignore[attr-defined]
-            self._it = iter(self._ds)
+            self.set_state(self._last_state)
             logger.info("HF stream rebuilt from last cached state after failure.")
         except Exception:
             # Fall back to sleeping and retrying next() on current iterator.
@@ -143,8 +183,22 @@ class HFStreamingTextStream:
             )
             return
 
-    def _next_item(self) -> str:
-        """Fetch and validate the next text item.
+    def _source_state(self) -> dict[str, Any]:
+        """Capture the unshuffled HF source state.
+
+        :raises RuntimeError: If the source cannot produce checkpoint state.
+        :return dict[str, Any]: Source iterator state.
+        """
+        try:
+            return self._ds.state_dict()  # type: ignore[attr-defined]
+        except Exception as exc:
+            raise RuntimeError(
+                "HF streaming dataset failed to produce state_dict(); refusing "
+                "to write a checkpoint whose data stream cannot resume exactly."
+            ) from exc
+
+    def _read_text(self) -> str:
+        """Read and validate one document from the HF source.
 
         :return str: Text payload from the dataset item.
         """
@@ -154,8 +208,71 @@ class HFStreamingTextStream:
                 f"HF item missing text key {self._spec.text_key!r}. Keys: {sorted(item.keys())}"
             )
         text = item[self._spec.text_key]
-        if not isinstance(text, str):
-            text = str(text)
+        return text if isinstance(text, str) else str(text)
+
+    def _shuffle_checkpoint(self, *, parent_state: dict[str, Any]) -> dict[str, Any]:
+        """Build compact state for the current shuffled document window.
+
+        :param dict[str, Any] parent_state: Source state at the window start.
+        :return dict[str, Any]: Resume state without buffered documents.
+        """
+        return {
+            "epoch": int(self._epoch),
+            "shuffle_state": {
+                "window_index": int(self._window_index),
+                "cursor": int(self._window_cursor),
+                "parent_state": parent_state,
+            },
+        }
+
+    def _fill_shuffle_window(self) -> None:
+        """Read and deterministically permute the next source document window."""
+        parent_state = self._source_state()
+        self._window_parent_state = parent_state
+        self._window = []
+        self._window_cursor = 0
+
+        # A network failure can occur only while the source window is being
+        # filled. Cache its start unconditionally so retry reconstruction
+        # cannot lose a partially read buffer or replay emitted documents.
+        self._last_state = self._shuffle_checkpoint(parent_state=parent_state)
+
+        for _ in range(int(self._spec.shuffle_buffer_size)):
+            try:
+                self._window.append(self._read_text())
+            except StopIteration:
+                break
+        if not self._window:
+            raise StopIteration
+        _shuffle_window(
+            self._window,
+            seed=int(self._spec.seed),
+            epoch=int(self._epoch),
+            window_index=int(self._window_index),
+        )
+
+    def _next_shuffled_text(self) -> str:
+        """Return the next document from the owned shuffle window.
+
+        :return str: Shuffled text document.
+        """
+        if self._window and self._window_cursor >= len(self._window):
+            self._window_index += 1
+            self._window = []
+            self._window_cursor = 0
+            self._window_parent_state = None
+        if not self._window:
+            self._fill_shuffle_window()
+        text = self._window[self._window_cursor]
+        self._window_cursor += 1
+        return text
+
+    def _next_item(self) -> str:
+        """Fetch and validate the next text item.
+
+        :return str: Text payload from the dataset item.
+        """
+        text = self._next_shuffled_text() if self._spec.shuffle else self._read_text()
         self._record_state()
         return text
 
@@ -201,52 +318,71 @@ class HFStreamingTextStream:
             Better to fail the save than write a checkpoint that silently
             cannot resume exactly.
         """
-        try:
-            hf_state = self._ds.state_dict()  # type: ignore[attr-defined]
-        except Exception as e:
-            raise RuntimeError(
-                "HF streaming dataset failed to produce state_dict(); refusing "
-                "to write a checkpoint whose data stream cannot resume exactly."
-            ) from e
+        if not self._spec.shuffle:
+            return {"epoch": int(self._epoch), "hf_state": self._source_state()}
 
-        return {
-            "epoch": int(self._epoch),
-            "hf_state": hf_state,
-        }
+        parent_state = self._window_parent_state
+        if parent_state is None:
+            parent_state = self._source_state()
+        return self._shuffle_checkpoint(parent_state=parent_state)
 
     def set_state(self, state: dict[str, Any]) -> None:
         """Restore stream state from a checkpoint.
 
         :param dict[str, Any] state: State dict from get_state().
-        :raises RuntimeError: If ``hf_state`` is missing. Every checkpoint
-            written by this module has a non-None ``hf_state`` (get_state()
-            fails loud if it can't capture one); a missing value means the
-            checkpoint predates exact HF stream capture or is corrupt, and
-            only an approximate epoch/seed rebuild is possible — refuse
-            rather than resume silently wrong.
+        :raises RuntimeError: If required source or shuffle replay state is
+            missing or invalid.
         :raises Exception: If load_state_dict fails (better to crash than silently reset).
         """
         epoch = int(state["epoch"])
-        hf_state = state.get("hf_state")
         self._epoch = epoch
-
-        if hf_state is None:
-            raise RuntimeError(
-                "Checkpoint is missing hf_state for the HF streaming dataset; "
-                "refusing to approximate resume by rebuilding from epoch/seed. "
-                "This checkpoint predates exact HF stream capture (or is "
-                "corrupt) and exact resume is impossible."
-            )
-
-        # Correct ordering:
-        # 1) rebuild dataset
-        # 2) load_state_dict (crash on failure — never silently restart from zero)
-        # 3) iter(ds)
         self._ds = self._load_ds_for_epoch(self._epoch)
-        self._ds.load_state_dict(hf_state)  # type: ignore[attr-defined]
-        self._it = iter(self._ds)
+
+        if not self._spec.shuffle:
+            hf_state = state.get("hf_state")
+            if hf_state is None:
+                raise RuntimeError(
+                    "Checkpoint is missing hf_state for the HF streaming dataset; "
+                    "refusing to approximate resume by rebuilding from epoch/seed."
+                )
+            self._ds.load_state_dict(hf_state)  # type: ignore[attr-defined]
+            self._it = iter(self._ds)
+            self._window = []
+            self._window_cursor = 0
+            self._window_index = 0
+            self._window_parent_state = None
+        else:
+            shuffle_state = state.get("shuffle_state")
+            if not isinstance(shuffle_state, dict):
+                raise RuntimeError(
+                    "Checkpoint is missing shuffle_state for the resume-safe HF "
+                    "document shuffle; exact resume is impossible."
+                )
+            parent_state = shuffle_state.get("parent_state")
+            if not isinstance(parent_state, dict):
+                raise RuntimeError("HF shuffle_state is missing its parent_state.")
+            window_index = int(shuffle_state.get("window_index", -1))
+            cursor = int(shuffle_state.get("cursor", -1))
+            if window_index < 0 or cursor < 0:
+                raise RuntimeError(
+                    "HF shuffle_state has a negative window_index or cursor; checkpoint is corrupt."
+                )
+            self._ds.load_state_dict(parent_state)  # type: ignore[attr-defined]
+            self._it = iter(self._ds)
+            self._window_index = window_index
+            self._window = []
+            self._window_cursor = 0
+            self._window_parent_state = parent_state
+            self._fill_shuffle_window()
+            if cursor > len(self._window):
+                raise RuntimeError(
+                    "HF shuffle_state cursor exceeds the reconstructed window length "
+                    f"({cursor} > {len(self._window)}); checkpoint or source is incompatible."
+                )
+            self._window_cursor = cursor
+
         self._n_since_state = 0
-        self._last_state = hf_state
+        self._last_state = self.get_state()
 
 
 class LocalTextStream:

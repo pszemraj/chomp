@@ -143,7 +143,7 @@ Guidance:
   documents spanning many `seq_len` windows.
 - Long-document corpora: `sequential` + `window_shuffle_windows` (default) +
   a large `shuffle_buffer_size` (e.g. `200_000`). The document-level shuffle
-  buffer fights source/domain/shard-order homogeneity of the stream; the
+  window fights source/domain/shard-order homogeneity of the stream; the
   window shuffle fights within-document, adjacent-window homogeneity. They
   are complementary; neither replaces the other.
 - `bin`/`multipack` mainly improve utilization on short-document mixes

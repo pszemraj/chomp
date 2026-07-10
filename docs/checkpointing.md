@@ -64,7 +64,8 @@ Missing or invalid `tokens_seen` metadata is also rejected so cumulative token
 accounting resumes exactly.
 Hard failures include:
 
-- data source identity (`hf_dataset`, `hf_name`, `split`, `text_key`)
+- data source identity (`hf_dataset`, `hf_name`, `split`, `hf_revision`, `text_key`)
+- data-pipeline implementation schema version
 - stream-order and termination semantics (`shuffle`, `shuffle_buffer_size`,
   `repeat`, `window_shuffle_windows`, its effective seed, and `grain_prefetch`)
 - tokenizer settings and vocab rounding

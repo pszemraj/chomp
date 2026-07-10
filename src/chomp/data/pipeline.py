@@ -41,6 +41,8 @@ from .grain import effective_window_shuffle_seed
 from .hf import HFStreamingTextStream, HFStreamSpec, LocalTextStream
 from .pack import BinPacker, MultipackPacker, TokenPacker
 
+DATA_PIPELINE_SCHEMA_VERSION = 1
+
 
 class Tokenizer(Protocol):
     """Protocol for tokenizers that convert text to token ids."""
@@ -277,6 +279,7 @@ def _build_hf_stream(
         name=cfg.data.hf_name,
         split=split,
         text_key=cfg.data.text_key,
+        revision=cfg.data.hf_revision,
         shuffle=cfg.data.shuffle,
         shuffle_buffer_size=cfg.data.shuffle_buffer_size,
         seed=base_seed + int(seed_offset),
@@ -768,6 +771,7 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
             "dataset": d.hf_dataset,
             "name": d.hf_name,
             "split": d.hf_split,
+            "revision": d.hf_revision,
             "text_key": d.text_key,
             "shuffle": d.shuffle,
             "shuffle_buffer_size": d.shuffle_buffer_size,
@@ -837,6 +841,7 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
     }
 
     return {
+        "data_pipeline_schema_version": DATA_PIPELINE_SCHEMA_VERSION,
         "source": src,
         "tokenizer": tok,
         "packing": packing,

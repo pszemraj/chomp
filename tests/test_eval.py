@@ -298,11 +298,12 @@ def test_eval_split_selection_and_fallback(monkeypatch: pytest.MonkeyPatch) -> N
             name: str,
             split: str,
             streaming: bool,
+            revision: str | None,
             _requested_splits: list[str] = requested_splits,
             _missing: dict[str, bool] = missing,
             _datasets: dict[str, list[dict[str, Any]]] = datasets,
         ) -> FakeHFIterable:
-            _ = (dataset, name, streaming)
+            _ = (dataset, name, streaming, revision)
             _requested_splits.append(split)
             if _missing.get(split, False):
                 raise FileNotFoundError(f"missing split: {split}")
@@ -473,23 +474,16 @@ def test_eval_tokens_cache_rejects_corruption(tmp_path: Path) -> None:
 def test_eval_train_fallback_uses_train_seed_when_data_seed_is_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Train fallback should shuffle with train.seed when data.seed=0."""
-    seen: dict[str, int] = {}
-    train_items = [{"text": "train-a"}, {"text": "train-b"}]
+    """Train-split eval should pass train.seed to the owned shuffler when data.seed=0."""
+    train_items = [{"text": f"train-{index}"} for index in range(9)]
+    seen_specs: list[Any] = []
 
-    def _capture_shuffle(seed: int, buffer_size: int) -> None:
-        seen["seed"] = int(seed)
-        seen["buffer_size"] = int(buffer_size)
+    def _capture_stream(spec: Any) -> Any:
+        """Capture the resolved stream spec without shadowing shuffle behavior."""
+        seen_specs.append(spec)
+        return iter(item["text"] for item in train_items)
 
-    def _load_dataset(dataset: str, *, name: str, split: str, streaming: bool) -> FakeHFIterable:
-        _ = (dataset, name, streaming)
-        if split == "train":
-            return FakeHFIterable(items=train_items, on_shuffle=_capture_shuffle)
-        raise FileNotFoundError("no validation split")
-
-    import datasets as hf_datasets
-
-    monkeypatch.setattr(hf_datasets, "load_dataset", _load_dataset)
+    monkeypatch.setattr("chomp.data.pipeline.HFStreamingTextStream", _capture_stream)
 
     cfg = _base_cfg()
     cfg = replace(
@@ -500,6 +494,7 @@ def test_eval_train_fallback_uses_train_seed_when_data_seed_is_default(
     tok = build_tokenizer(cfg)
     tokens = load_or_create_eval_texts(cfg, tokenizer=tok)
 
-    assert tokens == [tok.encode("train-a"), tok.encode("train-b")]
-    assert seen["seed"] == 69
-    assert seen["buffer_size"] == cfg.data.shuffle_buffer_size
+    assert tokens == [tok.encode("train-0"), tok.encode("train-1")]
+    assert len(seen_specs) == 1
+    assert seen_specs[0].seed == 69
+    assert seen_specs[0].shuffle_buffer_size == cfg.data.shuffle_buffer_size

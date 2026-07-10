@@ -1,15 +1,12 @@
 """Reusable fake Hugging Face streaming iterables for tests.
 
-WARNING: this is a shadow copy of the `datasets` streaming API surface that
-chomp.data.hf consumes (select_columns / shuffle / state_dict /
-load_state_dict / iteration). The real library is never exercised by the
-test suite, so if upstream changes this surface the fakes keep passing while
-the real integration breaks — update this file together with data/hf.py.
+This intentionally small fake covers ordinary unit tests. Resume-safe document
+shuffle coverage uses a real local ``datasets.IterableDataset`` so the source
+state implementation cannot silently drift away from this stand-in.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,25 +15,17 @@ from typing import Any
 class FakeHFIterable:
     """In-memory stand-in for a streaming IterableDataset.
 
-    Optional hooks: ``on_shuffle`` records shuffle(seed, buffer_size) calls;
-    ``fail_at``/``record`` inject a single transient failure at an item index
+    Optional ``fail_at``/``record`` hooks inject a single transient failure at an item index
     (``record`` tracks load_state_dict calls and failure consumption).
     """
 
     items: list[dict[str, Any]]
     index: int = 0
-    on_shuffle: Callable[[int, int], None] | None = None
     fail_at: int | None = None
     record: dict[str, Any] | None = None
 
     def select_columns(self, _columns: list[str]) -> FakeHFIterable:
         """Return self (columns not used in tests)."""
-        return self
-
-    def shuffle(self, *, seed: int, buffer_size: int) -> FakeHFIterable:
-        """Return self and optionally record shuffle parameters."""
-        if self.on_shuffle is not None:
-            self.on_shuffle(int(seed), int(buffer_size))
         return self
 
     def state_dict(self) -> dict[str, Any]:

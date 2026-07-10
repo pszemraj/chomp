@@ -226,6 +226,7 @@ class DataConfig:
     hf_dataset: str = "Zyphra/Zyda-2"
     hf_name: str = "sample-100BT"
     hf_split: str = "train"
+    hf_revision: str | None = None
     # Preferred eval split; fallback to train if missing.
     # Default None: derive eval texts from the train split.
     hf_eval_split: str | None = None
@@ -1018,6 +1019,8 @@ def _validate_data(cfg: Config) -> None:
             _vfail("data.hf_name must be non-empty when data.backend='hf' (use named configs)")
         if not cfg.data.hf_split:
             _vfail("data.hf_split must be non-empty when data.backend='hf'")
+        if cfg.data.hf_revision is not None and not cfg.data.hf_revision.strip():
+            _vfail("data.hf_revision must be null or a non-empty revision when data.backend='hf'")
         if cfg.data.hf_eval_split is not None:
             if not isinstance(cfg.data.hf_eval_split, str):
                 _vfail(

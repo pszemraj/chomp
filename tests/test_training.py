@@ -1344,7 +1344,7 @@ def test_resume_compat_device_put_drift(tmp_path: Path, caplog: LogCaptureFixtur
 
 
 def test_resume_compat_rejects_hf_shuffle_buffer_drift(tmp_path: Path) -> None:
-    """shuffle_buffer_size drives HF shuffled document order — hard error."""
+    """shuffle_buffer_size drives owned document-shuffle order — hard error."""
     cfg = _base_cfg(tmp_path / "run_sbuf")
     cfg = replace(
         cfg,
@@ -1362,6 +1362,37 @@ def test_resume_compat_rejects_hf_shuffle_buffer_drift(tmp_path: Path) -> None:
     drifted = replace(cfg, data=replace(cfg.data, shuffle_buffer_size=200_000))
     with pytest.raises(RuntimeError, match="shuffle_buffer_size"):
         check_resume_compat(drifted, meta)
+
+
+def test_resume_compat_rejects_hf_revision_drift(tmp_path: Path) -> None:
+    """A changed HF revision can change source contents and shard order."""
+    cfg = _base_cfg(tmp_path / "run_revision")
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_split="train",
+            hf_revision="abc123",
+        ),
+    )
+    meta = _checkpoint_record(cfg).to_dict()
+
+    drifted = replace(cfg, data=replace(cfg.data, hf_revision="def456"))
+    with pytest.raises(RuntimeError, match="hf_revision"):
+        check_resume_compat(drifted, meta)
+
+
+def test_resume_compat_rejects_pipeline_schema_drift(tmp_path: Path) -> None:
+    """Implementation-version drift must fail even when config fields match."""
+    cfg = _base_cfg(tmp_path / "run_schema")
+    meta = _checkpoint_record(cfg).to_dict()
+    del meta["data_fingerprint"]["data_pipeline_schema_version"]
+
+    with pytest.raises(RuntimeError, match="data_pipeline_schema_version"):
+        check_resume_compat(cfg, meta)
 
 
 def test_resume_compat_rejects_local_window_shuffle_seed_drift(tmp_path: Path) -> None:

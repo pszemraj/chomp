@@ -31,6 +31,7 @@ data:
   hf_dataset: Zyphra/Zyda-2
   hf_name: sample-100BT
   hf_split: train
+  hf_revision: bc389cd62969a275b2e3c3e11db826ba1918411a
   hf_eval_split: validation
   text_key: text
   packing_mode: bin

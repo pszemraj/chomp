@@ -398,6 +398,13 @@ def check_resume_compat(
 
     cur_fp = data_fingerprint(cfg, tokenizer_snapshot_hash=tokenizer_snapshot_hash)
 
+    _cmp(
+        "data_pipeline_schema_version",
+        cur_fp.get("data_pipeline_schema_version"),
+        meta_fp.get("data_pipeline_schema_version"),
+        severity="error",
+    )
+
     # Data source comparisons.
     src_prev = meta_fp.get("source") or {}
     src_cur = cur_fp.get("source") or {}
@@ -407,10 +414,16 @@ def check_resume_compat(
         _cmp("data.hf_dataset", src_cur.get("dataset"), src_prev.get("dataset"), severity="error")
         _cmp("data.hf_name", src_cur.get("name"), src_prev.get("name"), severity="error")
         _cmp("data.hf_split", src_cur.get("split"), src_prev.get("split"), severity="error")
+        _cmp(
+            "data.hf_revision",
+            src_cur.get("revision"),
+            src_prev.get("revision"),
+            severity="error",
+        )
         _cmp("data.text_key", src_cur.get("text_key"), src_prev.get("text_key"), severity="error")
         _cmp("data.shuffle", src_cur.get("shuffle"), src_prev.get("shuffle"), severity="error")
         _cmp("data.seed", src_cur.get("seed"), src_prev.get("seed"), severity="error")
-        # Hard error: buffer size drives HF's shuffled document order, so a
+        # Hard error: buffer size drives the owned document-shuffle order, so a
         # mismatch makes the resumed stream diverge from the continuous run.
         _cmp(
             "data.shuffle_buffer_size",

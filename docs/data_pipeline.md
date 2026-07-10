@@ -66,8 +66,9 @@ are decorrelated from raw stream order; see
 
 ## Grain iterator
 
-The Grain pipeline is composed as: sequence producer (text stream + packer)
--> optional packed-window shuffle -> batch assembly -> optional prefetch.
+The training pipeline is composed as: unshuffled HF source -> optional
+chomp-owned document-window shuffle -> tokenizer/packer -> optional Grain
+packed-window shuffle -> batch assembly -> optional prefetch.
 The wrapper provides:
 
 - deterministic iteration
@@ -93,11 +94,20 @@ When stats are enabled (`data.device_put: false`), iterator stats include:
 ## Iterator state and resume
 
 The iterator exposes checkpointable state containing the source cursor (HF or
-local text), packer buffered/ready queues, window-shuffle replay progress, and
-enabled prefetch-wrapper state.
+local text), document- and packed-window shuffle replay progress, packer
+buffered/ready queues, and enabled prefetch-wrapper state.
 
 This is checkpointed alongside the model so resume does not rely on `.skip()`
 or re-streaming.
+
+Hugging Face's streaming shuffle omits the contents of its read-ahead buffer
+from `state_dict()`, so chomp never calls it in the checkpointed path. Chomp
+instead permutes disjoint document windows. State stores the unshuffled source
+position at the current window's start, its index, and the output cursor; a
+restore reconstructs the window deterministically without inflating the
+checkpoint with document text. Set `data.hf_revision` to an immutable commit
+for production runs, because exact iterator replay cannot compensate for an
+upstream repository changing beneath the same name.
 
 ### Transient stream recovery (best-effort)
 
