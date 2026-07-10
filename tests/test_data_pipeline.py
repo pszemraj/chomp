@@ -893,6 +893,33 @@ def test_hf_retry_rebuild_roundtrip(patch_hf_load_dataset: Callable[..., dict[st
     assert record.get("last_loaded") == {"index": 1}
 
 
+def test_hf_shuffled_retry_reconstructs_failed_window_exactly(
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+) -> None:
+    """A transient refill failure must neither skip nor replay shuffled documents."""
+    items = [{"text": f"document-{index:03d}"} for index in range(40)]
+    spec = _hf_stream_spec(
+        shuffle=True,
+        shuffle_buffer_size=8,
+        seed=17,
+        max_retries=1,
+        state_update_interval=1000,
+    )
+
+    patch_hf_load_dataset(items)
+    expected_stream = HFStreamingTextStream(spec)
+    expected = [next(expected_stream) for _ in range(24)]
+
+    record: dict[str, Any] = {"fail_consumed": False}
+    calls = patch_hf_load_dataset(items, fail_at=10, record=record)
+    recovered_stream = HFStreamingTextStream(spec)
+    actual = [next(recovered_stream) for _ in range(24)]
+
+    assert actual == expected
+    assert calls["builds"] >= 2
+    assert record.get("last_loaded") == {"index": 8}
+
+
 def _batch_arrays(batch: Batch) -> tuple:
     """Extract arrays from batch for comparison.
 
