@@ -1,6 +1,6 @@
-variables:
-  seq_len: 2048
-  chunk_size: 512
+# Recommended 100k-step recipe: globally shuffled 50% FinePDFs-Edu,
+# 30% DCLM, and 20% FineWeb-Edu. The immutable dataset revision and Chomp's
+# owned shuffle layers make checkpoint resume reproduce the same data order.
 
 model:
   backend: megalodon
@@ -12,7 +12,7 @@ model:
   value_dim: 768
   ffn_hidden_dim: 3072
   cema_ndim: 16
-  chunk_size: $variables.chunk_size
+  chunk_size: 512
   dropout: 0.0
   attention_dropout: 0.0
   hidden_dropout: 0.0
@@ -28,22 +28,24 @@ model:
 
 data:
   backend: hf
-  hf_dataset: Zyphra/Zyda-2
-  hf_name: sample-100BT
+  hf_dataset: HuggingFaceFW/finepdfs_edu_50BT-dclm_30BT-fineweb_edu_20BT-shuffled
+  hf_name: default
   hf_split: train
-  hf_revision: bc389cd62969a275b2e3c3e11db826ba1918411a
+  hf_revision: 8904a95879538b9e7db6cf8636b2cd16b5e86a76
   hf_eval_split: null
+  hf_eval_holdout_fraction: 0.01
   text_key: text
+  seed: 0
   packing_mode: bin
   packing_buffer_docs: 256
   packing_max_docs_per_bin: null
+  packing_strict_segments: true
   grain_prefetch: 2
   mask_boundary_loss: true
   train_on_eos: true
   max_eval_samples: 1000
   shuffle: true
-  # Large doc buffer + packed-window shuffle: validated loss-stability recipe
-  # (see docs/packing.md, window shuffling).
+  # Both limits apply; the 512 MiB cap bounds memory for long PDF documents.
   shuffle_buffer_size: 200000
   shuffle_buffer_bytes: 536870912
   window_shuffle_tokens: 8388608
@@ -57,29 +59,42 @@ data:
     auto_set_special_tokens: true
     add_bos: false
     add_eos: true
+    # Preserve complete documents; truncation telemetry remains available if capped later.
+    max_doc_tokens: null
 
 train:
   seed: 0
-  steps: 10000
+  # 100,000 * 2 * 8 * 2,048 = 3.277B packed token slots before masking.
+  steps: 100000
   batch_size: 2
-  seq_len: $variables.seq_len
+  seq_len: 2048
   grad_accum: 8
   jit: true
   deterministic: false
   allow_cpu: false
   log_every: 25
   eval_every: 2500
+  generate_every: 5000
+  generate_input_len: 1024
+  generate_max_tokens: 528
 
 optim:
+  name: muon
   lr: 3.0e-4
   weight_decay: 0.01
   grad_clip_norm: 1.0
-  warmup_steps: 100
-  min_lr_ratio: 0.0
+  warmup_steps: 1000
+  decay_steps: null
+  min_lr_ratio: 0.1
+  muon:
+    lr_scale: 100.0
+    consistent_rms: null
+    allow_all_2d: false
+    allow_tied_embed: false
 
 checkpoint:
   enabled: true
-  save_every: 5000
+  save_every: 2500
   max_to_keep: 3
   async_save: true
 
@@ -96,8 +111,8 @@ logging:
     entity: null
     run_name: null
     mode: online
-    tags: ["zyda2", "100m", "seq{$variables.seq_len}", "chunk{$variables.chunk_size}"]
+    tags: ["smoldata-mix", "100m", "100k", "seq2048", "chunk512", "muon"]
 
 debug:
   nan_check: true
-  check_device_every: 10
+  check_device_every: 100

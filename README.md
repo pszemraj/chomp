@@ -25,11 +25,11 @@ chomp train configs/debug_smoke.yaml
 # Dry run (validate config, execute one step, exit)
 chomp train configs/debug_smoke.yaml --dry-run
 
-# Train with checkpoints
-chomp train configs/zyda2_100m_2048.yaml --run-dir runs/my_run
+# Train the recommended 100k-step recipe with checkpoints
+chomp train configs/smoldata_mix_100m_2048.yaml --run-dir runs/my_run
 
 # Resume
-chomp train configs/zyda2_100m_2048.yaml --run-dir runs/my_run --resume latest
+chomp train configs/smoldata_mix_100m_2048.yaml --run-dir runs/my_run --resume latest
 
 # Generate
 chomp generate runs/my_run --prompt "Hello world" --max-tokens 64
@@ -37,11 +37,17 @@ chomp generate runs/my_run --prompt "Hello world" --max-tokens 64
 
 ## Configurations
 
-| Config                         | Description                |
-| ------------------------------ | -------------------------- |
-| [`configs/debug_smoke.yaml`](configs/debug_smoke.yaml)     | Tiny local-text smoke test |
-| [`configs/zyda2_100m_2048.yaml`](configs/zyda2_100m_2048.yaml) | 100M Megalodon on Zyda-2   |
-| [`configs/zyda2_200m_2048.yaml`](configs/zyda2_200m_2048.yaml) | 200M Megalodon on Zyda-2   |
+| Config | Description |
+| ------ | ----------- |
+| [`configs/debug_smoke.yaml`](configs/debug_smoke.yaml) | Tiny local-text smoke test |
+| [`configs/smoldata_mix_100m_2048.yaml`](configs/smoldata_mix_100m_2048.yaml) | Recommended 100M, 100k-step mixed-corpus run |
+| [`configs/zyda2_100m_2048.yaml`](configs/zyda2_100m_2048.yaml) | 100M, 100k-step Zyda-2 comparison |
+| [`configs/zyda2_200m_2048.yaml`](configs/zyda2_200m_2048.yaml) | 200M, 100k-step Zyda-2 capacity run |
+
+The 100k recipes use 2 sequences per microbatch, 8 accumulation slices, and
+2,048-token rows: about 3.28 billion packed token slots before boundary and
+padding masks. The Smol-Data recipe is the default choice for source diversity;
+the Zyda-2 recipes provide a stable corpus comparison and a larger model option.
 
 Personal top-level configs in `configs/custom/` are gitignored. Reusable
 experiment suites can be tracked in named subdirectories there.

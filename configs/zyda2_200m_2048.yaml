@@ -29,10 +29,13 @@ data:
   hf_split: train
   hf_revision: bc389cd62969a275b2e3c3e11db826ba1918411a
   hf_eval_split: null
+  hf_eval_holdout_fraction: 0.01
   text_key: text
+  seed: 0
   packing_mode: bin
   packing_buffer_docs: 256
   packing_max_docs_per_bin: null
+  packing_strict_segments: true
   grain_prefetch: 2
   mask_boundary_loss: true
   train_on_eos: true
@@ -53,10 +56,12 @@ data:
     auto_set_special_tokens: true
     add_bos: false
     add_eos: true
+    max_doc_tokens: null
 
 train:
   seed: 0
-  steps: 10000
+  # About 3.28B packed token slots before boundary and padding masks.
+  steps: 100000
   batch_size: 2
   seq_len: 2048
   grad_accum: 8
@@ -65,6 +70,9 @@ train:
   allow_cpu: false
   log_every: 25
   eval_every: 2500
+  generate_every: 5000
+  generate_input_len: 1024
+  generate_max_tokens: 1040
 
 optim:
   name: muon
@@ -72,13 +80,17 @@ optim:
   weight_decay: 0.01
   grad_clip_norm: 1.0
   warmup_steps: 1000
+  decay_steps: null
   min_lr_ratio: 0.1
   muon:
     lr_scale: 100.0
+    consistent_rms: null
+    allow_all_2d: false
+    allow_tied_embed: false
 
 checkpoint:
   enabled: true
-  save_every: 5000
+  save_every: 2500
   max_to_keep: 3
   async_save: true
 
@@ -95,8 +107,8 @@ logging:
     entity: null
     run_name: null
     mode: online
-    tags: ["zyda2", "200m", "seq2048", "chunk1024", "default"]
+    tags: ["zyda2", "200m", "100k", "seq2048", "chunk1024", "muon"]
 
 debug:
   nan_check: true
-  check_device_every: 10
+  check_device_every: 100
