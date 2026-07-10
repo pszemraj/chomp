@@ -73,6 +73,8 @@ def _hf_stream_spec(**overrides: Any) -> HFStreamSpec:
         "shuffle_buffer_size": 8,
         "seed": 0,
         "repeat": False,
+        "content_partition": "all",
+        "eval_holdout_fraction": 0.01,
         "max_retries": 0,
         "retry_delay_sec": 0.0,
         "state_update_interval": 2,
@@ -1040,6 +1042,30 @@ def test_hf_shuffled_retry_reconstructs_failed_window_exactly(
     assert actual == expected
     assert calls["builds"] >= 2
     assert record.get("last_loaded") == {"index": 8}
+
+
+def test_hf_content_holdout_is_disjoint_complete_and_resumable(
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+) -> None:
+    """Hash partitioning assigns every content identity to exactly one side."""
+    texts = [f"document-{index:03d}" for index in range(200)] + ["document-000"]
+    patch_hf_load_dataset([{"text": text} for text in texts])
+    common = {"shuffle": False, "eval_holdout_fraction": 0.25}
+
+    train = list(HFStreamingTextStream(_hf_stream_spec(content_partition="train", **common)))
+    eval_ = list(HFStreamingTextStream(_hf_stream_spec(content_partition="eval", **common)))
+    assert train and eval_
+    assert set(train).isdisjoint(eval_)
+    assert set(train) | set(eval_) == set(texts)
+    assert (train.count("document-000"), eval_.count("document-000")) in {(2, 0), (0, 2)}
+
+    stream = HFStreamingTextStream(_hf_stream_spec(content_partition="train", **common))
+    _ = [next(stream) for _ in range(7)]
+    state = stream.get_state()
+    expected = [next(stream) for _ in range(12)]
+    restored = HFStreamingTextStream(_hf_stream_spec(content_partition="train", **common))
+    restored.set_state(state)
+    assert [next(restored) for _ in range(12)] == expected
 
 
 def _batch_arrays(batch: Batch) -> tuple:

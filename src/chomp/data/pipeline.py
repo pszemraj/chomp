@@ -38,10 +38,16 @@ from chomp.types import IGNORE_INDEX, Batch
 from chomp.utils.xla import deterministic_gpu_ops_setting
 
 from .grain import effective_window_shuffle_seed
-from .hf import HFStreamingTextStream, HFStreamSpec, LocalTextStream
+from .hf import (
+    CONTENT_HOLDOUT_SCHEMA_VERSION,
+    ContentPartition,
+    HFStreamingTextStream,
+    HFStreamSpec,
+    LocalTextStream,
+)
 from .pack import BinPacker, MultipackPacker, TokenPacker, _positions_from_segments
 
-DATA_PIPELINE_SCHEMA_VERSION = 4
+DATA_PIPELINE_SCHEMA_VERSION = 5
 
 
 class Tokenizer(Protocol):
@@ -248,7 +254,7 @@ def _build_hf_stream(
     split: str,
     repeat: bool,
     seed_offset: int = 0,
-    seed_override: int | None = None,
+    content_partition: ContentPartition = "all",
 ) -> HFStreamingTextStream:
     """Build an HF streaming text stream from config.
 
@@ -256,20 +262,25 @@ def _build_hf_stream(
     :param str split: Dataset split name.
     :param bool repeat: Whether to repeat the stream when exhausted.
     :param int seed_offset: Optional seed offset for independent streams.
-    :param int | None seed_override: Optional base shuffle seed override.
+    :param ContentPartition content_partition: All, training, or held-out documents.
     :return HFStreamingTextStream: Streaming text stream wrapper.
     """
-    base_seed = int(cfg.data.seed) if seed_override is None else int(seed_override)
     spec = HFStreamSpec(
         dataset=cfg.data.hf_dataset,
         name=cfg.data.hf_name,
         split=split,
         text_key=cfg.data.text_key,
         revision=cfg.data.hf_revision,
-        shuffle=cfg.data.shuffle,
+        # Hash selection already samples sparsely across the source. Filling a
+        # second document-shuffle window would scan roughly
+        # shuffle_buffer_size / holdout_fraction source documents before the
+        # first eval row, for no disjointness benefit.
+        shuffle=cfg.data.shuffle and content_partition != "eval",
         shuffle_buffer_size=cfg.data.shuffle_buffer_size,
-        seed=base_seed + int(seed_offset),
+        seed=int(cfg.data.seed) + int(seed_offset),
         repeat=repeat,
+        content_partition=content_partition,
+        eval_holdout_fraction=cfg.data.hf_eval_holdout_fraction,
         max_retries=cfg.data.max_retries,
         retry_delay_sec=cfg.data.retry_delay_sec,
         state_update_interval=cfg.data.state_update_interval,
@@ -505,6 +516,19 @@ def _tokenize_eval_texts(texts: list[str], tok: Tokenizer) -> list[list[int]]:
 _EVAL_TOKENS_FILENAME = "eval_tokens.json.gz"
 
 
+def _content_holdout_enabled(cfg: Config) -> bool:
+    """Return whether the HF training split is content-partitioned.
+
+    :param Config cfg: Training configuration.
+    :return bool: True when evaluation consumes a hash holdout from the train split.
+    """
+    return (
+        cfg.data.backend == "hf"
+        and cfg.data.hf_eval_split is None
+        and cfg.data.max_eval_samples > 0
+    )
+
+
 def _eval_source_split(cfg: Config) -> str:
     """Resolve the exact source selector used to build evaluation documents.
 
@@ -522,7 +546,7 @@ def _eval_cache_manifest(cfg: Config) -> dict[str, Any]:
     :param Config cfg: Training configuration.
     :return dict[str, Any]: Manifest of eval-identity config fields.
     """
-    return {
+    manifest: dict[str, Any] = {
         "backend": cfg.data.backend,
         "max_eval_samples": int(cfg.data.max_eval_samples),
         "hf_eval_split": cfg.data.hf_eval_split,
@@ -530,6 +554,25 @@ def _eval_cache_manifest(cfg: Config) -> dict[str, Any]:
         "hf_revision": cfg.data.hf_revision,
         "source_split": _eval_source_split(cfg),
     }
+    if cfg.data.backend == "hf":
+        manifest.update(
+            {
+                "hf_dataset": cfg.data.hf_dataset,
+                "hf_name": cfg.data.hf_name,
+                "text_key": cfg.data.text_key,
+            }
+        )
+    if _content_holdout_enabled(cfg):
+        manifest["content_holdout"] = {
+            "schema_version": CONTENT_HOLDOUT_SCHEMA_VERSION,
+            "fraction": cfg.data.hf_eval_holdout_fraction,
+        }
+    elif cfg.data.backend == "hf":
+        manifest["shuffle"] = cfg.data.shuffle
+        if cfg.data.shuffle:
+            manifest["shuffle_buffer_size"] = cfg.data.shuffle_buffer_size
+            manifest["seed"] = cfg.data.seed
+    return manifest
 
 
 def _eval_tokens_sha256(tokens: list[list[int]]) -> str:
@@ -642,17 +685,14 @@ def load_or_create_eval_texts(
 
     if cfg.data.backend == "hf":
         split = _eval_source_split(cfg)
-        seed_override = None
-        if split == cfg.data.hf_split and int(cfg.data.seed) == 0 and int(cfg.train.seed) != 0:
-            # Keep explicitly train-derived eval deterministic across runs by
-            # defaulting to train.seed when data.seed remains at its default 0.
-            seed_override = int(cfg.train.seed)
-            logger.info(
-                "Using train.seed=%d for train-split eval shuffle (data.seed=0).",
-                cfg.train.seed,
-            )
+        content_partition: ContentPartition = "eval" if _content_holdout_enabled(cfg) else "all"
         try:
-            stream = _build_hf_stream(cfg, split=split, repeat=False, seed_override=seed_override)
+            stream = _build_hf_stream(
+                cfg,
+                split=split,
+                repeat=False,
+                content_partition=content_partition,
+            )
             texts = _collect_texts(stream, max_samples)
         except Exception as exc:
             selection = (
@@ -660,8 +700,8 @@ def load_or_create_eval_texts(
             )
             raise RuntimeError(
                 f"Failed to collect evaluation documents from {selection}={split!r}. "
-                "Evaluation never falls back to another split after an error; set "
-                "data.hf_eval_split=null explicitly to evaluate on data.hf_split."
+                "Evaluation never falls back after an error. Use a valid explicit split, "
+                "or set data.hf_eval_split=null for a disjoint content-hash holdout."
             ) from exc
     elif cfg.data.backend == "local_text":
         texts = [cfg.data.local_text] * max_samples
@@ -692,11 +732,13 @@ def _build_backend_text_stream(cfg: Config, *, seed_offset: int = 0) -> TextStre
     :raises ValueError: If data.backend is unknown.
     """
     if cfg.data.backend == "hf":
+        content_partition: ContentPartition = "train" if _content_holdout_enabled(cfg) else "all"
         return _build_hf_stream(
             cfg,
             split=cfg.data.hf_split,
             repeat=cfg.data.repeat,
             seed_offset=seed_offset,
+            content_partition=content_partition,
         )
     if cfg.data.backend == "local_text":
         return LocalTextStream(text=cfg.data.local_text, repeat=cfg.data.repeat)
@@ -741,7 +783,11 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
             # terminates — a data-order/termination semantic, so it is part of
             # the resume identity for HF exactly as for local_text.
             "repeat": d.repeat,
+            "content_partition": "train" if _content_holdout_enabled(cfg) else "all",
         }
+        if _content_holdout_enabled(cfg):
+            src["content_holdout_schema_version"] = CONTENT_HOLDOUT_SCHEMA_VERSION
+            src["eval_holdout_fraction"] = d.hf_eval_holdout_fraction
     else:
         src = {
             "backend": "local_text",
@@ -800,6 +846,9 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
         "max_eval_samples": d.max_eval_samples,
         "hf_eval_split": d.hf_eval_split,
     }
+    if _content_holdout_enabled(cfg):
+        eval_cfg["content_holdout_schema_version"] = CONTENT_HOLDOUT_SCHEMA_VERSION
+        eval_cfg["hf_eval_holdout_fraction"] = d.hf_eval_holdout_fraction
 
     return {
         "data_pipeline_schema_version": DATA_PIPELINE_SCHEMA_VERSION,

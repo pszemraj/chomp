@@ -214,8 +214,9 @@ class DataConfig:
 
     where A=grad_accum, B=batch_size, T=seq_len.
 
-    Validation uses ``hf_eval_split`` when set; null explicitly selects
-    ``hf_split``. Collection errors never silently switch splits.
+    Validation uses ``hf_eval_split`` when set. When null, a deterministic
+    content-hash holdout is selected from ``hf_split`` and excluded from
+    training. Collection errors never silently switch splits.
     """
 
     backend: DatasetBackend = "hf"
@@ -226,8 +227,9 @@ class DataConfig:
     hf_name: str = "sample-100BT"
     hf_split: str = "train"
     hf_revision: str | None = None
-    # Evaluation split. Default None explicitly uses the training split.
+    # Evaluation split. None uses a disjoint content-hash holdout from hf_split.
     hf_eval_split: str | None = None
+    hf_eval_holdout_fraction: float = 0.01
     text_key: str = "text"
 
     shuffle: bool = True
@@ -235,12 +237,12 @@ class DataConfig:
     seed: int = 0
     repeat: bool = True
 
-    # Network resilience (best-effort; still expect rare failures)
+    # Network resilience with exact state restore + fast-forward recovery.
     max_retries: int = 3
     retry_delay_sec: float = 1.0
 
     # For retry: cache a last-known-good HF state dict every N examples.
-    # Smaller => more robust, but more overhead.
+    # Smaller => less reconstruction work, but more state-capture overhead.
     state_update_interval: int = 2_000
 
     # Debug-only local text source (exercises tokenize+pack path, not synthetic ids)
@@ -1028,6 +1030,16 @@ def _validate_data(cfg: Config) -> None:
                 _vfail(
                     "data.hf_eval_split must be null or a non-empty string when data.backend='hf'"
                 )
+            if cfg.data.max_eval_samples > 0 and cfg.data.hf_eval_split == cfg.data.hf_split:
+                _vfail(
+                    "data.hf_eval_split must differ from data.hf_split when evaluation is enabled; "
+                    "use null for a disjoint content-hash holdout"
+                )
+        if not 0.0 < cfg.data.hf_eval_holdout_fraction < 1.0:
+            _vfail(
+                "data.hf_eval_holdout_fraction must be between 0 and 1 exclusive, got "
+                f"{cfg.data.hf_eval_holdout_fraction}"
+            )
         if not cfg.data.text_key:
             _vfail("data.text_key must be non-empty")
         if cfg.data.shuffle and cfg.data.shuffle_buffer_size <= 0:

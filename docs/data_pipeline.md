@@ -136,12 +136,15 @@ also propagate and fail the run.
 chomp builds a fixed validation set when the run is created:
 
 - If `data.hf_eval_split` is set, it is authoritative. Any loading,
-  authentication, schema, decoding, or collection error fails startup.
+  authentication, schema, decoding, or collection error fails startup. It must
+  differ from `data.hf_split` while evaluation is enabled.
 - The selected split uses the configured `data.shuffle` behavior and contributes
   at most `data.max_eval_samples` examples.
-- Set `data.hf_eval_split: null` explicitly to evaluate on `data.hf_split`.
-- For train-split eval, if `data.seed` is left at `0` and `train.seed` is
-  non-zero, the shuffle seed defaults to `train.seed`.
+- With `data.hf_eval_split: null`, a stable BLAKE2 content hash reserves
+  `data.hf_eval_holdout_fraction` of identities for eval and removes them from
+  the training stream. Duplicate content always lands on the same side. The
+  sparse hash selection does not also fill a document-shuffle window; doing so
+  would multiply startup reads by roughly the inverse holdout fraction.
 - A positive `data.max_eval_samples` that yields no documents fails startup;
   use `0` to disable evaluation intentionally.
 
@@ -161,7 +164,7 @@ are not comparable. A rejected resume never persists its recollected tokens.
 
 At end of stream the `bin`/`multipack` packers flush their remaining pending
 documents into padded windows, so an eval doc set below the pack threshold
-still emits windows. If eval cannot fill even one complete `[A, B, T]` batch
-(too few packed windows for `grad_accum * batch_size` rows), or emits batches
-whose labels are entirely masked (zero valid loss tokens), training raises
-instead of silently emitting a null eval loss.
+still emits windows. Eval uses `A=1` and pads missing final rows independently
+of `train.grad_accum`. If it yields no usable window or emits batches whose
+labels are entirely masked (zero valid loss tokens), training raises instead
+of silently emitting a null eval loss.

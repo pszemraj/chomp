@@ -21,7 +21,12 @@ from chomp.config import (
     TokenizerConfig,
     TrainConfig,
 )
-from chomp.data import build_eval_iterator, build_tokenizer, load_or_create_eval_texts
+from chomp.data import (
+    build_eval_iterator,
+    build_generation_text_stream,
+    build_tokenizer,
+    load_or_create_eval_texts,
+)
 from chomp.train import run
 from tests.helpers.hf_fakes import FakeHFIterable
 from tests.helpers.io import read_jsonl
@@ -262,55 +267,25 @@ def _base_cfg() -> Config:
 
 
 def test_eval_split_selection(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An explicit eval split is authoritative; null explicitly selects train."""
-    cases: list[tuple[str | None, dict[str, list[dict[str, Any]]], str, list[str]]] = [
-        (
-            "validation",
-            {
-                "validation": [{"text": "val-a"}, {"text": "val-b"}],
-                "train": [{"text": "train-a"}, {"text": "train-b"}],
-            },
-            "validation",
-            ["val-a", "val-b"],
-        ),
-        (
-            None,
-            {"train": [{"text": "train-a"}, {"text": "train-b"}]},
-            "train",
-            ["train-a", "train-b"],
-        ),
-    ]
+    """An explicit eval split is authoritative and never opens train."""
+    requested_splits: list[str] = []
 
-    for hf_eval_split, datasets, expected_split, expected_texts in cases:
-        requested_splits: list[str] = []
+    def _load_dataset(
+        dataset: str, *, name: str, split: str, streaming: bool, revision: str | None
+    ) -> FakeHFIterable:
+        _ = (dataset, name, streaming, revision)
+        requested_splits.append(split)
+        return FakeHFIterable(items=[{"text": "val-a"}, {"text": "val-b"}])
 
-        def _load_dataset(
-            dataset: str,
-            *,
-            name: str,
-            split: str,
-            streaming: bool,
-            revision: str | None,
-            _requested_splits: list[str] = requested_splits,
-            _datasets: dict[str, list[dict[str, Any]]] = datasets,
-        ) -> FakeHFIterable:
-            _ = (dataset, name, streaming, revision)
-            _requested_splits.append(split)
-            if split not in _datasets:
-                raise ValueError(f"unknown split: {split}")
-            return FakeHFIterable(items=_datasets[split])
+    import datasets as hf_datasets
 
-        import datasets as hf_datasets
+    monkeypatch.setattr(hf_datasets, "load_dataset", _load_dataset)
+    cfg = _base_cfg()
+    tok = build_tokenizer(cfg)
+    tokens = load_or_create_eval_texts(cfg, tokenizer=tok)
 
-        monkeypatch.setattr(hf_datasets, "load_dataset", _load_dataset)
-
-        cfg = _base_cfg()
-        cfg = replace(cfg, data=replace(cfg.data, hf_eval_split=hf_eval_split))
-        tok = build_tokenizer(cfg)
-        tokens = load_or_create_eval_texts(cfg, tokenizer=tok)
-
-        assert tokens == [tok.encode(text) for text in expected_texts]
-        assert requested_splits == [expected_split]
+    assert tokens == [tok.encode("val-a"), tok.encode("val-b")]
+    assert requested_splits == ["validation"]
 
 
 @pytest.mark.parametrize(
@@ -530,10 +505,10 @@ def test_eval_tokens_cache_rejects_corruption(tmp_path: Path) -> None:
         load_or_create_eval_texts(cfg, tokenizer=tok, run_dir=tmp_path)
 
 
-def test_eval_train_fallback_uses_train_seed_when_data_seed_is_default(
+def test_null_eval_split_wires_complementary_content_partitions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Train-split eval should pass train.seed to the owned shuffler when data.seed=0."""
+    """Null eval split selects held-out content and excludes it from train prompts."""
     train_items = [{"text": f"train-{index}"} for index in range(9)]
     seen_specs: list[Any] = []
 
@@ -545,15 +520,14 @@ def test_eval_train_fallback_uses_train_seed_when_data_seed_is_default(
     monkeypatch.setattr("chomp.data.pipeline.HFStreamingTextStream", _capture_stream)
 
     cfg = _base_cfg()
-    cfg = replace(
-        cfg,
-        data=replace(cfg.data, hf_eval_split=None, shuffle=True, seed=0),
-        train=replace(cfg.train, seed=69),
-    )
+    cfg = replace(cfg, data=replace(cfg.data, hf_eval_split=None, shuffle=True, seed=0))
     tok = build_tokenizer(cfg)
     tokens = load_or_create_eval_texts(cfg, tokenizer=tok)
+    _ = build_generation_text_stream(cfg)
 
     assert tokens == [tok.encode("train-0"), tok.encode("train-1")]
-    assert len(seen_specs) == 1
-    assert seen_specs[0].seed == 69
+    assert len(seen_specs) == 2
+    assert seen_specs[0].content_partition == "eval"
+    assert seen_specs[1].content_partition == "train"
+    assert seen_specs[0].seed == cfg.data.seed
     assert seen_specs[0].shuffle_buffer_size == cfg.data.shuffle_buffer_size

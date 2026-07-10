@@ -409,14 +409,25 @@ data:
 
   # Key: data.hf_eval_split
   # Type: string | null
-  # Default: null, which derives evaluation examples from data.hf_split.
+  # Default: null, which creates a deterministic content-hash holdout from data.hf_split.
   # Required: no; ignored for local_text.
-  # Valid: null or a nonempty split name.
+  # Valid: null or a nonempty split name different from data.hf_split when max_eval_samples > 0.
   # Use: exact evaluation split. Any loading, authentication, schema, decoding, or collection error
-  # fails startup; there is no implicit fallback. Set null explicitly to evaluate on data.hf_split.
-  # With null, data.seed 0, and nonzero train.seed, train.seed controls eval document shuffling.
+  # fails startup; there is no implicit fallback. null assigns documents by stable content hash:
+  # held-out content feeds eval and is excluded from training, including duplicate copies.
   # Resume: this value is hard-compared even for local_text because it identifies the pinned eval set.
   hf_eval_split: null
+
+  # Key: data.hf_eval_holdout_fraction
+  # Type: number
+  # Default: 0.01 (1% of content identities).
+  # Required: no; used only for hf when hf_eval_split is null and max_eval_samples > 0.
+  # Valid: > 0 and < 1.
+  # Use: share of stable content hashes reserved exclusively for eval. 0.01 is recommended; lower
+  # values retain more training data but scan more source documents to collect max_eval_samples.
+  # Holdout collection does not apply document-window shuffle. Changing this changes training order.
+  # Resume: hard-compared when active; the hash-partition schema is also hard-gated.
+  hf_eval_holdout_fraction: 0.01
 
   # Key: data.text_key
   # Type: string
@@ -462,8 +473,8 @@ data:
   # Required: no.
   # Valid: true | false.
   # Use: repeats the training source after exhaustion. Keep true for step-based training; false
-  # stops early if a finite source ends before train.steps. If exhaustion consumes part of an
-  # incomplete A*B batch, the final checkpoint is skipped because data/train state is misaligned.
+  # stops early if a finite source ends before train.steps. A usable final window and missing batch
+  # rows are padded, trained, and saved before exact exhaustion is reported.
   repeat: true
 
   # Key: data.max_retries

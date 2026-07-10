@@ -14,11 +14,12 @@ Tokenization + packing happen elsewhere.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     import datasets
@@ -27,6 +28,23 @@ logger = logging.getLogger(__name__)
 
 _UINT64_MASK = 2**64 - 1
 _SPLITMIX_INCREMENT = 0x9E3779B97F4A7C15
+CONTENT_HOLDOUT_SCHEMA_VERSION = 1
+ContentPartition = Literal["all", "train", "eval"]
+
+
+def is_eval_holdout(text: str, *, fraction: float) -> bool:
+    """Return the stable content-hash holdout assignment for one document.
+
+    Identical content always lands on the same side, so duplicated documents
+    cannot leak between train and eval even when source row IDs are absent.
+
+    :param str text: Complete source document text.
+    :param float fraction: Eval share in the open interval (0, 1).
+    :return bool: True when the document belongs exclusively to evaluation.
+    """
+    digest = hashlib.blake2b(text.encode("utf-8"), digest_size=8, person=b"chomp-eval-v1").digest()
+    bucket = int.from_bytes(digest, "big")
+    return bucket < int(float(fraction) * (2**64))
 
 
 def _splitmix64(value: int) -> int:
@@ -71,6 +89,8 @@ class HFStreamSpec:
     shuffle_buffer_size: int
     seed: int
     repeat: bool
+    content_partition: ContentPartition
+    eval_holdout_fraction: float
 
     max_retries: int
     retry_delay_sec: float
@@ -226,13 +246,19 @@ class HFStreamingTextStream:
 
         :return str: Text payload from the dataset item.
         """
-        item = next(self._it)
-        if self._spec.text_key not in item:
-            raise KeyError(
-                f"HF item missing text key {self._spec.text_key!r}. Keys: {sorted(item.keys())}"
-            )
-        text = item[self._spec.text_key]
-        return text if isinstance(text, str) else str(text)
+        while True:
+            item = next(self._it)
+            if self._spec.text_key not in item:
+                raise KeyError(
+                    f"HF item missing text key {self._spec.text_key!r}. Keys: {sorted(item.keys())}"
+                )
+            value = item[self._spec.text_key]
+            text = value if isinstance(value, str) else str(value)
+            if self._spec.content_partition == "all":
+                return text
+            held_out = is_eval_holdout(text, fraction=self._spec.eval_holdout_fraction)
+            if (self._spec.content_partition == "eval") == held_out:
+                return text
 
     def _shuffle_checkpoint(self, *, parent_state: dict[str, Any]) -> dict[str, Any]:
         """Build compact state for the current shuffled document window.

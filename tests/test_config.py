@@ -503,13 +503,13 @@ def test_strict_packed_rejects_disabled_boundary_masking(mode: str) -> None:
 
 
 def test_hf_eval_split_allows_null() -> None:
-    """hf_eval_split=None should validate and explicitly select the training split."""
+    """hf_eval_split=None should validate as a disjoint content holdout."""
     cfg = _base_cfg()
     validate_config(replace(cfg, data=_hf_data()))
 
 
 def test_hf_eval_split_default_is_null() -> None:
-    """DataConfig should default hf_eval_split to None for train-only corpora."""
+    """DataConfig should default to content-holdout evaluation."""
     assert DataConfig().hf_eval_split is None
 
 
@@ -519,6 +519,22 @@ def test_hf_eval_split_rejects_non_string_types(bad_split: object) -> None:
     cfg = _base_cfg()
     with pytest.raises(ValueError, match="hf_eval_split"):
         validate_config(replace(cfg, data=_hf_data(hf_eval_split=bad_split)))
+
+
+def test_hf_eval_split_rejects_enabled_training_split() -> None:
+    """An eval_loss split cannot be the same split consumed by training."""
+    cfg = _base_cfg()
+    with pytest.raises(ValueError, match="must differ"):
+        validate_config(replace(cfg, data=_hf_data(hf_eval_split="train")))
+
+
+@pytest.mark.parametrize("fraction", [0.0, 1.0, -0.1, 1.1])
+def test_hf_eval_holdout_fraction_is_open_unit_interval(fraction: float) -> None:
+    """Content holdout fractions must leave nonempty probability mass on both sides."""
+    cfg = _base_cfg()
+    data = replace(_hf_data(), hf_eval_holdout_fraction=fraction)
+    with pytest.raises(ValueError, match="hf_eval_holdout_fraction"):
+        validate_config(replace(cfg, data=data))
 
 
 def test_muon_defaults_reflect_sweep_results() -> None:

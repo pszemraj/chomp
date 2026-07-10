@@ -458,6 +458,24 @@ def check_resume_compat(
         _cmp("data.text_key", src_cur.get("text_key"), src_prev.get("text_key"), severity="error")
         _cmp("data.shuffle", src_cur.get("shuffle"), src_prev.get("shuffle"), severity="error")
         _cmp("data.seed", src_cur.get("seed"), src_prev.get("seed"), severity="error")
+        _cmp(
+            "data.content_partition",
+            src_cur.get("content_partition"),
+            src_prev.get("content_partition"),
+            severity="error",
+        )
+        _cmp(
+            "data.content_holdout_schema_version",
+            src_cur.get("content_holdout_schema_version"),
+            src_prev.get("content_holdout_schema_version"),
+            severity="error",
+        )
+        _cmp(
+            "data.hf_eval_holdout_fraction",
+            src_cur.get("eval_holdout_fraction"),
+            src_prev.get("eval_holdout_fraction"),
+            severity="error",
+        )
         # Hard error: buffer size drives the owned document-shuffle order, so a
         # mismatch makes the resumed stream diverge from the continuous run.
         _cmp(
@@ -569,18 +587,8 @@ def check_resume_compat(
     # changing the eval set mid-run poisons every cross-run comparison.
     eval_prev = meta_fp.get("eval") or {}
     eval_cur = cur_fp.get("eval") or {}
-    _cmp(
-        "data.max_eval_samples",
-        eval_cur.get("max_eval_samples"),
-        eval_prev.get("max_eval_samples"),
-        severity="error",
-    )
-    _cmp(
-        "data.hf_eval_split",
-        eval_cur.get("hf_eval_split"),
-        eval_prev.get("hf_eval_split"),
-        severity="error",
-    )
+    for key in sorted(set(eval_prev) | set(eval_cur)):
+        _cmp(f"data.eval.{key}", eval_cur.get(key), eval_prev.get(key), severity="error")
 
     # Batch shape invariants.
     _cmp("train.seq_len", cur_fp.get("seq_len"), meta_fp.get("seq_len"), severity="error")
