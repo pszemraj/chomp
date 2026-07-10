@@ -76,11 +76,18 @@ def train(
     configure_blackwell_xla_env()
 
     # Deferred import: chomp.train triggers JAX init, must run after XLA env config
-    from chomp.train import run
+    from chomp.train import TrainingPreempted, run
     from chomp.utils.devices import validate_default_device
 
     # Fail fast on CPU unless explicitly allowed
     validate_default_device(allow_cpu=cfg.train.allow_cpu)
 
-    run_dir_path = run(cfg, config_path=config, resume=resume, dry_run=dry_run)  # type: ignore[arg-type]
+    try:
+        run_dir_path = run(  # type: ignore[arg-type]
+            cfg, config_path=config, resume=resume, dry_run=dry_run
+        )
+    except TrainingPreempted as exc:
+        click.echo(f"[chomp] run_dir: {exc.run_dir}")
+        click.echo(str(exc), err=True)
+        raise click.exceptions.Exit(exc.exit_code) from exc
     click.echo(f"[chomp] run_dir: {run_dir_path}")

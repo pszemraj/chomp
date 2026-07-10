@@ -29,7 +29,9 @@ import contextlib
 import logging
 import math
 import random
+import signal
 import sys
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -83,11 +85,91 @@ from chomp.model import (
 )
 from chomp.types import IGNORE_INDEX, Batch, TrainState
 from chomp.utils.devices import assert_batch_on_device
-from chomp.utils.io import MetricsWriter, add_file_logging, create_run_dir
+from chomp.utils.io import (
+    MetricsWriter,
+    RunDirectoryLock,
+    add_file_logging,
+    create_run_dir,
+    resolve_run_dir,
+)
 from chomp.utils.profiling import start_trace, step_annotation, stop_trace
 from chomp.utils.tree import abstractify_tree, param_count, path_to_str
 
 logger = logging.getLogger(__name__)
+
+
+class TrainingPreempted(RuntimeError):
+    """Training stopped cleanly after a scheduler/process signal."""
+
+    def __init__(self, *, run_dir: Path, signal_name: str, exit_code: int) -> None:
+        """Initialize a completed-preemption result.
+
+        :param Path run_dir: Run directory whose final checkpoint was closed.
+        :param str signal_name: Signal that requested the stop.
+        :param int exit_code: Explicit process status for CLI callers.
+        """
+        super().__init__(
+            f"{signal_name} preemption completed after finalizing run {run_dir} "
+            f"(exit status {exit_code})"
+        )
+        self.run_dir = run_dir
+        self.signal_name = signal_name
+        self.exit_code = int(exit_code)
+
+
+class _StopSignalState:
+    """Main-thread SIGTERM/SIGUSR1 bridge that never performs IO in a handler."""
+
+    def __init__(self) -> None:
+        """Initialize an unset stop request and empty handler restore map."""
+        self._event = threading.Event()
+        self._signum: int | None = None
+        self._previous: dict[int, Any] = {}
+
+    @property
+    def requested(self) -> bool:
+        """Whether a supported stop signal has arrived."""
+        return self._event.is_set()
+
+    @property
+    def reason(self) -> str:
+        """Return the recorded signal name, or a generic stop reason."""
+        if self._signum is None:
+            return "stop_requested"
+        try:
+            return signal.Signals(self._signum).name
+        except ValueError:
+            return f"signal_{self._signum}"
+
+    @property
+    def exit_code(self) -> int:
+        """Return a shell status that preserves the terminating signal."""
+        return 75 if self._signum is None else 128 + int(self._signum)
+
+    def _handle(self, signum: int, _frame: Any) -> None:
+        """Record a signal using operations safe for the Python handler.
+
+        :param int signum: Received signal number.
+        :param _frame: Interrupted Python frame, intentionally unused.
+        """
+        self._signum = int(signum)
+        self._event.set()
+
+    def __enter__(self) -> _StopSignalState:
+        if threading.current_thread() is not threading.main_thread():
+            return self
+        supported = [signal.SIGTERM]
+        if hasattr(signal, "SIGUSR1"):
+            supported.append(signal.SIGUSR1)
+        for signum in supported:
+            self._previous[int(signum)] = signal.getsignal(signum)
+            signal.signal(signum, self._handle)
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        for signum, previous in self._previous.items():
+            signal.signal(signum, previous)
+        self._previous.clear()
 
 
 def _count_tokens(labels: jax.Array, attention_mask: jax.Array) -> jax.Array:
@@ -1203,12 +1285,45 @@ def run(
     :param config_path: Optional path to the source YAML config file.
     :param resume: Resume mode - "none" (fresh), "latest", or specific step number.
     :param bool dry_run: If True, compile and run a single step, then exit early.
-    :raises RuntimeError: If resume requested but checkpointing is disabled.
+    :raises RuntimeError: If the run directory is active or resume setup is invalid.
+    :raises TrainingPreempted: After a signal-requested final checkpoint closes successfully.
     :return Path: Path to the run directory.
     """
 
     if dry_run and resume != "none":
         raise RuntimeError("dry_run does not support resume; use a fresh run.")
+
+    # Resolve first so fresh and resumed processes contend on the same stable
+    # sibling lock before create_run_dir or artifact setup can write anything.
+    run_dir = resolve_run_dir(cfg, config_path=config_path)
+    cfg = dc_replace(cfg, logging=dc_replace(cfg.logging, run_dir=str(run_dir)))
+    with _StopSignalState() as stop_request, RunDirectoryLock(run_dir):
+        return _run_impl(
+            cfg,
+            config_path=config_path,
+            resume=resume,
+            dry_run=dry_run,
+            stop_request=stop_request,
+        )
+
+
+def _run_impl(
+    cfg: Config,
+    *,
+    config_path: str | None,
+    resume: Literal["none", "latest"] | int,
+    dry_run: bool,
+    stop_request: _StopSignalState,
+) -> Path:
+    """Execute one run while its directory lock and signal guard are held.
+
+    :param Config cfg: Configuration with a resolved logging.run_dir.
+    :param config_path: Optional source YAML path.
+    :param resume: Resume selector.
+    :param bool dry_run: Whether to run only one compile/step smoke test.
+    :param _StopSignalState stop_request: Cooperative preemption state.
+    :return Path: Run directory.
+    """
 
     allow_existing = resume != "none"
 
@@ -1369,8 +1484,39 @@ def run(
     # `state`); the finally block re-validates them before the final save so
     # a non-finite step can never be persisted as "latest".
     metrics: dict[str, jax.Array] | None = None
+    preemption_reason: str | None = None
 
     eval_batches_cache: list[Batch] = []
+
+    def _record_stop_if_requested(mw: MetricsWriter) -> bool:
+        """Record a cooperative stop request at an aligned data boundary.
+
+        :param MetricsWriter mw: Active metrics writer.
+        :return bool: True when the training loop should stop.
+        """
+        nonlocal preemption_reason
+        if not stop_request.requested:
+            return False
+        if preemption_reason is None:
+            preemption_reason = stop_request.reason
+            row = {
+                "step": int(host_step),
+                "preemption_requested": True,
+                "preemption_signal": preemption_reason,
+                "tokens_seen": int(tokens_seen_count),
+                "wall_time_s": time.perf_counter() - t0,
+            }
+            mw.write(row)
+            if wandb_run is not None:
+                with contextlib.suppress(Exception):
+                    wandb_run.summary["preempted"] = True
+                    wandb_run.summary["preemption_signal"] = preemption_reason
+                    wandb_run.log(row, step=int(host_step))
+            print(
+                f"[chomp] {preemption_reason} received; stopping at aligned "
+                f"step {host_step} and writing the final checkpoint"
+            )
+        return True
 
     def _run_eval(params: Any) -> dict[str, Any]:
         """Run a full eval pass over the cached eval texts.
@@ -1505,6 +1651,8 @@ def run(
         with MetricsWriter(metrics_path) as mw:
             try:
                 for _ in tqdm(range(start_step, target_steps), desc="train", dynamic_ncols=True):
+                    if _record_stop_if_requested(mw):
+                        break
                     # Fetch batch (host) and (optionally) device_put
                     step_i = int(host_step) + 1
                     data_state_aligned = False
@@ -1554,6 +1702,9 @@ def run(
 
                     host_step = int(step_i)
                     data_state_aligned = True
+
+                    if _record_stop_if_requested(mw):
+                        break
 
                     should_eval = (
                         eval_step is not None and eval_every > 0 and (step_i % eval_every) == 0
@@ -1797,4 +1948,10 @@ def run(
                 f"checkpoint finalization failed: {ckpt_errors[0]}"
             ) from ckpt_errors[0]
 
+    if preemption_reason is not None:
+        raise TrainingPreempted(
+            run_dir=run_dir,
+            signal_name=preemption_reason,
+            exit_code=stop_request.exit_code,
+        )
     return run_dir

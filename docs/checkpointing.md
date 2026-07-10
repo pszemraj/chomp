@@ -50,6 +50,25 @@ When `debug.nan_check` is enabled, save steps force a metrics sync so the
 finite-loss/grad-norm check runs before the write. A non-finite step is then
 rejected even when the save cadence does not land on a logging step.
 
+## Run ownership and preemption
+
+Each resolved run directory has a nonblocking sibling lock held from before
+artifact setup until checkpoint-manager shutdown. A second fresh or resumed
+process targeting that run fails before it can write config, tokenizer, eval,
+metrics, manifest, or checkpoint artifacts. Lock files persist so every
+process contends on the same inode; the operating-system lock, not file
+existence, determines ownership.
+
+On `SIGTERM` or `SIGUSR1`, the main-thread handler records only a stop flag.
+The loop does no IO inside the signal handler: it finishes an optimizer step
+already in flight, stops at the next aligned model/data boundary, writes a
+`preemption_requested` metrics row with `preemption_signal`, forces the final
+checkpoint, and closes Orbax before exiting. A request received between
+steps stops before another batch is consumed. The Python API raises
+`TrainingPreempted` only after finalization; the CLI exits with `128 + signal`
+(143 for SIGTERM, 138 for SIGUSR1), so schedulers can distinguish a completed
+preemption from success or a training failure.
+
 ## Final checkpoint policy
 
 On exit (clean, crash, or Ctrl-C), a final checkpoint of the last completed

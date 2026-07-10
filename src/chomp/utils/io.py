@@ -14,8 +14,11 @@ Phase 3 addendum:
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import logging
+import os
+import socket
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -23,6 +26,79 @@ from typing import Any
 from chomp.config import Config, resolve_decay_horizon
 
 _NOISY_CONSOLE_PREFIXES = ("orbax", "jax", "jaxlib", "absl")
+
+
+def resolve_run_dir(cfg: Config, *, config_path: str | Path | None) -> Path:
+    """Resolve the run directory before any run-owned artifact is written.
+
+    :param Config cfg: Training configuration.
+    :param config_path: Optional source config path used in generated names.
+    :return Path: Explicit or timestamp-derived run directory.
+    """
+    if cfg.logging.run_dir is not None:
+        return Path(cfg.logging.run_dir)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = Path(config_path).stem if config_path is not None else "run"
+    return Path("runs") / cfg.logging.project / f"{stamp}_{name}"
+
+
+class RunDirectoryLock:
+    """Nonblocking process lock for all writes associated with one run directory."""
+
+    def __init__(self, run_dir: str | Path) -> None:
+        """Initialize a stable sibling lock path.
+
+        :param run_dir: Resolved run directory, which need not exist yet.
+        """
+        run_path = Path(run_dir)
+        self.path = run_path.parent / f".{run_path.name}.lock"
+        self._handle: Any | None = None
+
+    def acquire(self) -> None:
+        """Acquire the run lock without waiting.
+
+        :raises RuntimeError: If another process already owns the run.
+        """
+        if self._handle is not None:
+            raise RuntimeError(f"Run-directory lock is already held: {self.path}")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            handle.seek(0)
+            owner = handle.read().strip() or "owner metadata unavailable"
+            handle.close()
+            raise RuntimeError(
+                f"Run directory is already active (lock {self.path}; {owner}). "
+                "Use a different logging.run_dir or wait for that process to exit."
+            ) from exc
+        owner = {
+            "hostname": socket.gethostname(),
+            "pid": os.getpid(),
+            "acquired_at": datetime.now().astimezone().isoformat(),
+        }
+        handle.seek(0)
+        handle.truncate()
+        handle.write(json.dumps(owner, sort_keys=True))
+        handle.flush()
+        self._handle = handle
+
+    def close(self) -> None:
+        """Release the run lock, if held."""
+        handle = self._handle
+        self._handle = None
+        if handle is None:
+            return
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+    def __enter__(self) -> RunDirectoryLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self.close()
 
 
 class _ConsoleNoiseFilter(logging.Filter):
@@ -128,8 +204,8 @@ def create_run_dir(
     :return Path: Path to the run directory.
     """
 
+    run_dir = resolve_run_dir(cfg, config_path=config_path)
     if cfg.logging.run_dir is not None:
-        run_dir = Path(cfg.logging.run_dir)
         if allow_existing and not run_dir.exists():
             raise RuntimeError(f"Resume requested but run directory does not exist: {run_dir}")
         if not allow_existing:
@@ -145,11 +221,6 @@ def create_run_dir(
                 "Resume requested but logging.run_dir is null. "
                 "Set logging.run_dir to an existing run directory to resume."
             )
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        name = "run"
-        if config_path is not None:
-            name = Path(config_path).stem
-        run_dir = Path("runs") / cfg.logging.project / f"{stamp}_{name}"
         run_dir.mkdir(parents=True, exist_ok=False)
 
     # Save config snapshot (avoid clobbering on resume)

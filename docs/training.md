@@ -156,6 +156,7 @@ Metrics are written to `logging.metrics_file` every `train.log_every` steps
 - `peak_memory_gb` (best-effort, device-dependent)
 - `eval_loss` (only when eval runs)
 - `lr_muon` (Muon runs only)
+- `preemption_requested`, `preemption_signal` (one row on graceful SIGTERM/SIGUSR1 stop)
 
 Data exhaustion and crashes append event rows to the same file.
 

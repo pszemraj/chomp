@@ -25,7 +25,7 @@ from chomp.train import _check_finite_metrics
 from chomp.types import Batch
 from chomp.utils import devices, xla
 from chomp.utils.devices import device_platform, validate_default_device
-from chomp.utils.io import create_run_dir
+from chomp.utils.io import RunDirectoryLock, create_run_dir
 from chomp.utils.tree import param_count
 
 
@@ -66,6 +66,19 @@ def test_resume_requires_an_existing_run_directory(tmp_path: Path) -> None:
         create_run_dir(cfg, config_path=None, allow_existing=True)
 
     assert not run_dir.exists()
+
+
+def test_run_directory_lock_rejects_concurrent_owner_and_releases(tmp_path: Path) -> None:
+    """Only one process handle may own a run, and close should permit reacquisition."""
+    run_dir = tmp_path / "run"
+    first = RunDirectoryLock(run_dir)
+    second = RunDirectoryLock(run_dir)
+
+    with first, pytest.raises(RuntimeError, match="already active"):
+        second.acquire()
+
+    with second:
+        assert second.path.exists()
 
 
 def test_device_platform_detects_array() -> None:

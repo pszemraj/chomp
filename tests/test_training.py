@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import shutil
+import signal
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -54,13 +55,16 @@ from chomp.model import build_model, supports_packed_segments, training_loss
 from chomp.train import (
     _METRICS_FILE_DROP,
     _WANDB_DROP,
+    TrainingPreempted,
     _build_checkpoint_manager,
     _project_metrics,
+    _StopSignalState,
     build_optimizer,
     init_train_state,
     run,
 )
 from chomp.types import Batch, TrainState
+from chomp.utils.io import RunDirectoryLock
 from chomp.utils.tree import abstractify_tree
 from tests.helpers.assertions import tree_allclose
 from tests.helpers.config_factories import make_small_run_cfg
@@ -523,6 +527,85 @@ def test_checkpoint_saves_final_step(tmp_path: Path) -> None:
 
     assert (ckpt_dir / "2").exists(), "expected checkpoint at save interval"
     assert (ckpt_dir / "3").exists(), "expected final checkpoint at step 3"
+
+
+def test_stop_signal_state_records_reason_and_restores_handlers() -> None:
+    """The signal bridge should defer work and restore the process handler."""
+    previous = signal.getsignal(signal.SIGTERM)
+    state = _StopSignalState()
+
+    with state:
+        state._handle(signal.SIGTERM, None)
+        assert state.requested
+        assert state.reason == "SIGTERM"
+
+    assert signal.getsignal(signal.SIGTERM) is previous
+
+
+def test_preemption_finishes_one_step_and_writes_aligned_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cooperative stop after train_step should save that exact completed step."""
+    import chomp.train as train_mod
+
+    cfg, config_src = make_small_run_cfg(tmp_path, decay_steps=5)
+    cfg = replace(cfg, train=replace(cfg.train, steps=5))
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=100))
+
+    class _FakeStop:
+        requested = False
+        reason = "SIGTERM"
+        exit_code = 143
+
+        def __enter__(self) -> _FakeStop:
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+            return None
+
+    stop = _FakeStop()
+    monkeypatch.setattr(train_mod, "_StopSignalState", lambda: stop)
+    real_make_train_step = train_mod.make_train_step
+
+    def _make_stopping_step(*args: Any, **kwargs: Any) -> Any:
+        step = real_make_train_step(*args, **kwargs)
+
+        def _step(state: TrainState, batch: Batch) -> Any:
+            result = step(state, batch)
+            stop.requested = True
+            return result
+
+        return _step
+
+    monkeypatch.setattr(train_mod, "make_train_step", _make_stopping_step)
+
+    with pytest.raises(TrainingPreempted) as exc_info:
+        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+    assert exc_info.value.signal_name == "SIGTERM"
+    assert exc_info.value.exit_code == 143
+    run_dir = exc_info.value.run_dir
+
+    rows = read_jsonl(run_dir / cfg.logging.metrics_file)
+    assert any(
+        row.get("preemption_requested")
+        and row.get("preemption_signal") == "SIGTERM"
+        and row.get("step") == 1
+        for row in rows
+    )
+    ckpt_dir = default_ckpt_dir(run_dir)
+    steps = {int(path.name) for path in ckpt_dir.iterdir() if path.name.isdigit()}
+    assert steps == {1}
+
+
+def test_run_lock_fails_before_fresh_artifact_setup(tmp_path: Path) -> None:
+    """A competing owner must prevent even fresh config/tokenizer artifact writes."""
+    cfg, config_src = make_small_run_cfg(tmp_path)
+    run_dir = Path(cfg.logging.run_dir or "")
+
+    with RunDirectoryLock(run_dir), pytest.raises(RuntimeError, match="already active"):
+        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+
+    assert not run_dir.exists()
 
 
 @pytest.mark.parametrize("grain_prefetch", [0, 1])
