@@ -856,8 +856,6 @@ def _validate_train(cfg: Config) -> None:
 
 def _validate_optim(cfg: Config) -> None:
     """Validate optimizer-related config fields."""
-    if cfg.optim.name not in ("adamw", "muon"):
-        _vfail(f"optim.name must be 'adamw' or 'muon', got {cfg.optim.name!r}")
     if cfg.optim.lr <= 0:
         _vfail(f"optim.lr must be positive, got {cfg.optim.lr}")
     if cfg.optim.weight_decay < 0:
@@ -925,7 +923,7 @@ def _validate_model(cfg: Config) -> None:
     if cfg.model.backend == "dummy":
         if cfg.model.d_model <= 0:
             _vfail(f"model.d_model must be positive, got {cfg.model.d_model}")
-    elif cfg.model.backend == "megalodon":
+    else:
         positive_fields = {
             "model_dim": cfg.model.model_dim,
             "num_layers": cfg.model.num_layers,
@@ -987,21 +985,8 @@ def _validate_model(cfg: Config) -> None:
             _vfail(f"model.attention_dropout must be in [0, 1], got {cfg.model.attention_dropout}")
         if not 0 <= cfg.model.hidden_dropout <= 1:
             _vfail(f"model.hidden_dropout must be in [0, 1], got {cfg.model.hidden_dropout}")
-    else:
-        _vfail(f"model.backend must be 'dummy' or 'megalodon', got {cfg.model.backend!r}")
-
-    if cfg.model.init_mode not in ("gaussian", "xavier", "he", "bert", "none"):
-        _vfail(f"model.init_mode has unsupported value {cfg.model.init_mode!r}")
-    if cfg.model.compute_dtype not in ("float32", "bfloat16"):
-        _vfail(f"model.compute_dtype has unsupported value {cfg.model.compute_dtype!r}")
-    if cfg.model.accum_dtype not in ("float32", "bfloat16"):
-        _vfail(f"model.accum_dtype has unsupported value {cfg.model.accum_dtype!r}")
-    if cfg.model.softmax_dtype not in ("float32", "bfloat16"):
-        _vfail(f"model.softmax_dtype has unsupported value {cfg.model.softmax_dtype!r}")
     if cfg.model.compute_dtype == "float32" and cfg.model.accum_dtype != "float32":
         _vfail("model.accum_dtype must be at least as precise as model.compute_dtype")
-    if cfg.model.gemm_backend != "default":
-        _vfail(f"model.gemm_backend must be 'default', got {cfg.model.gemm_backend!r}")
     if cfg.model.output_size != -1 and cfg.model.output_size <= 0:
         _vfail(f"model.output_size must be -1 or positive, got {cfg.model.output_size}")
 
@@ -1034,10 +1019,6 @@ def _validate_data(cfg: Config) -> None:
                 "exact resume cannot restore iterator state against a mutable or unresolved source"
             )
         if cfg.data.hf_eval_split is not None:
-            if not isinstance(cfg.data.hf_eval_split, str):
-                _vfail(
-                    "data.hf_eval_split must be null or a non-empty string when data.backend='hf'"
-                )
             if not cfg.data.hf_eval_split.strip():
                 _vfail(
                     "data.hf_eval_split must be null or a non-empty string when data.backend='hf'"
@@ -1064,17 +1045,9 @@ def _validate_data(cfg: Config) -> None:
                 "data.shuffle_buffer_bytes must be positive when data.shuffle=true, "
                 f"got {cfg.data.shuffle_buffer_bytes}"
             )
-    elif cfg.data.backend == "local_text":
+    else:
         if not cfg.data.local_text:
             _vfail("data.local_text must be non-empty when data.backend='local_text'")
-    else:
-        _vfail(f"data.backend must be 'hf' or 'local_text', got {cfg.data.backend!r}")
-
-    if cfg.data.packing_mode not in ("sequential", "bin", "multipack"):
-        _vfail(
-            "data.packing_mode must be 'sequential', 'bin', or 'multipack', "
-            f"got {cfg.data.packing_mode!r}"
-        )
     if (
         cfg.data.packing_mode in ("bin", "multipack")
         and cfg.data.packing_max_docs_per_bin is not None
@@ -1143,11 +1116,6 @@ def _validate_data(cfg: Config) -> None:
 
 def _validate_logging(cfg: Config) -> None:
     """Validate logging-related config fields."""
-    if cfg.logging.level not in ("DEBUG", "INFO", "WARNING", "ERROR"):
-        _vfail(
-            "logging.level must be 'DEBUG', 'INFO', 'WARNING', or 'ERROR', "
-            f"got {cfg.logging.level!r}"
-        )
     if not str(cfg.logging.project).strip():
         _vfail("logging.project must be a non-empty string")
     if cfg.logging.run_dir is not None and not cfg.logging.run_dir.strip():
@@ -1160,11 +1128,7 @@ def _validate_logging(cfg: Config) -> None:
         value = getattr(cfg.logging.wandb, name)
         if value is not None and not value.strip():
             _vfail(f"logging.wandb.{name} must be a non-empty string or null")
-    if cfg.logging.wandb.mode not in ("online", "offline"):
-        _vfail(f"logging.wandb.mode must be 'online' or 'offline', got {cfg.logging.wandb.mode!r}")
-    if not isinstance(cfg.logging.wandb.tags, tuple):
-        _vfail("logging.wandb.tags must be a YAML/JSON list of strings")
-    if any(not isinstance(tag, str) or not tag.strip() for tag in cfg.logging.wandb.tags):
+    if any(not tag.strip() for tag in cfg.logging.wandb.tags):
         _vfail("logging.wandb.tags entries must be non-empty strings")
 
 
@@ -1174,7 +1138,7 @@ def _validate_tokenizer(cfg: Config) -> None:
     if tok.kind == "hf":
         if not tok.hf_name_or_path:
             _vfail("data.tokenizer.hf_name_or_path must be set when tokenizer.kind='hf'")
-    elif tok.kind == "byte":
+    else:
         if tok.byte_offset < 0:
             _vfail(f"data.tokenizer.byte_offset must be >=0, got {tok.byte_offset}")
         min_vocab = tok.byte_offset + 256
@@ -1199,9 +1163,6 @@ def _validate_tokenizer(cfg: Config) -> None:
                     "model.eos_token_id must be within [0, byte_offset) when using byte tokenizer "
                     "with add_eos=true"
                 )
-    else:
-        _vfail(f"data.tokenizer.kind must be 'byte' or 'hf', got {tok.kind!r}")
-
     if tok.vocab_size_multiple <= 0:
         _vfail(
             f"data.tokenizer.vocab_size_multiple must be positive, got {tok.vocab_size_multiple}"
