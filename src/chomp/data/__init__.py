@@ -17,7 +17,6 @@ v0:
 from __future__ import annotations
 
 from .pipeline import (
-    BatchAssemblyStopIteration,
     ZeroLossTokensError,
     build_eval_iterator,
     build_generation_text_stream,
@@ -32,7 +31,6 @@ from .pipeline import (
 )
 
 __all__ = [
-    "BatchAssemblyStopIteration",
     "ZeroLossTokensError",
     "build_eval_iterator",
     "build_generation_text_stream",

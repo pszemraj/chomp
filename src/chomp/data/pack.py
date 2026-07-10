@@ -200,6 +200,7 @@ class PackerState:
     next_segment_id: int
     docs_seen: int
     docs_truncated: int
+    exhausted: bool
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to a JSON-serializable dictionary.
@@ -212,6 +213,7 @@ class PackerState:
             "next_segment_id": int(self.next_segment_id),
             "docs_seen": int(self.docs_seen),
             "docs_truncated": int(self.docs_truncated),
+            "exhausted": bool(self.exhausted),
         }
 
     @staticmethod
@@ -240,6 +242,7 @@ class PackerState:
             raise ValueError(f"next_segment_id must be 1 or 2, got {next_segment_id}")
         docs_seen = int(d["docs_seen"])
         docs_truncated = int(d["docs_truncated"])
+        exhausted = bool(d["exhausted"])
         if docs_seen < 0 or docs_truncated < 0 or docs_truncated > docs_seen:
             raise ValueError(
                 "invalid document counters: expected 0 <= docs_truncated <= docs_seen, "
@@ -251,6 +254,7 @@ class PackerState:
             next_segment_id=next_segment_id,
             docs_seen=docs_seen,
             docs_truncated=docs_truncated,
+            exhausted=exhausted,
         )
 
 
@@ -329,6 +333,7 @@ class TokenPacker(_PackerBase):
         add_eos: bool,
         bos_id: int,
         eos_id: int,
+        pad_id: int,
         max_doc_tokens: int | None,
     ):
         """Initialize the token packer.
@@ -338,6 +343,7 @@ class TokenPacker(_PackerBase):
         :param bool add_eos: Whether to append EOS token to each document.
         :param int bos_id: BOS token ID.
         :param int eos_id: EOS token ID.
+        :param int pad_id: Padding token ID for a finite final window.
         :param max_doc_tokens: Optional max tokens per document before truncation.
         :raises ValueError: If seq_len < 8.
         """
@@ -353,6 +359,8 @@ class TokenPacker(_PackerBase):
         self._token_buf = _ChunkedIntBuffer()
         self._segment_buf = _ChunkedIntBuffer()
         self._next_segment_id = 1
+        self._pad_id = int(pad_id)
+        self._exhausted = False
 
     @staticmethod
     def _flip_segment_id(segment_id: int) -> int:
@@ -383,6 +391,8 @@ class TokenPacker(_PackerBase):
 
         :param tokens: Iterable of token IDs for the document.
         """
+        if self._exhausted:
+            raise RuntimeError("cannot add a document after TokenPacker.finish()")
         doc = self._prepare_document(tokens)
         if doc.size == 0:
             return
@@ -395,20 +405,22 @@ class TokenPacker(_PackerBase):
         """Check if buffer has enough tokens for one sequence.
 
         :raises RuntimeError: If token/segment buffers are misaligned.
-        :return bool: True if at least seq_len tokens are available.
+        :return bool: True if a full window or finite nonempty tail is available.
         """
         if self._token_buf.size != self._segment_buf.size:
             raise RuntimeError("token/segment buffers are misaligned")
-        return self._token_buf.size >= self.seq_len
+        return self._token_buf.size >= self.seq_len or (
+            self._exhausted and self._token_buf.size > 0
+        )
 
     def finish(self) -> None:
-        """Mark the upstream document stream exhausted (no-op here).
+        """Mark the upstream document stream exhausted.
 
-        Sequential windows are unpadded slices of the continuous token
-        stream, so a partial tail window (< seq_len tokens) cannot be emitted
-        under the fixed-shape contract and is dropped by design. The FFD
-        packers implement this hook as a real flush of pending documents.
+        A later pop right-pads the remaining nonempty token tail to preserve
+        every usable token under the fixed-shape batch contract. Idempotent;
+        part of the checkpointed state.
         """
+        self._exhausted = True
 
     def pop_seq_with_metadata(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Return ([seq_len] tokens, [seq_len] segment_ids, [seq_len] position_ids).
@@ -432,8 +444,18 @@ class TokenPacker(_PackerBase):
         """
         if self._token_buf.size != self._segment_buf.size:
             raise RuntimeError("token/segment buffers are misaligned")
-        tokens = self._token_buf.take(self.seq_len)
-        segs = self._reindex_popped_segments(self._segment_buf.take(self.seq_len))
+        available = self._token_buf.size
+        if available < self.seq_len and not self._exhausted:
+            raise RuntimeError("TokenPacker has no complete sequence available")
+        take_n = min(self.seq_len, available)
+        if take_n <= 0:
+            raise RuntimeError("TokenPacker has no sequence available")
+        tokens = self._token_buf.take(take_n)
+        segs = self._reindex_popped_segments(self._segment_buf.take(take_n))
+        if take_n < self.seq_len:
+            pad_n = self.seq_len - take_n
+            tokens = np.pad(tokens, (0, pad_n), constant_values=self._pad_id)
+            segs = np.pad(segs, (0, pad_n), constant_values=0)
         return tokens, segs
 
     def get_state(self) -> dict[str, Any]:
@@ -448,6 +470,7 @@ class TokenPacker(_PackerBase):
             next_segment_id=int(self._next_segment_id),
             docs_seen=int(self._docs_seen),
             docs_truncated=int(self._docs_truncated),
+            exhausted=bool(self._exhausted),
         )
         return st.to_dict()
 
@@ -462,6 +485,7 @@ class TokenPacker(_PackerBase):
         self._next_segment_id = int(st.next_segment_id)
         self._docs_seen = int(st.docs_seen)
         self._docs_truncated = int(st.docs_truncated)
+        self._exhausted = bool(st.exhausted)
 
 
 @dataclass(frozen=True)

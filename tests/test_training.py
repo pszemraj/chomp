@@ -587,18 +587,11 @@ def test_crash_between_fetch_and_step_skips_final_checkpoint(
     assert tree_allclose(states[0].opt_state, states[1].opt_state, rtol=0.0, atol=0.0)
 
 
-def test_exhaustion_mid_assembly_skips_final_checkpoint(tmp_path: Path) -> None:
-    """StopIteration during batch fetch must not write a final checkpoint.
-
-    Batch assembly pops A*B windows one at a time, so exhaustion can strike
-    after part of the stream/packer state was consumed (and a popped window
-    discarded). "Nothing was consumed" does not hold; a final checkpoint
-    there would pair the old train state with a partially-advanced iterator.
-    """
+def test_finite_partial_batch_trains_and_saves_aligned_checkpoint(tmp_path: Path) -> None:
+    """A usable finite tail must train before an aligned final checkpoint."""
     # One 116-char doc -> 116 byte tokens (offset 0, no BOS/EOS; varied bytes
-    # so windows differ and the loss-replay check below has teeth): 7 poppable
-    # seq_len=16 windows. grad_accum=2 -> batches 1-3 eat 6 windows; batch 4
-    # pops window 7, then dies on window 8 with 4 leftover tokens.
+    # so windows differ): seven full seq_len=16 rows plus one padded four-token
+    # row. grad_accum=2 therefore produces four optimizer batches.
     text = "".join(chr(97 + (i * 7) % 26) for i in range(116))
     cfg, config_src = make_small_run_cfg(tmp_path, local_text=text, decay_steps=10)
     cfg = replace(cfg, train=replace(cfg.train, steps=10, grad_accum=2))
@@ -616,24 +609,19 @@ def test_exhaustion_mid_assembly_skips_final_checkpoint(tmp_path: Path) -> None:
     metrics_path = run_dir / cfg.logging.metrics_file
     rows = read_jsonl(metrics_path)
     assert any(row.get("data_exhausted") for row in rows)
-    loss_step3 = [row["loss"] for row in rows if row.get("step") == 3 and "loss" in row]
-    assert len(loss_step3) == 1
+    assert len([row for row in rows if row.get("step") == 4 and "loss" in row]) == 1
 
     ckpt_dir = default_ckpt_dir(run_dir)
     steps_on_disk = {int(p.name) for p in ckpt_dir.iterdir() if p.is_dir() and p.name.isdigit()}
-    assert steps_on_disk == {2}, (
-        f"exhaustion mid-assembly must skip the final checkpoint, found {steps_on_disk}"
-    )
+    assert steps_on_disk == {2, 4}
 
-    # Resume from the aligned periodic checkpoint: batch 3 replays bit-exactly
-    # (same loss), then the stream exhausts again without new checkpoints.
+    # Resume sees exact EOF at the saved aligned iterator state; it performs no
+    # additional optimizer step and retains the final checkpoint.
     run(cfg, config_path=str(config_src), resume="latest", dry_run=False)
     rows = read_jsonl(metrics_path)
-    loss_step3_replayed = [row["loss"] for row in rows if row.get("step") == 3 and "loss" in row]
-    assert len(loss_step3_replayed) == 2
-    assert loss_step3_replayed[0] == loss_step3_replayed[1]
+    assert len([row for row in rows if row.get("step") == 4 and "loss" in row]) == 1
     steps_on_disk = {int(p.name) for p in ckpt_dir.iterdir() if p.is_dir() and p.name.isdigit()}
-    assert steps_on_disk == {2}
+    assert steps_on_disk == {2, 4}
 
 
 def test_zero_loss_batch_does_not_mutate_training_state(

@@ -505,9 +505,9 @@ data:
   # Default: sequential.
   # Required: no.
   # Valid: sequential | bin | multipack.
-  # Use: sequential treats the corpus as a continuous token stream and drops a final short tail.
-  # bin and multipack use First-Fit-Decreasing and flush tails into padded rows; both can combine
-  # unrelated documents.
+  # Use: sequential treats the corpus as a continuous token stream and right-pads its finite final
+  # tail. bin and multipack use First-Fit-Decreasing and flush tails into padded rows; both can
+  # combine unrelated documents. Missing rows in a finite final batch are padded, never discarded.
   packing_mode: sequential
 
   # Key: data.packing_buffer_docs

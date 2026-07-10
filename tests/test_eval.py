@@ -21,7 +21,7 @@ from chomp.config import (
     TokenizerConfig,
     TrainConfig,
 )
-from chomp.data import build_tokenizer, load_or_create_eval_texts
+from chomp.data import build_eval_iterator, build_tokenizer, load_or_create_eval_texts
 from chomp.train import run
 from tests.helpers.hf_fakes import FakeHFIterable
 from tests.helpers.io import read_jsonl
@@ -175,13 +175,10 @@ def test_eval_flushes_partial_buffer_at_stream_end(
     assert eval_rows, "flushed eval windows should have produced an eval loss"
 
 
-def test_eval_fails_fast_when_windows_cannot_fill_one_batch(
+def test_eval_pads_missing_rows_and_ignores_train_grad_accum(
     tmp_path: Path, patch_hf_load_dataset: Callable[..., dict[str, int]]
 ) -> None:
-    """Eval should raise when the doc set yields fewer packed windows than one
-    full [A, B, T] batch (partial batches are dropped by the fixed-shape
-    contract) — the zero-batches guard's remaining real-world trigger now that
-    packers flush at end of stream."""
+    """Finite eval uses A=1 and retains a row below the train batch geometry."""
     patch_hf_load_dataset(
         {
             "train": [{"text": "xxxx"} for _ in range(64)],
@@ -190,7 +187,7 @@ def test_eval_fails_fast_when_windows_cannot_fill_one_batch(
         }
     )
 
-    run_dir = tmp_path / "run_zero_batches"
+    run_dir = tmp_path / "run_partial_batch"
     cfg = _packed_eval_cfg(
         run_dir,
         grad_accum=2,
@@ -199,8 +196,14 @@ def test_eval_fails_fast_when_windows_cannot_fill_one_batch(
         max_eval_samples=8,
     )
 
-    with pytest.raises(RuntimeError, match="Evaluation produced zero batches"):
-        run(cfg, config_path=None, resume="none")
+    run(cfg, config_path=None, resume="none")
+
+    rows = read_jsonl(run_dir / cfg.logging.metrics_file)
+    eval_rows = [row for row in rows if row.get("eval_loss") not in (None, "")]
+    assert eval_rows
+    eval_batches = list(build_eval_iterator(cfg, tokens=[[1, 2], [3, 4]]))
+    assert len(eval_batches) == 1
+    assert eval_batches[0].input_ids.shape == (1, 1, 8)
 
 
 def test_eval_fails_fast_on_zero_valid_tokens(

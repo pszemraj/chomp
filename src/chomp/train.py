@@ -60,7 +60,6 @@ from chomp.config import (
     strict_packed_segments,
 )
 from chomp.data import (
-    BatchAssemblyStopIteration,
     build_eval_iterator,
     build_generation_text_stream,
     build_train_iterator,
@@ -1466,16 +1465,13 @@ def run(
             total_tokens += float(token_sum_host)
 
         if batch_count == 0:
-            rows_per_batch = int(cfg.train.grad_accum) * int(cfg.train.batch_size)
             raise RuntimeError(
                 "Evaluation produced zero batches. "
                 f"packing_mode={cfg.data.packing_mode!r}, "
-                f"rows_per_batch={rows_per_batch} (grad_accum * batch_size), "
+                f"eval_rows_per_batch={int(cfg.train.batch_size)}, "
                 f"eval_doc_count={len(eval_tokens)}. "
-                "The eval set must yield at least rows_per_batch packed [T] "
-                "windows to fill one complete [A, B, T] batch (partial batches "
-                "are dropped by the fixed-shape contract). Increase "
-                "data.max_eval_samples or reduce the batch geometry."
+                "The eval set did not yield any usable packed window. Increase "
+                "data.max_eval_samples or check tokenization and masking."
             )
 
         if total_tokens <= 0:
@@ -1572,13 +1568,11 @@ def run(
                     t_fetch = time.perf_counter()
                     try:
                         batch = next(data_it)
-                    except StopIteration as exc:
-                        # Exhaustion is only misaligned if the failed fetch
-                        # popped at least one packed window. Exact EOF (or an
-                        # untrainable tail that yields zero windows) is still
-                        # aligned with the last completed train step.
-                        if isinstance(exc, BatchAssemblyStopIteration):
-                            data_state_aligned = exc.windows_consumed == 0
+                    except StopIteration:
+                        # Usable partial batches are padded and returned by
+                        # assembly. A failed fetch therefore consumes zero
+                        # windows and remains aligned with the last step.
+                        data_state_aligned = True
                         tokens_seen_host = int(tokens_seen_count)
                         step_i = int(host_step)
                         row = {

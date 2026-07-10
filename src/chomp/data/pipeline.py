@@ -41,7 +41,7 @@ from .grain import effective_window_shuffle_seed
 from .hf import HFStreamingTextStream, HFStreamSpec, LocalTextStream
 from .pack import BinPacker, MultipackPacker, TokenPacker, _positions_from_segments
 
-DATA_PIPELINE_SCHEMA_VERSION = 3
+DATA_PIPELINE_SCHEMA_VERSION = 4
 
 
 class Tokenizer(Protocol):
@@ -81,24 +81,6 @@ class TextStream(Protocol):
 
 
 logger = logging.getLogger(__name__)
-
-
-class BatchAssemblyStopIteration(StopIteration):
-    """StopIteration raised by fixed-shape batch assembly.
-
-    :param int windows_consumed: Number of packed windows popped before exhaustion.
-    """
-
-    def __init__(self, *, windows_consumed: int) -> None:
-        """Initialize the exception with batch assembly progress.
-
-        :param int windows_consumed: Number of packed windows popped before exhaustion.
-        """
-        self.windows_consumed = int(windows_consumed)
-        suffix = "" if self.windows_consumed == 1 else "s"
-        super().__init__(
-            f"data exhausted after consuming {self.windows_consumed} packed window{suffix}"
-        )
 
 
 class ZeroLossTokensError(RuntimeError):
@@ -875,22 +857,25 @@ class _BatchAssemblySpec:
     mask_boundary_loss: bool
     train_on_eos: bool
     eos_id: int
+    pad_id: int
     device_put: bool
 
     @staticmethod
-    def from_config(cfg: Config) -> _BatchAssemblySpec:
+    def from_config(cfg: Config, *, grad_accum: int | None = None) -> _BatchAssemblySpec:
         """Extract the batch-assembly knobs from a training config.
 
         :param Config cfg: Training configuration.
+        :param grad_accum: Optional assembly-only accumulation axis override.
         :return _BatchAssemblySpec: Immutable assembly parameters.
         """
         return _BatchAssemblySpec(
-            grad_accum=int(cfg.train.grad_accum),
+            grad_accum=int(cfg.train.grad_accum if grad_accum is None else grad_accum),
             batch_size=int(cfg.train.batch_size),
             seq_len=int(cfg.train.seq_len),
             mask_boundary_loss=bool(cfg.data.mask_boundary_loss),
             train_on_eos=bool(cfg.data.train_on_eos),
             eos_id=int(cfg.model.eos_token_id),
+            pad_id=int(cfg.model.pad_token_id),
             device_put=bool(cfg.data.device_put),
         )
 
@@ -911,16 +896,18 @@ def _assemble_batch(
     """
     grad_accum, batch_size, seq_len = spec.grad_accum, spec.batch_size, spec.seq_len
     need = grad_accum * batch_size
-    inps = np.empty((need, seq_len), dtype=np.int32)
-    labs = np.empty((need, seq_len), dtype=np.int32)
-    segs_out = np.empty((need, seq_len), dtype=np.int32)
-    pos_out = np.empty((need, seq_len), dtype=np.int32)
+    inps = np.full((need, seq_len), spec.pad_id, dtype=np.int32)
+    labs = np.full((need, seq_len), IGNORE_INDEX, dtype=np.int32)
+    segs_out = np.zeros((need, seq_len), dtype=np.int32)
+    pos_out = np.zeros((need, seq_len), dtype=np.int32)
 
     for idx in range(need):
         try:
             seq, segs = next_window()  # [T]
-        except StopIteration as exc:
-            raise BatchAssemblyStopIteration(windows_consumed=idx) from exc
+        except StopIteration:
+            if idx == 0:
+                raise
+            break
         # Labels align with input_ids; the model shifts internally.
         inp = np.asarray(seq, dtype=np.int32)
         labs[idx] = _mask_labels(
@@ -958,12 +945,20 @@ def _assemble_batch(
     return batch
 
 
-def _build_packer(cfg: Config) -> TokenPacker | BinPacker | MultipackPacker:
+def _build_packer(
+    cfg: Config, *, rows_per_pack: int | None = None
+) -> TokenPacker | BinPacker | MultipackPacker:
     """Create the configured token packer.
 
     :param Config cfg: Training configuration.
+    :param rows_per_pack: Optional FFD output-row count per packing cycle.
     :return TokenPacker | BinPacker | MultipackPacker: Configured packer.
     """
+    bins_per_pack = (
+        int(cfg.train.grad_accum) * int(cfg.train.batch_size)
+        if rows_per_pack is None
+        else int(rows_per_pack)
+    )
     common: dict[str, Any] = {
         "seq_len": cfg.train.seq_len,
         "add_bos": cfg.data.tokenizer.add_bos,
@@ -971,22 +966,21 @@ def _build_packer(cfg: Config) -> TokenPacker | BinPacker | MultipackPacker:
         "bos_id": cfg.model.bos_token_id,
         "eos_id": cfg.model.eos_token_id,
         "max_doc_tokens": cfg.data.tokenizer.max_doc_tokens,
+        "pad_id": cfg.model.pad_token_id,
     }
     if cfg.data.packing_mode == "bin":
         return BinPacker(
             **common,
-            bins_per_pack=int(cfg.train.grad_accum) * int(cfg.train.batch_size),
+            bins_per_pack=bins_per_pack,
             buffer_docs=cfg.data.packing_buffer_docs,
             max_docs_per_bin=cfg.data.packing_max_docs_per_bin,
-            pad_id=cfg.model.pad_token_id,
         )
     if cfg.data.packing_mode == "multipack":
         return MultipackPacker(
             **common,
-            bins_per_pack=int(cfg.train.grad_accum) * int(cfg.train.batch_size),
+            bins_per_pack=bins_per_pack,
             group_docs=cfg.data.packing_group_docs,
             max_docs_per_bin=cfg.data.packing_max_docs_per_bin,
-            pad_id=cfg.model.pad_token_id,
         )
     return TokenPacker(**common)
 
@@ -1007,6 +1001,7 @@ class _SequenceProducer:
         *,
         tokenizer: Tokenizer | None,
         text_stream: Iterator[TextItem] | None = None,
+        rows_per_pack: int | None = None,
     ):
         """Initialize the sequence producer.
 
@@ -1014,6 +1009,7 @@ class _SequenceProducer:
         :param Tokenizer | None tokenizer: Tokenizer for string items; None is
             valid only for pre-tokenized streams.
         :param text_stream: Optional text stream override (used for eval datasets).
+        :param rows_per_pack: Optional FFD output-row count per packing cycle.
         :raises ValueError: If data.backend is unknown.
         """
         self._tok = tokenizer
@@ -1024,7 +1020,7 @@ class _SequenceProducer:
         else:
             self._text_stream = _build_backend_text_stream(cfg)
 
-        self._packer = _build_packer(cfg)
+        self._packer = _build_packer(cfg, rows_per_pack=rows_per_pack)
 
     def _push_next_document(self) -> None:
         """Fetch one item from the text stream and add it to the packer."""
@@ -1114,8 +1110,11 @@ class _EvalBatchIterator:
             cfg,
             tokenizer=None,
             text_stream=iter([list(document) for document in tokens]),
+            rows_per_pack=int(cfg.train.batch_size),
         )
-        self._spec = _BatchAssemblySpec.from_config(cfg)
+        # Evaluation has no optimizer accumulation requirement. Keeping A=1
+        # prevents train.grad_accum from changing which finite eval rows fit.
+        self._spec = _BatchAssemblySpec.from_config(cfg, grad_accum=1)
 
     def __iter__(self) -> _EvalBatchIterator:
         return self

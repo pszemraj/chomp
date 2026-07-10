@@ -29,7 +29,6 @@ from chomp.data.grain import (
 from chomp.data.hf import HFStreamingTextStream, HFStreamSpec
 from chomp.data.pack import MultipackPacker, TokenPacker
 from chomp.data.pipeline import (
-    BatchAssemblyStopIteration,
     BinPacker,
     ByteTokenizer,
     ZeroLossTokensError,
@@ -430,6 +429,7 @@ def test_token_packer_state_rejects_invalid_current_state(
         add_eos=False,
         bos_id=1,
         eos_id=2,
+        pad_id=0,
         max_doc_tokens=None,
     )
 
@@ -439,10 +439,43 @@ def test_token_packer_state_rejects_invalid_current_state(
         "next_segment_id": 1,
         "docs_seen": 0,
         "docs_truncated": 0,
+        "exhausted": False,
     }
     state.update(mutation)
     with pytest.raises(ValueError, match=match):
         packer.set_state(state)
+
+
+def test_token_packer_finite_tail_state_roundtrip() -> None:
+    """Sequential exhaustion and its padded tail must survive a restore."""
+
+    def make_packer() -> TokenPacker:
+        return TokenPacker(
+            seq_len=8,
+            add_bos=False,
+            add_eos=False,
+            bos_id=1,
+            eos_id=2,
+            pad_id=0,
+            max_doc_tokens=None,
+        )
+
+    packer = make_packer()
+    packer.add_document([4, 5, 6])
+    packer.finish()
+    state = packer.get_state()
+    assert state["exhausted"] is True
+
+    restored = make_packer()
+    restored.set_state(state)
+    tokens, segments = restored.pop_seq_with_segments()
+    np.testing.assert_array_equal(tokens, [4, 5, 6, 0, 0, 0, 0, 0])
+    np.testing.assert_array_equal(segments, [1, 1, 1, 0, 0, 0, 0, 0])
+    assert not restored.can_pop()
+
+    del state["exhausted"]
+    with pytest.raises(KeyError):
+        make_packer().set_state(state)
 
 
 def test_grain_iterator_state_roundtrip() -> None:
@@ -677,25 +710,22 @@ def _assert_multi_segment_boundary_masked(batch: Batch) -> None:
     assert np.all(masked_labels == -100)
 
 
-def test_stopiteration_mid_assembly_advances_iterator_state() -> None:
-    """Exhaustion during batch assembly is not a no-op.
-
-    Windows are popped (and discarded) and the stream advances before
-    StopIteration surfaces from a partial batch, so the train loop must
-    treat exhaustion as data-state misalignment (no final checkpoint).
-    """
-    # 10 chars + BOS/EOS = 12 tokens = one seq_len=8 window; grad_accum=2
-    # needs two, so assembly pops window 1 and then runs dry.
+def test_finite_sequential_tail_is_padded_without_token_loss() -> None:
+    """A finite sequential tail fills the final row and preserves alignment."""
+    # 10 chars + BOS/EOS = 12 tokens: one full row and one four-token tail.
     cfg = make_pipeline_cfg(local_text="x" * 10, repeat=False, window_shuffle_windows=0)
     cfg = replace(cfg, train=replace(cfg.train, grad_accum=2))
 
     it = build_train_iterator(cfg)
     state_before = json.dumps(it.get_state(), sort_keys=True, default=str)
-    with pytest.raises(BatchAssemblyStopIteration) as exc_info:
-        next(it)
-    assert exc_info.value.windows_consumed == 1
+    batch = next(it)
+    assert batch.input_ids.shape == (2, 1, 8)
+    assert int(np.count_nonzero(batch.attention_mask)) == 12
+    np.testing.assert_array_equal(batch.segment_ids[1, 0, 4:], np.zeros(4, dtype=np.int32))
     state_after = json.dumps(it.get_state(), sort_keys=True, default=str)
     assert state_after != state_before
+    with pytest.raises(StopIteration):
+        next(it)
 
 
 def test_stopiteration_at_exact_batch_boundary_consumes_zero_windows() -> None:
@@ -711,9 +741,8 @@ def test_stopiteration_at_exact_batch_boundary_consumes_zero_windows() -> None:
     it = build_train_iterator(cfg)
     next(it)
     next(it)
-    with pytest.raises(BatchAssemblyStopIteration) as exc_info:
+    with pytest.raises(StopIteration):
         next(it)
-    assert exc_info.value.windows_consumed == 0
 
 
 def test_batch_assembly_rejects_zero_valid_loss_tokens() -> None:

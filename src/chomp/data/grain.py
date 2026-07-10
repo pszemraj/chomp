@@ -279,9 +279,10 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
     class _BatchAssembleDatasetIterator(grain.DatasetIterator):  # type: ignore[misc]
         """Assembles [A, B, T] Batch objects from a stream of packed windows.
 
-        Holds no checkpoint state of its own: it fully drains exactly A*B
-        windows per __next__, and checkpointing only happens between batches,
-        so state forwards 1:1 to the parent iterator.
+        Holds no checkpoint state of its own: it drains up to A*B windows per
+        __next__ and pads missing rows only after exact upstream exhaustion.
+        Checkpointing happens between batches, so state forwards 1:1 to the
+        parent iterator.
 
         docs_added_this_batch is measured here, below any prefetch layer, so
         it reflects actual stream pulls for the assembled batch rather than

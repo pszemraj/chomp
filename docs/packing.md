@@ -54,9 +54,11 @@ Shared by both packed modes:
 - End-of-stream flush: when the upstream stream is exhausted (`data.repeat:
   false`, or the finite eval doc set), both packers flush their remaining
   sub-threshold pending documents into as many padded windows as needed
-  instead of silently dropping them. The fixed-shape contract still applies
-  downstream: windows that cannot fill one complete `[A, B, T]` batch are
-  dropped at batch assembly, and eval raises if zero batches result.
+  instead of silently dropping them. Sequential packing likewise right-pads
+  its final nonempty token tail. Batch assembly right-pads missing rows, so
+  every usable final window reaches training or evaluation without changing
+  the compiled `[A, B, T]` shape. Evaluation always uses `A=1`; changing
+  `train.grad_accum` does not change finite eval coverage.
 
 ## Segment-isolation semantics
 
