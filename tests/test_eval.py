@@ -531,3 +531,4 @@ def test_null_eval_split_wires_complementary_content_partitions(
     assert seen_specs[1].content_partition == "train"
     assert seen_specs[0].seed == cfg.data.seed
     assert seen_specs[0].shuffle_buffer_size == cfg.data.shuffle_buffer_size
+    assert seen_specs[0].shuffle_buffer_bytes == cfg.data.shuffle_buffer_bytes

@@ -45,6 +45,7 @@ data:
   # Large doc buffer + packed-window shuffle: validated loss-stability recipe
   # (see docs/packing.md, window shuffling).
   shuffle_buffer_size: 200000
+  shuffle_buffer_bytes: 536870912
   window_shuffle_tokens: 8388608
   repeat: true
   tokenizer:

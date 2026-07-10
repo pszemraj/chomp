@@ -146,6 +146,9 @@ Metrics are written to `logging.metrics_file` every `train.log_every` steps
 - `tokens_per_sec` (end-to-end throughput over the last sync interval)
 - `packing_mode`, `packing_utilization` (when iterator stats are enabled)
 - `docs_seen`, `docs_truncated`, `docs_added_this_batch` (when available)
+- `shuffle_window_docs`, `shuffle_window_bytes`, `shuffle_peak_window_docs`,
+  `shuffle_peak_window_bytes`, `shuffle_replayed_window_docs`, and
+  `shuffle_replayed_window_bytes`
 - `loss_tokens_host` (same host count exposed with packing diagnostics)
 - `boundary_transitions` (count of in-batch segment transitions)
 - `docs_per_seq_mean`, `docs_per_seq_min`, `docs_per_seq_max` (document-density summary)

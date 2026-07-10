@@ -70,6 +70,13 @@ window shuffle (`data.window_shuffle_tokens`, train iterator only) so batches
 are decorrelated from raw stream order; see
 [Window shuffling](packing.md#window-shuffling-batch-decorrelation).
 
+The HF document shuffle ends each window at the first of
+`data.shuffle_buffer_size` documents or `data.shuffle_buffer_bytes` UTF-8
+payload bytes. Runtime packing metrics expose current and peak document-window
+counts/bytes plus replay totals. The byte limit may be exceeded by one
+oversized document because reading ahead and carrying that document outside
+the compact checkpoint state would break exact replay.
+
 ## Grain iterator
 
 The training pipeline is composed as: unshuffled HF source -> optional

@@ -87,6 +87,7 @@ class HFStreamSpec:
     revision: str | None
     shuffle: bool
     shuffle_buffer_size: int
+    shuffle_buffer_bytes: int
     seed: int
     repeat: bool
     content_partition: ContentPartition
@@ -134,6 +135,11 @@ class HFStreamingTextStream:
         self._window_cursor = 0
         self._window_index = 0
         self._window_parent_state: dict[str, Any] | None = None
+        self._window_bytes = 0
+        self._peak_window_docs = 0
+        self._peak_window_bytes = 0
+        self._replayed_window_docs = 0
+        self._replayed_window_bytes = 0
         self._build()
 
     def _load_ds_for_epoch(self, epoch: int) -> datasets.IterableDataset:
@@ -167,6 +173,7 @@ class HFStreamingTextStream:
         self._window_cursor = 0
         self._window_index = 0
         self._window_parent_state = None
+        self._window_bytes = 0
         # Retry recovery starts exact even when the first source read fails.
         self._last_state = self.get_state()
 
@@ -275,12 +282,20 @@ class HFStreamingTextStream:
             },
         }
 
-    def _fill_shuffle_window(self) -> None:
-        """Read and deterministically permute the next source document window."""
+    def _fill_shuffle_window(self, *, replay: bool = False) -> None:
+        """Read and deterministically permute the next source document window.
+
+        A window stops after reaching either the document-count cap or the
+        UTF-8 payload-byte budget. The document that reaches the byte budget
+        remains in the window, avoiding an uncheckpointed read-ahead item.
+
+        :param bool replay: Whether this fill reconstructs a checkpointed window.
+        """
         parent_state = self._source_state()
         self._window_parent_state = parent_state
         self._window = []
         self._window_cursor = 0
+        self._window_bytes = 0
 
         # A network failure can occur only while the source window is being
         # filled. Cache its start unconditionally so retry reconstruction
@@ -290,11 +305,20 @@ class HFStreamingTextStream:
 
         for _ in range(int(self._spec.shuffle_buffer_size)):
             try:
-                self._window.append(self._read_text())
+                text = self._read_text()
             except StopIteration:
+                break
+            self._window.append(text)
+            self._window_bytes += len(text.encode("utf-8"))
+            if self._window_bytes >= int(self._spec.shuffle_buffer_bytes):
                 break
         if not self._window:
             raise StopIteration
+        self._peak_window_docs = max(self._peak_window_docs, len(self._window))
+        self._peak_window_bytes = max(self._peak_window_bytes, self._window_bytes)
+        if replay:
+            self._replayed_window_docs += len(self._window)
+            self._replayed_window_bytes += self._window_bytes
         _shuffle_window(
             self._window,
             seed=int(self._spec.seed),
@@ -403,6 +427,7 @@ class HFStreamingTextStream:
             self._window_cursor = 0
             self._window_index = 0
             self._window_parent_state = None
+            self._window_bytes = 0
         else:
             shuffle_state = state.get("shuffle_state")
             if not isinstance(shuffle_state, dict):
@@ -425,7 +450,7 @@ class HFStreamingTextStream:
             self._window = []
             self._window_cursor = 0
             self._window_parent_state = parent_state
-            self._fill_shuffle_window()
+            self._fill_shuffle_window(replay=True)
             if cursor > len(self._window):
                 raise RuntimeError(
                     "HF shuffle_state cursor exceeds the reconstructed window length "
@@ -435,6 +460,22 @@ class HFStreamingTextStream:
 
         self._n_since_state = 0
         self._last_state = self.get_state()
+
+    def get_stats(self) -> dict[str, int]:
+        """Return owned document-shuffle memory and replay diagnostics.
+
+        :return dict[str, int]: Current/peak window sizes and replay totals.
+        """
+        if not self._spec.shuffle:
+            return {}
+        return {
+            "shuffle_window_docs": len(self._window),
+            "shuffle_window_bytes": int(self._window_bytes),
+            "shuffle_peak_window_docs": int(self._peak_window_docs),
+            "shuffle_peak_window_bytes": int(self._peak_window_bytes),
+            "shuffle_replayed_window_docs": int(self._replayed_window_docs),
+            "shuffle_replayed_window_bytes": int(self._replayed_window_bytes),
+        }
 
 
 class LocalTextStream:

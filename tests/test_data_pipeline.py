@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -72,6 +74,7 @@ def _hf_stream_spec(**overrides: Any) -> HFStreamSpec:
         "revision": None,
         "shuffle": False,
         "shuffle_buffer_size": 8,
+        "shuffle_buffer_bytes": 1_000_000,
         "seed": 0,
         "repeat": False,
         "content_partition": "all",
@@ -932,6 +935,58 @@ def test_real_hf_iterable_shuffled_state_roundtrip(monkeypatch: pytest.MonkeyPat
     actual = [next(resumed) for _ in range(41)]
 
     assert actual == expected
+    assert len(set(consumed + expected)) == len(consumed + expected)
+
+
+def test_real_hf_iterable_resume_is_exact_across_fresh_processes(tmp_path: Path) -> None:
+    """Serialized real-HF state should reproduce continuation in a new interpreter."""
+    worker = Path(__file__).parent / "helpers" / "hf_resume_worker.py"
+    state_path = tmp_path / "state.pkl"
+    expected_path = tmp_path / "expected.json"
+    actual_path = tmp_path / "actual.json"
+
+    subprocess.run(
+        [sys.executable, str(worker), "prepare", str(state_path), str(expected_path)],
+        check=True,
+    )
+    subprocess.run(
+        [sys.executable, str(worker), "resume", str(state_path), str(actual_path)],
+        check=True,
+    )
+
+    assert json.loads(actual_path.read_text()) == json.loads(expected_path.read_text())
+
+
+def test_hf_document_shuffle_byte_budget_bounds_window_and_replays_exactly(
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+) -> None:
+    """UTF-8 bytes should cap a window without weakening exact replay."""
+    items = [{"text": f"doc-{index}-" + ("é" * 5)} for index in range(30)]
+    patch_hf_load_dataset(items)
+    spec = _hf_stream_spec(
+        shuffle=True,
+        shuffle_buffer_size=100,
+        shuffle_buffer_bytes=32,
+        seed=11,
+    )
+    stream = HFStreamingTextStream(spec)
+
+    consumed = [next(stream) for _ in range(3)]
+    stats = stream.get_stats()
+    assert stats["shuffle_window_docs"] == 2
+    assert stats["shuffle_window_bytes"] >= spec.shuffle_buffer_bytes
+    assert stats["shuffle_window_bytes"] < spec.shuffle_buffer_bytes + max(
+        len(item["text"].encode("utf-8")) for item in items
+    )
+    state = stream.get_state()
+    expected = [next(stream) for _ in range(9)]
+
+    restored = HFStreamingTextStream(spec)
+    restored.set_state(state)
+    assert [next(restored) for _ in range(9)] == expected
+    replay_stats = restored.get_stats()
+    assert replay_stats["shuffle_replayed_window_docs"] >= 2
+    assert replay_stats["shuffle_replayed_window_bytes"] >= spec.shuffle_buffer_bytes
     assert len(set(consumed + expected)) == len(consumed + expected)
 
 

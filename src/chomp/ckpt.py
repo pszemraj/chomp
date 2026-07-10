@@ -622,6 +622,12 @@ def check_resume_compat(
             src_prev.get("shuffle_buffer_size"),
             severity="error",
         )
+        _cmp(
+            "data.shuffle_buffer_bytes",
+            src_cur.get("shuffle_buffer_bytes"),
+            src_prev.get("shuffle_buffer_bytes"),
+            severity="error",
+        )
     elif src_cur.get("backend") == "local_text":
         _cmp(
             "data.local_text_hash",

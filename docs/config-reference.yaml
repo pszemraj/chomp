@@ -453,9 +453,21 @@ data:
   # Required: no; used only for the HF backend when data.shuffle is true.
   # Valid: > 0 when shuffle is true.
   # Use: number of HF documents in each chomp-owned shuffle window. Larger windows improve mixing
-  # and consume more host memory. Checkpoints replay the current source window from compact state;
-  # they do not serialize its documents. Resume hard-compares this value even when shuffle is false.
+  # and consume more host memory, but data.shuffle_buffer_bytes can end a window first. Checkpoints
+  # replay the current source window from compact state; they do not serialize its documents. Resume
+  # hard-compares this value even when shuffle is false.
   shuffle_buffer_size: 10000
+
+  # Key: data.shuffle_buffer_bytes
+  # Type: integer
+  # Default: 536870912 (512 MiB of UTF-8 document payload).
+  # Required: no; used only for the HF backend when data.shuffle is true.
+  # Valid: > 0 when shuffle is true.
+  # Use: host-memory budget for each chomp-owned document-shuffle window. A window ends after reaching
+  # this byte budget or data.shuffle_buffer_size, whichever occurs first. The document that reaches
+  # the budget remains in the window, so one oversized document can exceed it; no document is dropped
+  # or read ahead. Lower this on memory-constrained hosts. Resume hard-compares this value.
+  shuffle_buffer_bytes: 536870912
 
   # Key: data.seed
   # Type: integer

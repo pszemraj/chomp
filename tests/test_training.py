@@ -1624,6 +1624,28 @@ def test_resume_compat_rejects_hf_shuffle_buffer_drift(tmp_path: Path) -> None:
         check_resume_compat(drifted, meta)
 
 
+def test_resume_compat_rejects_hf_shuffle_byte_budget_drift(tmp_path: Path) -> None:
+    """shuffle_buffer_bytes changes owned document-window boundaries and order."""
+    cfg = _base_cfg(tmp_path / "run_sbuf_bytes")
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_split="train",
+            shuffle=True,
+            shuffle_buffer_bytes=1024,
+        ),
+    )
+    meta = _checkpoint_record(cfg).to_dict()
+    drifted = replace(cfg, data=replace(cfg.data, shuffle_buffer_bytes=2048))
+
+    with pytest.raises(RuntimeError, match="shuffle_buffer_bytes"):
+        check_resume_compat(drifted, meta)
+
+
 def test_resume_compat_rejects_hf_revision_drift(tmp_path: Path) -> None:
     """A changed HF revision can change source contents and shard order."""
     cfg = _base_cfg(tmp_path / "run_revision")

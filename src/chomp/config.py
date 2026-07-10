@@ -233,7 +233,12 @@ class DataConfig:
     text_key: str = "text"
 
     shuffle: bool = True
+    # Hard document-count cap for each owned HF shuffle window.
     shuffle_buffer_size: int = 10_000
+    # UTF-8 payload-byte cap for each owned HF shuffle window. The first
+    # document is always admitted, so a single oversized document can exceed
+    # this value without being dropped.
+    shuffle_buffer_bytes: int = 536_870_912
     seed: int = 0
     repeat: bool = True
 
@@ -1044,6 +1049,11 @@ def _validate_data(cfg: Config) -> None:
             _vfail(
                 "data.shuffle_buffer_size must be positive when data.shuffle=true, "
                 f"got {cfg.data.shuffle_buffer_size}"
+            )
+        if cfg.data.shuffle and cfg.data.shuffle_buffer_bytes <= 0:
+            _vfail(
+                "data.shuffle_buffer_bytes must be positive when data.shuffle=true, "
+                f"got {cfg.data.shuffle_buffer_bytes}"
             )
     elif cfg.data.backend == "local_text":
         if not cfg.data.local_text:

@@ -78,7 +78,8 @@ Hard failures include:
 - data source identity (`hf_dataset`, `hf_name`, `split`, `hf_revision`, `text_key`)
 - data-pipeline implementation schema version
 - stream-order and termination semantics (`shuffle`, `shuffle_buffer_size`,
-  `repeat`, `window_shuffle_tokens`, its derived rows/effective seed, and `grain_prefetch`)
+  `shuffle_buffer_bytes`, `repeat`, `window_shuffle_tokens`, its derived
+  rows/effective seed, and `grain_prefetch`)
 - tokenizer settings and vocab rounding
 - packing mode, packing buffer sizes, and strict-segment settings
 - objective knobs (`mask_boundary_loss`, `train_on_eos`) and eval knobs

@@ -49,7 +49,7 @@ from .hf import (
 )
 from .pack import BinPacker, MultipackPacker, TokenPacker, _positions_from_segments
 
-DATA_PIPELINE_SCHEMA_VERSION = 6
+DATA_PIPELINE_SCHEMA_VERSION = 7
 
 
 class Tokenizer(Protocol):
@@ -279,6 +279,7 @@ def _build_hf_stream(
         # first eval row, for no disjointness benefit.
         shuffle=cfg.data.shuffle and content_partition != "eval",
         shuffle_buffer_size=cfg.data.shuffle_buffer_size,
+        shuffle_buffer_bytes=cfg.data.shuffle_buffer_bytes,
         seed=int(cfg.data.seed) + int(seed_offset),
         repeat=repeat,
         content_partition=content_partition,
@@ -587,6 +588,7 @@ def _eval_cache_manifest(cfg: Config) -> dict[str, Any]:
         manifest["shuffle"] = cfg.data.shuffle
         if cfg.data.shuffle:
             manifest["shuffle_buffer_size"] = cfg.data.shuffle_buffer_size
+            manifest["shuffle_buffer_bytes"] = cfg.data.shuffle_buffer_bytes
             manifest["seed"] = cfg.data.seed
     return manifest
 
@@ -794,6 +796,7 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
             "text_key": d.text_key,
             "shuffle": d.shuffle,
             "shuffle_buffer_size": d.shuffle_buffer_size,
+            "shuffle_buffer_bytes": d.shuffle_buffer_bytes,
             "seed": d.seed,
             # repeat decides whether the stream rolls into the next epoch or
             # terminates — a data-order/termination semantic, so it is part of
@@ -1149,11 +1152,16 @@ class _SequenceProducer:
         self._packer.set_state(state["packer"])
 
     def get_stats(self) -> dict[str, int]:
-        """Return packer-level document stats if available.
+        """Return source- and packer-level document stats if available.
 
-        :return dict[str, int]: Stats like docs_seen/docs_truncated.
+        :return dict[str, int]: Stream memory/replay and packing counters.
         """
-        return dict(self._packer.get_stats())
+        stats: dict[str, int] = {}
+        get_stream_stats = getattr(self._text_stream, "get_stats", None)
+        if callable(get_stream_stats):
+            stats.update(get_stream_stats())
+        stats.update(self._packer.get_stats())
+        return stats
 
 
 class _EvalBatchIterator:

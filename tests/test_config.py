@@ -378,6 +378,13 @@ def test_data_and_logging_validation_rejects_invalid_values() -> None:
             lambda cfg: replace(cfg, data=replace(cfg.data, window_shuffle_tokens=31)),
             "window_shuffle_tokens",
         ),
+        (
+            lambda cfg: replace(
+                cfg,
+                data=replace(_hf_data(), shuffle=True, shuffle_buffer_bytes=0),
+            ),
+            "shuffle_buffer_bytes",
+        ),
         (lambda cfg: replace(cfg, data=replace(cfg.data, seed=-1)), "data.seed"),
         (
             lambda cfg: replace(
