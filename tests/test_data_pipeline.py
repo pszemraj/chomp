@@ -29,7 +29,7 @@ from chomp.data.grain import (
     effective_window_shuffle_seed,
 )
 from chomp.data.hf import HFStreamingTextStream, HFStreamSpec
-from chomp.data.pack import FFDPackerState, MultipackPacker, TokenPacker
+from chomp.data.pack import FFDPackerState, MultipackPacker, TokenPacker, _DocumentStats
 from chomp.data.pipeline import (
     BinPacker,
     ByteTokenizer,
@@ -115,16 +115,17 @@ def _compact_ffd_state(
     ready_tokens: list[list[int]] | None = None,
     ready_segments: list[list[int]] | None = None,
     docs_seen: int = 3,
-    docs_truncated: int = 0,
     exhausted: bool = False,
 ) -> dict[str, Any]:
     """Build production-format compact FFD state for corruption tests."""
+    document_stats = _DocumentStats()
+    for _ in range(docs_seen):
+        document_stats.observe(source_tokens=1, retained_tokens=1)
     return FFDPackerState(
         pending_docs=[np.asarray(row, dtype=np.int32) for row in pending_docs or []],
         ready_tokens=[np.asarray(row, dtype=np.int32) for row in ready_tokens or []],
         ready_segments=[np.asarray(row, dtype=np.int32) for row in ready_segments or []],
-        docs_seen=docs_seen,
-        docs_truncated=docs_truncated,
+        document_stats=document_stats,
         exhausted=exhausted,
     ).to_dict()
 
@@ -372,8 +373,7 @@ def test_ffd_packer_state_roundtrip(
         "ready_tokens_i32_b64",
         "ready_segments_i32_b64",
         "ready_offsets",
-        "docs_seen",
-        "docs_truncated",
+        "document_stats",
         "exhausted",
     ],
 )
@@ -412,7 +412,7 @@ def test_ffd_packer_state_from_dict_is_strict(missing_key: str) -> None:
         # pending chunk longer than capacity (chunks are pre-split)
         ({"pending_docs": [list(range(9))]}, r"pending_docs\[0\]"),
         # negative counters / truncated > seen
-        ({"docs_seen": -1}, "invalid document counters"),
+        ({"docs_seen": -1}, "nonnegative"),
         ({"docs_seen": 1, "docs_truncated": 2}, "invalid document counters"),
     ],
     ids=[
@@ -437,9 +437,10 @@ def test_ffd_packer_state_rejects_corrupt_queues(
             pending_docs=mutation.get("pending_docs"),
             ready_tokens=mutation.get("ready_tokens"),
             ready_segments=mutation.get("ready_segments"),
-            docs_seen=mutation.get("docs_seen", 3),
-            docs_truncated=mutation.get("docs_truncated", 0),
         )
+        for key in ("docs_seen", "docs_truncated"):
+            if key in mutation:
+                state["document_stats"][key] = mutation[key]
         packer.set_state(state)
 
 
@@ -468,7 +469,7 @@ def test_ffd_packer_state_rejects_corrupt_compact_encoding(
     [
         ({"remaining_tokens": [10], "remaining_segments": [0]}, "remaining_segments"),
         ({"next_segment_id": 3}, "next_segment_id"),
-        ({"docs_seen": -1}, "invalid document counters"),
+        ({"docs_seen": -1}, "nonnegative"),
         ({"docs_seen": 1, "docs_truncated": 2}, "invalid document counters"),
     ],
     ids=["invalid_segment", "invalid_next_segment", "negative_counter", "truncated_gt_seen"],
@@ -487,15 +488,12 @@ def test_token_packer_state_rejects_invalid_current_state(
         max_doc_tokens=None,
     )
 
-    state = {
-        "remaining_tokens": [],
-        "remaining_segments": [],
-        "next_segment_id": 1,
-        "docs_seen": 0,
-        "docs_truncated": 0,
-        "exhausted": False,
-    }
-    state.update(mutation)
+    state = packer.get_state()
+    for key, value in mutation.items():
+        if key in ("docs_seen", "docs_truncated"):
+            state["document_stats"][key] = value
+        else:
+            state[key] = value
     with pytest.raises(ValueError, match=match):
         packer.set_state(state)
 
@@ -530,6 +528,75 @@ def test_token_packer_finite_tail_state_roundtrip() -> None:
     del state["exhausted"]
     with pytest.raises(KeyError):
         make_packer().set_state(state)
+
+
+@pytest.mark.parametrize("mode", ["sequential", "bin", "multipack"])
+def test_document_truncation_metrics_are_complete_and_resume_stable(mode: str) -> None:
+    """Explicit truncation should report token loss and bounded length quantiles."""
+    common: dict[str, Any] = {
+        "seq_len": 8,
+        "add_bos": False,
+        "add_eos": False,
+        "bos_id": 1,
+        "eos_id": 2,
+        "pad_id": 0,
+        "max_doc_tokens": 4,
+    }
+    if mode == "sequential":
+        packer: Any = TokenPacker(**common)
+        restored: Any = TokenPacker(**common)
+    elif mode == "bin":
+        packer = BinPacker(bins_per_pack=1, buffer_docs=2, max_docs_per_bin=None, **common)
+        restored = BinPacker(bins_per_pack=1, buffer_docs=2, max_docs_per_bin=None, **common)
+    else:
+        packer = MultipackPacker(bins_per_pack=1, group_docs=2, max_docs_per_bin=None, **common)
+        restored = MultipackPacker(bins_per_pack=1, group_docs=2, max_docs_per_bin=None, **common)
+
+    for length in (0, 1, 2, 4, 5, 8, 9):
+        packer.add_document(list(range(length)))
+    expected = packer.get_stats()
+
+    assert expected == {
+        "docs_seen": 7,
+        "docs_truncated": 3,
+        "source_tokens_observed": 29,
+        "source_tokens_retained": 19,
+        "source_tokens_discarded": 10,
+        "source_truncation_fraction": 10 / 29,
+        "source_doc_tokens_p50_upper": 7,
+        "source_doc_tokens_p90_upper": 15,
+        "source_doc_tokens_p99_upper": 15,
+    }
+    restored.set_state(packer.get_state())
+    assert restored.get_stats() == expected
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        ({"length_histogram": [0]}, "exactly 65 bins"),
+        ({"source_tokens_discarded": 1}, "retained \\+ discarded"),
+        ({"docs_seen": 1}, "histogram count"),
+    ],
+)
+def test_document_stats_reject_inconsistent_checkpoint_state(
+    mutation: dict[str, Any], match: str
+) -> None:
+    """Resume must reject incomplete or contradictory truncation diagnostics."""
+    packer = TokenPacker(
+        seq_len=8,
+        add_bos=False,
+        add_eos=False,
+        bos_id=1,
+        eos_id=2,
+        pad_id=0,
+        max_doc_tokens=None,
+    )
+    state = packer.get_state()
+    state["document_stats"].update(mutation)
+
+    with pytest.raises(ValueError, match=match):
+        packer.set_state(state)
 
 
 def test_grain_iterator_state_roundtrip() -> None:
@@ -1205,7 +1272,7 @@ def test_packer_alignment_after_restore() -> None:
 
     remaining = state.get("packer", {}).get("remaining_tokens")
     assert remaining, "expected non-empty packer buffer for alignment test"
-    docs_seen_at_snapshot = state["packer"]["docs_seen"]
+    docs_seen_at_snapshot = state["packer"]["document_stats"]["docs_seen"]
     assert docs_seen_at_snapshot > 0
 
     cont = [_batch_arrays(next(it)) for _ in range(3)]
@@ -1213,7 +1280,7 @@ def test_packer_alignment_after_restore() -> None:
     it2 = build_train_iterator(cfg)
     it2.set_state(state)
     # docs_seen/docs_truncated diagnostics must survive save/load, not reset to 0.
-    assert it2.get_state()["packer"]["docs_seen"] == docs_seen_at_snapshot
+    assert it2.get_state()["packer"]["document_stats"]["docs_seen"] == docs_seen_at_snapshot
     resumed = [_batch_arrays(next(it2)) for _ in range(3)]
 
     for batch_a, batch_b in zip(cont, resumed, strict=True):

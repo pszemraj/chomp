@@ -229,10 +229,10 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
             """Restore producer state from checkpoint."""
             self._producer.set_state(state)
 
-        def get_stats(self) -> dict[str, int]:
+        def get_stats(self) -> dict[str, int | float]:
             """Return packer-level document stats.
 
-            :return dict[str, int]: Packer stats, or an empty dict if unavailable.
+            :return dict[str, int | float]: Packer stats, or an empty dict if unavailable.
             """
             return self._producer.get_stats()
 

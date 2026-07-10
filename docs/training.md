@@ -146,6 +146,10 @@ Metrics are written to `logging.metrics_file` every `train.log_every` steps
 - `tokens_per_sec` (end-to-end throughput over the last sync interval)
 - `packing_mode`, `packing_utilization` (when iterator stats are enabled)
 - `docs_seen`, `docs_truncated`, `docs_added_this_batch` (when available)
+- `source_tokens_observed`, `source_tokens_retained`,
+  `source_tokens_discarded`, `source_truncation_fraction`
+- `source_doc_tokens_p50_upper`, `source_doc_tokens_p90_upper`,
+  `source_doc_tokens_p99_upper` (log2-histogram upper bounds)
 - `shuffle_window_docs`, `shuffle_window_bytes`, `shuffle_peak_window_docs`,
   `shuffle_peak_window_bytes`, `shuffle_replayed_window_docs`, and
   `shuffle_replayed_window_bytes`

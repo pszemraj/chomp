@@ -49,7 +49,7 @@ from .hf import (
 )
 from .pack import BinPacker, MultipackPacker, TokenPacker, _positions_from_segments
 
-DATA_PIPELINE_SCHEMA_VERSION = 8
+DATA_PIPELINE_SCHEMA_VERSION = 9
 
 
 class Tokenizer(Protocol):
@@ -1151,12 +1151,12 @@ class _SequenceProducer:
         self._text_stream.set_state(state["text"])
         self._packer.set_state(state["packer"])
 
-    def get_stats(self) -> dict[str, int]:
+    def get_stats(self) -> dict[str, int | float]:
         """Return source- and packer-level document stats if available.
 
-        :return dict[str, int]: Stream memory/replay and packing counters.
+        :return dict[str, int | float]: Stream memory/replay and packing counters.
         """
-        stats: dict[str, int] = {}
+        stats: dict[str, int | float] = {}
         get_stream_stats = getattr(self._text_stream, "get_stats", None)
         if callable(get_stream_stats):
             stats.update(get_stream_stats())

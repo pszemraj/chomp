@@ -18,6 +18,7 @@ Senior dev notes:
 from __future__ import annotations
 
 import base64
+import math
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -34,7 +35,7 @@ def _prepare_doc_tokens(
     bos_id: int,
     eos_id: int,
     max_doc_tokens: int | None,
-) -> tuple[np.ndarray, bool]:
+) -> tuple[np.ndarray, int, int]:
     """Build a document token array with optional BOS/EOS and truncation.
 
     :param tokens: Iterable of token IDs for the document.
@@ -43,7 +44,8 @@ def _prepare_doc_tokens(
     :param int bos_id: BOS token ID.
     :param int eos_id: EOS token ID.
     :param max_doc_tokens: Optional cap on document length before special tokens.
-    :return tuple[np.ndarray, bool]: (Token array (int32), truncated flag).
+    :return tuple[np.ndarray, int, int]: Prepared tokens, source-token count,
+        and retained source-token count.
     """
     if isinstance(tokens, np.ndarray):
         arr = tokens.astype(np.int32, copy=False)
@@ -52,10 +54,10 @@ def _prepare_doc_tokens(
     else:
         arr = np.fromiter(tokens, dtype=np.int32)
 
-    truncated = False
+    source_tokens = int(arr.size)
     if max_doc_tokens is not None and arr.size > max_doc_tokens:
         arr = arr[:max_doc_tokens]
-        truncated = True
+    retained_tokens = int(arr.size)
 
     pieces = []
     if add_bos:
@@ -66,10 +68,10 @@ def _prepare_doc_tokens(
         pieces.append(np.asarray([eos_id], dtype=np.int32))
 
     if not pieces:
-        return np.empty((0,), dtype=np.int32), truncated
+        return np.empty((0,), dtype=np.int32), source_tokens, retained_tokens
     if len(pieces) == 1:
-        return pieces[0], truncated
-    return np.concatenate(pieces, axis=0), truncated
+        return pieces[0], source_tokens, retained_tokens
+    return np.concatenate(pieces, axis=0), source_tokens, retained_tokens
 
 
 def _positions_from_segments(segs: np.ndarray) -> np.ndarray:
@@ -192,6 +194,138 @@ class _ChunkedIntBuffer:
             self._chunks.append(arr)
 
 
+_DOC_LENGTH_HISTOGRAM_BINS = 65
+
+
+@dataclass
+class _DocumentStats:
+    """Checkpointed document/truncation counters with fixed-memory length bins."""
+
+    docs_seen: int = 0
+    docs_truncated: int = 0
+    source_tokens_observed: int = 0
+    source_tokens_retained: int = 0
+    source_tokens_discarded: int = 0
+    length_histogram: list[int] = field(default_factory=lambda: [0] * _DOC_LENGTH_HISTOGRAM_BINS)
+
+    def observe(self, *, source_tokens: int, retained_tokens: int) -> None:
+        """Record one source document after optional content truncation.
+
+        :param int source_tokens: Token count before the configured cap.
+        :param int retained_tokens: Token count after the configured cap.
+        """
+        source_tokens = int(source_tokens)
+        retained_tokens = int(retained_tokens)
+        if source_tokens < 0 or not 0 <= retained_tokens <= source_tokens:
+            raise ValueError(
+                f"invalid document token counts: source={source_tokens}, retained={retained_tokens}"
+            )
+        discarded = source_tokens - retained_tokens
+        self.docs_seen += 1
+        self.docs_truncated += int(discarded > 0)
+        self.source_tokens_observed += source_tokens
+        self.source_tokens_retained += retained_tokens
+        self.source_tokens_discarded += discarded
+        bucket = min(source_tokens.bit_length(), _DOC_LENGTH_HISTOGRAM_BINS - 1)
+        self.length_histogram[bucket] += 1
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return strict JSON state for checkpointing.
+
+        :return dict[str, Any]: Counter and histogram state.
+        """
+        return {
+            "docs_seen": int(self.docs_seen),
+            "docs_truncated": int(self.docs_truncated),
+            "source_tokens_observed": int(self.source_tokens_observed),
+            "source_tokens_retained": int(self.source_tokens_retained),
+            "source_tokens_discarded": int(self.source_tokens_discarded),
+            "length_histogram": [int(value) for value in self.length_histogram],
+        }
+
+    @staticmethod
+    def from_dict(state: dict[str, Any]) -> _DocumentStats:
+        """Parse and validate checkpointed document statistics.
+
+        :param dict[str, Any] state: Serialized counter and histogram state.
+        :raises ValueError: If any counter relationship is inconsistent.
+        :return _DocumentStats: Validated statistics.
+        """
+        values = {
+            key: int(state[key])
+            for key in (
+                "docs_seen",
+                "docs_truncated",
+                "source_tokens_observed",
+                "source_tokens_retained",
+                "source_tokens_discarded",
+            )
+        }
+        histogram_raw = state["length_histogram"]
+        if not isinstance(histogram_raw, list) or len(histogram_raw) != _DOC_LENGTH_HISTOGRAM_BINS:
+            raise ValueError(
+                f"document length_histogram must contain exactly {_DOC_LENGTH_HISTOGRAM_BINS} bins"
+            )
+        histogram = [int(value) for value in histogram_raw]
+        if any(value < 0 for value in (*values.values(), *histogram)):
+            raise ValueError("document statistics must be nonnegative")
+        docs_seen = values["docs_seen"]
+        docs_truncated = values["docs_truncated"]
+        observed = values["source_tokens_observed"]
+        retained = values["source_tokens_retained"]
+        discarded = values["source_tokens_discarded"]
+        if docs_truncated > docs_seen or sum(histogram) != docs_seen:
+            raise ValueError(
+                "invalid document counters: docs_truncated must not exceed docs_seen and "
+                "histogram count must equal docs_seen"
+            )
+        if retained + discarded != observed:
+            raise ValueError(
+                "invalid source-token counters: retained + discarded must equal observed"
+            )
+        if (docs_truncated == 0) != (discarded == 0) or discarded < docs_truncated:
+            raise ValueError(
+                "invalid truncation counters: discarded tokens and truncated documents disagree"
+            )
+        return _DocumentStats(length_histogram=histogram, **values)
+
+    def _quantile_upper_bound(self, quantile: float) -> int:
+        """Return a power-of-two histogram upper bound for a document quantile.
+
+        :param float quantile: Quantile in the interval (0, 1].
+        :return int: Inclusive token-count upper bound.
+        """
+        if self.docs_seen <= 0:
+            return 0
+        target = max(1, math.ceil(self.docs_seen * float(quantile)))
+        cumulative = 0
+        for bucket, count in enumerate(self.length_histogram):
+            cumulative += count
+            if cumulative >= target:
+                return 0 if bucket == 0 else (1 << bucket) - 1
+        raise RuntimeError("document length histogram does not cover docs_seen")
+
+    def metrics(self) -> dict[str, int | float]:
+        """Return operational counters and bounded length quantiles.
+
+        :return dict[str, int | float]: Document/truncation metrics.
+        """
+        observed = int(self.source_tokens_observed)
+        return {
+            "docs_seen": int(self.docs_seen),
+            "docs_truncated": int(self.docs_truncated),
+            "source_tokens_observed": observed,
+            "source_tokens_retained": int(self.source_tokens_retained),
+            "source_tokens_discarded": int(self.source_tokens_discarded),
+            "source_truncation_fraction": (
+                float(self.source_tokens_discarded) / observed if observed else 0.0
+            ),
+            "source_doc_tokens_p50_upper": self._quantile_upper_bound(0.50),
+            "source_doc_tokens_p90_upper": self._quantile_upper_bound(0.90),
+            "source_doc_tokens_p99_upper": self._quantile_upper_bound(0.99),
+        }
+
+
 @dataclass(frozen=True)
 class PackerState:
     """JSON-serializable packer state."""
@@ -199,8 +333,7 @@ class PackerState:
     remaining_tokens: list[int]
     remaining_segments: list[int]
     next_segment_id: int
-    docs_seen: int
-    docs_truncated: int
+    document_stats: _DocumentStats
     exhausted: bool
 
     def to_dict(self) -> dict[str, Any]:
@@ -212,8 +345,7 @@ class PackerState:
             "remaining_tokens": self.remaining_tokens,
             "remaining_segments": self.remaining_segments,
             "next_segment_id": int(self.next_segment_id),
-            "docs_seen": int(self.docs_seen),
-            "docs_truncated": int(self.docs_truncated),
+            "document_stats": self.document_stats.to_dict(),
             "exhausted": bool(self.exhausted),
         }
 
@@ -241,20 +373,13 @@ class PackerState:
         next_segment_id = int(d["next_segment_id"])
         if next_segment_id not in (1, 2):
             raise ValueError(f"next_segment_id must be 1 or 2, got {next_segment_id}")
-        docs_seen = int(d["docs_seen"])
-        docs_truncated = int(d["docs_truncated"])
+        document_stats = _DocumentStats.from_dict(d["document_stats"])
         exhausted = bool(d["exhausted"])
-        if docs_seen < 0 or docs_truncated < 0 or docs_truncated > docs_seen:
-            raise ValueError(
-                "invalid document counters: expected 0 <= docs_truncated <= docs_seen, "
-                f"got docs_truncated={docs_truncated}, docs_seen={docs_seen}"
-            )
         return PackerState(
             remaining_tokens=toks,
             remaining_segments=segs,
             next_segment_id=next_segment_id,
-            docs_seen=docs_seen,
-            docs_truncated=docs_truncated,
+            document_stats=document_stats,
             exhausted=exhausted,
         )
 
@@ -290,8 +415,7 @@ class _PackerBase:
         self.bos_id = int(bos_id)
         self.eos_id = int(eos_id)
         self.max_doc_tokens = None if max_doc_tokens is None else int(max_doc_tokens)
-        self._docs_seen = 0
-        self._docs_truncated = 0
+        self._document_stats = _DocumentStats()
 
     def _prepare_document(self, tokens: Iterable[int]) -> np.ndarray:
         """Prepare one document and update shared counters.
@@ -299,7 +423,7 @@ class _PackerBase:
         :param tokens: Iterable of input token IDs.
         :return np.ndarray: Prepared int32 document tokens.
         """
-        document, truncated = _prepare_doc_tokens(
+        document, source_tokens, retained_tokens = _prepare_doc_tokens(
             tokens,
             add_bos=self.add_bos,
             add_eos=self.add_eos,
@@ -307,20 +431,18 @@ class _PackerBase:
             eos_id=self.eos_id,
             max_doc_tokens=self.max_doc_tokens,
         )
-        self._docs_seen += 1
-        if truncated:
-            self._docs_truncated += 1
+        self._document_stats.observe(
+            source_tokens=source_tokens,
+            retained_tokens=retained_tokens,
+        )
         return document
 
-    def get_stats(self) -> dict[str, int]:
-        """Return common document counters.
+    def get_stats(self) -> dict[str, int | float]:
+        """Return common document and truncation diagnostics.
 
-        :return dict[str, int]: docs_seen and docs_truncated counts.
+        :return dict[str, int | float]: Counts, token totals, and length bounds.
         """
-        return {
-            "docs_seen": int(self._docs_seen),
-            "docs_truncated": int(self._docs_truncated),
-        }
+        return self._document_stats.metrics()
 
 
 class TokenPacker(_PackerBase):
@@ -469,8 +591,7 @@ class TokenPacker(_PackerBase):
             remaining_tokens=self._token_buf.dump_remaining(),
             remaining_segments=self._segment_buf.dump_remaining(),
             next_segment_id=int(self._next_segment_id),
-            docs_seen=int(self._docs_seen),
-            docs_truncated=int(self._docs_truncated),
+            document_stats=self._document_stats,
             exhausted=bool(self._exhausted),
         )
         return st.to_dict()
@@ -484,8 +605,7 @@ class TokenPacker(_PackerBase):
         self._token_buf.load_remaining(st.remaining_tokens)
         self._segment_buf.load_remaining(st.remaining_segments)
         self._next_segment_id = int(st.next_segment_id)
-        self._docs_seen = int(st.docs_seen)
-        self._docs_truncated = int(st.docs_truncated)
+        self._document_stats = st.document_stats
         self._exhausted = bool(st.exhausted)
 
 
@@ -502,8 +622,7 @@ class FFDPackerState:
     pending_docs: list[np.ndarray]
     ready_tokens: list[np.ndarray]
     ready_segments: list[np.ndarray]
-    docs_seen: int
-    docs_truncated: int
+    document_stats: _DocumentStats
     exhausted: bool
 
     def to_dict(self) -> dict[str, Any]:
@@ -522,8 +641,7 @@ class FFDPackerState:
             "ready_tokens_i32_b64": ready_payload,
             "ready_segments_i32_b64": segment_payload,
             "ready_offsets": ready_offsets,
-            "docs_seen": int(self.docs_seen),
-            "docs_truncated": int(self.docs_truncated),
+            "document_stats": self.document_stats.to_dict(),
             "exhausted": bool(self.exhausted),
         }
 
@@ -551,19 +669,12 @@ class FFDPackerState:
         ready_segments = _decode_i32_rows(
             d["ready_segments_i32_b64"], d["ready_offsets"], label="ready_segments"
         )
-        docs_seen = int(d["docs_seen"])
-        docs_truncated = int(d["docs_truncated"])
-        if docs_seen < 0 or docs_truncated < 0 or docs_truncated > docs_seen:
-            raise ValueError(
-                f"invalid document counters (docs_seen={docs_seen}, "
-                f"docs_truncated={docs_truncated})"
-            )
+        document_stats = _DocumentStats.from_dict(d["document_stats"])
         return FFDPackerState(
             pending_docs=pending,
             ready_tokens=ready_tokens,
             ready_segments=ready_segments,
-            docs_seen=docs_seen,
-            docs_truncated=docs_truncated,
+            document_stats=document_stats,
             exhausted=bool(d["exhausted"]),
         )
 
@@ -939,8 +1050,7 @@ class _FFDPackerBase(_PackerBase):
             pending_docs=list(self._pending_docs),
             ready_tokens=[x for x, _ in self._ready],
             ready_segments=[x for _, x in self._ready],
-            docs_seen=int(self._docs_seen),
-            docs_truncated=int(self._docs_truncated),
+            document_stats=self._document_stats,
             exhausted=bool(self._exhausted),
         )
         return st.to_dict()
@@ -977,8 +1087,7 @@ class _FFDPackerBase(_PackerBase):
             )
             for tokens, segs in zip(st.ready_tokens, st.ready_segments, strict=True)
         )
-        self._docs_seen = int(st.docs_seen)
-        self._docs_truncated = int(st.docs_truncated)
+        self._document_stats = st.document_stats
         self._exhausted = bool(st.exhausted)
 
 

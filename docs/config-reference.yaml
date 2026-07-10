@@ -733,7 +733,8 @@ data:
     # Use: optional explicit cap on encoded document tokens before inserted BOS/EOS and packing.
     # Tokenization processes the full raw document before this cap, so it does not limit tokenizer
     # memory or CPU time. Truncation permanently discards document tails; leave null unless that loss
-    # is intentional and monitor docs_truncated.
+    # is intentional. Monitor source_tokens_discarded, source_truncation_fraction, docs_truncated,
+    # and the source_doc_tokens_p*_upper length bounds when a positive cap is active.
     max_doc_tokens: null
 
   # Key: data.device_put
