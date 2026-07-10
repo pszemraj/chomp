@@ -42,7 +42,10 @@ dependencies = [
   # tripwire fails fast if the attribute vanishes, but any bump must re-verify
   # the workaround and the full interrupted-versus-continuous resume tests.
   "grain==0.2.15",
-  "datasets==4.5.0",
+  # 5.0.0 is the first release with the remote-Parquet thread-shutdown fix
+  # for apache/arrow#45214. Earlier releases can abort a successful run at
+  # interpreter exit after a partially consumed streaming shard.
+  "datasets==5.0.0",
   "transformers==4.57.3",
   "tokenizers==0.22.1",
   # CLI

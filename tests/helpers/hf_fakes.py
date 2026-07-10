@@ -68,3 +68,8 @@ class FakeHFIterator:
         self._i += 1
         ds.index = self._i
         return item
+
+    def close(self) -> None:
+        """Record explicit iterator cleanup when requested."""
+        if self._ds.record is not None:
+            self._ds.record["close_calls"] = self._ds.record.get("close_calls", 0) + 1

@@ -8,6 +8,7 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -1020,6 +1021,34 @@ def test_hf_pipeline_segment_ids_and_label_mask(
     _assert_multi_segment_boundary_masked(next(it))
 
 
+def test_grain_close_reaches_hf_source_with_prefetch(
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+) -> None:
+    """Explicit close must stop prefetch and release the HF source generator."""
+    record: dict[str, Any] = {}
+    patch_hf_load_dataset(
+        [{"text": f"document-{index}"} for index in range(100)],
+        record=record,
+    )
+    cfg = make_pipeline_cfg(
+        vocab_size=256,
+        backend="hf",
+        hf_dataset="dummy",
+        hf_name="dummy",
+        hf_split="train",
+        shuffle=False,
+        repeat=True,
+        grain_prefetch=2,
+        window_shuffle_tokens=0,
+    )
+
+    iterator = build_train_iterator(cfg)
+    next(iterator)
+    iterator.close()
+
+    assert record["close_calls"] == 1
+
+
 def test_hf_state_roundtrip(patch_hf_load_dataset: Callable[..., dict[str, int]]) -> None:
     """HF stream should resume to same position after state roundtrip."""
     patch_hf_load_dataset([{"text": "alpha"}, {"text": "bravo"}, {"text": "charlie"}])
@@ -1034,6 +1063,29 @@ def test_hf_state_roundtrip(patch_hf_load_dataset: Callable[..., dict[str, int]]
     resumed = HFStreamingTextStream(spec)
     resumed.set_state(state)
     assert next(resumed) == expected
+
+
+def test_hf_close_honors_remote_parquet_shutdown_grace(
+    patch_hf_load_dataset: Callable[..., dict[str, int]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sources flagged by Datasets must receive its Arrow shutdown grace."""
+    from datasets import config as datasets_config
+
+    record: dict[str, Any] = {}
+    patch_hf_load_dataset([{"text": "alpha"}], record=record)
+    stream = HFStreamingTextStream(_hf_stream_spec())
+    next(stream)
+    stream._ds._ex_iterable = SimpleNamespace(sleep_on_threads_shutdown=True)
+    sleeps: list[float] = []
+    monkeypatch.setattr("chomp.data.hf.time.sleep", sleeps.append)
+
+    stream.close()
+    stream.close()
+
+    assert record["close_calls"] == 1
+    assert sleeps == [datasets_config.SLEEP_TIME_ON_THREADS_SHUTDOWN]
+    with pytest.raises(ValueError, match="closed HF streaming iterator"):
+        next(stream)
 
 
 def test_real_hf_iterable_shuffled_state_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:

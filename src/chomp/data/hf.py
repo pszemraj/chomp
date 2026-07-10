@@ -126,9 +126,11 @@ class HFStreamingTextStream:
         :param HFStreamSpec spec: Dataset specification.
         """
         self._spec = spec
+        self._closed = False
         self._epoch = 0
         self._ds: datasets.IterableDataset
         self._it: Iterator[dict[str, Any]]
+        self._source_started = False
         self._n_since_state = 0
         self._last_state: dict[str, Any] | None = None
         self._window: list[str] = []
@@ -165,8 +167,11 @@ class HFStreamingTextStream:
 
     def _build(self) -> None:
         """Build or rebuild the dataset iterator for the current epoch."""
+        self._close_source_iterator()
         self._ds = self._load_ds_for_epoch(self._epoch)
         self._it = iter(self._ds)
+        self._closed = False
+        self._source_started = False
         self._n_since_state = 0
         self._last_state = None
         self._window = []
@@ -176,6 +181,37 @@ class HFStreamingTextStream:
         self._window_bytes = 0
         # Retry recovery starts exact even when the first source read fails.
         self._last_state = self.get_state()
+
+    def _close_source_iterator(self) -> None:
+        """Close the active Hugging Face generator when one exists."""
+        iterator = getattr(self, "_it", None)
+        close = getattr(iterator, "close", None)
+        if callable(close):
+            close()
+
+    def close(self) -> None:
+        """Release the active Hugging Face streaming iterator."""
+        if self._closed:
+            return
+        ex_iterable = getattr(getattr(self, "_ds", None), "_ex_iterable", None)
+        wait_for_arrow = self._source_started and bool(
+            getattr(ex_iterable, "sleep_on_threads_shutdown", False)
+        )
+        self._close_source_iterator()
+        self._window = []
+        self._window_cursor = 0
+        self._window_parent_state = None
+        self._window_bytes = 0
+        if wait_for_arrow:
+            # Datasets marks remote Parquet builders that need this grace for
+            # Apache Arrow #45214. Its multi-source iterators apply the delay
+            # themselves, but a partially consumed single-source iterator can
+            # otherwise still call into CPython after interpreter finalization.
+            from datasets import config
+
+            time.sleep(config.SLEEP_TIME_ON_THREADS_SHUTDOWN)
+        self._source_started = False
+        self._closed = True
 
     def __iter__(self) -> HFStreamingTextStream:
         return self
@@ -254,6 +290,7 @@ class HFStreamingTextStream:
         :return str: Text payload from the dataset item.
         """
         while True:
+            self._source_started = True
             item = next(self._it)
             if self._spec.text_key not in item:
                 raise KeyError(
@@ -352,6 +389,8 @@ class HFStreamingTextStream:
         return text
 
     def __next__(self) -> str:
+        if self._closed:
+            raise ValueError("Attempting to use a closed HF streaming iterator.")
         # Retry loop for transient failures
         for attempt in range(self._spec.max_retries + 1):
             try:
@@ -410,6 +449,7 @@ class HFStreamingTextStream:
             missing or invalid.
         :raises Exception: If load_state_dict fails (better to crash than silently reset).
         """
+        self._close_source_iterator()
         epoch = int(state["epoch"])
         self._epoch = epoch
         self._ds = self._load_ds_for_epoch(self._epoch)
@@ -423,6 +463,8 @@ class HFStreamingTextStream:
                 )
             self._ds.load_state_dict(hf_state)  # type: ignore[attr-defined]
             self._it = iter(self._ds)
+            self._closed = False
+            self._source_started = False
             self._window = []
             self._window_cursor = 0
             self._window_index = 0
@@ -446,6 +488,8 @@ class HFStreamingTextStream:
                 )
             self._ds.load_state_dict(parent_state)  # type: ignore[attr-defined]
             self._it = iter(self._ds)
+            self._closed = False
+            self._source_started = False
             self._window_index = window_index
             self._window = []
             self._window_cursor = 0
@@ -520,3 +564,6 @@ class LocalTextStream:
         :param dict[str, Any] state: State dict from get_state().
         """
         self._i = int(state["i"])
+
+    def close(self) -> None:
+        """Close the in-memory stream (a no-op)."""

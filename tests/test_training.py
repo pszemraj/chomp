@@ -1031,7 +1031,7 @@ def test_final_checkpoint_failure_fails_the_run(
 
     monkeypatch.setattr("chomp.train.save", _failing_save)
     monkeypatch.setattr("chomp.train._maybe_init_wandb", lambda *a, **k: _FakeWandbRun())
-    with pytest.raises(RuntimeError, match="checkpoint finalization failed"):
+    with pytest.raises(RuntimeError, match="run finalization failed"):
         run(cfg, config_path=str(config_src), resume="none", dry_run=False)
     assert finish_codes == [1], (
         f"W&B must record the checkpoint finalization failure, got {finish_codes}"
@@ -1129,9 +1129,7 @@ def test_final_checkpoint_refuses_nonfinite_state(
 
     with (
         caplog.at_level(logging.ERROR, logger="chomp.train"),
-        pytest.raises(
-            RuntimeError, match="checkpoint finalization failed: Non-finite loss at step 5"
-        ),
+        pytest.raises(RuntimeError, match="run finalization failed: Non-finite loss at step 5"),
     ):
         run(cfg, config_path=str(config_src), resume="none", dry_run=False)
 
@@ -1189,7 +1187,18 @@ def test_resume_rejects_seq_len_mismatch(tmp_path: Path) -> None:
 
 def test_dry_run_compiles_single_step(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Dry run should compile one step, write config, but not metrics."""
+    from chomp.data.grain import GrainTrainBatchIterator
+
     profile_events: list[str] = []
+    close_calls: list[int] = []
+    real_close = GrainTrainBatchIterator.close
+
+    def _tracked_close(iterator: GrainTrainBatchIterator) -> None:
+        """Record and preserve data-iterator cleanup."""
+        close_calls.append(id(iterator))
+        real_close(iterator)
+
+    monkeypatch.setattr(GrainTrainBatchIterator, "close", _tracked_close)
     monkeypatch.setattr("chomp.train.start_trace", lambda _: profile_events.append("start"))
     monkeypatch.setattr("chomp.train.stop_trace", lambda: profile_events.append("stop"))
     run_dir = tmp_path / "dry_run"
@@ -1235,6 +1244,7 @@ def test_dry_run_compiles_single_step(tmp_path: Path, monkeypatch: pytest.Monkey
 
     data = json.loads((run_dir / "config_resolved.json").read_text())
     assert data["derived"]["optim"]["decay_steps_effective"] == cfg.train.steps
+    assert len(close_calls) == 1
 
 
 def test_deterministic_checkpointing_warns(tmp_path: Path, caplog: LogCaptureFixture) -> None:
@@ -1339,6 +1349,17 @@ def test_training_crash_marks_wandb_failed_and_logs(
     """
     run_dir = tmp_path / "run"
     dummy_wandb = DummyWandbRun()
+    from chomp.data.grain import GrainTrainBatchIterator
+
+    close_calls: list[int] = []
+    real_close = GrainTrainBatchIterator.close
+
+    def _tracked_close(iterator: GrainTrainBatchIterator) -> None:
+        """Record and preserve data-iterator cleanup on the crash path."""
+        close_calls.append(id(iterator))
+        real_close(iterator)
+
+    monkeypatch.setattr(GrainTrainBatchIterator, "close", _tracked_close)
 
     def boom_make_train_step(*args: Any, **kwargs: Any) -> Any:
         """Return a train step that always raises a crash error."""
@@ -1386,6 +1407,7 @@ def test_training_crash_marks_wandb_failed_and_logs(
         run(cfg, config_path=None, resume="none", dry_run=False)
 
     assert dummy_wandb.finish_calls == [1]
+    assert len(close_calls) == 1
 
     metrics_path = run_dir / cfg.logging.metrics_file
     rows = read_jsonl(metrics_path)

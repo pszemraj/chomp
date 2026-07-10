@@ -507,6 +507,35 @@ def _close_manager_after_failure(manager: Any | None, *, phase: str) -> None:
         logger.exception("Closing the checkpoint manager after %s failure also failed", phase)
 
 
+def _close_iterator(iterator: Any | None, *, label: str) -> None:
+    """Close a data iterator or stream when it exposes explicit cleanup.
+
+    :param iterator: Iterator/stream to close, or None.
+    :param str label: Resource label used in failure messages.
+    """
+    if iterator is None:
+        return
+    close = getattr(iterator, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception as exc:
+            raise RuntimeError(f"Closing {label} failed") from exc
+
+
+def _close_iterator_after_failure(iterator: Any | None, *, label: str, phase: str) -> None:
+    """Close an iterator without masking an active primary failure.
+
+    :param iterator: Iterator/stream to close, or None.
+    :param str label: Resource label used in secondary-error logging.
+    :param str phase: Setup/finalization phase used in secondary-error logging.
+    """
+    try:
+        _close_iterator(iterator, label=label)
+    except Exception:
+        logger.exception("Closing %s after %s failure also failed", label, phase)
+
+
 def _save_training_checkpoint(
     manager: Any,
     *,
@@ -1401,6 +1430,8 @@ def _run_impl(
             eval_step = make_eval_step(cfg, static=static)
     except BaseException:
         _close_manager_after_failure(manager, phase="training setup")
+        _close_iterator_after_failure(data_it, label="training data iterator", phase="setup")
+        _close_iterator_after_failure(gen_stream, label="generation stream", phase="setup")
         raise
 
     if dry_run:
@@ -1408,6 +1439,9 @@ def _run_impl(
             wandb_run, profile_enabled = _start_run_telemetry(cfg, run_dir=run_dir, dry_run=True)
         except BaseException:
             _close_manager_after_failure(manager, phase="dry-run telemetry setup")
+            _close_iterator_after_failure(
+                data_it, label="training data iterator", phase="dry-run telemetry setup"
+            )
             raise
         try:
             try:
@@ -1446,17 +1480,26 @@ def _run_impl(
             print(console_line)
         except BaseException:
             _close_manager_after_failure(manager, phase="dry run")
+            _close_iterator_after_failure(data_it, label="training data iterator", phase="dry run")
             _finish_run_telemetry(wandb_run, profile_enabled=profile_enabled, exit_code=1)
             raise
         else:
-            try:
-                if manager is not None:
+            close_errors: list[Exception] = []
+            if manager is not None:
+                try:
                     manager.close()
-            except BaseException:
+                except Exception as exc:
+                    close_errors.append(exc)
+            try:
+                _close_iterator(data_it, label="training data iterator")
+            except Exception as exc:
+                close_errors.append(exc)
+            if close_errors:
                 _finish_run_telemetry(wandb_run, profile_enabled=profile_enabled, exit_code=1)
-                raise
-            else:
-                _finish_run_telemetry(wandb_run, profile_enabled=profile_enabled)
+                raise RuntimeError(
+                    f"dry-run finalization failed: {close_errors[0]}"
+                ) from close_errors[0]
+            _finish_run_telemetry(wandb_run, profile_enabled=profile_enabled)
         return run_dir
 
     # Training loop
@@ -1637,6 +1680,12 @@ def _run_impl(
         wandb_run, profile_enabled = _start_run_telemetry(cfg, run_dir=run_dir, dry_run=False)
     except BaseException:
         _close_manager_after_failure(manager, phase="telemetry setup")
+        _close_iterator_after_failure(
+            data_it, label="training data iterator", phase="telemetry setup"
+        )
+        _close_iterator_after_failure(
+            gen_stream, label="generation stream", phase="telemetry setup"
+        )
         raise
     exit_code = 0
     crash_reason = None
@@ -1867,7 +1916,7 @@ def _run_impl(
         # checkpoint); on the crash path the original exception keeps
         # propagating and they are logged as secondary failures.
         exc_in_flight = sys.exc_info()[0] is not None
-        ckpt_errors: list[Exception] = []
+        finalization_errors: list[Exception] = []
 
         final_step = None
         if manager is not None and not data_state_aligned:
@@ -1883,7 +1932,7 @@ def _run_impl(
                 final_step = int(jax.device_get(state.step))
             except Exception as exc:
                 logger.exception("Could not read state.step for the final checkpoint")
-                ckpt_errors.append(exc)
+                finalization_errors.append(exc)
         if (
             manager is not None
             and final_step is not None
@@ -1907,7 +1956,7 @@ def _run_impl(
                         exc,
                         f" (step {last_saved_step})" if last_saved_step >= 0 else "",
                     )
-                    ckpt_errors.append(exc)
+                    finalization_errors.append(exc)
             if final_state_valid:
                 try:
                     _save_training_checkpoint(
@@ -1923,19 +1972,29 @@ def _run_impl(
                     )
                 except Exception as exc:
                     logger.exception("Final checkpoint save failed at step %s", final_step)
-                    ckpt_errors.append(exc)
+                    finalization_errors.append(exc)
 
         if manager is not None:
             try:
                 manager.close()
             except Exception as exc:
                 logger.exception("Closing the checkpoint manager failed")
-                ckpt_errors.append(exc)
+                finalization_errors.append(exc)
 
-        # Checkpoint finalization failures fail the run (raise below), so the
-        # exit code W&B records must agree — finish() only after all
-        # checkpoint work has had its chance to error.
-        if ckpt_errors and not exc_in_flight and exit_code == 0:
+        for iterator, label in (
+            (data_it, "training data iterator"),
+            (gen_stream, "generation stream"),
+        ):
+            try:
+                _close_iterator(iterator, label=label)
+            except Exception as exc:
+                logger.exception("Closing %s failed", label)
+                finalization_errors.append(exc)
+
+        # Checkpoint or iterator finalization failures fail the run (raise
+        # below), so W&B's exit code must agree. Finish telemetry only after
+        # all run resources have had their chance to error.
+        if finalization_errors and not exc_in_flight and exit_code == 0:
             exit_code = 1
         _finish_run_telemetry(
             wandb_run,
@@ -1947,10 +2006,10 @@ def _run_impl(
 
         _flush_loggers()
 
-        if ckpt_errors and not exc_in_flight:
+        if finalization_errors and not exc_in_flight:
             raise RuntimeError(
-                f"checkpoint finalization failed: {ckpt_errors[0]}"
-            ) from ckpt_errors[0]
+                f"run finalization failed: {finalization_errors[0]}"
+            ) from finalization_errors[0]
 
     if preemption_reason is not None:
         raise TrainingPreempted(

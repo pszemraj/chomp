@@ -150,6 +150,20 @@ class GrainTrainBatchIterator:
         """
         return self._it
 
+    def close(self) -> None:
+        """Stop prefetch and recursively release the source iterator."""
+        # Grain's ordinary DatasetIterator.close() recursively closes parents,
+        # but ThreadPrefetchDatasetIterator overrides it to stop only its own
+        # worker. Close that outer node first, then its parent; the parent's
+        # base implementation handles the remainder of the chain.
+        try:
+            parent = getattr(self._it, "_parent", None)
+        except AssertionError:
+            parent = None
+        self._it.close()
+        if parent is not None:
+            parent.close()
+
     def get_stats(self) -> dict[str, float | int | str]:
         """Return latest packing stats from the iterator.
 
@@ -247,6 +261,13 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
             :return dict[str, int | float]: Packer stats, or an empty dict if unavailable.
             """
             return self._producer.get_stats()
+
+        def close(self) -> None:
+            """Release the producer before closing the Grain source node."""
+            try:
+                self._producer.close()
+            finally:
+                super().close()
 
     class _TrainSequenceIterDataset(grain.IterDataset):  # type: ignore[misc]
         """IterDataset yielding packed [T] windows."""

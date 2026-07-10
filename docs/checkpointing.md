@@ -43,8 +43,14 @@ Checkpoint frequency is controlled by:
 - `checkpoint.max_to_keep`
 - `checkpoint.async_save`
 
-The manager closes on every exit path, which waits for asynchronous writes and
-releases its checkpointer, metadata stores, and deleter. Orbax enforces
+The manager and data iterator close on every exit path. Orbax waits for
+asynchronous writes and releases its checkpointer, metadata stores, and
+deleter; Grain stops prefetch workers and closes the underlying Hugging Face
+stream. Datasets 5.0.0 is pinned because it includes the remote-Parquet
+thread-shutdown cleanup for successful processes that stop mid-shard. For a
+single-source Parquet stream, Chomp also observes Datasets' builder flag and
+applies its bounded Arrow thread-shutdown grace after closing the generator.
+Local and non-Parquet streams do not wait. Orbax enforces
 `checkpoint.max_to_keep` for retained checkpoints.
 
 A save succeeds only when Orbax explicitly accepts it. Before save and after

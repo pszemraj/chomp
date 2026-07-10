@@ -87,6 +87,10 @@ class TextStream(Protocol):
         """Restore stream state from a checkpoint."""
         ...
 
+    def close(self) -> None:
+        """Release resources owned by the stream."""
+        ...
+
 
 logger = logging.getLogger(__name__)
 
@@ -1106,6 +1110,12 @@ class _SequenceProducer:
                 "expected str or list[int]."
             )
         self._packer.add_document(ids)
+
+    def close(self) -> None:
+        """Release the producer's underlying text stream."""
+        close = getattr(self._text_stream, "close", None)
+        if callable(close):
+            close()
 
     def next_window(self) -> tuple[np.ndarray, np.ndarray]:
         """Pop the next [T] token and segment-ID arrays from the packer.
