@@ -74,28 +74,6 @@ def _prepare_doc_tokens(
     return np.concatenate(pieces, axis=0), source_tokens, retained_tokens
 
 
-def _positions_from_segments(segs: np.ndarray) -> np.ndarray:
-    """Derive per-segment position IDs from segment IDs (vectorized).
-
-    Positions restart at 0 at every contiguous segment-ID run and are 0 on
-    padding (segment id <= 0). Positions are always a pure function of the
-    emitted segment IDs, so they are computed here in exactly one place
-    rather than stored or re-derived by consumers.
-
-    :param np.ndarray segs: Segment IDs of length T.
-    :return np.ndarray: Position IDs of length T (int32).
-    """
-    n = int(segs.size)
-    idx = np.arange(n, dtype=np.int64)
-    boundary = np.empty(n, dtype=bool)
-    boundary[0] = True
-    boundary[1:] = segs[1:] != segs[:-1]
-    run_starts = idx[boundary]
-    pos = (idx - run_starts[np.cumsum(boundary) - 1]).astype(np.int32)
-    pos[segs <= 0] = 0
-    return pos
-
-
 class _ChunkedIntBuffer:
     """A chunked 1D int32 buffer with efficient take()."""
 
@@ -544,20 +522,6 @@ class TokenPacker(_PackerBase):
         part of the checkpointed state.
         """
         self._exhausted = True
-
-    def pop_seq_with_metadata(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return ([seq_len] tokens, [seq_len] segment_ids, [seq_len] position_ids).
-
-        Position IDs restart at each window: a document spanning multiple
-        windows restarts at 0 in every window. They are informational for
-        stream-semantics modes (never consumed by the model).
-
-        :raises RuntimeError: If token/segment buffers are misaligned.
-        :return tuple: (tokens, segment_ids, position_ids) arrays of shape [seq_len].
-        """
-
-        tokens, segs = self.pop_seq_with_segments()
-        return tokens, segs, _positions_from_segments(segs)
 
     def pop_seq_with_segments(self) -> tuple[np.ndarray, np.ndarray]:
         """Return tokens and segment IDs without materializing position IDs.
@@ -1021,15 +985,6 @@ class _FFDPackerBase(_PackerBase):
         elif self._exhausted and self._pending_docs:
             self._flush()
         return bool(self._ready)
-
-    def pop_seq_with_metadata(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return ([seq_len] tokens, [seq_len] segment_ids, [seq_len] position_ids).
-
-        :raises RuntimeError: If called before any sequences are ready.
-        :return tuple: (tokens, segment_ids, position_ids) arrays of shape [seq_len].
-        """
-        tokens, segs = self.pop_seq_with_segments()
-        return tokens, segs, _positions_from_segments(segs)
 
     def pop_seq_with_segments(self) -> tuple[np.ndarray, np.ndarray]:
         """Return tokens and segment IDs without materializing position IDs.

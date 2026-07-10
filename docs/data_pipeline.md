@@ -24,12 +24,11 @@ All batches have **fixed shapes**:
 
 - `input_ids`: `[A, B, T]` int32
 - `labels`: `[A, B, T]` int32 (aligned with `input_ids`)
-- `attention_mask`: `[A, B, T]` bool
 - `segment_ids`: `[A, B, T]` int32
-- `position_ids`: `[A, B, T]` int32
 
-The current device transfer uses all five arrays. The measured, contract-gated
-transfer reduction is tracked in [Development Guide: tracked follow-ups](dev.md#tracked-follow-ups).
+The compiled model path derives the attention mask and segment-local positions
+from `segment_ids`. Keeping these deterministic arrays out of the batch avoids
+buffering and transferring duplicate data.
 
 Where:
 

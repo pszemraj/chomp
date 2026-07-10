@@ -123,9 +123,7 @@ def _make_batch() -> Batch:
     return Batch(
         input_ids=arr,
         labels=arr,
-        attention_mask=arr.astype(bool),
         segment_ids=arr,
-        position_ids=arr,
     )
 
 

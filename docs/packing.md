@@ -76,7 +76,7 @@ computes as if it were run alone:
 
 - segment-isolated attention (masked by contiguous segment *runs*, so a reused
   segment id cannot attend back to an earlier same-id document),
-- per-segment RoPE position resets via explicit `position_ids`,
+- per-segment RoPE position resets derived from `segment_ids`,
 - ComplexEMA recurrent state zeroed at every segment boundary,
 - TimestepNorm running statistics (count/mean/M2) restarted at every boundary,
 - cross-segment label pairs and pairs targeting padding excluded from the loss
@@ -183,9 +183,10 @@ before the optimizer, schedule, model RNG, or training step can advance. This
 usually indicates one-token documents, a tokenizer special-token collision, or
 an over-restrictive masking configuration.
 
-## Position IDs
+## Derived attention and positions
 
-The batch contract now includes `position_ids` for all packing modes.
-For `bin` and `multipack` under strict segment isolation, they are consumed by
-the backend to reset positions at each packed segment boundary. Otherwise they
-are informational.
+The batch carries `segment_ids`, from which the compiled model derives the
+attention mask and segment-local positions. Strict `bin` and `multipack`
+packing uses those local positions to reset RoPE at each segment boundary.
+Sequential packing uses segment IDs for loss masking and diagnostics without
+enabling model-state segmentation.

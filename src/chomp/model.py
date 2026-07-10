@@ -116,7 +116,6 @@ class DummyLM(eqx.Module):
         labels: jax.Array,
         attention_mask: jax.Array | None = None,
         segment_ids: jax.Array | None = None,
-        position_ids: jax.Array | None = None,
         *,
         ignore_index: int = -100,
         deterministic: bool = True,
@@ -128,13 +127,12 @@ class DummyLM(eqx.Module):
         :param jax.Array labels: Label token IDs of shape [B, T].
         :param attention_mask: Optional mask of shape [B, T].
         :param segment_ids: Optional segment IDs of shape [B, T].
-        :param position_ids: Optional position IDs of shape [B, T].
         :param int ignore_index: Label value to ignore in loss.
         :param bool deterministic: If False, apply dropout.
         :param key: PRNG key required when deterministic=False.
         :return jax.Array: Scalar mean cross-entropy loss.
         """
-        del segment_ids, position_ids
+        del segment_ids
         logits = self(input_ids, attention_mask, deterministic=deterministic, key=key)
 
         # Shift for causal LM
@@ -526,10 +524,10 @@ def training_loss(
 
     :param Any params: Model parameters from eqx.partition.
     :param Any static: Static model components from eqx.partition.
-    :param Batch batch: Batch with input_ids, labels, attention_mask, and packed metadata.
+    :param Batch batch: Batch with input IDs, labels, and segment IDs.
     :param bool deterministic: If False, apply dropout.
     :param key: PRNG key required when deterministic=False.
-    :param bool use_packed_segments: Whether to pass segment_ids/position_ids to backend loss.
+    :param bool use_packed_segments: Whether to pass segment IDs to backend loss.
     :return jax.Array: Scalar loss value.
     """
 
@@ -538,13 +536,12 @@ def training_loss(
     # Batch tensors come in as [A, B, T]. We compute loss per microbatch and average.
     # The compiled train_step calls this on each microbatch slice (shape [B, T]).
     kwargs: dict[str, Any] = {
-        "attention_mask": batch.attention_mask,
+        "attention_mask": batch.segment_ids > 0,
         "deterministic": deterministic,
         "key": key,
     }
     if use_packed_segments:
         kwargs["segment_ids"] = batch.segment_ids
-        kwargs["position_ids"] = batch.position_ids
     return model.compute_loss(  # type: ignore[attr-defined]
         batch.input_ids,
         batch.labels,

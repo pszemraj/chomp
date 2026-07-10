@@ -208,11 +208,13 @@ class DataConfig:
     Default dataset is Zyphra/Zyda-2 sample-100BT streaming split, as requested.
 
     The data pipeline's job is to yield fixed-shape `Batch` objects:
-      input_ids:      [A, B, T]
-      labels:         [A, B, T]
-      attention_mask: [A, B, T]
+      input_ids:   [A, B, T]
+      labels:      [A, B, T]
+      segment_ids: [A, B, T]
 
     where A=grad_accum, B=batch_size, T=seq_len.
+    Attention masks and segment-local positions are derived from segment IDs
+    inside the compiled model path.
 
     Validation uses ``hf_eval_split`` when set. When null, a deterministic
     content-hash holdout is selected from ``hf_split`` and excluded from

@@ -47,7 +47,7 @@ from .hf import (
     HFStreamSpec,
     LocalTextStream,
 )
-from .pack import BinPacker, MultipackPacker, TokenPacker, _positions_from_segments
+from .pack import BinPacker, MultipackPacker, TokenPacker
 
 DATA_PIPELINE_SCHEMA_VERSION = 10
 
@@ -975,7 +975,6 @@ def _assemble_batch(
     inps = np.full((need, seq_len), spec.pad_id, dtype=np.int32)
     labs = np.full((need, seq_len), IGNORE_INDEX, dtype=np.int32)
     segs_out = np.zeros((need, seq_len), dtype=np.int32)
-    pos_out = np.zeros((need, seq_len), dtype=np.int32)
 
     for idx in range(need):
         try:
@@ -995,7 +994,6 @@ def _assemble_batch(
         )
         inps[idx] = inp
         segs_out[idx] = np.asarray(segs, dtype=np.int32)
-        pos_out[idx] = _positions_from_segments(segs_out[idx])
 
     valid_targets = (labs[:, 1:] != IGNORE_INDEX) & (segs_out[:, 1:] > 0)
     if not np.any(valid_targets):
@@ -1010,9 +1008,7 @@ def _assemble_batch(
     batch = Batch(
         input_ids=inps.reshape(grad_accum, batch_size, seq_len),
         labels=labs.reshape(grad_accum, batch_size, seq_len),
-        attention_mask=segs_abt > 0,
         segment_ids=segs_abt,
-        position_ids=pos_out.reshape(grad_accum, batch_size, seq_len),
     )
     if spec.device_put:
         import jax  # imported lazily to keep iterator usable in non-JAX contexts

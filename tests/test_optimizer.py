@@ -373,9 +373,7 @@ def test_grad_accum_equivalence_dummy_local_text() -> None:
         p: jax.Array,
         in_ids: jax.Array,
         labs: jax.Array,
-        attn: jax.Array,
         segs: jax.Array,
-        pos_ids: jax.Array,
         k: jax.Array,
         token_count: jax.Array,
     ) -> jax.Array:
@@ -384,9 +382,7 @@ def test_grad_accum_equivalence_dummy_local_text() -> None:
         :param jax.Array p: Model parameters.
         :param jax.Array in_ids: Input token ids.
         :param jax.Array labs: Label token ids.
-        :param jax.Array attn: Attention mask.
         :param jax.Array segs: Segment ids.
-        :param jax.Array pos_ids: Position ids.
         :param jax.Array k: PRNG key.
         :param jax.Array token_count: Token count for scaling.
         :return jax.Array: Scaled microbatch loss.
@@ -394,9 +390,7 @@ def test_grad_accum_equivalence_dummy_local_text() -> None:
         micro = Batch(
             input_ids=in_ids,
             labels=labs,
-            attention_mask=attn,
             segment_ids=segs,
-            position_ids=pos_ids,
         )
         loss = training_loss(
             p,
@@ -420,15 +414,13 @@ def test_grad_accum_equivalence_dummy_local_text() -> None:
     for i in range(cfg.train.grad_accum):
         shift_labels = batch.labels[i][:, 1:]
         valid = shift_labels != -100
-        valid = valid & batch.attention_mask[i][:, 1:].astype(bool)
+        valid = valid & (batch.segment_ids[i][:, 1:] > 0)
         token_count = jnp.sum(valid, dtype=jnp.int32).astype(jnp.float32)
         loss_i, grads_i = loss_and_grad(
             state0.params,
             batch.input_ids[i],
             batch.labels[i],
-            batch.attention_mask[i],
             batch.segment_ids[i],
-            batch.position_ids[i],
             micro_keys[i],
             token_count,
         )

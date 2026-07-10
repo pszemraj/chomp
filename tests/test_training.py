@@ -500,15 +500,11 @@ def test_checkpoint_restore_allows_forward(
     seq_len = int(cfg.train.seq_len)
     input_ids = jnp.zeros((bsz, seq_len), dtype=jnp.int32)
     labels = input_ids.copy()
-    attn = jnp.ones((bsz, seq_len), dtype=bool)
     segs = jnp.ones((bsz, seq_len), dtype=jnp.int32)
-    pos = jnp.zeros((bsz, seq_len), dtype=jnp.int32)
     batch = Batch(
         input_ids=input_ids,
         labels=labels,
-        attention_mask=attn,
         segment_ids=segs,
-        position_ids=pos,
     )
 
     loss = training_loss(state.params, static, batch=batch, deterministic=True, key=None)
@@ -1877,7 +1873,7 @@ def test_strict_packed_segments_covers_multi_document_modes(tmp_path: Path) -> N
 
 
 def test_training_loss_passes_segments_iff_packed() -> None:
-    """segment_ids/position_ids reach the backend exactly when strict packed segments are on."""
+    """Strict packing passes segments and lets the backend derive positions."""
     import equinox as eqx
 
     calls: dict[str, Any] = {}
@@ -1907,16 +1903,14 @@ def test_training_loss_passes_segments_iff_packed() -> None:
     micro = Batch(
         input_ids=jnp.zeros((1, 8), dtype=jnp.int32),
         labels=jnp.zeros((1, 8), dtype=jnp.int32),
-        attention_mask=jnp.ones((1, 8), dtype=bool),
         segment_ids=jnp.ones((1, 8), dtype=jnp.int32),
-        position_ids=jnp.zeros((1, 8), dtype=jnp.int32),
     )
 
     training_loss(
         params, static, batch=micro, deterministic=True, key=None, use_packed_segments=True
     )
     assert calls["segment_ids"] is not None
-    assert calls["position_ids"] is not None
+    assert calls["position_ids"] is None
 
     training_loss(
         params, static, batch=micro, deterministic=True, key=None, use_packed_segments=False

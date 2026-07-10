@@ -78,8 +78,8 @@ class GrainTrainBatchIterator:
         if not self._enable_stats or not self._collect_next_stats:
             self._last_stats = {}
             return batch
-        attn = np.asarray(batch.attention_mask, dtype=bool)
         segs = np.asarray(batch.segment_ids)
+        attn = segs > 0
 
         tokens_used = int(np.count_nonzero(attn))
         capacity = int(attn.size)
@@ -383,8 +383,8 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
             docs_seen_before = self._docs_seen() if self._enable_stats else None
             batch = _assemble_batch(lambda: next(self._parent), self._spec)
             labels = np.asarray(batch.labels)
-            attention = np.asarray(batch.attention_mask, dtype=bool)
-            valid = (labels[..., 1:] != int(IGNORE_INDEX)) & attention[..., 1:]
+            segments = np.asarray(batch.segment_ids)
+            valid = (labels[..., 1:] != int(IGNORE_INDEX)) & (segments[..., 1:] > 0)
             loss_tokens_host = int(np.count_nonzero(valid))
             if self._enable_stats:
                 stats = _packer_stats_from_chain(self._parent)

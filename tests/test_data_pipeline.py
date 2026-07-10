@@ -155,8 +155,8 @@ def test_bin_packer_packs_multiple_docs() -> None:
         packer.add_document(_doc(tok, length))
 
     assert packer.can_pop()
-    seq1, seg1, _ = packer.pop_seq_with_metadata()
-    seq2, seg2, _ = packer.pop_seq_with_metadata()
+    seq1, seg1 = packer.pop_seq_with_segments()
+    seq2, seg2 = packer.pop_seq_with_segments()
 
     assert seq1.shape == (8,)
     assert seq2.shape == (8,)
@@ -168,21 +168,6 @@ def test_bin_packer_packs_multiple_docs() -> None:
 
         unique = np.unique(segs[segs > 0])
         assert unique.size >= 2
-
-
-def test_multipack_packer_emits_segment_local_positions() -> None:
-    """MultipackPacker should emit segment IDs and per-segment position IDs."""
-    packer = _multipack_packer()
-    packer.add_document([10, 11, 12])
-    packer.add_document([20, 21])
-    assert packer.can_pop()
-    toks, segs, pos = packer.pop_seq_with_metadata()
-
-    np.testing.assert_array_equal(toks[:5], np.asarray([10, 11, 12, 20, 21], dtype=np.int32))
-    np.testing.assert_array_equal(segs[:5], np.asarray([1, 1, 1, 2, 2], dtype=np.int32))
-    np.testing.assert_array_equal(pos[:5], np.asarray([0, 1, 2, 0, 1], dtype=np.int32))
-    assert np.all(segs[5:] == 0)
-    assert np.all(pos[5:] == 0)
 
 
 @pytest.mark.parametrize("mode", ["bin", "multipack"])
@@ -214,7 +199,7 @@ def test_ffd_leftover_requeue_preserves_arrival_order(mode: str) -> None:
     packer.add_document(_doc(30, 9))
 
     assert packer.can_pop()
-    seq, _, _ = packer.pop_seq_with_metadata()
+    seq, _ = packer.pop_seq_with_segments()
     np.testing.assert_array_equal(seq[:10], np.full((10,), 10, dtype=np.int32))
 
     assert _ffd_pending_docs(packer) == [_doc(20, 8), _doc(30, 9)]
@@ -240,8 +225,8 @@ def test_ffd_queue_policies_remain_distinct() -> None:
         packer.add_document(_doc(20, 2))
         # Adds two chunks at once, taking the queue past the threshold.
         packer.add_document(_doc(30, 12))
-        _ = packer.pop_seq_with_metadata()
-        _ = packer.pop_seq_with_metadata()
+        _ = packer.pop_seq_with_segments()
+        _ = packer.pop_seq_with_segments()
 
     assert _ffd_pending_docs(bin_packer) == [_doc(30, 8)]
     assert _ffd_pending_docs(multipack) == [_doc(30, 8), _doc(30, 4)]
@@ -257,7 +242,7 @@ def test_ffd_fifo_seed_prevents_adversarial_starvation(make_packer: Callable[[],
     for token in range(10, 16):
         packer.add_document(_doc(token, 8))
         if packer.can_pop():
-            row, _, _ = packer.pop_seq_with_metadata()
+            row, _ = packer.pop_seq_with_segments()
             emitted.append(int(row[0]))
 
     assert emitted == [6, 10, 11, 12, 13, 14]
@@ -269,16 +254,16 @@ def test_ffd_long_document_tail_progress_and_restore(make_packer: Callable[[], A
     """A long-document tail must be the next mandatory seed after restore."""
     packer = make_packer()
     packer.add_document(_doc(7, 14))  # chunks [8, 6]
-    first, _, _ = packer.pop_seq_with_metadata()
+    first, _ = packer.pop_seq_with_segments()
     state = packer.get_state()
 
     packer.add_document(_doc(9, 8))
-    expected, _, _ = packer.pop_seq_with_metadata()
+    expected, _ = packer.pop_seq_with_segments()
 
     restored = make_packer()
     restored.set_state(state)
     restored.add_document(_doc(9, 8))
-    actual, _, _ = restored.pop_seq_with_metadata()
+    actual, _ = restored.pop_seq_with_segments()
 
     np.testing.assert_array_equal(first, np.full((8,), 7, dtype=np.int32))
     np.testing.assert_array_equal(expected[:6], np.full((6,), 7, dtype=np.int32))
@@ -300,7 +285,7 @@ def test_ffd_packer_flushes_pending_docs_at_stream_end(
 
     packer.finish()
     assert packer.can_pop()
-    seq, segs, _ = packer.pop_seq_with_metadata()
+    seq, segs = packer.pop_seq_with_segments()
     np.testing.assert_array_equal(seq[:5], np.full((5,), 7, dtype=np.int32))
     np.testing.assert_array_equal(segs[:5], np.ones((5,), dtype=np.int32))
     assert np.all(segs[5:] == 0)
@@ -318,12 +303,12 @@ def test_ffd_packer_flush_state_roundtrips(make_packer: Callable[[], Any]) -> No
     packer.finish()
     state = packer.get_state()
     assert state["exhausted"] is True
-    expected = packer.pop_seq_with_metadata()
+    expected = packer.pop_seq_with_segments()
 
     restored = make_packer()
     restored.set_state(state)
     assert restored.can_pop()
-    actual = restored.pop_seq_with_metadata()
+    actual = restored.pop_seq_with_segments()
     for arr_a, arr_b in zip(expected, actual, strict=True):
         np.testing.assert_array_equal(arr_a, arr_b)
 
@@ -347,17 +332,17 @@ def test_ffd_packer_state_roundtrip(
     for doc in docs:
         packer.add_document(doc)
     for _ in range(pops_before_snapshot):
-        _ = packer.pop_seq_with_metadata()
+        _ = packer.pop_seq_with_segments()
     state = packer.get_state()
     assert "pending_docs" not in state
     assert isinstance(state["pending_tokens_i32_b64"], str)
     assert json.loads(json.dumps(state)) == state
     expected_stats = packer.get_stats()
-    expected = packer.pop_seq_with_metadata()
+    expected = packer.pop_seq_with_segments()
 
     restored = make_packer()
     restored.set_state(state)
-    actual = restored.pop_seq_with_metadata()
+    actual = restored.pop_seq_with_segments()
 
     for arr_a, arr_b in zip(expected, actual, strict=True):
         np.testing.assert_array_equal(arr_a, arr_b)
@@ -619,7 +604,6 @@ def test_grain_iterator_state_roundtrip() -> None:
 
     np.testing.assert_array_equal(next_a.input_ids, next_b.input_ids)
     np.testing.assert_array_equal(next_a.labels, next_b.labels)
-    np.testing.assert_array_equal(next_a.attention_mask, next_b.attention_mask)
     np.testing.assert_array_equal(next_a.segment_ids, next_b.segment_ids)
 
 
@@ -729,9 +713,7 @@ def test_window_shuffle_state_roundtrip(
     for a, b in zip(followups_a, followups_b, strict=True):
         np.testing.assert_array_equal(a.input_ids, b.input_ids)
         np.testing.assert_array_equal(a.labels, b.labels)
-        np.testing.assert_array_equal(a.attention_mask, b.attention_mask)
         np.testing.assert_array_equal(a.segment_ids, b.segment_ids)
-        np.testing.assert_array_equal(a.position_ids, b.position_ids)
 
 
 def test_docs_added_this_batch_accounts_for_all_pulls(
@@ -843,7 +825,7 @@ def test_finite_sequential_tail_is_padded_without_token_loss() -> None:
     state_before = json.dumps(it.get_state(), sort_keys=True, default=str)
     batch = next(it)
     assert batch.input_ids.shape == (2, 1, 8)
-    assert int(np.count_nonzero(batch.attention_mask)) == 12
+    assert int(np.count_nonzero(batch.segment_ids)) == 12
     np.testing.assert_array_equal(batch.segment_ids[1, 0, 4:], np.zeros(4, dtype=np.int32))
     state_after = json.dumps(it.get_state(), sort_keys=True, default=str)
     assert state_after != state_before
@@ -912,16 +894,15 @@ def test_pipeline_bin_packing_segment_ids() -> None:
     segs = batch.segment_ids[0, 0]
     unique = np.unique(segs[segs > 0])
     assert unique.size >= 2
-    assert np.array_equal(batch.attention_mask, batch.segment_ids > 0)
 
     stats = it.get_stats()
     assert stats["packing_mode"] == "bin"
     assert stats["packing_capacity"] == batch.segment_ids.size
-    expected_util = float(np.count_nonzero(batch.attention_mask) / batch.attention_mask.size)
+    expected_util = float(np.count_nonzero(batch.segment_ids) / batch.segment_ids.size)
     assert stats["packing_utilization"] == expected_util
 
     labels = np.asarray(batch.labels)
-    attn = np.asarray(batch.attention_mask, dtype=bool)
+    attn = np.asarray(batch.segment_ids) > 0
     valid_loss = labels[..., 1:] != -100
     valid_loss = valid_loss & attn[..., 1:]
     assert stats["loss_tokens_host"] == int(np.count_nonzero(valid_loss))
@@ -951,32 +932,21 @@ def test_loss_token_count_stays_paired_through_device_prefetch() -> None:
     iterator = build_train_iterator(cfg)
     batch = next(iterator)
     labels = np.asarray(batch.labels)
-    attention = np.asarray(batch.attention_mask, dtype=bool)
+    attention = np.asarray(batch.segment_ids) > 0
     expected = int(np.count_nonzero((labels[..., 1:] != -100) & attention[..., 1:]))
 
     assert iterator.get_loss_tokens() == expected
     assert iterator.get_stats() == {}
 
 
-def test_pipeline_multipack_position_ids_and_stats() -> None:
-    """Multipack mode should emit per-segment position IDs and packing stats."""
+def test_pipeline_multipack_segments_and_stats() -> None:
+    """Multipack mode should emit packed segments and packing stats."""
     cfg = make_pipeline_cfg(packing_mode="multipack", packing_group_docs=4)
 
     it = build_train_iterator(cfg)
     batch = next(it)
     segs = np.asarray(batch.segment_ids[0, 0], dtype=np.int32)
-    pos = np.asarray(batch.position_ids[0, 0], dtype=np.int32)
-    attn = np.asarray(batch.attention_mask[0, 0], dtype=bool)
-
-    assert np.array_equal(batch.attention_mask, batch.segment_ids > 0)
-    assert np.all(pos[~attn] == 0)
-    for idx in range(int(segs.size)):
-        if segs[idx] <= 0:
-            continue
-        if idx == 0 or segs[idx] != segs[idx - 1]:
-            assert pos[idx] == 0
-        else:
-            assert pos[idx] == pos[idx - 1] + 1
+    assert np.unique(segs[segs > 0]).size >= 2
 
     stats = it.get_stats()
     assert stats["packing_mode"] == "multipack"
@@ -1388,9 +1358,9 @@ def _batch_arrays(batch: Batch) -> tuple:
     """Extract arrays from batch for comparison.
 
     :param Batch batch: Batch to extract from.
-    :return tuple: Tuple of (input_ids, labels, attention_mask, segment_ids).
+    :return tuple: Tuple of (input_ids, labels, segment_ids).
     """
-    return batch.input_ids, batch.labels, batch.attention_mask, batch.segment_ids
+    return batch.input_ids, batch.labels, batch.segment_ids
 
 
 def test_packer_alignment_after_restore() -> None:

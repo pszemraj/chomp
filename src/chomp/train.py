@@ -172,16 +172,16 @@ class _StopSignalState:
         self._previous.clear()
 
 
-def _count_tokens(labels: jax.Array, attention_mask: jax.Array) -> jax.Array:
+def _count_tokens(labels: jax.Array, segment_ids: jax.Array) -> jax.Array:
     """Count valid tokens after the causal shift (for correct GA normalization).
 
     :param jax.Array labels: Label tensor of shape [B, T].
-    :param jax.Array attention_mask: Mask tensor of shape [B, T].
+    :param jax.Array segment_ids: Segment IDs of shape [B, T], with zero padding.
     :return jax.Array: Scalar count of valid (non-ignored, non-masked) tokens.
     """
 
     return jnp.sum(
-        causal_loss_mask(labels, attention_mask, ignore_index=IGNORE_INDEX),
+        causal_loss_mask(labels, segment_ids > 0, ignore_index=IGNORE_INDEX),
         dtype=jnp.int32,
     )
 
@@ -1042,25 +1042,19 @@ def init_train_state(
 def _micro_batch(
     input_ids: jax.Array,
     labels: jax.Array,
-    attn: jax.Array,
     segs: jax.Array,
-    pos_ids: jax.Array,
 ) -> Batch:
     """Assemble one [B, T] micro-batch inside a scan body (train and eval).
 
     :param jax.Array input_ids: Input token IDs [B, T].
     :param jax.Array labels: Label token IDs [B, T].
-    :param jax.Array attn: Attention mask [B, T].
     :param jax.Array segs: Segment IDs [B, T].
-    :param jax.Array pos_ids: Position IDs [B, T].
     :return Batch: Micro-batch with contract dtypes.
     """
     return Batch(
         input_ids=input_ids,
         labels=labels,
-        attention_mask=attn.astype(bool),
         segment_ids=segs.astype(jnp.int32),
-        position_ids=pos_ids.astype(jnp.int32),
     )
 
 
@@ -1103,9 +1097,7 @@ def make_train_step(
         params: Any,
         input_ids: jax.Array,
         labels: jax.Array,
-        attn: jax.Array,
         segs: jax.Array,
-        pos_ids: jax.Array,
         key: jax.Array | None,
         token_count: jax.Array,
     ) -> jax.Array:
@@ -1114,14 +1106,12 @@ def make_train_step(
         :param Any params: Model parameters.
         :param jax.Array input_ids: Input token IDs [B, T].
         :param jax.Array labels: Label token IDs [B, T].
-        :param jax.Array attn: Attention mask [B, T].
         :param jax.Array segs: Segment IDs [B, T].
-        :param jax.Array pos_ids: Position IDs [B, T].
         :param key: PRNG key for dropout, or None if deterministic.
         :param jax.Array token_count: Number of valid tokens for weighting.
         :return jax.Array: Weighted loss scalar.
         """
-        micro = _micro_batch(input_ids, labels, attn, segs, pos_ids)
+        micro = _micro_batch(input_ids, labels, segs)
         loss = training_loss(
             params,
             static,
@@ -1159,21 +1149,19 @@ def make_train_step(
 
         def body(
             carry: tuple[jax.Array, Any, jax.Array],
-            inputs: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
+            inputs: tuple[jax.Array, jax.Array, jax.Array, jax.Array],
         ) -> tuple[tuple[jax.Array, Any, jax.Array], None]:
             """Scan body: accumulate loss and gradients for one micro-batch.
 
             :param tuple carry: (loss_sum, grad_sum, token_sum) accumulators.
-            :param tuple inputs: (input_ids, labels, attn, segs, pos_ids, key) for one micro-batch.
+            :param tuple inputs: (input_ids, labels, segments, key) for one micro-batch.
             :return tuple: (updated_carry, None).
             """
             loss_sum, grad_sum, token_sum = carry
-            in_ids, labs, attn, segs, pos_ids, k = inputs
-            token_count_int = _count_tokens(labs, attn).astype(jnp.int32)
+            in_ids, labs, segs, k = inputs
+            token_count_int = _count_tokens(labs, segs).astype(jnp.int32)
             token_count = token_count_int.astype(jnp.float32)
-            loss, grads = loss_and_grad(
-                state.params, in_ids, labs, attn, segs, pos_ids, k, token_count
-            )
+            loss, grads = loss_and_grad(state.params, in_ids, labs, segs, k, token_count)
             loss_sum = loss_sum + loss.astype(jnp.float32)
             grad_sum = jax.tree_util.tree_map(lambda a, b: a + b.astype(a.dtype), grad_sum, grads)
             token_sum = token_sum + token_count_int
@@ -1185,9 +1173,7 @@ def make_train_step(
             (
                 batch.input_ids,
                 batch.labels,
-                batch.attention_mask,
                 batch.segment_ids,
-                batch.position_ids,
                 micro_keys,
             ),
         )
@@ -1259,13 +1245,13 @@ def make_eval_step(
             """Scan body that accumulates loss and token counts for eval.
 
             :param tuple carry: (loss_sum, token_sum) accumulators.
-            :param tuple xs: (input_ids, labels, attn, segs, pos_ids) microbatch inputs.
+            :param tuple xs: (input_ids, labels, segment_ids) microbatch inputs.
             :return tuple: (updated_carry, None).
             """
             loss_sum, token_sum = carry
-            input_ids, labels, attn, segs, pos_ids = xs
-            micro = _micro_batch(input_ids, labels, attn, segs, pos_ids)
-            token_count = _count_tokens(labels, attn).astype(jnp.int32)
+            input_ids, labels, segs = xs
+            micro = _micro_batch(input_ids, labels, segs)
+            token_count = _count_tokens(labels, segs).astype(jnp.int32)
             loss = training_loss(
                 params,
                 static,
@@ -1285,9 +1271,7 @@ def make_eval_step(
             (
                 batch.input_ids,
                 batch.labels,
-                batch.attention_mask,
                 batch.segment_ids,
-                batch.position_ids,
             ),
         )
         return loss_sum, token_sum

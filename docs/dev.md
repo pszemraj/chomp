@@ -119,14 +119,12 @@ High-risk invariants remain isolated for visibility:
   Acceptance requires the full continuous-versus-resumed suite with prefetch,
   mid-window restore, and a deliberate Grain upgrade before changing the pin.
 
-- **TODO(batch-transfer): reduce the device batch to tokens and compact segment
-  metadata.** Attention masks and position IDs are functions of segment IDs;
-  labels are functions of tokens, boundaries, EOS policy, and padding. Derive
-  them on-device only after preserving the host zero-objective guard, exact
-  loss-token envelope, eval behavior, strict/non-strict segment semantics, and
-  backend capability checks. Benchmark host-to-device bytes and step time at
-  2K, 8K, and 32K contexts; keep the change only when it improves measured
-  throughput or memory without complicating those contracts.
+- **TODO(batch-labels): evaluate deriving labels on-device.** Labels are a
+  function of tokens, segment boundaries, EOS policy, and padding. Remove the
+  transferred label array only if the design preserves the host zero-objective
+  guard, exact loss-token envelope, eval behavior, and strict/non-strict
+  segment semantics. Benchmark host-to-device bytes and step time at 2K, 8K,
+  and 32K contexts before keeping the added device-side logic.
 
 - **TODO(megalodon-rope): move fixed rotary frequencies into the model's static
   contract.** The pinned Megalodon-JAX release exposes `rotary.inv_freq` as an
