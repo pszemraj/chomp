@@ -101,6 +101,10 @@ class BatchAssemblyStopIteration(StopIteration):
         )
 
 
+class ZeroLossTokensError(RuntimeError):
+    """Raised when a complete batch contains no valid causal targets."""
+
+
 @dataclass
 class ByteTokenizer:
     """A tiny byte-level tokenizer.
@@ -954,6 +958,15 @@ def _assemble_batch(
         inps[idx] = inp
         segs_out[idx] = np.asarray(segs, dtype=np.int32)
         pos_out[idx] = np.asarray(pos_ids, dtype=np.int32)
+
+    valid_targets = (labs[:, 1:] != IGNORE_INDEX) & (segs_out[:, 1:] > 0)
+    if not np.any(valid_targets):
+        raise ZeroLossTokensError(
+            "Batch contains zero valid loss tokens after causal shift, boundary/EOS masking, "
+            "and padding. Check for one-token documents, tokenizer special-token collisions, "
+            "or an over-restrictive masking configuration. Refusing to advance the optimizer, "
+            "schedule, RNG, or training step without an objective."
+        )
 
     segs_abt = segs_out.reshape(grad_accum, batch_size, seq_len)
     batch = Batch(

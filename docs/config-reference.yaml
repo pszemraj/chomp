@@ -552,7 +552,8 @@ data:
   # Required: must be true for bin/multipack when data.packing_strict_segments is true.
   # Valid: true | false subject to the interaction above.
   # Use: excludes next-token targets crossing document boundaries. Keep true for independent docs.
-  # Warning: false changes loss-token counts and token-weighted gradient accumulation.
+  # Warning: false changes loss-token counts and token-weighted gradient accumulation. If masking
+  # leaves an entire batch with no valid shifted targets, batch assembly fails before optimization.
   mask_boundary_loss: true
 
   # Key: data.train_on_eos
@@ -562,6 +563,8 @@ data:
   # Valid: true | false.
   # Use: false masks every label equal to model.eos_token_id, including naturally encoded collisions,
   # not only EOS inserted by add_eos. With default byte mode, raw byte 0x02 maps to EOS ID 2.
+  # Warning: if this and boundary/padding masks remove every shifted target in a batch, training
+  # fails before changing parameters, optimizer state, schedule, RNG, or step.
   train_on_eos: true
 
   # Key: data.window_shuffle_windows

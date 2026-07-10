@@ -166,6 +166,10 @@ Two config knobs control loss behavior at packed boundaries:
 
 These masks are applied inside the data pipeline before batching and do not
 affect shapes.
+If they leave a complete batch with zero valid shifted targets, assembly fails
+before the optimizer, schedule, model RNG, or training step can advance. This
+usually indicates one-token documents, a tokenizer special-token collision, or
+an over-restrictive masking configuration.
 
 ## Position IDs
 

@@ -41,7 +41,12 @@ from chomp.config import (
     WandbConfig,
     strict_packed_segments,
 )
-from chomp.data import build_train_iterator, data_fingerprint, prepare_tokenizer_and_config
+from chomp.data import (
+    ZeroLossTokensError,
+    build_train_iterator,
+    data_fingerprint,
+    prepare_tokenizer_and_config,
+)
 from chomp.model import build_model, supports_packed_segments, training_loss
 from chomp.train import (
     _METRICS_FILE_DROP,
@@ -522,6 +527,82 @@ def test_exhaustion_mid_assembly_skips_final_checkpoint(tmp_path: Path) -> None:
     assert loss_step3_replayed[0] == loss_step3_replayed[1]
     steps_on_disk = {int(p.name) for p in ckpt_dir.iterdir() if p.is_dir() and p.name.isdigit()}
     assert steps_on_disk == {2}
+
+
+def test_zero_loss_batch_does_not_mutate_training_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    """A zero-objective batch must fail before train_step or final checkpointing."""
+    import chomp.train as train_mod
+
+    run_dir = tmp_path / "run_zero_loss"
+    cfg = Config(
+        model=ModelConfig(backend="dummy", vocab_size=256, d_model=16, dropout=0.0),
+        data=DataConfig(
+            backend="local_text",
+            local_text="a",
+            repeat=True,
+            window_shuffle_windows=0,
+            max_eval_samples=0,
+            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+        ),
+        train=TrainConfig(
+            steps=1,
+            batch_size=1,
+            seq_len=8,
+            grad_accum=1,
+            jit=False,
+            deterministic=True,
+            allow_cpu=True,
+            eval_every=0,
+        ),
+        optim=OptimConfig(warmup_steps=0),
+        checkpoint=CheckpointConfig(enabled=True, save_every=1, async_save=False),
+        logging=LoggingConfig(run_dir=str(run_dir)),
+        debug=DebugConfig(check_device_every=0),
+    )
+
+    captured: dict[str, Any] = {}
+    real_build = train_mod._build_model_state
+
+    def _capture_initial_state(config: Config) -> Any:
+        """Snapshot the initial state that must remain untouched."""
+        result = real_build(config)
+        captured["state"] = result[4]
+        captured["snapshot"] = jax.tree_util.tree_map(lambda value: jnp.array(value), result[4])
+        return result
+
+    train_step_calls = 0
+
+    def _spy_make_train_step(*args: Any, **kwargs: Any) -> Any:
+        """Return a step function that records any forbidden invocation."""
+
+        def _step(state: TrainState, batch: Batch) -> Any:
+            nonlocal train_step_calls
+            train_step_calls += 1
+            return state, {}
+
+        return _step
+
+    monkeypatch.setattr(train_mod, "_build_model_state", _capture_initial_state)
+    monkeypatch.setattr(train_mod, "make_train_step", _spy_make_train_step)
+
+    with (
+        caplog.at_level(logging.WARNING, logger="chomp.train"),
+        pytest.raises(ZeroLossTokensError, match="zero valid loss tokens"),
+    ):
+        run(cfg, config_path=None, resume="none")
+
+    assert train_step_calls == 0
+    assert tree_allclose(captured["state"], captured["snapshot"], rtol=0.0, atol=0.0)
+    ckpt_dir = default_ckpt_dir(run_dir)
+    saved_steps = (
+        {path.name for path in ckpt_dir.iterdir() if path.is_dir() and path.name.isdigit()}
+        if ckpt_dir.exists()
+        else set()
+    )
+    assert saved_steps == set()
+    assert any("Skipping final checkpoint" in record.getMessage() for record in caplog.records)
 
 
 def test_resume_bit_exact_with_prefetch_and_window_shuffle(tmp_path: Path) -> None:

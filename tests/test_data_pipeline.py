@@ -28,6 +28,7 @@ from chomp.data.pipeline import (
     BatchAssemblyStopIteration,
     BinPacker,
     ByteTokenizer,
+    ZeroLossTokensError,
     build_eval_iterator,
     build_train_iterator,
 )
@@ -671,6 +672,20 @@ def test_stopiteration_at_exact_batch_boundary_consumes_zero_windows() -> None:
     with pytest.raises(BatchAssemblyStopIteration) as exc_info:
         next(it)
     assert exc_info.value.windows_consumed == 0
+
+
+def test_batch_assembly_rejects_zero_valid_loss_tokens() -> None:
+    """One-token segments must fail before a zero-objective batch reaches training."""
+    cfg = make_pipeline_cfg(
+        local_text="a",
+        seq_len=8,
+        repeat=True,
+        window_shuffle_windows=0,
+        tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+    )
+
+    with pytest.raises(ZeroLossTokensError, match="zero valid loss tokens"):
+        next(build_train_iterator(cfg))
 
 
 def test_pipeline_segment_ids_multiple_docs() -> None:
