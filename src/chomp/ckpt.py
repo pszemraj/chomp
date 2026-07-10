@@ -699,8 +699,8 @@ def check_resume_compat(
     # of recorded keys (mirroring the model/optim loops below) so a knob
     # added to the fingerprint's packing section can never be silently
     # skipped here. Every key defaults to a hard error: fingerprinted packing
-    # knobs change data order (mode, buffer_docs, group_docs,
-    # window_shuffle_windows), the training objective (strict_segments,
+    # knobs change data order (mode, buffer_docs, group_docs, packed-window
+    # shuffle budget/rows), the training objective (strict_segments,
     # mask_boundary_loss, train_on_eos), or the iterator-state shape a
     # restore must line up against (grain_prefetch). The one exception is
     # device_put: it does not change sample order, so a mismatch is normally

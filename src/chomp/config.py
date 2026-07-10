@@ -268,11 +268,9 @@ class DataConfig:
     mask_boundary_loss: bool = True
     train_on_eos: bool = True
 
-    # Number of packed [T] windows to buffer and shuffle before batch assembly.
-    # 0 disables. Without this, every batch is a contiguous slice of packer
-    # output, so a single long document can dominate consecutive batches
-    # (0 is not recommended for long-document corpora).
-    window_shuffle_windows: int = 4096
+    # Packed-token budget for window shuffling before batch assembly. Derived
+    # rows are aligned down to batch_size * grad_accum; 0 disables.
+    window_shuffle_tokens: int = 8_388_608
 
     # Grain pipeline settings.
     grain_prefetch: int = 0
@@ -1099,16 +1097,15 @@ def _validate_data(cfg: Config) -> None:
             "for deliberate cross-document state bleed."
         )
 
-    if cfg.data.window_shuffle_windows < 0:
-        _vfail(f"data.window_shuffle_windows must be >=0, got {cfg.data.window_shuffle_windows}")
+    if cfg.data.window_shuffle_tokens < 0:
+        _vfail(f"data.window_shuffle_tokens must be >=0, got {cfg.data.window_shuffle_tokens}")
     rows_per_batch = cfg.train.batch_size * cfg.train.grad_accum
-    if 0 < cfg.data.window_shuffle_windows < rows_per_batch:
-        warnings.warn(
-            "data.window_shuffle_windows "
-            f"({cfg.data.window_shuffle_windows}) is smaller than one batch "
-            f"({rows_per_batch} rows), so it provides only sub-batch/local mixing. "
-            "Use 0 to disable or a multiple of the batch row count for stronger mixing.",
-            stacklevel=2,
+    min_shuffle_tokens = cfg.train.seq_len * rows_per_batch
+    if 0 < cfg.data.window_shuffle_tokens < min_shuffle_tokens:
+        _vfail(
+            "data.window_shuffle_tokens must be 0 or large enough for one complete batch "
+            f"({min_shuffle_tokens} tokens at the configured shape), got "
+            f"{cfg.data.window_shuffle_tokens}"
         )
 
     if cfg.data.grain_prefetch < 0:
@@ -1243,6 +1240,20 @@ def derived_deterministic(cfg: Config) -> bool:
         and cfg.model.attention_dropout == 0.0
         and cfg.model.hidden_dropout == 0.0
     )
+
+
+def resolve_window_shuffle_rows(cfg: Config) -> int:
+    """Resolve a packed-token shuffle budget to batch-aligned rows.
+
+    :param Config cfg: Training configuration.
+    :return int: Window rows, or zero when shuffling is disabled.
+    """
+    budget = int(cfg.data.window_shuffle_tokens)
+    if budget <= 0:
+        return 0
+    rows_per_batch = int(cfg.train.batch_size) * int(cfg.train.grad_accum)
+    raw_rows = budget // int(cfg.train.seq_len)
+    return (raw_rows // rows_per_batch) * rows_per_batch
 
 
 def strict_packed_segments(cfg: Config) -> bool:

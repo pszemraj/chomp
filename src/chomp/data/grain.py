@@ -8,7 +8,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from chomp.config import Config
+from chomp.config import Config, resolve_window_shuffle_rows
 from chomp.types import IGNORE_INDEX, Batch
 
 logger = logging.getLogger(__name__)
@@ -418,7 +418,7 @@ def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchItera
 
     Pipeline: sequence producer -> optional packed-window shuffle -> batch
     assembly -> optional thread prefetch. The window shuffle decorrelates
-    batches from raw packer-output order (data.window_shuffle_windows).
+    batches from raw packer-output order within a token memory budget.
 
     :param Config cfg: Training configuration.
     :param tokenizer: Tokenizer instance for encoding text.
@@ -435,10 +435,11 @@ def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchItera
     )
     ds = _TrainSequenceIterDataset(cfg=cfg, tokenizer=tokenizer)
 
-    if cfg.data.window_shuffle_windows > 0:
+    window_rows = resolve_window_shuffle_rows(cfg)
+    if window_rows > 0:
         ds = _WindowShuffle(
             ds,
-            window_size=int(cfg.data.window_shuffle_windows),
+            window_size=window_rows,
             seed=effective_window_shuffle_seed(cfg),
         )
 

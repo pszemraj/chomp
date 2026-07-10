@@ -7,8 +7,9 @@ sequential packing. The initial 2x2 matrix varied:
 - `data.shuffle_buffer_size`: `10_000` or `200_000`
 
 All variants used the same model, optimizer, seed, and base config family. A
-follow-up ablation compared `data.window_shuffle_windows: 0` against `4096`
-with the 200,000-document shuffle buffer.
+follow-up ablation compared disabled packed-window shuffle against an
+8,388,608-token budget (4,096 rows at context 2,048) with the 200,000-document
+shuffle buffer.
 
 ## Results
 

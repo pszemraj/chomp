@@ -443,7 +443,7 @@ data:
   # Required: no.
   # Valid: true | false.
   # Use: enables chomp's fixed-window HF document shuffle; local_text ignores it. Packed
-  # training-row shuffling is separately controlled by data.window_shuffle_windows. Eval rows are
+  # training-row shuffling is separately controlled by data.window_shuffle_tokens. Eval rows are
   # never window-shuffled.
   shuffle: true
 
@@ -510,7 +510,7 @@ data:
   # Valid: nonempty literal text.
   # Lifecycle: debug only.
   # Use: inline content, not a path. Use YAML block syntax for multiline input. For a quick smoke run,
-  # set data.window_shuffle_windows to 0; its default otherwise fills a 4096-row shuffle window first.
+  # set data.window_shuffle_tokens to 0; its default otherwise fills one token-budgeted window first.
   local_text: "Hello from chomp.\n"
 
   # Key: data.packing_mode
@@ -581,15 +581,16 @@ data:
   # fails before changing parameters, optimizer state, schedule, RNG, or step.
   train_on_eos: true
 
-  # Key: data.window_shuffle_windows
+  # Key: data.window_shuffle_tokens
   # Type: integer
-  # Default: 4096.
+  # Default: 8388608 (2^23 packed tokens; 4096 rows at seq_len 2048).
   # Required: no.
-  # Valid: >= 0; zero disables packed-row shuffling.
-  # Use: packed training [seq_len] rows held in the shuffle window; eval never uses it. Prefer a
-  # positive multiple of train.batch_size * train.grad_accum. A smaller positive value warns because
-  # it provides only sub-batch/local mixing.
-  window_shuffle_windows: 4096
+  # Valid: zero, or >= train.seq_len * train.batch_size * train.grad_accum.
+  # Use: packed-token memory budget for training-row shuffle; eval never uses it. Chomp divides by
+  # train.seq_len and rounds rows down to a train.batch_size * train.grad_accum multiple. The two
+  # buffered int32 arrays use about 8 bytes per budgeted token (64 MiB at default), independent of
+  # context length. zero disables shuffling and is not recommended for domain-ordered/long-doc data.
+  window_shuffle_tokens: 8388608
 
   # Key: data.grain_prefetch
   # Type: integer

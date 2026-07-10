@@ -35,7 +35,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from chomp.config import Config, validate_config
+from chomp.config import Config, resolve_window_shuffle_rows, validate_config
 from chomp.types import IGNORE_INDEX, Batch
 from chomp.utils.xla import deterministic_gpu_ops_setting
 
@@ -49,7 +49,7 @@ from .hf import (
 )
 from .pack import BinPacker, MultipackPacker, TokenPacker, _positions_from_segments
 
-DATA_PIPELINE_SCHEMA_VERSION = 5
+DATA_PIPELINE_SCHEMA_VERSION = 6
 
 
 class Tokenizer(Protocol):
@@ -832,20 +832,21 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
     # is always an error). Fingerprints written before this gating recorded
     # inert knobs unconditionally and fail resume-compat — accepted, per the
     # no-backward-compat policy (docs/dev.md); they already fail on the
-    # window_shuffle_windows key regardless.
+    # packed-window shuffle keys regardless.
     packing = {
         "mode": d.packing_mode,
         "mask_boundary_loss": d.mask_boundary_loss,
         "train_on_eos": d.train_on_eos,
         "grain_prefetch": d.grain_prefetch,
-        "window_shuffle_windows": d.window_shuffle_windows,
+        "window_shuffle_tokens": d.window_shuffle_tokens,
+        "window_shuffle_rows": resolve_window_shuffle_rows(cfg),
         # device_put does not change sample order, but it moves the
         # host->device transfer into the iterator and disables iterator
         # stats — recorded so resume can warn (or error under prefetch,
         # where iterator mechanics already differ).
         "device_put": d.device_put,
     }
-    if d.window_shuffle_windows > 0:
+    if d.window_shuffle_tokens > 0:
         # The shuffle reconstructs current and future windows from this seed
         # after restore. Keep the fingerprint tied to the effective value used
         # by Grain so changing either data.seed or the internal offset cannot

@@ -537,7 +537,7 @@ def test_exact_eof_after_batch_boundary_saves_final_checkpoint(
         data=replace(
             cfg.data,
             repeat=False,
-            window_shuffle_windows=0,
+            window_shuffle_tokens=0,
             grain_prefetch=grain_prefetch,
         ),
     )
@@ -685,7 +685,7 @@ def test_zero_loss_batch_does_not_mutate_training_state(
             backend="local_text",
             local_text="a",
             repeat=True,
-            window_shuffle_windows=0,
+            window_shuffle_tokens=0,
             max_eval_samples=0,
             tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
         ),
@@ -774,7 +774,7 @@ def test_resume_bit_exact_with_prefetch_and_window_shuffle(
                 cfg.data,
                 local_text=text,
                 grain_prefetch=2,
-                window_shuffle_windows=8,
+                window_shuffle_tokens=128,
             ),
         )
         # save_every > steps: the interrupted run's step-3 checkpoint is the
@@ -858,7 +858,7 @@ def test_resume_bit_exact_through_exhaustion_flush(
                 repeat=False,
                 packing_mode="bin",
                 grain_prefetch=2,
-                window_shuffle_windows=8,
+                window_shuffle_tokens=128,
             ),
         )
         # save_every > steps: only the finally-block final save runs, so the
@@ -1553,8 +1553,8 @@ def test_resume_compat_warns_on_gpu_determinism_drift(
             "grain_prefetch",
         ),
         (
-            lambda c: replace(c, data=replace(c.data, window_shuffle_windows=64)),
-            "window_shuffle_windows",
+            lambda c: replace(c, data=replace(c.data, window_shuffle_tokens=64)),
+            "window_shuffle_tokens",
         ),
         (
             lambda c: replace(
@@ -1659,14 +1659,14 @@ def test_resume_compat_rejects_local_window_shuffle_seed_drift(tmp_path: Path) -
     """Local window-shuffle replay must reject a changed data seed."""
     cfg = _base_cfg(tmp_path / "run_window_seed")
     assert cfg.data.backend == "local_text"
-    assert cfg.data.window_shuffle_windows > 0
+    assert cfg.data.window_shuffle_tokens > 0
     meta = _checkpoint_record(cfg).to_dict()
 
     drifted = replace(cfg, data=replace(cfg.data, seed=cfg.data.seed + 1))
     with pytest.raises(RuntimeError, match="window_shuffle_seed"):
         check_resume_compat(drifted, meta)
 
-    disabled = replace(cfg, data=replace(cfg.data, window_shuffle_windows=0))
+    disabled = replace(cfg, data=replace(cfg.data, window_shuffle_tokens=0))
     disabled_meta = _checkpoint_record(disabled).to_dict()
     disabled_drifted = replace(disabled, data=replace(disabled.data, seed=disabled.data.seed + 1))
     check_resume_compat(disabled_drifted, disabled_meta)

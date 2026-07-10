@@ -129,18 +129,20 @@ hundreds of `seq_len` windows would dominate several consecutive optimizer
 steps, producing near-single-document batches, choppy train loss, and
 quasi-online memorization (train loss diving below eval loss).
 
-`data.window_shuffle_windows` (default `4096`, `0` disables) inserts a seeded,
-deterministic shuffle of packed `[T]` windows between the packer and batch
-assembly. Disjoint blocks of that many windows are permuted, so a
-244-window document contributes a few rows per batch instead of every row.
+`data.window_shuffle_tokens` (default `8_388_608`, `0` disables) inserts a
+seeded, deterministic shuffle of packed `[T]` windows between the packer and
+batch assembly. The token budget is divided by `seq_len` and aligned down to
+an `A*B` row multiple. At `seq_len=2048`, the default is 4,096 rows; at 32K it
+is 256 rows. A 244-window document therefore contributes a few rows per batch
+instead of every row at the 2K geometry.
 Resume remains exact: the shuffle checkpoints only the upstream state at the
 window start plus permutation progress, then reconstructs and replays the
 window deterministically. Eval batches are never shuffled.
 
 The shuffle window stores only int32 token and segment-ID arrays. Position IDs
-are derived from segment IDs during batch assembly after shuffling, saving one
-`[window_shuffle_windows, seq_len]` array (about 32 MiB at the default
-4096x2048 geometry).
+are derived from segment IDs during batch assembly after shuffling. The two
+arrays use about 8 bytes per budgeted token: about 64 MiB at the default,
+independent of context length. Replay work is bounded by the same token budget.
 
 Guidance:
 
@@ -150,7 +152,7 @@ Guidance:
   (Common Pile derivatives), arXiv/books/legal/PDF dumps, code dumps, or
   anything stored as "all of source A, then all of source B", or with
   documents spanning many `seq_len` windows.
-- Long-document corpora: `sequential` + `window_shuffle_windows` (default) +
+- Long-document corpora: `sequential` + `window_shuffle_tokens` (default) +
   a large `shuffle_buffer_size` (e.g. `200_000`). The document-level shuffle
   window fights source/domain/shard-order homogeneity of the stream; the
   window shuffle fights within-document, adjacent-window homogeneity. They

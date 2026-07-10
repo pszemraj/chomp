@@ -510,7 +510,7 @@ def _window_shuffle_cfg(*, window: int, repeat: bool = False) -> Config:
     so every packed row is one whole document and row identity is readable from
     its second token.
 
-    :param int window: data.window_shuffle_windows value.
+    :param int window: Desired packed-window row count.
     :param bool repeat: Whether to repeat the stream.
     :return Config: Test configuration.
     """
@@ -523,7 +523,7 @@ def _window_shuffle_cfg(*, window: int, repeat: bool = False) -> Config:
         shuffle=False,
         shuffle_buffer_size=8,
         repeat=repeat,
-        window_shuffle_windows=window,
+        window_shuffle_tokens=window * 8,
     )
 
 
@@ -549,7 +549,7 @@ def _row_doc_tokens(batch: Batch) -> list[int]:
 def test_window_shuffle_disabled_matches_unshuffled(
     patch_hf_load_dataset: Callable[..., dict[str, int]],
 ) -> None:
-    """window_shuffle_windows=0 must preserve raw packer output order."""
+    """window_shuffle_tokens=0 must preserve raw packer output order."""
     items = _distinct_docs(20)
     patch_hf_load_dataset(items)
 
@@ -716,7 +716,7 @@ def _assert_multi_segment_boundary_masked(batch: Batch) -> None:
 def test_finite_sequential_tail_is_padded_without_token_loss() -> None:
     """A finite sequential tail fills the final row and preserves alignment."""
     # 10 chars + BOS/EOS = 12 tokens: one full row and one four-token tail.
-    cfg = make_pipeline_cfg(local_text="x" * 10, repeat=False, window_shuffle_windows=0)
+    cfg = make_pipeline_cfg(local_text="x" * 10, repeat=False, window_shuffle_tokens=0)
     cfg = replace(cfg, train=replace(cfg.train, grad_accum=2))
 
     it = build_train_iterator(cfg)
@@ -736,7 +736,7 @@ def test_stopiteration_at_exact_batch_boundary_consumes_zero_windows() -> None:
     cfg = make_pipeline_cfg(
         local_text="x" * 16,
         repeat=False,
-        window_shuffle_windows=0,
+        window_shuffle_tokens=0,
         seq_len=8,
         tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=False, add_eos=False),
     )
@@ -754,7 +754,7 @@ def test_batch_assembly_rejects_zero_valid_loss_tokens() -> None:
         local_text="a",
         seq_len=8,
         repeat=True,
-        window_shuffle_windows=0,
+        window_shuffle_tokens=0,
         tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
     )
 
@@ -1094,7 +1094,7 @@ def _batch_arrays(batch: Batch) -> tuple:
 def test_packer_alignment_after_restore() -> None:
     """Restored iterator should produce same batches as continued iterator."""
     # Raw packer-state layout is only exposed without window shuffling.
-    cfg = make_pipeline_cfg(local_text="abcde", window_shuffle_windows=0)
+    cfg = make_pipeline_cfg(local_text="abcde", window_shuffle_tokens=0)
 
     it = build_train_iterator(cfg)
     _ = next(it)
@@ -1122,7 +1122,7 @@ def test_grain_shuffle_source_does_not_buffer_position_ids() -> None:
     """Packed shuffle rows should hold only tokens and segment IDs."""
     import grain.python as grain
 
-    cfg = make_pipeline_cfg(window_shuffle_windows=8)
+    cfg = make_pipeline_cfg(window_shuffle_tokens=64)
     train_dataset_type, _, _ = _make_grain_iter_classes(grain)
     dataset = train_dataset_type(cfg=cfg, tokenizer=ByteTokenizer(byte_offset=4))
 

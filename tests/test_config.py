@@ -18,6 +18,7 @@ from chomp.config import (
     TrainConfig,
     build_config,
     load_config,
+    resolve_window_shuffle_rows,
     validate_config,
 )
 from chomp.data.pipeline import build_tokenizer, resolve_tokenizer_config
@@ -369,6 +370,14 @@ def test_data_and_logging_validation_rejects_invalid_values() -> None:
             lambda cfg: replace(cfg, data=replace(cfg.data, max_eval_samples=-1)),
             "max_eval_samples",
         ),
+        (
+            lambda cfg: replace(cfg, data=replace(cfg.data, window_shuffle_tokens=-1)),
+            "window_shuffle_tokens",
+        ),
+        (
+            lambda cfg: replace(cfg, data=replace(cfg.data, window_shuffle_tokens=31)),
+            "window_shuffle_tokens",
+        ),
         (lambda cfg: replace(cfg, data=replace(cfg.data, seed=-1)), "data.seed"),
         (
             lambda cfg: replace(
@@ -432,6 +441,39 @@ def test_data_and_logging_validation_rejects_invalid_values() -> None:
     for mutate, match in cases:
         with pytest.raises(ValueError, match=match):
             validate_config(mutate(_base_cfg()))
+
+
+@pytest.mark.parametrize(
+    ("token_budget", "seq_len", "batch_size", "grad_accum", "expected_rows"),
+    [
+        (0, 16, 2, 1, 0),
+        (8_388_608, 2_048, 2, 1, 4_096),
+        (8_388_608, 32_768, 2, 1, 256),
+        (1_000, 16, 3, 2, 60),
+    ],
+)
+def test_window_shuffle_budget_resolves_to_batch_aligned_rows(
+    token_budget: int,
+    seq_len: int,
+    batch_size: int,
+    grad_accum: int,
+    expected_rows: int,
+) -> None:
+    """Packed-row shuffle size should stay within budget and preserve batch geometry."""
+    cfg = _base_cfg()
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, window_shuffle_tokens=token_budget),
+        train=replace(
+            cfg.train,
+            seq_len=seq_len,
+            batch_size=batch_size,
+            grad_accum=grad_accum,
+        ),
+    )
+
+    validate_config(cfg)
+    assert resolve_window_shuffle_rows(cfg) == expected_rows
 
 
 def test_wandb_tags_require_and_normalize_a_string_list() -> None:

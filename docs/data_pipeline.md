@@ -66,7 +66,7 @@ Packing trade-offs and boundary-masking behavior are documented in
 [Packing and Boundary Semantics](packing.md).
 
 Between the packer and batch assembly, packed windows pass through a seeded
-window shuffle (`data.window_shuffle_windows`, train iterator only) so batches
+window shuffle (`data.window_shuffle_tokens`, train iterator only) so batches
 are decorrelated from raw stream order; see
 [Window shuffling](packing.md#window-shuffling-batch-decorrelation).
 
