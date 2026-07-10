@@ -150,7 +150,7 @@ Metrics are written to `logging.metrics_file` every `train.log_every` steps
 - `step_time_s`, `data_wait_s` (per-step averages over the last sync interval)
 - `tokens_per_sec` (end-to-end throughput over the last sync interval)
 - `packing_mode`, `packing_utilization` (when iterator stats are enabled)
-- `docs_seen`, `docs_truncated`, `docs_added_this_batch` (when available)
+- `docs_seen`, `docs_truncated` (when available)
 - `source_tokens_observed`, `source_tokens_retained`,
   `source_tokens_discarded`, `source_truncation_fraction`
 - `source_doc_tokens_p50_upper`, `source_doc_tokens_p90_upper`,
@@ -160,7 +160,8 @@ Metrics are written to `logging.metrics_file` every `train.log_every` steps
   `shuffle_replayed_window_bytes`
 - `loss_tokens_host` (same host count exposed with packing diagnostics)
 - `boundary_transitions` (count of in-batch segment transitions)
-- `docs_per_seq_mean`, `docs_per_seq_min`, `docs_per_seq_max` (document-density summary)
+- `segments_per_seq_mean`, `segments_per_seq_min`, `segments_per_seq_max`
+  (packed-segment density summary)
 - `first_step_compile_time_s` (first logged step after compile)
 - `peak_memory_gb` (best-effort, device-dependent)
 - `eval_loss` (only when eval runs)

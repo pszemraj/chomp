@@ -716,25 +716,6 @@ def test_window_shuffle_state_roundtrip(
         np.testing.assert_array_equal(a.segment_ids, b.segment_ids)
 
 
-def test_docs_added_this_batch_accounts_for_all_pulls(
-    patch_hf_load_dataset: Callable[..., dict[str, int]],
-) -> None:
-    """Sum of docs_added_this_batch must equal the packer's docs_seen counter."""
-    patch_hf_load_dataset(_distinct_docs(64))
-
-    cfg = _window_shuffle_cfg(window=8)
-    it = build_train_iterator(cfg)
-
-    total = 0
-    for _ in range(4):
-        _ = next(it)
-        stats = it.get_stats()
-        added = stats.get("docs_added_this_batch")
-        assert added is not None and added >= 0
-        total += added
-    assert total == it.get_stats().get("docs_seen")
-
-
 def test_disabled_stats_skip_per_batch_chain_walks(monkeypatch: pytest.MonkeyPatch) -> None:
     """data.device_put=true disables stats; batch assembly must then skip the
     per-batch iterator-chain walks entirely — nothing ever reads the snapshot."""
@@ -920,10 +901,10 @@ def test_pipeline_bin_packing_segment_ids() -> None:
     seq_boundary = (
         (flat_segs[:, 1:] != flat_segs[:, :-1]) & (flat_segs[:, 1:] > 0) & (flat_segs[:, :-1] > 0)
     )
-    docs_per_seq = np.where(has_tokens, 1 + seq_boundary.sum(axis=1), 0).astype(np.int32)
-    assert stats["docs_per_seq_mean"] == float(np.mean(docs_per_seq))
-    assert stats["docs_per_seq_min"] == int(np.min(docs_per_seq))
-    assert stats["docs_per_seq_max"] == int(np.max(docs_per_seq))
+    segments_per_seq = np.where(has_tokens, 1 + seq_boundary.sum(axis=1), 0).astype(np.int32)
+    assert stats["segments_per_seq_mean"] == float(np.mean(segments_per_seq))
+    assert stats["segments_per_seq_min"] == int(np.min(segments_per_seq))
+    assert stats["segments_per_seq_max"] == int(np.max(segments_per_seq))
 
 
 def test_loss_token_count_stays_paired_through_device_prefetch() -> None:

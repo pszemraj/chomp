@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import numpy as np
 
 from chomp.config import Config, resolve_window_shuffle_rows
-from chomp.types import IGNORE_INDEX, Batch
+from chomp.types import Batch
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +21,11 @@ _UINT32_MODULUS = 2**32
 
 @dataclass(frozen=True)
 class _BatchEnvelope:
-    """One batch paired with its exact pre-device loss-token count."""
+    """One batch paired with exact host accounting and source statistics."""
 
     batch: Batch
     loss_tokens_host: int
+    pipeline_stats: dict[str, Any]
 
 
 def effective_window_shuffle_seed(cfg: Config) -> int:
@@ -76,7 +77,7 @@ class GrainTrainBatchIterator:
         batch = envelope.batch
         self._last_loss_tokens = int(envelope.loss_tokens_host)
         if not self._enable_stats or not self._collect_next_stats:
-            self._last_stats = {}
+            self._last_stats = dict(envelope.pipeline_stats)
             return batch
         segs = np.asarray(batch.segment_ids)
         attn = segs > 0
@@ -85,7 +86,7 @@ class GrainTrainBatchIterator:
         capacity = int(attn.size)
         utilization = float(tokens_used / capacity) if capacity > 0 else 0.0
         # Reshape commutes with the per-last-axis boundary op, so one [rows, T-1]
-        # array serves both the global count and the per-sequence doc counts.
+        # array serves both the global count and per-sequence segment counts.
         flat_segs = segs.reshape(-1, segs.shape[-1])
         seq_boundary = (
             (flat_segs[:, 1:] != flat_segs[:, :-1])
@@ -95,18 +96,21 @@ class GrainTrainBatchIterator:
         boundary_transitions = int(np.count_nonzero(seq_boundary))
 
         has_tokens = np.any(flat_segs > 0, axis=1)
-        docs_per_seq = np.where(has_tokens, 1 + seq_boundary.sum(axis=1), 0).astype(np.int32)
-        self._last_stats = {
-            "packing_mode": self._packing_mode,
-            "packing_tokens": tokens_used,
-            "packing_capacity": capacity,
-            "packing_utilization": utilization,
-            "loss_tokens_host": self._last_loss_tokens,
-            "boundary_transitions": boundary_transitions,
-            "docs_per_seq_mean": float(np.mean(docs_per_seq)),
-            "docs_per_seq_min": int(np.min(docs_per_seq)),
-            "docs_per_seq_max": int(np.max(docs_per_seq)),
-        }
+        segments_per_seq = np.where(has_tokens, 1 + seq_boundary.sum(axis=1), 0).astype(np.int32)
+        self._last_stats = dict(envelope.pipeline_stats)
+        self._last_stats.update(
+            {
+                "packing_mode": self._packing_mode,
+                "packing_tokens": tokens_used,
+                "packing_capacity": capacity,
+                "packing_utilization": utilization,
+                "loss_tokens_host": self._last_loss_tokens,
+                "boundary_transitions": boundary_transitions,
+                "segments_per_seq_mean": float(np.mean(segments_per_seq)),
+                "segments_per_seq_min": int(np.min(segments_per_seq)),
+                "segments_per_seq_max": int(np.max(segments_per_seq)),
+            }
+        )
         return batch
 
     def get_state(self) -> dict[str, Any]:
@@ -171,11 +175,7 @@ class GrainTrainBatchIterator:
         """
         if not self._enable_stats:
             return {}
-        stats: dict[str, float | int | str] = dict(self._last_stats)
-        extra = _packer_stats_from_chain(self._it)
-        if extra:
-            stats.update(extra)
-        return stats
+        return dict(self._last_stats)
 
 
 def _packer_stats_from_chain(it: Any) -> dict[str, Any]:
@@ -335,19 +335,9 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
         Checkpointing happens between batches, so state forwards 1:1 to the
         parent iterator.
 
-        docs_added_this_batch is measured here, below any prefetch layer, so
-        it reflects actual stream pulls for the assembled batch rather than
-        prefetch-thread timing. With prefetch enabled the reported value may
-        belong to a batch up to prefetch-depth ahead of the one just consumed.
-
-        Thread safety: with prefetch, __next__ runs on the prefetch thread
-        while get_stats is called from the consumer thread. All packer/producer
-        access happens inside __next__; the finished stats dict is published
-        via a single attribute assignment (atomic under the GIL) and get_stats
-        only reads that snapshot — it never walks into producer-owned objects.
-
-        With enable_stats=False the per-batch chain walks are skipped entirely
-        (nothing would ever read the snapshot).
+        Packer/source statistics are captured after assembly and carried in the
+        same envelope as the batch. Prefetch therefore cannot pair a consumed
+        batch with an ahead-of-consumer statistics snapshot.
         """
 
         def __init__(self, parent: Any, *, cfg: Config, enable_stats: bool) -> None:
@@ -364,43 +354,24 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
             # transfer the batch. The count travels beside the batch through
             # prefetch, so accounting cannot observe an ahead-of-consumer
             # stats snapshot.
-            self._spec = replace(_BatchAssemblySpec.from_config(cfg), device_put=False)
+            self._spec = _BatchAssemblySpec.from_config(cfg)
             self._device_put = bool(cfg.data.device_put)
             self._enable_stats = bool(enable_stats)
-            self._stats_snapshot: dict[str, Any] = {}
-
-        def _docs_seen(self) -> int | None:
-            """Read the packer's docs_seen counter from the parent chain.
-
-            :return int | None: docs_seen if reachable, else None.
-            """
-            value = _packer_stats_from_chain(self._parent).get("docs_seen")
-            return int(value) if value is not None else None
 
         def __next__(self) -> _BatchEnvelope:
             from chomp.data.pipeline import _assemble_batch
 
-            docs_seen_before = self._docs_seen() if self._enable_stats else None
-            batch = _assemble_batch(lambda: next(self._parent), self._spec)
-            labels = np.asarray(batch.labels)
-            segments = np.asarray(batch.segment_ids)
-            valid = (labels[..., 1:] != int(IGNORE_INDEX)) & (segments[..., 1:] > 0)
-            loss_tokens_host = int(np.count_nonzero(valid))
-            if self._enable_stats:
-                stats = _packer_stats_from_chain(self._parent)
-                docs_seen_after = stats.get("docs_seen")
-                if docs_seen_before is not None and docs_seen_after is not None:
-                    # Fresh documents pulled from the stream while assembling this
-                    # batch. Collapses toward 0 while already-buffered content
-                    # drains; bursty when a shuffle window refills.
-                    stats["docs_added_this_batch"] = int(docs_seen_after) - docs_seen_before
-                # Single-assignment publish; never mutated afterwards.
-                self._stats_snapshot = stats
+            batch, loss_tokens_host = _assemble_batch(lambda: next(self._parent), self._spec)
+            stats = _packer_stats_from_chain(self._parent) if self._enable_stats else {}
             if self._device_put:
                 import jax
 
                 batch = jax.device_put(batch)
-            return _BatchEnvelope(batch=batch, loss_tokens_host=loss_tokens_host)
+            return _BatchEnvelope(
+                batch=batch,
+                loss_tokens_host=loss_tokens_host,
+                pipeline_stats=stats,
+            )
 
         def get_state(self) -> dict[str, Any]:
             """Return parent iterator state for checkpointing.
@@ -412,17 +383,6 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
         def set_state(self, state: dict[str, Any]) -> None:
             """Restore parent iterator state from checkpoint."""
             self._parent.set_state(state)
-            self._stats_snapshot = {}
-
-        def get_stats(self) -> dict[str, Any]:
-            """Return the stats snapshot published by the last assembled batch.
-
-            Safe to call from the consumer thread under prefetch: reads a
-            reference published atomically by __next__, never producer state.
-
-            :return dict[str, Any]: Packer stats merged with docs_added_this_batch.
-            """
-            return dict(self._stats_snapshot)
 
     class _BatchAssembleIterDataset(grain.IterDataset):  # type: ignore[misc]
         """IterDataset that yields chomp Batch objects."""

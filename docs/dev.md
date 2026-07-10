@@ -93,7 +93,6 @@ Shared helper modules:
 High-risk invariants remain isolated for visibility:
 
 - [`tests/test_compile_stability.py`](../tests/test_compile_stability.py)
-- [`tests/test_cache_policy.py`](../tests/test_cache_policy.py)
 - [`tests/test_gpu_smoke.py`](../tests/test_gpu_smoke.py)
 
 ## Tracked follow-ups
@@ -107,9 +106,7 @@ High-risk invariants remain isolated for visibility:
   optimizer batch. This belongs with multi-source mixing because source fields
   and stable IDs are dataset-schema decisions. Acceptance requires exact
   interrupted/resumed provenance metrics, bounded host memory, and no dense
-  document-ID device array. Until then, `docs_added_this_batch` is only a
-  bursty source-pull diagnostic and must not be interpreted as batch
-  homogeneity.
+  document-ID device array.
 
 - **TODO(grain-shuffle): replace the pinned private Grain workaround with an
   owned packed-window iterator.** The verified runtime pins `grain==0.2.15`

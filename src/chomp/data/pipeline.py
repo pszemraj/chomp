@@ -912,8 +912,7 @@ def _mask_labels(
     """
     if mask_boundary_loss:
         same = (segs[1:] == segs[:-1]) & (segs[1:] > 0) & (segs[:-1] > 0)
-        if labels.size > 1:
-            labels[1:] = np.where(same, labels[1:], IGNORE_INDEX).astype(np.int32)
+        labels[1:] = np.where(same, labels[1:], IGNORE_INDEX).astype(np.int32)
     if not train_on_eos:
         labels = np.where(labels == eos_id, IGNORE_INDEX, labels).astype(np.int32)
     return labels
@@ -934,7 +933,6 @@ class _BatchAssemblySpec:
     train_on_eos: bool
     eos_id: int
     pad_id: int
-    device_put: bool
 
     @staticmethod
     def from_config(cfg: Config, *, grad_accum: int | None = None) -> _BatchAssemblySpec:
@@ -952,23 +950,21 @@ class _BatchAssemblySpec:
             train_on_eos=bool(cfg.data.train_on_eos),
             eos_id=int(cfg.model.eos_token_id),
             pad_id=int(cfg.model.pad_token_id),
-            device_put=bool(cfg.data.device_put),
         )
 
 
 def _assemble_batch(
     next_window: Callable[[], tuple[np.ndarray, np.ndarray]],
     spec: _BatchAssemblySpec,
-) -> Batch:
-    """Assemble one fixed-shape [A, B, T] Batch from packed [T] windows.
+) -> tuple[Batch, int]:
+    """Assemble a fixed-shape batch and its exact valid-target count.
 
-    Single source of truth for batch assembly semantics (label masking,
-    attention mask from segment IDs, reshape, optional device transfer);
-    used by both the Grain train path and the eval iterator.
+    This is the single source for label masking, padding, zero-objective
+    rejection, and host loss-token accounting used by train and eval.
 
     :param next_window: Callable yielding (tokens, segment_ids) [T] arrays.
     :param _BatchAssemblySpec spec: Assembly knobs extracted from the config.
-    :return Batch: Fixed-shape batch of [A, B, T] arrays.
+    :return tuple[Batch, int]: Fixed-shape batch and valid shifted-target count.
     """
     grad_accum, batch_size, seq_len = spec.grad_accum, spec.batch_size, spec.seq_len
     need = grad_accum * batch_size
@@ -996,7 +992,8 @@ def _assemble_batch(
         segs_out[idx] = np.asarray(segs, dtype=np.int32)
 
     valid_targets = (labs[:, 1:] != IGNORE_INDEX) & (segs_out[:, 1:] > 0)
-    if not np.any(valid_targets):
+    loss_tokens_host = int(np.count_nonzero(valid_targets))
+    if loss_tokens_host == 0:
         raise ZeroLossTokensError(
             "Batch contains zero valid loss tokens after causal shift, boundary/EOS masking, "
             "and padding. Check for one-token documents, tokenizer special-token collisions, "
@@ -1010,11 +1007,7 @@ def _assemble_batch(
         labels=labs.reshape(grad_accum, batch_size, seq_len),
         segment_ids=segs_abt,
     )
-    if spec.device_put:
-        import jax  # imported lazily to keep iterator usable in non-JAX contexts
-
-        batch = jax.device_put(batch)
-    return batch
+    return batch, loss_tokens_host
 
 
 def _build_packer(
@@ -1054,7 +1047,9 @@ def _build_packer(
             group_docs=cfg.data.packing_group_docs,
             max_docs_per_bin=cfg.data.packing_max_docs_per_bin,
         )
-    return TokenPacker(**common)
+    if cfg.data.packing_mode == "sequential":
+        return TokenPacker(**common)
+    raise ValueError(f"Unsupported packing mode: {cfg.data.packing_mode!r}")
 
 
 class _SequenceProducer:
@@ -1192,7 +1187,7 @@ class _EvalBatchIterator:
         self._producer = _SequenceProducer(
             cfg,
             tokenizer=None,
-            text_stream=iter([list(document) for document in tokens]),
+            text_stream=iter(tokens),
             rows_per_pack=int(cfg.train.batch_size),
         )
         # Evaluation has no optimizer accumulation requirement. Keeping A=1
@@ -1203,7 +1198,8 @@ class _EvalBatchIterator:
         return self
 
     def __next__(self) -> Batch:
-        return _assemble_batch(self._producer.next_window, self._spec)
+        batch, _loss_tokens_host = _assemble_batch(self._producer.next_window, self._spec)
+        return batch
 
 
 def build_train_iterator(cfg: Config, *, tokenizer: Tokenizer | None = None) -> Any:
