@@ -41,7 +41,7 @@ from .grain import effective_window_shuffle_seed
 from .hf import HFStreamingTextStream, HFStreamSpec, LocalTextStream
 from .pack import BinPacker, MultipackPacker, TokenPacker, _positions_from_segments
 
-DATA_PIPELINE_SCHEMA_VERSION = 2
+DATA_PIPELINE_SCHEMA_VERSION = 3
 
 
 class Tokenizer(Protocol):

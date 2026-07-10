@@ -610,9 +610,10 @@ def _ffd_pack(
 ) -> tuple[list[_Bin], list[np.ndarray]]:
     """First-fit-decreasing pack candidates into bins_per_pack bins.
 
-    Considers candidates by size (descending, stable), seeds each bin with one
-    of the largest segments, then first-fit places the rest. Requires
-    len(candidates) >= bins_per_pack and every candidate <= capacity.
+    Seeds each bin with one of the oldest candidates to guarantee FIFO
+    progress, then considers the remaining candidates by size (descending,
+    stable) for first-fit placement. Requires len(candidates) >=
+    bins_per_pack and every candidate <= capacity.
 
     :param list[np.ndarray] candidates: Candidate segments to pack.
     :param int bins_per_pack: Number of bins to produce.
@@ -622,13 +623,17 @@ def _ffd_pack(
         segments in original candidate (arrival) order, so callers can requeue
         them without scrambling stream locality.
     """
-    order = sorted(range(len(candidates)), key=lambda i: int(candidates[i].size), reverse=True)
     bins = [_Bin(capacity=capacity, max_docs=max_docs) for _ in range(bins_per_pack)]
     for slot in range(bins_per_pack):
-        bins[slot].add(candidates[order[slot]])
+        bins[slot].add(candidates[slot])
 
     leftover_idx: list[int] = []
-    for idx in order[bins_per_pack:]:
+    fill_order = sorted(
+        range(bins_per_pack, len(candidates)),
+        key=lambda i: int(candidates[i].size),
+        reverse=True,
+    )
+    for idx in fill_order:
         if not _place_first_fit(bins, candidates[idx]):
             leftover_idx.append(idx)
     leftover = [candidates[i] for i in sorted(leftover_idx)]
@@ -691,9 +696,11 @@ class _FFDPackerBase(_PackerBase):
     """Shared machinery for the FFD-based packers (bin, multipack).
 
     Subclasses select whether each cycle consumes the entire pending pool
-    (bin) or one bounded FIFO group (multipack). Once `finish()` marks the
-    stream exhausted, sub-threshold pending documents are flushed into padded
-    bins instead of being dropped.
+    (bin) or one bounded FIFO group (multipack). Every cycle seeds bins with
+    the oldest candidates before using FFD for fill, so no pending chunk can
+    starve behind a continuing stream of larger arrivals. Once `finish()`
+    marks the stream exhausted, sub-threshold pending documents are flushed
+    into padded bins instead of being dropped.
     """
 
     _mode_name = "ffd"

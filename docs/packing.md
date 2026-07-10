@@ -16,16 +16,15 @@ all emitting fixed-length windows of `seq_len`:
      stream order.
 
 2) **Bin packer** (`data.packing_mode: bin`)
-   - Buffers multiple documents and uses a First-Fit-Decreasing heuristic to
-     pack documents into bins of size `seq_len`.
+   - Buffers multiple documents, seeds bins from the oldest candidates, and
+     uses a First-Fit-Decreasing heuristic to fill remaining capacity.
    - Useful for higher utilization when documents are short or variable length.
    - Note this is a **length-based local reorder with bounded lookahead**, not
-     "stream order with less padding": FFD sorts the buffered candidates by
-     descending length, so large documents are pulled forward and small ones
-     deferred within each buffer refill.
+     "stream order with less padding": fill candidates are length-sorted, but
+     FIFO seeds guarantee that no old short candidate can starve.
 
 3) **Multipack packer** (`data.packing_mode: multipack`)
-   - Uses grouped First-Fit-Decreasing packing over
+   - Uses FIFO-seeded, grouped First-Fit-Decreasing packing over
      `max(data.packing_group_docs, A*B)` candidates and emits `A*B` packed
      sequences per cycle.
    - Intended for strict packed training semantics with segment-aware attention.
@@ -49,6 +48,9 @@ Shared by both packed modes:
 
 - `data.packing_strict_segments` (default `true`): require full per-document
   state isolation in the backend.
+- FIFO progress: every cycle emits the oldest `A*B` pending chunks as mandatory
+  seeds before FFD fill. Document tails therefore make bounded progress even
+  under an endless stream of full-size chunks.
 - End-of-stream flush: when the upstream stream is exhausted (`data.repeat:
   false`, or the finite eval doc set), both packers flush their remaining
   sub-threshold pending documents into as many padded windows as needed

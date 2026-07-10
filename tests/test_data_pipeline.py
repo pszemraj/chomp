@@ -210,8 +210,46 @@ def test_ffd_queue_policies_remain_distinct() -> None:
         _ = packer.pop_seq_with_metadata()
         _ = packer.pop_seq_with_metadata()
 
-    assert bin_packer.get_state()["pending_docs"] == []
-    assert multipack.get_state()["pending_docs"] == [_doc(30, 4)]
+    assert bin_packer.get_state()["pending_docs"] == [_doc(30, 8)]
+    assert multipack.get_state()["pending_docs"] == [_doc(30, 8), _doc(30, 4)]
+
+
+@pytest.mark.parametrize("make_packer", [_bin_packer, _multipack_packer])
+def test_ffd_fifo_seed_prevents_adversarial_starvation(make_packer: Callable[[], Any]) -> None:
+    """The oldest short candidate must progress despite endless full rows."""
+    packer = make_packer()
+    packer.add_document(_doc(6, 6))
+
+    emitted: list[int] = []
+    for token in range(10, 16):
+        packer.add_document(_doc(token, 8))
+        if packer.can_pop():
+            row, _, _ = packer.pop_seq_with_metadata()
+            emitted.append(int(row[0]))
+
+    assert emitted == [6, 10, 11, 12, 13, 14]
+    assert packer.get_state()["pending_docs"] == [_doc(15, 8)]
+
+
+@pytest.mark.parametrize("make_packer", [_bin_packer, _multipack_packer])
+def test_ffd_long_document_tail_progress_and_restore(make_packer: Callable[[], Any]) -> None:
+    """A long-document tail must be the next mandatory seed after restore."""
+    packer = make_packer()
+    packer.add_document(_doc(7, 14))  # chunks [8, 6]
+    first, _, _ = packer.pop_seq_with_metadata()
+    state = packer.get_state()
+
+    packer.add_document(_doc(9, 8))
+    expected, _, _ = packer.pop_seq_with_metadata()
+
+    restored = make_packer()
+    restored.set_state(state)
+    restored.add_document(_doc(9, 8))
+    actual, _, _ = restored.pop_seq_with_metadata()
+
+    np.testing.assert_array_equal(first, np.full((8,), 7, dtype=np.int32))
+    np.testing.assert_array_equal(expected[:6], np.full((6,), 7, dtype=np.int32))
+    np.testing.assert_array_equal(actual, expected)
 
 
 @pytest.mark.parametrize("make_packer", [_bin_packer, _multipack_packer])
