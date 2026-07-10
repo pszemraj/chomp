@@ -1669,67 +1669,34 @@ def test_resume_compat_device_put_drift(tmp_path: Path, caplog: LogCaptureFixtur
         check_resume_compat(pf_drifted, pf_meta)
 
 
-def test_resume_compat_rejects_hf_shuffle_buffer_drift(tmp_path: Path) -> None:
-    """shuffle_buffer_size drives owned document-shuffle order — hard error."""
-    cfg = _base_cfg(tmp_path / "run_sbuf")
-    cfg = replace(
-        cfg,
-        data=replace(
-            cfg.data,
-            backend="hf",
-            hf_dataset="dummy",
-            hf_name="dummy",
-            hf_split="train",
-            shuffle=True,
-            shuffle_buffer_size=10_000,
-        ),
+@pytest.mark.parametrize(
+    ("field", "initial", "changed", "match"),
+    [
+        ("shuffle_buffer_size", 10_000, 200_000, "shuffle_buffer_size"),
+        ("shuffle_buffer_bytes", 1024, 2048, "shuffle_buffer_bytes"),
+        ("hf_revision", "abc123", "def456", "hf_revision"),
+        ("repeat", True, False, "data.repeat"),
+    ],
+)
+def test_resume_compat_rejects_hf_source_drift(
+    tmp_path: Path, field: str, initial: Any, changed: Any, match: str
+) -> None:
+    """Every HF field that changes source order or identity is a hard error."""
+    cfg = _base_cfg(tmp_path / f"run_{field}")
+    data = replace(
+        cfg.data,
+        backend="hf",
+        hf_dataset="dummy",
+        hf_name="dummy",
+        hf_split="train",
+        shuffle=True,
+        **{field: initial},
     )
+    cfg = replace(cfg, data=data)
     meta = _checkpoint_record(cfg).to_dict()
-    drifted = replace(cfg, data=replace(cfg.data, shuffle_buffer_size=200_000))
-    with pytest.raises(RuntimeError, match="shuffle_buffer_size"):
-        check_resume_compat(drifted, meta)
+    drifted = replace(cfg, data=replace(cfg.data, **{field: changed}))
 
-
-def test_resume_compat_rejects_hf_shuffle_byte_budget_drift(tmp_path: Path) -> None:
-    """shuffle_buffer_bytes changes owned document-window boundaries and order."""
-    cfg = _base_cfg(tmp_path / "run_sbuf_bytes")
-    cfg = replace(
-        cfg,
-        data=replace(
-            cfg.data,
-            backend="hf",
-            hf_dataset="dummy",
-            hf_name="dummy",
-            hf_split="train",
-            shuffle=True,
-            shuffle_buffer_bytes=1024,
-        ),
-    )
-    meta = _checkpoint_record(cfg).to_dict()
-    drifted = replace(cfg, data=replace(cfg.data, shuffle_buffer_bytes=2048))
-
-    with pytest.raises(RuntimeError, match="shuffle_buffer_bytes"):
-        check_resume_compat(drifted, meta)
-
-
-def test_resume_compat_rejects_hf_revision_drift(tmp_path: Path) -> None:
-    """A changed HF revision can change source contents and shard order."""
-    cfg = _base_cfg(tmp_path / "run_revision")
-    cfg = replace(
-        cfg,
-        data=replace(
-            cfg.data,
-            backend="hf",
-            hf_dataset="dummy",
-            hf_name="dummy",
-            hf_split="train",
-            hf_revision="abc123",
-        ),
-    )
-    meta = _checkpoint_record(cfg).to_dict()
-
-    drifted = replace(cfg, data=replace(cfg.data, hf_revision="def456"))
-    with pytest.raises(RuntimeError, match="hf_revision"):
+    with pytest.raises(RuntimeError, match=match):
         check_resume_compat(drifted, meta)
 
 
@@ -1758,27 +1725,6 @@ def test_resume_compat_rejects_local_window_shuffle_seed_drift(tmp_path: Path) -
     disabled_meta = _checkpoint_record(disabled).to_dict()
     disabled_drifted = replace(disabled, data=replace(disabled.data, seed=disabled.data.seed + 1))
     check_resume_compat(disabled_drifted, disabled_meta)
-
-
-def test_resume_compat_rejects_hf_repeat_drift(tmp_path: Path) -> None:
-    """repeat decides epoch rollover vs stream termination — hard error for
-    HF streams, not just local_text."""
-    cfg = _base_cfg(tmp_path / "run_repeat")
-    cfg = replace(
-        cfg,
-        data=replace(
-            cfg.data,
-            backend="hf",
-            hf_dataset="dummy",
-            hf_name="dummy",
-            hf_split="train",
-            repeat=True,
-        ),
-    )
-    meta = _checkpoint_record(cfg).to_dict()
-    drifted = replace(cfg, data=replace(cfg.data, repeat=False))
-    with pytest.raises(RuntimeError, match="data.repeat"):
-        check_resume_compat(drifted, meta)
 
 
 def test_supports_packed_segments_requires_capability_flag() -> None:
