@@ -34,6 +34,7 @@ from chomp.data.pipeline import (
     ZeroLossTokensError,
     build_eval_iterator,
     build_train_iterator,
+    save_tokenizer_snapshot,
 )
 from chomp.train import run
 from tests.helpers.config_factories import make_pipeline_cfg
@@ -1187,3 +1188,27 @@ def test_tokenizer_snapshot_saved(tmp_path: Path) -> None:
 
     data = json.loads(tok_file.read_text(encoding="utf-8"))
     assert data["kind"] == "byte"
+    assert not list(run_dir.glob(".tokenizer-*"))
+
+
+def test_failed_tokenizer_snapshot_never_publishes_partial_directory(tmp_path: Path) -> None:
+    """An interrupted tokenizer save leaves neither final nor temporary artifacts."""
+
+    class _BrokenTokenizer:
+        """Tokenizer stub that writes one file and then fails."""
+
+        def save_pretrained(self, path: Path) -> None:
+            """Write a partial snapshot before simulating interruption."""
+            (path / "partial.json").write_text("{}")
+            raise RuntimeError("interrupted")
+
+    cfg = Config(data=DataConfig(backend="local_text"))
+    with pytest.raises(RuntimeError, match="atomically save"):
+        save_tokenizer_snapshot(
+            tmp_path,
+            cfg,
+            _BrokenTokenizer(),  # type: ignore[arg-type]
+            allow_existing=False,
+        )
+    assert not (tmp_path / "tokenizer").exists()
+    assert not list(tmp_path.glob(".tokenizer-*"))

@@ -24,6 +24,11 @@ buffer with its optimizer group and decay policy. Eval cache creation, drift
 checks, and the `data.recreate_eval_cache` override are covered in
 [Data Pipeline validation set](data_pipeline.md#validation-set).
 
+Tokenizer snapshots are written to a temporary sibling, loaded back for
+validation, and atomically renamed. A failed or interrupted save never leaves
+an incomplete `tokenizer/` directory that a later resume could mistake for a
+valid snapshot.
+
 ## Save cadence
 
 Checkpoint frequency is controlled by:
@@ -36,6 +41,10 @@ Checkpoint frequency is controlled by:
 The manager closes on every exit path, which waits for asynchronous writes and
 releases its checkpointer, metadata stores, and deleter. Orbax enforces
 `checkpoint.max_to_keep` for retained checkpoints.
+
+A save succeeds only when Orbax explicitly accepts it. Before save and after
+restore, Chomp requires the checkpoint directory step, metadata step, and
+`TrainState.step` to agree; any mismatch is treated as corruption.
 
 When `debug.nan_check` is enabled, save steps force a metrics sync so the
 finite-loss/grad-norm check runs before the write. A non-finite step is then

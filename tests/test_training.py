@@ -29,6 +29,7 @@ from chomp.ckpt import (
     restore_latest,
     restore_params_only,
     save,
+    validate_checkpoint_steps,
 )
 from chomp.config import (
     CheckpointConfig,
@@ -184,6 +185,43 @@ def test_async_checkpoint_roundtrip(
     assert tree_allclose(restored.opt_state, state.opt_state, rtol=0.0, atol=0.0)
 
 
+def test_checkpoint_step_consistency_rejects_all_mismatches(tmp_path: Path) -> None:
+    """Directory, metadata, and train-state steps form one indivisible identity."""
+    cfg = _base_cfg(tmp_path / "run_step_consistency")
+    state = _make_state()
+    meta = _checkpoint_record(cfg, step=1)
+    validate_checkpoint_steps(directory_step=1, meta=meta, train_state=state)
+
+    with pytest.raises(RuntimeError, match="metadata=1"):
+        validate_checkpoint_steps(directory_step=2, meta=meta, train_state=state)
+    wrong_state = TrainState(
+        step=jnp.array(2), params=state.params, opt_state=state.opt_state, rng=state.rng
+    )
+    with pytest.raises(RuntimeError, match="train_state=2"):
+        validate_checkpoint_steps(directory_step=1, meta=meta, train_state=wrong_state)
+
+
+def test_checkpoint_manager_false_save_result_is_failure(tmp_path: Path) -> None:
+    """A manager that declines a save must not be reported as checkpointed."""
+
+    class _RejectingManager:
+        """CheckpointManager stub that declines the request without raising."""
+
+        def save(self, *args: Any, **kwargs: Any) -> bool:
+            """Return the Orbax not-saved signal."""
+            return False
+
+    cfg = _base_cfg(tmp_path / "run_rejected_save")
+    with pytest.raises(RuntimeError, match="rejected save"):
+        save(
+            _RejectingManager(),  # type: ignore[arg-type]
+            step=1,
+            train_state=_make_state(),
+            data_iter=build_train_iterator(cfg),
+            meta=_checkpoint_record(cfg, step=1),
+        )
+
+
 def test_restore_params_only(
     tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
 ) -> None:
@@ -309,6 +347,12 @@ def test_max_to_keep_prunes_checkpoints(
     )
 
     for step in (1, 2, 3):
+        state = TrainState(
+            step=jnp.array(step),
+            params=state.params,
+            opt_state=state.opt_state,
+            rng=state.rng,
+        )
         meta = _checkpoint_record(cfg, step=step)
         save(
             mgr,
@@ -319,6 +363,9 @@ def test_max_to_keep_prunes_checkpoints(
         )
         mgr.wait_until_finished()
 
+    state = TrainState(
+        step=jnp.array(4), params=state.params, opt_state=state.opt_state, rng=state.rng
+    )
     meta = _checkpoint_record(cfg, step=4)
     save(
         mgr,

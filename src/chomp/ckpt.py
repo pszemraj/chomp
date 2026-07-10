@@ -264,6 +264,49 @@ def _checkpoint_target(data_iter: Any) -> Any:
     return data_iter
 
 
+def _train_state_step(train_state: Any) -> int:
+    """Read an integer step from a restored or live train state.
+
+    :param Any train_state: Object or mapping containing ``step``.
+    :raises RuntimeError: If the step is missing or not scalar-convertible.
+    :return int: Scalar optimizer step.
+    """
+    try:
+        value = train_state["step"] if isinstance(train_state, dict) else train_state.step
+        import jax
+
+        return int(jax.device_get(value))
+    except Exception as exc:
+        raise RuntimeError("Checkpoint train_state has no valid scalar step") from exc
+
+
+def validate_checkpoint_steps(
+    *, directory_step: int, meta: dict[str, Any] | CheckpointMeta | None, train_state: Any | None
+) -> None:
+    """Require directory, metadata, and train-state steps to agree.
+
+    :param int directory_step: CheckpointManager step/directory selector.
+    :param meta: Restored metadata mapping or live CheckpointMeta.
+    :param train_state: Restored/live state, or None for metadata-only preflight.
+    :raises RuntimeError: If any required step is invalid or mismatched.
+    """
+    if meta is None:
+        raise RuntimeError("Checkpoint metadata is missing; cannot validate step consistency")
+    meta_step_raw = meta.step if isinstance(meta, CheckpointMeta) else meta.get("step")
+    if isinstance(meta_step_raw, bool) or not isinstance(meta_step_raw, int):
+        raise RuntimeError(f"Checkpoint metadata step is invalid: {meta_step_raw!r}")
+    state_step = None if train_state is None else _train_state_step(train_state)
+    mismatches = []
+    if int(meta_step_raw) != int(directory_step):
+        mismatches.append(f"metadata={meta_step_raw}")
+    if state_step is not None and state_step != int(directory_step):
+        mismatches.append(f"train_state={state_step}")
+    if mismatches:
+        raise RuntimeError(
+            f"Checkpoint step mismatch: directory={int(directory_step)}, " + ", ".join(mismatches)
+        )
+
+
 def save(
     manager: ocp.CheckpointManager,
     *,
@@ -296,7 +339,8 @@ def save(
     import grain.checkpoint as gcp
     import orbax.checkpoint as ocp
 
-    manager.save(
+    validate_checkpoint_steps(directory_step=int(step), meta=meta, train_state=train_state)
+    accepted = manager.save(
         int(step),
         args=ocp.args.Composite(
             train_state=ocp.args.StandardSave(train_state),
@@ -305,6 +349,10 @@ def save(
         ),
         force=force,
     )
+    if accepted is not True:
+        raise RuntimeError(
+            f"CheckpointManager rejected save for step {int(step)} (returned {accepted!r})"
+        )
 
 
 def restore_latest(
@@ -375,7 +423,9 @@ def restore_meta_at_step(manager: ocp.CheckpointManager, *, step: int) -> dict[s
         int(step),
         args=ocp.args.Composite(meta=ocp.args.JsonRestore()),
     )
-    return restored.get("meta")
+    meta = restored.get("meta")
+    validate_checkpoint_steps(directory_step=int(step), meta=meta, train_state=None)
+    return meta
 
 
 def _restore_step(
@@ -408,6 +458,7 @@ def _restore_step(
     # Orbax returns a dict-like mapping for Composite.
     train_state = restored["train_state"]
     meta = restored.get("meta")
+    validate_checkpoint_steps(directory_step=int(step), meta=meta, train_state=train_state)
     return step, train_state, meta
 
 

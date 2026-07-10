@@ -26,6 +26,8 @@ import gzip
 import hashlib
 import json
 import logging
+import shutil
+import tempfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -415,38 +417,36 @@ def save_tokenizer_snapshot(
             return
         raise RuntimeError(f"Tokenizer snapshot already exists: {tok_dir}")
 
-    tok_dir.mkdir(parents=True, exist_ok=False)
+    tmp_dir = Path(tempfile.mkdtemp(prefix=".tokenizer-", dir=Path(run_dir)))
+    try:
+        if hasattr(tok, "save_pretrained"):
+            tok.save_pretrained(tmp_dir)  # type: ignore[call-arg]
+        else:
+            record = {
+                "kind": cfg.data.tokenizer.kind,
+                "byte_offset": cfg.data.tokenizer.byte_offset,
+            }
+            (tmp_dir / "tokenizer.json").write_text(
+                json.dumps(record, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        if not any(path.is_file() for path in tmp_dir.rglob("*")):
+            raise RuntimeError("tokenizer save produced no files")
+        _load_tokenizer_dir(tmp_dir, cfg)
+        tmp_dir.replace(tok_dir)
+    except Exception as exc:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise RuntimeError(f"Failed to atomically save tokenizer snapshot to {tok_dir}") from exc
 
-    if hasattr(tok, "save_pretrained"):
-        try:
-            tok.save_pretrained(tok_dir)  # type: ignore[call-arg]
-            return
-        except Exception as exc:
-            raise RuntimeError(f"Failed to save HF tokenizer to {tok_dir}") from exc
 
-    record = {
-        "kind": cfg.data.tokenizer.kind,
-        "byte_offset": cfg.data.tokenizer.byte_offset,
-    }
-    (tok_dir / "tokenizer.json").write_text(
-        json.dumps(record, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+def _load_tokenizer_dir(tok_dir: Path, cfg: Config) -> Tokenizer:
+    """Validate and load a tokenizer from an exact snapshot directory.
 
-
-def load_tokenizer_snapshot(run_dir: Path, cfg: Config) -> Tokenizer:
-    """Load a tokenizer snapshot from a run directory.
-
-    :param Path run_dir: Run directory containing tokenizer snapshot.
-    :param Config cfg: Training configuration (used to pick tokenizer kind).
-    :return Tokenizer: Restored tokenizer instance.
-    :raises FileNotFoundError: If tokenizer snapshot is missing.
-    :raises RuntimeError: If snapshot is invalid or incompatible.
+    :param Path tok_dir: Snapshot directory.
+    :param Config cfg: Training configuration.
+    :raises RuntimeError: If the snapshot is incomplete or incompatible.
+    :return Tokenizer: Loaded tokenizer.
     """
-    tok_dir = Path(run_dir) / "tokenizer"
-    if not tok_dir.exists():
-        raise FileNotFoundError(f"Tokenizer snapshot not found at {tok_dir}")
-
     tok_cfg = cfg.data.tokenizer
     if tok_cfg.kind == "byte":
         record_path = tok_dir / "tokenizer.json"
@@ -466,6 +466,22 @@ def load_tokenizer_snapshot(run_dir: Path, cfg: Config) -> Tokenizer:
         )
 
     raise ValueError(f"Unknown tokenizer.kind: {tok_cfg.kind!r}")
+
+
+def load_tokenizer_snapshot(run_dir: Path, cfg: Config) -> Tokenizer:
+    """Load a tokenizer snapshot from a run directory.
+
+    :param Path run_dir: Run directory containing tokenizer snapshot.
+    :param Config cfg: Training configuration (used to pick tokenizer kind).
+    :return Tokenizer: Restored tokenizer instance.
+    :raises FileNotFoundError: If tokenizer snapshot is missing.
+    :raises RuntimeError: If snapshot is invalid or incompatible.
+    """
+    tok_dir = Path(run_dir) / "tokenizer"
+    if not tok_dir.exists():
+        raise FileNotFoundError(f"Tokenizer snapshot not found at {tok_dir}")
+
+    return _load_tokenizer_dir(tok_dir, cfg)
 
 
 def tokenizer_snapshot_hash(run_dir: Path) -> str | None:
