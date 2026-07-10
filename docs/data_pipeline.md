@@ -49,8 +49,9 @@ When using `hf`, chomp resolves tokenizer-dependent model settings
 Tokenizer knobs are defined in [Config Reference](config-reference.yaml) under
 `data.tokenizer.*`.
 
-chomp saves a tokenizer snapshot under `run_dir/tokenizer` and will prefer that
-snapshot on resume to keep tokenization reproducible.
+chomp saves a tokenizer snapshot under `run_dir/tokenizer`. Resume requires
+that snapshot and fails before modifying the run directory when it is missing;
+it never rebuilds a replacement from a potentially changed repository or path.
 
 ## Packing
 
@@ -128,13 +129,15 @@ the run.
 
 chomp builds a fixed validation set when the run is created:
 
-- If `data.hf_eval_split` is set, chomp tries that split first and then
-  `data.hf_split` if loading or collection fails.
-- Each candidate uses the configured `data.shuffle` behavior and contributes
+- If `data.hf_eval_split` is set, it is authoritative. Any loading,
+  authentication, schema, decoding, or collection error fails startup.
+- The selected split uses the configured `data.shuffle` behavior and contributes
   at most `data.max_eval_samples` examples.
-- Set `data.hf_eval_split: null` to skip eval-split lookup and always use train.
-- For train-split fallback, if `data.seed` is left at `0` and `train.seed` is
+- Set `data.hf_eval_split: null` explicitly to evaluate on `data.hf_split`.
+- For train-split eval, if `data.seed` is left at `0` and `train.seed` is
   non-zero, the shuffle seed defaults to `train.seed`.
+- A positive `data.max_eval_samples` that yields no documents fails startup;
+  use `0` to disable evaluation intentionally.
 
 The selected tokens are **persisted to `run_dir/eval_tokens.json.gz`** together
 with an identity manifest (eval knobs) and a content hash. Every later start,

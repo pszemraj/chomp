@@ -541,6 +541,17 @@ def _tokenize_eval_texts(texts: list[str], tok: Tokenizer) -> list[list[int]]:
 _EVAL_TOKENS_FILENAME = "eval_tokens.json.gz"
 
 
+def _eval_source_split(cfg: Config) -> str:
+    """Resolve the exact source selector used to build evaluation documents.
+
+    :param Config cfg: Training configuration.
+    :return str: HF split name or the local-text source marker.
+    """
+    if cfg.data.backend == "local_text":
+        return "local_text"
+    return cfg.data.hf_eval_split or cfg.data.hf_split
+
+
 def _eval_cache_manifest(cfg: Config) -> dict[str, Any]:
     """Eval-set-defining config knobs pinned alongside the cached tokens.
 
@@ -552,6 +563,8 @@ def _eval_cache_manifest(cfg: Config) -> dict[str, Any]:
         "max_eval_samples": int(cfg.data.max_eval_samples),
         "hf_eval_split": cfg.data.hf_eval_split,
         "hf_split": cfg.data.hf_split,
+        "hf_revision": cfg.data.hf_revision,
+        "source_split": _eval_source_split(cfg),
     }
 
 
@@ -663,63 +676,43 @@ def load_or_create_eval_texts(
             cache_path,
         )
 
-    texts: list[str] = []
-    split_used: str | None = None
-
     if cfg.data.backend == "hf":
-        split_candidates: list[str] = []
-        eval_split = cfg.data.hf_eval_split
-        if eval_split is not None and str(eval_split).strip():
-            split_candidates.append(str(eval_split))
-        if cfg.data.hf_split not in split_candidates:
-            split_candidates.append(cfg.data.hf_split)
-
-        split_errors: list[str] = []
-        for split in split_candidates:
-            try:
-                seed_override = None
-                if (
-                    split == cfg.data.hf_split
-                    and int(cfg.data.seed) == 0
-                    and int(cfg.train.seed) != 0
-                ):
-                    # Keep eval-train fallback deterministic across runs by defaulting
-                    # to train.seed when data.seed is left at its default 0.
-                    seed_override = int(cfg.train.seed)
-                    logger.info(
-                        "Using train.seed=%d for eval train-split shuffle (data.seed=0).",
-                        cfg.train.seed,
-                    )
-
-                stream = _build_hf_stream(
-                    cfg, split=split, repeat=False, seed_override=seed_override
-                )
-                texts = _collect_texts(stream, max_samples)
-                split_used = split
-                break
-            except Exception as exc:
-                split_errors.append(f"{split!r}: {type(exc).__name__}: {exc}")
-                logger.warning("Eval split %r unavailable: %s", split, exc)
-                continue
-        if split_used is None:
-            details = "; ".join(split_errors) if split_errors else "no split candidates"
-            raise RuntimeError(
-                "Failed to build eval dataset from HF streaming splits. "
-                f"Tried: {split_candidates}. Errors: {details}"
+        split = _eval_source_split(cfg)
+        seed_override = None
+        if split == cfg.data.hf_split and int(cfg.data.seed) == 0 and int(cfg.train.seed) != 0:
+            # Keep explicitly train-derived eval deterministic across runs by
+            # defaulting to train.seed when data.seed remains at its default 0.
+            seed_override = int(cfg.train.seed)
+            logger.info(
+                "Using train.seed=%d for train-split eval shuffle (data.seed=0).",
+                cfg.train.seed,
             )
+        try:
+            stream = _build_hf_stream(cfg, split=split, repeat=False, seed_override=seed_override)
+            texts = _collect_texts(stream, max_samples)
+        except Exception as exc:
+            selection = (
+                "data.hf_eval_split" if cfg.data.hf_eval_split is not None else "data.hf_split"
+            )
+            raise RuntimeError(
+                f"Failed to collect evaluation documents from {selection}={split!r}. "
+                "Evaluation never falls back to another split after an error; set "
+                "data.hf_eval_split=null explicitly to evaluate on data.hf_split."
+            ) from exc
     elif cfg.data.backend == "local_text":
         texts = [cfg.data.local_text] * max_samples
-        split_used = "local_text"
     else:
         raise RuntimeError(f"Unknown data.backend for eval: {cfg.data.backend!r}")
 
     if not texts:
-        logger.warning("Eval text set is empty (max_eval_samples=%d).", max_samples)
+        raise RuntimeError(
+            "Evaluation collected zero documents while data.max_eval_samples is positive "
+            f"({max_samples}) from source {_eval_source_split(cfg)!r}. Refusing to silently "
+            "disable evaluation; fix the source/split or set data.max_eval_samples=0 explicitly."
+        )
 
     tokens = _tokenize_eval_texts(texts, tokenizer)
-    # An empty set is a broken state, not an identity worth pinning; leave no
-    # cache so the next start retries collection.
-    if cache_path is not None and tokens:
+    if cache_path is not None:
         _write_eval_tokens_cache(cache_path, cfg, tokens)
         logger.info("Persisted %d eval documents to %s", len(tokens), cache_path)
     return tokens

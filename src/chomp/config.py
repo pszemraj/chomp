@@ -214,9 +214,8 @@ class DataConfig:
 
     where A=grad_accum, B=batch_size, T=seq_len.
 
-    Validation behavior:
-    - If an HF eval split is configured and exists, we take its first max_eval_samples examples.
-    - Otherwise we take the first max_eval_samples examples from the (shuffled) train split.
+    Validation uses ``hf_eval_split`` when set; null explicitly selects
+    ``hf_split``. Collection errors never silently switch splits.
     """
 
     backend: DatasetBackend = "hf"
@@ -227,8 +226,7 @@ class DataConfig:
     hf_name: str = "sample-100BT"
     hf_split: str = "train"
     hf_revision: str | None = None
-    # Preferred eval split; fallback to train if missing.
-    # Default None: derive eval texts from the train split.
+    # Evaluation split. Default None explicitly uses the training split.
     hf_eval_split: str | None = None
     text_key: str = "text"
 
@@ -277,7 +275,7 @@ class DataConfig:
     # Grain pipeline settings.
     grain_prefetch: int = 0
 
-    # Validation set creation (first N examples from validation or train fallback)
+    # Validation set creation from the explicitly selected split/source.
     max_eval_samples: int = 1000
     # One-shot operational override: allow a resume to recollect the pinned
     # eval set when run_dir/eval_tokens.json.gz is missing. Off by default —

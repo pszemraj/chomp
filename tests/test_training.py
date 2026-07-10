@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar
@@ -312,6 +313,22 @@ def test_checkpoint_resume_advances_step(tmp_path: Path) -> None:
     run_dir2 = run(cfg_resume, config_path=str(config_src), resume="latest", dry_run=False)
     assert run_dir2 == run_dir
     assert (ckpt_dir / "3").exists(), "expected checkpoint at step 3 after resume"
+
+
+def test_resume_requires_existing_tokenizer_snapshot(tmp_path: Path) -> None:
+    """A missing tokenizer snapshot must fail before mutating the run directory."""
+    cfg, config_src = make_small_run_cfg(tmp_path, decay_steps=1)
+    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+    tokenizer_dir = run_dir / "tokenizer"
+    shutil.rmtree(tokenizer_dir)
+    resume_record = run_dir / "config_resume.json"
+    assert not resume_record.exists()
+
+    with pytest.raises(FileNotFoundError, match="tokenizer snapshot is missing"):
+        run(cfg, config_path=str(config_src), resume="latest", dry_run=False)
+
+    assert not tokenizer_dir.exists()
+    assert not resume_record.exists()
 
 
 def test_checkpoint_restore_allows_forward(tmp_path: Path) -> None:

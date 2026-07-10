@@ -503,7 +503,7 @@ def test_strict_packed_rejects_disabled_boundary_masking(mode: str) -> None:
 
 
 def test_hf_eval_split_allows_null() -> None:
-    """hf_eval_split=None should validate and imply train-split eval fallback."""
+    """hf_eval_split=None should validate and explicitly select the training split."""
     cfg = _base_cfg()
     validate_config(replace(cfg, data=_hf_data()))
 

@@ -16,7 +16,7 @@ Each checkpoint stores three items:
 3) `meta`: JSON metadata (config snapshot, data fingerprint, required
    non-negative `tokens_seen`, and versions)
 
-The run directory also includes a tokenizer snapshot under `tokenizer/` and
+The run directory also includes a required tokenizer snapshot under `tokenizer/` and
 the pinned eval token set `eval_tokens.json.gz`. Eval cache creation, drift
 checks, and the `data.recreate_eval_cache` override are covered in
 [Data Pipeline validation set](data_pipeline.md#validation-set).

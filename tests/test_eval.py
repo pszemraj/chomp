@@ -258,38 +258,27 @@ def _base_cfg() -> Config:
     )
 
 
-def test_eval_split_selection_and_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Eval text loading should prefer eval split, then fall back to train as configured."""
-    cases: list[
-        tuple[str | None, dict[str, list[dict[str, Any]]], dict[str, bool], list[str], list[str]]
-    ] = [
+def test_eval_split_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit eval split is authoritative; null explicitly selects train."""
+    cases: list[tuple[str | None, dict[str, list[dict[str, Any]]], str, list[str]]] = [
         (
             "validation",
             {
                 "validation": [{"text": "val-a"}, {"text": "val-b"}],
                 "train": [{"text": "train-a"}, {"text": "train-b"}],
             },
-            {"validation": False},
-            ["validation"],
-            ["val-a", "val-b"],
-        ),
-        (
             "validation",
-            {"train": [{"text": "train-a"}, {"text": "train-b"}]},
-            {"validation": True},
-            ["validation", "train"],
-            ["train-a", "train-b"],
+            ["val-a", "val-b"],
         ),
         (
             None,
             {"train": [{"text": "train-a"}, {"text": "train-b"}]},
-            {},
-            ["train"],
+            "train",
             ["train-a", "train-b"],
         ),
     ]
 
-    for hf_eval_split, datasets, missing, expected_splits, expected_texts in cases:
+    for hf_eval_split, datasets, expected_split, expected_texts in cases:
         requested_splits: list[str] = []
 
         def _load_dataset(
@@ -300,13 +289,10 @@ def test_eval_split_selection_and_fallback(monkeypatch: pytest.MonkeyPatch) -> N
             streaming: bool,
             revision: str | None,
             _requested_splits: list[str] = requested_splits,
-            _missing: dict[str, bool] = missing,
             _datasets: dict[str, list[dict[str, Any]]] = datasets,
         ) -> FakeHFIterable:
             _ = (dataset, name, streaming, revision)
             _requested_splits.append(split)
-            if _missing.get(split, False):
-                raise FileNotFoundError(f"missing split: {split}")
             if split not in _datasets:
                 raise ValueError(f"unknown split: {split}")
             return FakeHFIterable(items=_datasets[split])
@@ -321,7 +307,77 @@ def test_eval_split_selection_and_fallback(monkeypatch: pytest.MonkeyPatch) -> N
         tokens = load_or_create_eval_texts(cfg, tokenizer=tok)
 
         assert tokens == [tok.encode(text) for text in expected_texts]
-        assert requested_splits == expected_splits
+        assert requested_splits == [expected_split]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [FileNotFoundError("missing validation split"), PermissionError("authentication failed")],
+)
+def test_explicit_eval_split_failure_never_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    """Missing or inaccessible explicit eval data must not become train-set eval."""
+    requested_splits: list[str] = []
+
+    def _load_dataset(
+        dataset: str,
+        *,
+        name: str,
+        split: str,
+        streaming: bool,
+        revision: str | None,
+    ) -> FakeHFIterable:
+        _ = (dataset, name, streaming, revision)
+        requested_splits.append(split)
+        if split == "validation":
+            raise failure
+        return FakeHFIterable(items=[{"text": "training data must not be used"}])
+
+    import datasets as hf_datasets
+
+    monkeypatch.setattr(hf_datasets, "load_dataset", _load_dataset)
+    cfg = _base_cfg()
+
+    with pytest.raises(RuntimeError, match="never falls back"):
+        load_or_create_eval_texts(cfg, tokenizer=build_tokenizer(cfg), run_dir=tmp_path)
+
+    assert requested_splits == ["validation"]
+    assert not (tmp_path / "eval_tokens.json.gz").exists()
+
+
+def test_positive_eval_sample_count_rejects_empty_source(
+    tmp_path: Path, patch_hf_load_dataset: Callable[..., dict[str, int]]
+) -> None:
+    """An empty configured source must fail instead of silently disabling eval."""
+    patch_hf_load_dataset({"validation": [], "train": [{"text": "unused"}]})
+    cfg = _base_cfg()
+
+    with pytest.raises(RuntimeError, match="collected zero documents"):
+        load_or_create_eval_texts(cfg, tokenizer=build_tokenizer(cfg), run_dir=tmp_path)
+
+    assert not (tmp_path / "eval_tokens.json.gz").exists()
+
+
+def test_eval_cache_manifest_records_actual_source_split(
+    tmp_path: Path, patch_hf_load_dataset: Callable[..., dict[str, int]]
+) -> None:
+    """Pinned eval identity must record the split that actually supplied documents."""
+    import gzip
+
+    patch_hf_load_dataset(
+        {
+            "validation": [{"text": "val-a"}, {"text": "val-b"}],
+            "train": [{"text": "train-a"}],
+        }
+    )
+    cfg = _base_cfg()
+    load_or_create_eval_texts(cfg, tokenizer=build_tokenizer(cfg), run_dir=tmp_path)
+
+    with gzip.open(tmp_path / "eval_tokens.json.gz", "rt", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    assert payload["manifest"]["source_split"] == "validation"
+    assert payload["manifest"]["hf_revision"] is None
 
 
 def test_eval_empty_when_disabled() -> None:

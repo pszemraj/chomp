@@ -411,8 +411,9 @@ data:
   # Default: null, which derives evaluation examples from data.hf_split.
   # Required: no; ignored for local_text.
   # Valid: null or a nonempty split name.
-  # Use: preferred evaluation split. If unavailable, collection falls back to hf_split. When that
-  # fallback is used with data.seed 0 and train.seed nonzero, train.seed controls eval shuffling.
+  # Use: exact evaluation split. Any loading, authentication, schema, decoding, or collection error
+  # fails startup; there is no implicit fallback. Set null explicitly to evaluate on data.hf_split.
+  # With null, data.seed 0, and nonzero train.seed, train.seed controls eval document shuffling.
   # Resume: this value is hard-compared even for local_text because it identifies the pinned eval set.
   hf_eval_split: null
 
@@ -593,8 +594,8 @@ data:
   # Valid: >= 0; zero disables evaluation data.
   # Use: maximum source examples collected into the pinned evaluation token cache. Setup collects
   # them even when eval_every is 0; max_eval_samples 0 or --dry-run skips collection. This is not a
-  # token/window count: too few full A*B rows, or all-masked labels, fails when evaluation first runs.
-  # Changing it changes evaluation semantics and is rejected on resume.
+  # token/window count: zero collected documents fails at setup, while too few full A*B rows or
+  # all-masked labels fails when evaluation first runs. Changing it is rejected on resume.
   max_eval_samples: 1000
 
   # Key: data.recreate_eval_cache
@@ -732,8 +733,8 @@ train:
   # Required: no.
   # Valid: >= 0.
   # Use: fresh model/dropout RNG plus two periodic-generation RNGs. Data ordering normally uses
-  # data.seed; eval fallback to the HF training split uses train.seed when data.seed is 0. Restored
-  # model/dropout RNG supersedes this value on resume, and generation RNGs restart rather than restore.
+  # data.seed; train-split eval uses train.seed when data.seed is 0. Restored model/dropout RNG
+  # supersedes this value on resume, and generation RNGs restart rather than restore.
   seed: 0
 
   # Key: train.steps
