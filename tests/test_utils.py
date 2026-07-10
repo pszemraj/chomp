@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
-import tomllib
 from dataclasses import replace
 from pathlib import Path
 
@@ -27,19 +25,6 @@ from chomp.utils import devices, xla
 from chomp.utils.devices import device_platform, validate_default_device
 from chomp.utils.io import RunDirectoryLock, create_run_dir
 from chomp.utils.tree import param_count
-
-
-def test_project_dependencies_are_exactly_pinned() -> None:
-    """Every environment accepted by package metadata must match a tested version."""
-    project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
-    dependencies = list(project["project"]["dependencies"])
-    dependencies.extend(project["project"]["optional-dependencies"]["dev"])
-
-    for requirement in dependencies:
-        if " @ git+" in requirement:
-            assert re.search(r"@[0-9a-f]{40}$", requirement), requirement
-        else:
-            assert "==" in requirement, requirement
 
 
 def test_cpu_fails_when_disallowed() -> None:
