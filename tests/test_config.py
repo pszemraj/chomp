@@ -135,6 +135,50 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
             lambda cfg: replace(cfg, model=replace(cfg.model, model_dim=130, num_heads=8)),
             "model_dim",
         ),
+        (lambda cfg: replace(cfg, model=replace(cfg.model, dropout=1.1)), "model.dropout"),
+        (lambda cfg: replace(cfg, model=replace(cfg.model, z_dim=65)), "model.z_dim"),
+        (lambda cfg: replace(cfg, model=replace(cfg.model, value_dim=130)), "model.value_dim"),
+        (
+            lambda cfg: replace(cfg, model=replace(cfg.model, norm_num_groups=30)),
+            "norm_num_groups",
+        ),
+        (lambda cfg: replace(cfg, model=replace(cfg.model, norm_eps=0.0)), "norm_eps"),
+        (lambda cfg: replace(cfg, model=replace(cfg.model, max_cache_len=8)), "max_cache_len"),
+        (lambda cfg: replace(cfg, model=replace(cfg.model, rope_base=0.0)), "rope_base"),
+        (
+            lambda cfg: replace(cfg, model=replace(cfg.model, attention_dropout=-0.1)),
+            "attention_dropout",
+        ),
+        (
+            lambda cfg: replace(cfg, model=replace(cfg.model, hidden_dropout=1.1)),
+            "hidden_dropout",
+        ),
+        (lambda cfg: replace(cfg, model=replace(cfg.model, init_mode="invalid")), "init_mode"),
+        (
+            lambda cfg: replace(cfg, model=replace(cfg.model, compute_dtype="float16")),
+            "compute_dtype",
+        ),
+        (
+            lambda cfg: replace(
+                cfg,
+                model=replace(
+                    cfg.model,
+                    compute_dtype="float32",
+                    accum_dtype="bfloat16",
+                ),
+            ),
+            "accum_dtype",
+        ),
+        (
+            lambda cfg: replace(cfg, model=replace(cfg.model, softmax_dtype="float16")),
+            "softmax_dtype",
+        ),
+        (
+            lambda cfg: replace(cfg, model=replace(cfg.model, gemm_backend="triton")),
+            "gemm_backend",
+        ),
+        (lambda cfg: replace(cfg, model=replace(cfg.model, output_size=0)), "output_size"),
+        (lambda cfg: replace(cfg, model=replace(cfg.model, max_positions=0)), "max_positions"),
         (lambda cfg: replace(cfg, train=replace(cfg.train, eval_every=-1)), "eval_every"),
         (lambda cfg: replace(cfg, train=replace(cfg.train, generate_every=-1)), "generate_every"),
         (
@@ -193,6 +237,7 @@ def test_optim_validation_rejects_invalid_values() -> None:
     """Optimizer validation should fail for out-of-range settings."""
     cases: list[tuple[Callable[[Config], Config], str]] = [
         (lambda cfg: replace(cfg, optim=replace(cfg.optim, min_lr_ratio=1.5)), "min_lr_ratio"),
+        (lambda cfg: replace(cfg, optim=replace(cfg.optim, weight_decay=-0.1)), "weight_decay"),
         (
             lambda cfg: replace(
                 cfg, optim=replace(cfg.optim, muon=replace(cfg.optim.muon, lr_scale=0.0))
@@ -309,12 +354,42 @@ def test_data_and_logging_validation_rejects_invalid_values() -> None:
             ),
             "wandb.mode",
         ),
+        (lambda cfg: replace(cfg, logging=replace(cfg.logging, level="TRACE")), "level"),
+        (lambda cfg: replace(cfg, logging=replace(cfg.logging, project=" ")), "project"),
+        (
+            lambda cfg: replace(cfg, logging=replace(cfg.logging, metrics_file=" ")),
+            "metrics_file",
+        ),
+        (
+            lambda cfg: replace(
+                cfg,
+                logging=replace(
+                    cfg.logging,
+                    wandb=replace(cfg.logging.wandb, tags=("valid", "")),
+                ),
+            ),
+            "wandb.tags",
+        ),
         (lambda cfg: replace(cfg, logging=replace(cfg.logging, log_file=" ")), "log_file"),
     ]
 
     for mutate, match in cases:
         with pytest.raises(ValueError, match=match):
             validate_config(mutate(_base_cfg()))
+
+
+def test_wandb_tags_require_and_normalize_a_string_list() -> None:
+    """YAML/JSON tag lists should normalize to the immutable config type."""
+    data = _base_cfg().to_dict()
+    data["logging"]["wandb"]["tags"] = ["baseline", "smoke"]
+
+    cfg = build_config(data)
+
+    assert cfg.logging.wandb.tags == ("baseline", "smoke")
+
+    data["logging"]["wandb"]["tags"] = "baseline,smoke"
+    with pytest.raises(ValueError, match="YAML/JSON list"):
+        build_config(data)
 
 
 @pytest.mark.parametrize("mode", ["bin", "multipack"])

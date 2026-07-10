@@ -98,7 +98,7 @@ class ModelConfig:
     # chomp has no fp32 master-param path (tracked in docs/dev.md), so
     # validate_config rejects bfloat16 params rather than silently training
     # with bf16 optimizer moments. bf16 belongs in compute_dtype.
-    param_dtype: Literal["float32", "bfloat16"] = "float32"
+    param_dtype: Literal["float32"] = "float32"
     compute_dtype: Literal["float32", "bfloat16"] = "bfloat16"
     # Model-internal accumulation only (attention/CEMA reductions inside
     # megalodon-jax). Harness gradient accumulation/clipping is always fp32
@@ -639,7 +639,12 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
     optim_d = {k: v for k, v in optim_d.items() if k not in {"muon", "adam"}}
     optim = OptimConfig(muon=muon, adam=adam, **optim_d)
     logging_d = data.get("logging") or {}
-    wandb_d = logging_d.get("wandb") or {}
+    wandb_d = dict(logging_d.get("wandb") or {})
+    if "tags" in wandb_d:
+        tags = wandb_d["tags"]
+        if not isinstance(tags, (list, tuple)):
+            _vfail("logging.wandb.tags must be a YAML/JSON list of strings")
+        wandb_d["tags"] = tuple(tags)
     wandb = WandbConfig(**wandb_d)
     logging_d = {k: v for k, v in logging_d.items() if k != "wandb"}
     logging = LoggingConfig(wandb=wandb, **logging_d)
@@ -728,6 +733,8 @@ def _validate_optim(cfg: Config) -> None:
         _vfail(f"optim.name must be 'adamw' or 'muon', got {cfg.optim.name!r}")
     if cfg.optim.lr <= 0:
         _vfail(f"optim.lr must be positive, got {cfg.optim.lr}")
+    if cfg.optim.weight_decay < 0:
+        _vfail(f"optim.weight_decay must be >= 0, got {cfg.optim.weight_decay}")
     if cfg.optim.grad_clip_norm < 0:
         _vfail(f"optim.grad_clip_norm must be >= 0, got {cfg.optim.grad_clip_norm}")
     if cfg.optim.warmup_steps < 0:
@@ -774,6 +781,8 @@ def _validate_model(cfg: Config) -> None:
     """Validate model-related config fields."""
     if cfg.model.vocab_size <= 0:
         _vfail(f"model.vocab_size must be positive, got {cfg.model.vocab_size}")
+    if not 0 <= cfg.model.dropout <= 1:
+        _vfail(f"model.dropout must be in [0, 1], got {cfg.model.dropout}")
     if cfg.model.param_dtype != "float32":
         _vfail(
             f"model.param_dtype must be 'float32', got {cfg.model.param_dtype!r}: "
@@ -786,16 +795,40 @@ def _validate_model(cfg: Config) -> None:
         if cfg.model.d_model <= 0:
             _vfail(f"model.d_model must be positive, got {cfg.model.d_model}")
     elif cfg.model.backend == "megalodon":
-        if cfg.model.model_dim <= 0:
-            _vfail(f"model.model_dim must be positive, got {cfg.model.model_dim}")
-        if cfg.model.num_layers <= 0:
-            _vfail(f"model.num_layers must be positive, got {cfg.model.num_layers}")
-        if cfg.model.num_heads <= 0:
-            _vfail(f"model.num_heads must be positive, got {cfg.model.num_heads}")
+        positive_fields = {
+            "model_dim": cfg.model.model_dim,
+            "num_layers": cfg.model.num_layers,
+            "num_heads": cfg.model.num_heads,
+            "z_dim": cfg.model.z_dim,
+            "value_dim": cfg.model.value_dim,
+            "ffn_hidden_dim": cfg.model.ffn_hidden_dim,
+            "cema_ndim": cfg.model.cema_ndim,
+            "norm_num_groups": cfg.model.norm_num_groups,
+            "norm_eps": cfg.model.norm_eps,
+            "max_positions": cfg.model.max_positions,
+        }
+        for name, value in positive_fields.items():
+            if value <= 0:
+                _vfail(f"model.{name} must be positive, got {value}")
         if cfg.model.model_dim % cfg.model.num_heads != 0:
             _vfail(
                 f"model.model_dim ({cfg.model.model_dim}) must be divisible by "
                 f"model.num_heads ({cfg.model.num_heads})"
+            )
+        if cfg.model.z_dim % cfg.model.num_heads != 0:
+            _vfail(
+                f"model.z_dim ({cfg.model.z_dim}) must be divisible by "
+                f"model.num_heads ({cfg.model.num_heads})"
+            )
+        if cfg.model.value_dim % cfg.model.num_heads != 0:
+            _vfail(
+                f"model.value_dim ({cfg.model.value_dim}) must be divisible by "
+                f"model.num_heads ({cfg.model.num_heads})"
+            )
+        if cfg.model.model_dim % cfg.model.norm_num_groups != 0:
+            _vfail(
+                f"model.model_dim ({cfg.model.model_dim}) must be divisible by "
+                f"model.norm_num_groups ({cfg.model.norm_num_groups})"
             )
         if cfg.model.chunk_size <= 0:
             _vfail(f"model.chunk_size must be positive, got {cfg.model.chunk_size}")
@@ -808,8 +841,39 @@ def _validate_model(cfg: Config) -> None:
                 f"train.seq_len ({cfg.train.seq_len}) must be divisible by "
                 f"model.chunk_size ({cfg.model.chunk_size})"
             )
+        if cfg.model.max_cache_len is not None:
+            if cfg.model.max_cache_len <= 0:
+                _vfail(
+                    f"model.max_cache_len must be positive when set, got {cfg.model.max_cache_len}"
+                )
+            if cfg.model.max_cache_len < cfg.model.chunk_size:
+                _vfail(
+                    f"model.max_cache_len ({cfg.model.max_cache_len}) must be >= "
+                    f"model.chunk_size ({cfg.model.chunk_size})"
+                )
+        if cfg.model.rope_base is not None and cfg.model.rope_base <= 0:
+            _vfail(f"model.rope_base must be positive when set, got {cfg.model.rope_base}")
+        if not 0 <= cfg.model.attention_dropout <= 1:
+            _vfail(f"model.attention_dropout must be in [0, 1], got {cfg.model.attention_dropout}")
+        if not 0 <= cfg.model.hidden_dropout <= 1:
+            _vfail(f"model.hidden_dropout must be in [0, 1], got {cfg.model.hidden_dropout}")
     else:
         _vfail(f"model.backend must be 'dummy' or 'megalodon', got {cfg.model.backend!r}")
+
+    if cfg.model.init_mode not in ("gaussian", "xavier", "he", "bert", "none"):
+        _vfail(f"model.init_mode has unsupported value {cfg.model.init_mode!r}")
+    if cfg.model.compute_dtype not in ("float32", "bfloat16"):
+        _vfail(f"model.compute_dtype has unsupported value {cfg.model.compute_dtype!r}")
+    if cfg.model.accum_dtype not in ("float32", "bfloat16"):
+        _vfail(f"model.accum_dtype has unsupported value {cfg.model.accum_dtype!r}")
+    if cfg.model.softmax_dtype not in ("float32", "bfloat16"):
+        _vfail(f"model.softmax_dtype has unsupported value {cfg.model.softmax_dtype!r}")
+    if cfg.model.compute_dtype == "float32" and cfg.model.accum_dtype != "float32":
+        _vfail("model.accum_dtype must be at least as precise as model.compute_dtype")
+    if cfg.model.gemm_backend != "default":
+        _vfail(f"model.gemm_backend must be 'default', got {cfg.model.gemm_backend!r}")
+    if cfg.model.output_size != -1 and cfg.model.output_size <= 0:
+        _vfail(f"model.output_size must be -1 or positive, got {cfg.model.output_size}")
 
     if cfg.model.pad_token_id == cfg.model.eos_token_id:
         warnings.warn(
@@ -924,10 +988,21 @@ def _validate_data(cfg: Config) -> None:
 
 def _validate_logging(cfg: Config) -> None:
     """Validate logging-related config fields."""
+    if cfg.logging.level not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+        _vfail(
+            "logging.level must be 'DEBUG', 'INFO', 'WARNING', or 'ERROR', "
+            f"got {cfg.logging.level!r}"
+        )
+    if not str(cfg.logging.project).strip():
+        _vfail("logging.project must be a non-empty string")
+    if not str(cfg.logging.metrics_file).strip():
+        _vfail("logging.metrics_file must be a non-empty string")
     if cfg.logging.log_file is not None and not str(cfg.logging.log_file).strip():
         _vfail("logging.log_file must be a non-empty string or null")
     if cfg.logging.wandb.mode not in ("online", "offline"):
         _vfail(f"logging.wandb.mode must be 'online' or 'offline', got {cfg.logging.wandb.mode!r}")
+    if any(not isinstance(tag, str) or not tag.strip() for tag in cfg.logging.wandb.tags):
+        _vfail("logging.wandb.tags entries must be non-empty strings")
 
 
 def _validate_tokenizer(cfg: Config) -> None:
