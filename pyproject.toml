@@ -20,22 +20,22 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-# NOTE:
-# - JAX wheels (jaxlib) are platform/CUDA specific. See README.
-# - We pin Orbax to avoid silent API drift.
+# NOTE: exact runtime pins define the environment covered by the resume and
+# checkpoint suite. JAX CUDA plugins remain platform-specific; see README.
 dependencies = [
-  "jax>=0.7.0",
-  "equinox>=0.12.0",
+  "jax==0.8.2",
+  "jaxlib==0.8.2",
+  "equinox==0.13.2",
   # Commit pin includes megalodon-jax 0.1.2 supports_segment_reset support.
   # The runtime version check remains a clear failure for editable installs.
   "megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git@c0612735a1861dd5d72ef40937cd91b96dd8ac0d",
-  "packaging>=23.0",
+  "packaging==25.0",
   "optax @ git+https://github.com/google-deepmind/optax.git@141c8d5e3746540163da8c7edf5a0072369a27c8",
   "orbax-checkpoint==0.11.31",
-  "PyYAML>=6.0",
-  "tqdm",
-  "rich>=13.0",
-  "wandb>=0.16.0",
+  "PyYAML==6.0.3",
+  "tqdm==4.67.1",
+  "rich==14.2.0",
+  "wandb==0.24.0",
   # Exact pin is deliberate: the window-shuffle resume-exactness fix
   # (_ResumeSafeWindowShuffleIterDataset in chomp.data.grain) patches grain's
   # private _WindowShuffleDatasetIterator._init flag. A construction-time
@@ -43,14 +43,14 @@ dependencies = [
   # the workaround and the full interrupted-versus-continuous resume tests.
   "grain==0.2.15",
   "datasets==4.5.0",
-  # transformers (tokenizers)
-  "transformers>=4.40.0",
+  "transformers==4.57.3",
+  "tokenizers==0.22.1",
   # CLI
-  "click>=8.0",
+  "click==8.3.1",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.4", "ruff>=0.4.0"]
+dev = ["pytest==9.0.1", "ruff==0.14.11"]
 
 [project.scripts]
 chomp = "chomp.cli.main:cli"

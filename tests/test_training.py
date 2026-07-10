@@ -1401,6 +1401,20 @@ def test_resume_compat_hard_gates_parameter_manifest(tmp_path: Path) -> None:
         check_resume_compat(cfg, meta, parameter_manifest_hash="test-parameter-manifest")
 
 
+def test_resume_compat_hard_gates_runtime_identity(tmp_path: Path) -> None:
+    """Dependency, source, platform, and accelerator drift must reject resume."""
+    cfg = _base_cfg(tmp_path / "run_runtime_compat")
+    meta = _checkpoint_record(cfg).to_dict()
+    meta["runtime"]["packages"]["jaxlib"] = "incompatible"
+
+    with pytest.raises(RuntimeError, match="runtime.packages"):
+        check_resume_compat(cfg, meta)
+
+    del meta["runtime"]
+    with pytest.raises(RuntimeError, match="runtime identity"):
+        check_resume_compat(cfg, meta)
+
+
 def test_resume_compat_ignores_inert_packing_knobs(tmp_path: Path) -> None:
     """Editing a packing knob the active mode never consumes must not block resume.
 

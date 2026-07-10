@@ -16,10 +16,11 @@ All project commands should run inside the `mega-jax` conda environment.
 conda run --name mega-jax <command>
 ```
 
-Runtime dependencies whose behavior affects exact resume are pinned in
-`pyproject.toml`: the Megalodon implementation commit, Grain iterator internals,
-Hugging Face streaming state, and Orbax checkpoint APIs. Upgrade them
-deliberately with the resume/checkpoint tests, not as unconstrained installs.
+Runtime and development dependencies are exactly pinned in
+[`pyproject.toml`](../pyproject.toml), including the Megalodon and Optax source
+commits. Upgrade them deliberately with the full resume/checkpoint suite, not
+as unconstrained installs. JAX accelerator plugins must match the pinned
+`jax==jaxlib==0.8.2` core.
 
 ## Lint and format
 

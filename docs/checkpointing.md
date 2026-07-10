@@ -14,7 +14,8 @@ Each checkpoint stores three items:
 2) `data_state`: the checkpointable data path described in
    [Data Pipeline: iterator state and resume](data_pipeline.md#iterator-state-and-resume)
 3) `meta`: JSON metadata (config snapshot, data fingerprint, required
-   non-negative `tokens_seen`, parameter-manifest hash, and versions)
+   non-negative `tokens_seen`, parameter-manifest hash, and strict runtime
+   identity)
 
 The run directory also includes a required tokenizer snapshot under `tokenizer/` and
 the pinned eval token set `eval_tokens.json.gz`. It also contains
@@ -76,6 +77,9 @@ Hard failures include:
 - model and optimizer config, `train.deterministic`
 - the complete parameter/fixed-buffer, optimizer-group, and decay assignment
   through the parameter-manifest hash
+- Python/platform, accelerator backend and device, Chomp source revision, and
+  exact JAX/JAXlib/Equinox/Optax/Orbax/Grain/Datasets/Transformers/tokenizers/
+  Megalodon-JAX versions
 
 The packing, model, and optimizer sections are compared over the union of
 keys recorded on either side, so a knob present in only one version's

@@ -23,8 +23,10 @@ Orbax notes:
 from __future__ import annotations
 
 import logging
+import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -49,12 +51,8 @@ class CheckpointMeta:
     timestamp: str
     tokens_seen: int
 
-    # Versions for debugging (not for strict gating in v0)
-    python: str
-    jax: str | None
-    orbax: str | None
-    chomp: str
-    megalodon_jax: str | None
+    # Runtime/code identity (strict resume gate)
+    runtime: dict[str, Any]
 
     # Repro snapshot
     config: dict[str, Any]
@@ -87,6 +85,86 @@ def _safe_version(pkg: str) -> str | None:
         return None
 
 
+@lru_cache(maxsize=1)
+def _source_revision() -> str:
+    """Return the repository commit plus tracked-source dirty status.
+
+    Installed wheels may not have repository metadata; their package version
+    remains a stable fallback identity.
+
+    :return str: Git commit, optionally suffixed ``+dirty``, or package version.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "diff", "--quiet", "--", "src", "pyproject.toml"],
+            cwd=repo_root,
+            check=False,
+        ).returncode
+        staged_dirty = subprocess.run(
+            ["git", "diff", "--cached", "--quiet", "--", "src", "pyproject.toml"],
+            cwd=repo_root,
+            check=False,
+        ).returncode
+        if dirty not in (0, 1) or staged_dirty not in (0, 1):
+            raise RuntimeError("git diff could not inspect source state")
+        return f"{commit}+dirty" if dirty or staged_dirty else commit
+    except Exception:
+        return f"package:{_chomp_version}"
+
+
+@lru_cache(maxsize=1)
+def runtime_identity() -> dict[str, Any]:
+    """Return the strict code, dependency, and accelerator resume identity.
+
+    :return dict[str, Any]: JSON-serializable runtime identity.
+    """
+    import platform
+
+    packages = (
+        "jax",
+        "jaxlib",
+        "equinox",
+        "optax",
+        "orbax-checkpoint",
+        "grain",
+        "datasets",
+        "transformers",
+        "tokenizers",
+        "megalodon-jax",
+    )
+    backend: dict[str, Any]
+    try:
+        import jax
+
+        devices = jax.devices()
+        first = devices[0]
+        backend = {
+            "platform": jax.default_backend(),
+            "platform_version": str(getattr(first.client, "platform_version", "unknown")),
+            "device_kind": str(getattr(first, "device_kind", "unknown")),
+        }
+    except Exception as exc:
+        backend = {"error": f"{type(exc).__name__}: {exc}"}
+
+    return {
+        "python": platform.python_version(),
+        "system": platform.system(),
+        "machine": platform.machine(),
+        "chomp": _chomp_version,
+        "source_revision": _source_revision(),
+        "packages": {name: _safe_version(name) for name in packages},
+        "backend": backend,
+    }
+
+
 def build_meta(
     *,
     step: int,
@@ -104,16 +182,10 @@ def build_meta(
     :param int tokens_seen: Cumulative loss-token count for exact resume accounting.
     :return CheckpointMeta: Populated metadata object.
     """
-    import platform
-
     return CheckpointMeta(
         step=int(step),
         timestamp=datetime.now().isoformat(timespec="seconds"),
-        python=platform.python_version(),
-        jax=_safe_version("jax"),
-        orbax=_safe_version("orbax-checkpoint"),
-        chomp=_chomp_version,
-        megalodon_jax=_safe_version("megalodon-jax"),
+        runtime=runtime_identity(),
         tokens_seen=int(tokens_seen),
         config=config,
         data_fingerprint=data_fingerprint,
@@ -395,9 +467,15 @@ def check_resume_compat(
 
     meta_cfg = meta.get("config")
     meta_fp = meta.get("data_fingerprint")
-    if not isinstance(meta_cfg, dict) or not isinstance(meta_fp, dict):
+    meta_runtime = meta.get("runtime")
+    if (
+        not isinstance(meta_cfg, dict)
+        or not isinstance(meta_fp, dict)
+        or not isinstance(meta_runtime, dict)
+    ):
         raise RuntimeError(
-            "Checkpoint meta is missing config/data_fingerprint; cannot verify resume compatibility."
+            "Checkpoint meta is missing config/data_fingerprint/runtime identity; "
+            "cannot verify resume compatibility."
         )
     tokens_seen = meta.get("tokens_seen")
     if isinstance(tokens_seen, bool) or not isinstance(tokens_seen, int) or tokens_seen < 0:
@@ -424,6 +502,15 @@ def check_resume_compat(
                 warnings.append(msg)
 
     cur_fp = data_fingerprint(cfg, tokenizer_snapshot_hash=tokenizer_snapshot_hash)
+
+    current_runtime = runtime_identity()
+    for key in sorted(set(meta_runtime) | set(current_runtime)):
+        _cmp(
+            f"runtime.{key}",
+            current_runtime.get(key),
+            meta_runtime.get(key),
+            severity="error",
+        )
 
     if parameter_manifest_hash is not None:
         _cmp(
