@@ -11,7 +11,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from chomp.ckpt import resolve_ckpt_root
 from chomp.config import build_config, read_config_mapping
 
 
@@ -179,6 +178,8 @@ def resolve_checkpoint_path(
         return path, run_dir
 
     if (path / "config_resolved.json").exists():
+        from chomp.ckpt import resolve_ckpt_root
+
         run_dir = path
         # Use the run's resolved config to locate checkpoints, regardless of overrides.
         cfg = build_config(_read_run_dir_config(run_dir))
@@ -196,6 +197,8 @@ def resolve_checkpoint_path(
         return step_dir, run_dir
 
     if config_override is not None:
+        from chomp.ckpt import resolve_ckpt_root
+
         run_dir = path
         cfg = load_config_for_checkpoint(
             step_dir=path, run_dir=run_dir, config_override=config_override

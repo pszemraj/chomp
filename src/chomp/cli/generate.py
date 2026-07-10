@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import click
 
-from chomp.utils.ckpt_paths import load_config_for_checkpoint, resolve_checkpoint_path
-
 
 @click.command()
 @click.argument("checkpoint", type=click.Path(exists=True))
@@ -84,6 +82,7 @@ def generate(
     from chomp.ckpt import restore_params_only
     from chomp.data.pipeline import load_tokenizer_snapshot, prepare_tokenizer_and_config
     from chomp.model import build_model, generate_tokens
+    from chomp.utils.ckpt_paths import load_config_for_checkpoint, resolve_checkpoint_path
     from chomp.utils.tree import abstractify_tree
 
     # Find checkpoint and load config

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -23,6 +25,14 @@ from chomp.model import build_model
 from chomp.train import run
 from chomp.utils.tree import abstractify_tree
 from tests.helpers.config_factories import make_small_run_cfg
+
+
+def test_cli_import_does_not_initialize_jax() -> None:
+    """Importing command registration must leave XLA configuration mutable."""
+    code = "import sys; import chomp.cli.main; assert 'jax' not in sys.modules"
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.fixture(scope="module")

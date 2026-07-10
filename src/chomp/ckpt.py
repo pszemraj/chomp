@@ -35,7 +35,6 @@ if TYPE_CHECKING:
 
 from chomp import __version__ as _chomp_version
 from chomp.config import Config, decay_horizon_from_values
-from chomp.data import data_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -512,6 +511,8 @@ def check_resume_compat(
     :param str | None parameter_manifest_hash: Current model/optimizer manifest hash.
     :raises RuntimeError: If meta is missing or config mismatches are found.
     """
+
+    from chomp.data import data_fingerprint
 
     if meta is None:
         raise RuntimeError("Checkpoint meta is missing; cannot verify resume compatibility.")
