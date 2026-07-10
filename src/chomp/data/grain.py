@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 import numpy as np
@@ -18,6 +19,14 @@ _WINDOW_SHUFFLE_SEED_OFFSET = 104_729
 _UINT32_MODULUS = 2**32
 
 
+@dataclass(frozen=True)
+class _BatchEnvelope:
+    """One batch paired with its exact pre-device loss-token count."""
+
+    batch: Batch
+    loss_tokens_host: int
+
+
 def effective_window_shuffle_seed(cfg: Config) -> int:
     """Return the deterministic seed consumed by packed-window shuffling.
 
@@ -30,7 +39,7 @@ def effective_window_shuffle_seed(cfg: Config) -> int:
 class _IteratorProtocol(Protocol):
     """Protocol for Grain dataset iterators."""
 
-    def __next__(self) -> Batch: ...
+    def __next__(self) -> _BatchEnvelope: ...
 
     def get_state(self) -> dict[str, Any]:
         """Return iterator state for checkpointing."""
@@ -56,26 +65,24 @@ class GrainTrainBatchIterator:
         self._packing_mode = str(packing_mode)
         self._enable_stats = bool(enable_stats)
         self._last_stats: dict[str, float | int | str] = {}
+        self._last_loss_tokens: int | None = None
 
     def __iter__(self) -> GrainTrainBatchIterator:
         return self
 
     def __next__(self) -> Batch:
-        batch = next(self._it)
+        envelope = next(self._it)
+        batch = envelope.batch
+        self._last_loss_tokens = int(envelope.loss_tokens_host)
         if not self._enable_stats:
             self._last_stats = {}
             return batch
         attn = np.asarray(batch.attention_mask, dtype=bool)
-        labels = np.asarray(batch.labels)
         segs = np.asarray(batch.segment_ids)
 
         tokens_used = int(np.count_nonzero(attn))
         capacity = int(attn.size)
         utilization = float(tokens_used / capacity) if capacity > 0 else 0.0
-        valid_loss = labels[..., 1:] != int(IGNORE_INDEX)
-        valid_loss = valid_loss & attn[..., 1:]
-        loss_tokens_host = int(np.count_nonzero(valid_loss))
-
         # Reshape commutes with the per-last-axis boundary op, so one [rows, T-1]
         # array serves both the global count and the per-sequence doc counts.
         flat_segs = segs.reshape(-1, segs.shape[-1])
@@ -93,7 +100,7 @@ class GrainTrainBatchIterator:
             "packing_tokens": tokens_used,
             "packing_capacity": capacity,
             "packing_utilization": utilization,
-            "loss_tokens_host": loss_tokens_host,
+            "loss_tokens_host": self._last_loss_tokens,
             "boundary_transitions": boundary_transitions,
             "docs_per_seq_mean": float(np.mean(docs_per_seq)),
             "docs_per_seq_min": int(np.min(docs_per_seq)),
@@ -112,6 +119,17 @@ class GrainTrainBatchIterator:
         """Restore iterator state from checkpoint."""
         self._it.set_state(state)
         self._last_stats = {}
+        self._last_loss_tokens = None
+
+    def get_loss_tokens(self) -> int:
+        """Return the exact valid-target count paired with the last batch.
+
+        :raises RuntimeError: If no batch has been yielded since construction/restore.
+        :return int: Host-computed valid causal target count.
+        """
+        if self._last_loss_tokens is None:
+            raise RuntimeError("No batch is available for host loss-token accounting")
+        return self._last_loss_tokens
 
     def checkpoint_target(self) -> Any:
         """Return the Grain iterator used for Orbax checkpointing.
@@ -309,7 +327,12 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
             super().__init__(parent)
             from chomp.data.pipeline import _BatchAssemblySpec
 
-            self._spec = _BatchAssemblySpec.from_config(cfg)
+            # Count targets while arrays are still on host, then optionally
+            # transfer the batch. The count travels beside the batch through
+            # prefetch, so accounting cannot observe an ahead-of-consumer
+            # stats snapshot.
+            self._spec = replace(_BatchAssemblySpec.from_config(cfg), device_put=False)
+            self._device_put = bool(cfg.data.device_put)
             self._enable_stats = bool(enable_stats)
             self._stats_snapshot: dict[str, Any] = {}
 
@@ -321,23 +344,30 @@ def _make_grain_iter_classes(grain: Any) -> tuple[type[Any], type[Any], type[Any
             value = _packer_stats_from_chain(self._parent).get("docs_seen")
             return int(value) if value is not None else None
 
-        def __next__(self) -> Batch:
+        def __next__(self) -> _BatchEnvelope:
             from chomp.data.pipeline import _assemble_batch
 
             docs_seen_before = self._docs_seen() if self._enable_stats else None
             batch = _assemble_batch(lambda: next(self._parent), self._spec)
-            if not self._enable_stats:
-                return batch
-            stats = _packer_stats_from_chain(self._parent)
-            docs_seen_after = stats.get("docs_seen")
-            if docs_seen_before is not None and docs_seen_after is not None:
-                # Fresh documents pulled from the stream while assembling this
-                # batch. Collapses toward 0 while already-buffered content
-                # drains; bursty when a shuffle window refills.
-                stats["docs_added_this_batch"] = int(docs_seen_after) - docs_seen_before
-            # Single-assignment publish; never mutated afterwards.
-            self._stats_snapshot = stats
-            return batch
+            labels = np.asarray(batch.labels)
+            attention = np.asarray(batch.attention_mask, dtype=bool)
+            valid = (labels[..., 1:] != int(IGNORE_INDEX)) & attention[..., 1:]
+            loss_tokens_host = int(np.count_nonzero(valid))
+            if self._enable_stats:
+                stats = _packer_stats_from_chain(self._parent)
+                docs_seen_after = stats.get("docs_seen")
+                if docs_seen_before is not None and docs_seen_after is not None:
+                    # Fresh documents pulled from the stream while assembling this
+                    # batch. Collapses toward 0 while already-buffered content
+                    # drains; bursty when a shuffle window refills.
+                    stats["docs_added_this_batch"] = int(docs_seen_after) - docs_seen_before
+                # Single-assignment publish; never mutated afterwards.
+                self._stats_snapshot = stats
+            if self._device_put:
+                import jax
+
+                batch = jax.device_put(batch)
+            return _BatchEnvelope(batch=batch, loss_tokens_host=loss_tokens_host)
 
         def get_state(self) -> dict[str, Any]:
             """Return parent iterator state for checkpointing.

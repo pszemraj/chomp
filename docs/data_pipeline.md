@@ -81,6 +81,8 @@ The wrapper provides:
 - optional threaded prefetch (`data.grain_prefetch`)
 - a checkpointable iterator state (`get_state` / `set_state`)
 - host-side packing diagnostics per emitted batch (`get_stats`)
+- an exact host loss-token count paired with the batch through prefetch and
+  device transfer (`get_loss_tokens`)
 
 The packing iterator itself remains a small, explicit Python object; Grain only
 wraps it for performance and checkpoint integration.

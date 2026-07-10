@@ -825,6 +825,19 @@ def test_pipeline_bin_packing_segment_ids() -> None:
     assert stats["docs_per_seq_max"] == int(np.max(docs_per_seq))
 
 
+def test_loss_token_count_stays_paired_through_device_prefetch() -> None:
+    """Exact host accounting travels with its batch through prefetch/device transfer."""
+    cfg = make_pipeline_cfg(grain_prefetch=2, device_put=True)
+    iterator = build_train_iterator(cfg)
+    batch = next(iterator)
+    labels = np.asarray(batch.labels)
+    attention = np.asarray(batch.attention_mask, dtype=bool)
+    expected = int(np.count_nonzero((labels[..., 1:] != -100) & attention[..., 1:]))
+
+    assert iterator.get_loss_tokens() == expected
+    assert iterator.get_stats() == {}
+
+
 def test_pipeline_multipack_position_ids_and_stats() -> None:
     """Multipack mode should emit per-segment position IDs and packing stats."""
     cfg = make_pipeline_cfg(packing_mode="multipack", packing_group_docs=4)

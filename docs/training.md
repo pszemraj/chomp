@@ -18,6 +18,14 @@ Grad accumulation is **token-weighted**: microbatch losses are scaled by the
 count of valid (non-masked) tokens to keep updates correct with padding or
 boundary masks.
 
+Batch assembly computes the same shifted valid-target count on the host and
+pairs it with the batch through prefetch/device transfer. The trainer updates
+`tokens_seen` from that Python integer without synchronizing every optimizer
+step. Logging, evaluation, checkpoint, first-compile, and finite-check cadences
+synchronize queued work and verify the current host count against the compiled
+int32 counter. Evaluation likewise accumulates all batch totals on device and
+synchronizes once per pass.
+
 ## Optimizer selection
 
 The train loop treats `adamw` and `muon` as one optimizer step per outer
@@ -132,13 +140,13 @@ Metrics are written to `logging.metrics_file` every `train.log_every` steps
 - `loss`
 - `grad_norm`
 - `lr`
-- `loss_tokens` (exact compiled `token_sum` for that step)
-- `tokens_seen` (cumulative exact compiled `token_sum`)
-- `step_time_s`, `data_wait_s`
-- `tokens_per_sec` (model step) and `tokens_per_sec_e2e` (including data wait)
+- `loss_tokens` (exact host count, checked against compiled `token_sum` at sync points)
+- `tokens_seen` (cumulative exact host count)
+- `step_time_s`, `data_wait_s` (per-step averages over the last sync interval)
+- `tokens_per_sec` (end-to-end throughput over the last sync interval)
 - `packing_mode`, `packing_utilization` (when iterator stats are enabled)
 - `docs_seen`, `docs_truncated`, `docs_added_this_batch` (when available)
-- `loss_tokens_host` (host recomputed valid-loss tokens from labels + masks)
+- `loss_tokens_host` (same host count exposed with packing diagnostics)
 - `boundary_transitions` (count of in-batch segment transitions)
 - `docs_per_seq_mean`, `docs_per_seq_min`, `docs_per_seq_max` (document-density summary)
 - `first_step_compile_time_s` (first logged step after compile)

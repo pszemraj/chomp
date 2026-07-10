@@ -459,10 +459,10 @@ def test_bf16_params_accumulate_grads_in_fp32(model_accum_dtype: str) -> None:
 
     With bf16 params, zeros_like-initialized accumulators would sum
     micro-gradients in bf16 across the scan, silently dropping low-order
-    bits. The scan carry (loss, grad tree, token count) must therefore be
-    entirely fp32 even when every param leaf is bf16 — and regardless of
-    model.accum_dtype, which governs model-internal accumulation only and
-    must not leak into harness optimizer math.
+    bits. Floating scan carries (loss and gradient tree) must therefore be
+    fp32 even when every param leaf is bf16. The exact token counter remains
+    int32 and is cast only for normalization. model.accum_dtype governs
+    model-internal accumulation and must not leak into optimizer math.
     """
     cfg = Config(
         model=ModelConfig(
@@ -510,9 +510,7 @@ def test_bf16_params_accumulate_grads_in_fp32(model_accum_dtype: str) -> None:
     for eqn in scan_eqns:
         num_carry = int(eqn.params["num_carry"])
         carry_dtypes = {v.aval.dtype for v in eqn.outvars[:num_carry]}
-        assert carry_dtypes == {jnp.dtype(jnp.float32)}, (
-            f"non-fp32 accumulator carry: {carry_dtypes}"
-        )
+        assert carry_dtypes == {jnp.dtype(jnp.float32), jnp.dtype(jnp.int32)}
 
     state1, metrics = train_step(state0, batch)
     assert jnp.isfinite(metrics["loss"])

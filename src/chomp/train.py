@@ -1044,7 +1044,7 @@ def make_train_step(
             else jnp.zeros_like(x),
             state.params,
         )
-        token0 = jnp.zeros((), dtype=jnp.float32)
+        token0 = jnp.zeros((), dtype=jnp.int32)
 
         def body(
             carry: tuple[jax.Array, Any, jax.Array],
@@ -1058,13 +1058,14 @@ def make_train_step(
             """
             loss_sum, grad_sum, token_sum = carry
             in_ids, labs, attn, segs, pos_ids, k = inputs
-            token_count = _count_tokens(labs, attn).astype(jnp.float32)
+            token_count_int = _count_tokens(labs, attn).astype(jnp.int32)
+            token_count = token_count_int.astype(jnp.float32)
             loss, grads = loss_and_grad(
                 state.params, in_ids, labs, attn, segs, pos_ids, k, token_count
             )
             loss_sum = loss_sum + loss.astype(jnp.float32)
             grad_sum = jax.tree_util.tree_map(lambda a, b: a + b.astype(a.dtype), grad_sum, grads)
-            token_sum = token_sum + token_count
+            token_sum = token_sum + token_count_int
             return (loss_sum, grad_sum, token_sum), None
 
         (loss_sum, grad_sum, token_sum), _ = jax.lax.scan(
@@ -1080,7 +1081,7 @@ def make_train_step(
             ),
         )
 
-        token_denom = jnp.maximum(token_sum, 1.0)
+        token_denom = jnp.maximum(token_sum, 1).astype(jnp.float32)
         loss = loss_sum / token_denom
         grads = jax.tree_util.tree_map(lambda g: g / token_denom, grad_sum)
 
@@ -1110,7 +1111,7 @@ def make_train_step(
             "loss": loss,
             "grad_norm": grad_norm.astype(jnp.float32),
             "lr": lr.astype(jnp.float32),
-            "token_sum": token_sum.astype(jnp.float32),
+            "token_sum": token_sum,
         }
         return new_state, metrics
 
@@ -1139,7 +1140,7 @@ def make_eval_step(
         :return tuple: (loss_sum, token_sum) for the batch.
         """
         loss0 = jnp.zeros((), dtype=jnp.float32)
-        token0 = jnp.zeros((), dtype=jnp.float32)
+        token0 = jnp.zeros((), dtype=jnp.int32)
 
         def body(
             carry: tuple[jax.Array, jax.Array], xs: tuple[jax.Array, ...]
@@ -1153,7 +1154,7 @@ def make_eval_step(
             loss_sum, token_sum = carry
             input_ids, labels, attn, segs, pos_ids = xs
             micro = _micro_batch(input_ids, labels, attn, segs, pos_ids)
-            token_count = _count_tokens(labels, attn).astype(jnp.float32)
+            token_count = _count_tokens(labels, attn).astype(jnp.int32)
             loss = training_loss(
                 params,
                 static,
@@ -1162,7 +1163,10 @@ def make_eval_step(
                 key=None,
                 use_packed_segments=use_packed_segments,
             )
-            return (loss_sum + loss * token_count, token_sum + token_count), None
+            return (
+                loss_sum + loss * token_count.astype(jnp.float32),
+                token_sum + token_count,
+            ), None
 
         (loss_sum, token_sum), _ = jax.lax.scan(
             body,
@@ -1385,16 +1389,15 @@ def run(
         if not eval_batches_cache:
             host_cfg = dc_replace(cfg, data=dc_replace(cfg.data, device_put=False))
             eval_batches_cache.extend(build_eval_iterator(host_cfg, tokens=eval_tokens))
-        total_loss = 0.0
-        total_tokens = 0.0
+        total_loss = jnp.zeros((), dtype=jnp.float32)
+        total_tokens = jnp.zeros((), dtype=jnp.int32)
         batch_count = 0
         for eval_batch in eval_batches_cache:
             batch_count += 1
             eval_batch = jax.device_put(eval_batch)
             loss_sum, token_sum = eval_step(params, eval_batch)
-            loss_sum_host, token_sum_host = jax.device_get((loss_sum, token_sum))
-            total_loss += float(loss_sum_host)
-            total_tokens += float(token_sum_host)
+            total_loss = total_loss + loss_sum
+            total_tokens = total_tokens + token_sum
 
         if batch_count == 0:
             raise RuntimeError(
@@ -1406,7 +1409,8 @@ def run(
                 "data.max_eval_samples or check tokenization and masking."
             )
 
-        if total_tokens <= 0:
+        total_loss_host, total_tokens_host = jax.device_get((total_loss, total_tokens))
+        if int(total_tokens_host) <= 0:
             # Batches exist but every label is masked out: broken boundary
             # masking, EOS suppression eating the whole set, or pathological
             # short docs. A null eval loss would hide it for the entire run.
@@ -1416,7 +1420,10 @@ def run(
                 "data.mask_boundary_loss / data.train_on_eos against the eval "
                 "document lengths."
             )
-        return {"eval_loss": total_loss / total_tokens, "eval_tokens": int(total_tokens)}
+        return {
+            "eval_loss": float(total_loss_host) / int(total_tokens_host),
+            "eval_tokens": int(total_tokens_host),
+        }
 
     def _run_generation_sample(step: int, params: Any) -> None:
         """Sample a prompt and run generation.
@@ -1489,6 +1496,10 @@ def run(
     crash_reason = None
     crash_type = None
     crash_step = None
+    sync_started = time.perf_counter()
+    sync_interval_tokens = 0
+    sync_interval_steps = 0
+    sync_interval_data_wait = 0.0
 
     try:
         with MetricsWriter(metrics_path) as mw:
@@ -1518,13 +1529,12 @@ def run(
                             wandb_run.log(row, step=step_i)
                         print("[chomp] data exhausted; stopping early")
                         break
+                    step_loss_tokens = data_it.get_loss_tokens()
                     data_stats = data_it.get_stats()
                     if not cfg.data.device_put:
                         batch = jax.device_put(batch)
                     # Host-side input-pipeline time for this step: fetch (incl.
                     # tokenize/pack/shuffle backpressure) + stats + device_put.
-                    # tokens_per_sec below is model-step throughput only; the
-                    # e2e rate in the metrics row includes this wait.
                     data_wait_s = time.perf_counter() - t_fetch
 
                     # Batch placement validation (real check)
@@ -1537,13 +1547,10 @@ def run(
                     with step_annotation("train_step"):
                         t1 = time.perf_counter()
                         state, metrics = train_step(state, batch)
-                        # Intentional per-step device sync: tokens_seen feeds
-                        # checkpoint meta and must be exact for resume
-                        # accounting. On a single device the host blocks at the
-                        # next dispatch anyway, so estimating to stay async
-                        # would trade exactness for nothing.
-                        step_loss_tokens = int(jax.device_get(metrics["token_sum"]))
                         tokens_seen_count += step_loss_tokens
+                        sync_interval_tokens += step_loss_tokens
+                        sync_interval_steps += 1
+                        sync_interval_data_wait += data_wait_s
 
                     host_step = int(step_i)
                     data_state_aligned = True
@@ -1568,13 +1575,26 @@ def run(
                     if should_sync:
                         metrics_host = jax.device_get(metrics)
                         t2 = time.perf_counter()
-                        step_time_s = t2 - t1
+                        sync_elapsed = t2 - sync_started
+                        step_time_s = sync_elapsed / sync_interval_steps
+                        data_wait_s = sync_interval_data_wait / sync_interval_steps
                         if t_compile is None:
-                            t_compile = step_time_s
+                            t_compile = t2 - t1
                         if cfg.debug.nan_check:
                             _check_finite_metrics(metrics_host, step=step_i)
-                        token_sum = float(metrics_host.get("token_sum", 0.0))
-                        tokens_per_sec = token_sum / step_time_s if step_time_s > 0 else 0.0
+                        device_loss_tokens = int(metrics_host.get("token_sum", -1))
+                        if device_loss_tokens != step_loss_tokens:
+                            raise RuntimeError(
+                                "Host/device loss-token count mismatch at step "
+                                f"{step_i}: host={step_loss_tokens}, device={device_loss_tokens}"
+                            )
+                        tokens_per_sec = (
+                            sync_interval_tokens / sync_elapsed if sync_elapsed > 0 else 0.0
+                        )
+                        sync_started = t2
+                        sync_interval_tokens = 0
+                        sync_interval_steps = 0
+                        sync_interval_data_wait = 0.0
 
                     # Checkpoint save (after state updated + finite-checked)
                     if save_interval:
@@ -1616,11 +1636,6 @@ def run(
                             "step_time_s": float(step_time_s),
                             "data_wait_s": float(data_wait_s),
                             "tokens_per_sec": float(tokens_per_sec),
-                            "tokens_per_sec_e2e": float(
-                                token_sum / (step_time_s + data_wait_s)
-                                if (step_time_s + data_wait_s) > 0
-                                else 0.0
-                            ),
                             "tokens_seen": int(tokens_seen_count),
                             "wall_time_s": time.perf_counter() - t0,
                         }

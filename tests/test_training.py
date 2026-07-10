@@ -1312,8 +1312,8 @@ def test_training_crash_marks_wandb_failed_and_logs(
     assert "Training crashed" in log_text
 
 
-def test_tokens_seen_matches_exact_loss_tokens(tmp_path: Path) -> None:
-    """tokens_seen should equal cumulative exact loss_tokens from compiled metrics."""
+def test_tokens_seen_matches_host_counts_between_sync_points(tmp_path: Path) -> None:
+    """Host counts stay exact while intermediate optimizer steps remain asynchronous."""
     cfg = Config(
         model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
         data=DataConfig(
@@ -1333,7 +1333,7 @@ def test_tokens_seen_matches_exact_loss_tokens(tmp_path: Path) -> None:
             jit=False,
             deterministic=True,
             allow_cpu=True,
-            log_every=1,
+            log_every=4,
             eval_every=0,
         ),
         optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
@@ -1342,19 +1342,21 @@ def test_tokens_seen_matches_exact_loss_tokens(tmp_path: Path) -> None:
         logging=LoggingConfig(project="chomp", run_dir=str(tmp_path / "run")),
     )
 
+    resolved, tokenizer = prepare_tokenizer_and_config(cfg)
+    iterator = build_train_iterator(resolved, tokenizer=tokenizer)
+    expected_counts = []
+    for _ in range(cfg.train.steps):
+        _ = next(iterator)
+        expected_counts.append(iterator.get_loss_tokens())
+
     run(cfg, config_path=None, resume="none")
 
     metrics_path = Path(cfg.logging.run_dir) / cfg.logging.metrics_file
     rows = read_jsonl(metrics_path)
     train_rows = [row for row in rows if "loss_tokens" in row]
-    assert len(train_rows) == cfg.train.steps
-
-    cumulative = 0
-    for row in train_rows:
-        loss_tokens = int(row["loss_tokens"])
-        assert loss_tokens > 0
-        cumulative += loss_tokens
-        assert int(row["tokens_seen"]) == cumulative
+    assert len(train_rows) == 1
+    assert int(train_rows[0]["loss_tokens"]) == expected_counts[-1]
+    assert int(train_rows[0]["tokens_seen"]) == sum(expected_counts)
 
 
 @pytest.mark.parametrize("mode", ["bin", "multipack"])
