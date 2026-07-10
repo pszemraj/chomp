@@ -45,6 +45,8 @@ def make_pipeline_cfg(
         "tokenizer": TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
     }
     data.update(data_kwargs)
+    if data.get("backend") == "hf" and "hf_revision" not in data:
+        data["hf_revision"] = "0" * 40
     return Config(
         model=ModelConfig(backend="dummy", vocab_size=vocab_size, d_model=32, dropout=0.0),
         data=DataConfig(**data),

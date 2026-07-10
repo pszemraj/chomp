@@ -130,7 +130,9 @@ position at the current window's start, its index, and the output cursor; a
 restore reconstructs the window deterministically without inflating the
 checkpoint with document text. Set `data.hf_revision` to an immutable commit
 for production runs, because exact iterator replay cannot compensate for an
-upstream repository changing beneath the same name.
+upstream repository changing beneath the same name. Chomp enforces a full
+40-hex commit whenever `checkpoint.enabled: true`; mutable revisions remain
+available only for explicitly non-checkpointed exploration.
 
 ### Transient stream recovery
 

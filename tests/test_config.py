@@ -46,6 +46,7 @@ def _hf_data(*, hf_eval_split: object | None = None) -> DataConfig:
         hf_dataset="dummy",
         hf_name="dummy",
         hf_split="train",
+        hf_revision="0" * 40,
         hf_eval_split=hf_eval_split,  # type: ignore[arg-type]
         text_key="text",
         shuffle=False,
@@ -560,6 +561,25 @@ def test_hf_eval_split_allows_null() -> None:
 def test_hf_eval_split_default_is_null() -> None:
     """DataConfig should default to content-holdout evaluation."""
     assert DataConfig().hf_eval_split is None
+
+
+@pytest.mark.parametrize("revision", [None, "main", "abc123", "g" * 40])
+def test_checkpointed_hf_source_requires_full_commit(revision: str | None) -> None:
+    """Checkpointed streaming state is invalid without immutable source identity."""
+    cfg = _base_cfg()
+    with pytest.raises(ValueError, match="full 40-hex commit"):
+        validate_config(replace(cfg, data=replace(_hf_data(), hf_revision=revision)))
+
+
+def test_noncheckpointed_hf_source_allows_unpinned_revision() -> None:
+    """Explicitly non-resumable exploration may follow a mutable HF revision."""
+    cfg = _base_cfg()
+    cfg = replace(
+        cfg,
+        data=replace(_hf_data(), hf_revision=None),
+        checkpoint=replace(cfg.checkpoint, enabled=False),
+    )
+    validate_config(cfg)
 
 
 @pytest.mark.parametrize("bad_split", [False, 0, 1.5, [], {}])

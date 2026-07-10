@@ -226,7 +226,7 @@ class DataConfig:
     hf_dataset: str = "Zyphra/Zyda-2"
     hf_name: str = "sample-100BT"
     hf_split: str = "train"
-    hf_revision: str | None = None
+    hf_revision: str | None = "bc389cd62969a275b2e3c3e11db826ba1918411a"
     # Evaluation split. None uses a disjoint content-hash holdout from hf_split.
     hf_eval_split: str | None = None
     hf_eval_holdout_fraction: float = 0.01
@@ -1024,6 +1024,13 @@ def _validate_data(cfg: Config) -> None:
             _vfail("data.hf_split must be non-empty when data.backend='hf'")
         if cfg.data.hf_revision is not None and not cfg.data.hf_revision.strip():
             _vfail("data.hf_revision must be null or a non-empty revision when data.backend='hf'")
+        if cfg.checkpoint.enabled and not re.fullmatch(
+            r"[0-9a-fA-F]{40}", cfg.data.hf_revision or ""
+        ):
+            _vfail(
+                "data.hf_revision must be a full 40-hex commit when checkpoint.enabled=true; "
+                "exact resume cannot restore iterator state against a mutable or unresolved source"
+            )
         if cfg.data.hf_eval_split is not None:
             if not isinstance(cfg.data.hf_eval_split, str):
                 _vfail(

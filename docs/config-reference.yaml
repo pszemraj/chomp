@@ -399,13 +399,14 @@ data:
 
   # Key: data.hf_revision
   # Type: string | null
-  # Default: null, which follows the dataset repository's current default revision.
-  # Required: no; ignored for local_text.
+  # Default: bc389cd62969a275b2e3c3e11db826ba1918411a (the pinned default Zyda-2 commit).
+  # Required: a full commit when data.backend is hf and checkpoint.enabled is true; otherwise no.
   # Valid: null or a nonempty branch, tag, or commit.
-  # Use: pins the dataset repository revision passed to Hugging Face. Use an immutable commit SHA
-  # for resumable production runs so source contents and shard layout cannot drift between starts.
-  # Resume: hard-compared for HF sources. null is accepted but does not make upstream data immutable.
-  hf_revision: null
+  # Constraint: checkpointed HF runs accept only an exact 40-hex commit. null, branches, and tags are
+  # accepted only when checkpoint.enabled is false, for explicitly non-resumable exploration.
+  # Use: pins the dataset repository revision passed to Hugging Face so source contents and shard
+  # layout cannot drift between starts. Resume hard-compares this value for HF sources.
+  hf_revision: bc389cd62969a275b2e3c3e11db826ba1918411a
 
   # Key: data.hf_eval_split
   # Type: string | null
