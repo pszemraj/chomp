@@ -112,6 +112,10 @@ The iterator exposes checkpointable state containing the source cursor (HF or
 local text), document- and packed-window shuffle replay progress, packer
 buffered/ready queues, and enabled prefetch-wrapper state.
 
+Bin and multipack queue rows are checkpointed as flat int32 payloads with row
+offsets, not nested token lists. This changes serialization shape only; FIFO
+queue order and emitted rows are identical.
+
 This is checkpointed alongside the model so resume does not rely on `.skip()`
 or re-streaming.
 

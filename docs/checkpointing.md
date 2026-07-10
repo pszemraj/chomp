@@ -17,6 +17,11 @@ Each checkpoint stores three items:
    non-negative `tokens_seen`, parameter-manifest hash, and strict runtime
    identity)
 
+FFD packer queues in `data_state` use flat little-endian int32 payloads plus
+row offsets. Grain's JSON handler stores those payloads as base64 rather than
+materializing nested Python integer lists, which bounds serialization object
+overhead for long contexts and large pending buffers.
+
 The run directory also includes a required tokenizer snapshot under `tokenizer/` and
 the pinned eval token set `eval_tokens.json.gz`. It also contains
 `parameter-manifest.json`, which lists every trainable parameter and fixed

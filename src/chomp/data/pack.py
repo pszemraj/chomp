@@ -17,6 +17,7 @@ Senior dev notes:
 
 from __future__ import annotations
 
+import base64
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -490,15 +491,17 @@ class TokenPacker(_PackerBase):
 
 @dataclass(frozen=True)
 class FFDPackerState:
-    """JSON-serializable state shared by the FFD packers (bin, multipack).
+    """Compact state shared by the FFD packers (bin, multipack).
 
     Position IDs are a pure function of segment IDs and are derived at pop
-    time, so they are deliberately not part of the state.
+    time, so they are deliberately not part of the state. Queue values are
+    encoded as flat little-endian int32 payloads plus row offsets for Grain's
+    JSON checkpoint handler; this avoids nested Python integer lists.
     """
 
-    pending_docs: list[list[int]]
-    ready_tokens: list[list[int]]
-    ready_segments: list[list[int]]
+    pending_docs: list[np.ndarray]
+    ready_tokens: list[np.ndarray]
+    ready_segments: list[np.ndarray]
     docs_seen: int
     docs_truncated: int
     exhausted: bool
@@ -508,10 +511,17 @@ class FFDPackerState:
 
         :return dict[str, Any]: State as a dict.
         """
+        pending_payload, pending_offsets = _encode_i32_rows(self.pending_docs)
+        ready_payload, ready_offsets = _encode_i32_rows(self.ready_tokens)
+        segment_payload, segment_offsets = _encode_i32_rows(self.ready_segments)
+        if segment_offsets != ready_offsets:
+            raise ValueError("ready token and segment rows must have matching lengths")
         return {
-            "pending_docs": self.pending_docs,
-            "ready_tokens": self.ready_tokens,
-            "ready_segments": self.ready_segments,
+            "pending_tokens_i32_b64": pending_payload,
+            "pending_offsets": pending_offsets,
+            "ready_tokens_i32_b64": ready_payload,
+            "ready_segments_i32_b64": segment_payload,
+            "ready_offsets": ready_offsets,
             "docs_seen": int(self.docs_seen),
             "docs_truncated": int(self.docs_truncated),
             "exhausted": bool(self.exhausted),
@@ -532,20 +542,15 @@ class FFDPackerState:
         # silently resumes with an empty buffer instead of failing loud on
         # corrupt/foreign state. Capacity-dependent invariants (chunk sizes,
         # fixed ready-row length) live in set_state, which knows seq_len.
-        pending = list(d["pending_docs"])
-        ready_tokens = list(d["ready_tokens"])
-        ready_segments = list(d["ready_segments"])
-        if len(ready_tokens) != len(ready_segments):
-            raise ValueError(
-                "ready_tokens and ready_segments must have the same length "
-                f"({len(ready_tokens)} != {len(ready_segments)})"
-            )
-        for i, (row_t, row_s) in enumerate(zip(ready_tokens, ready_segments, strict=True)):
-            if len(row_t) != len(row_s):
-                raise ValueError(
-                    f"ready_tokens[{i}] and ready_segments[{i}] lengths differ "
-                    f"({len(row_t)} != {len(row_s)})"
-                )
+        pending = _decode_i32_rows(
+            d["pending_tokens_i32_b64"], d["pending_offsets"], label="pending"
+        )
+        ready_tokens = _decode_i32_rows(
+            d["ready_tokens_i32_b64"], d["ready_offsets"], label="ready_tokens"
+        )
+        ready_segments = _decode_i32_rows(
+            d["ready_segments_i32_b64"], d["ready_offsets"], label="ready_segments"
+        )
         docs_seen = int(d["docs_seen"])
         docs_truncated = int(d["docs_truncated"])
         if docs_seen < 0 or docs_truncated < 0 or docs_truncated > docs_seen:
@@ -554,13 +559,66 @@ class FFDPackerState:
                 f"docs_truncated={docs_truncated})"
             )
         return FFDPackerState(
-            pending_docs=[list(x) for x in pending],
-            ready_tokens=[list(x) for x in ready_tokens],
-            ready_segments=[list(x) for x in ready_segments],
+            pending_docs=pending,
+            ready_tokens=ready_tokens,
+            ready_segments=ready_segments,
             docs_seen=docs_seen,
             docs_truncated=docs_truncated,
             exhausted=bool(d["exhausted"]),
         )
+
+
+def _encode_i32_rows(rows: Iterable[Iterable[int] | np.ndarray]) -> tuple[str, list[int]]:
+    """Encode ragged int32 rows as one base64 payload plus offsets.
+
+    :param rows: Ragged integer rows.
+    :return tuple[str, list[int]]: Base64 little-endian int32 payload and offsets.
+    """
+    arrays: list[np.ndarray] = []
+    offsets = [0]
+    for row in rows:
+        array = np.asarray(row, dtype=np.int32).reshape(-1)
+        arrays.append(array)
+        offsets.append(offsets[-1] + int(array.size))
+    flat = np.concatenate(arrays) if arrays else np.empty((0,), dtype=np.int32)
+    payload = base64.b64encode(flat.astype("<i4", copy=False).tobytes()).decode("ascii")
+    return payload, offsets
+
+
+def _decode_i32_rows(payload: Any, offsets: Any, *, label: str) -> list[np.ndarray]:
+    """Decode and validate a flat base64 int32 row representation.
+
+    :param payload: Base64-encoded little-endian int32 bytes.
+    :param offsets: Row boundary offsets into the flat array.
+    :param str label: Field name used in corruption errors.
+    :raises ValueError: If encoding or offsets are invalid.
+    :return list[np.ndarray]: Owned native-int32 rows.
+    """
+    if not isinstance(payload, str):
+        raise ValueError(f"{label} payload must be a base64 string")
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except Exception as exc:
+        raise ValueError(f"{label} payload is not valid base64") from exc
+    if len(raw) % np.dtype("<i4").itemsize:
+        raise ValueError(f"{label} payload byte length is not divisible by 4")
+    if not isinstance(offsets, list) or not offsets:
+        raise ValueError(f"{label} offsets must be a nonempty list")
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in offsets):
+        raise ValueError(f"{label} offsets must contain only integers")
+    if offsets[0] != 0 or any(
+        right < left for left, right in zip(offsets, offsets[1:], strict=False)
+    ):
+        raise ValueError(f"{label} offsets must start at zero and be nondecreasing")
+    flat = np.frombuffer(raw, dtype="<i4")
+    if offsets[-1] != int(flat.size):
+        raise ValueError(
+            f"{label} final offset ({offsets[-1]}) must equal payload length ({flat.size})"
+        )
+    return [
+        np.asarray(flat[start:end], dtype=np.int32).copy()
+        for start, end in zip(offsets, offsets[1:], strict=False)
+    ]
 
 
 @dataclass
@@ -878,9 +936,9 @@ class _FFDPackerBase(_PackerBase):
         :return dict[str, Any]: Serializable state dict.
         """
         st = FFDPackerState(
-            pending_docs=[x.tolist() for x in self._pending_docs],
-            ready_tokens=[x.tolist() for x, _ in self._ready],
-            ready_segments=[x.tolist() for _, x in self._ready],
+            pending_docs=list(self._pending_docs),
+            ready_tokens=[x for x, _ in self._ready],
+            ready_segments=[x for _, x in self._ready],
             docs_seen=int(self._docs_seen),
             docs_truncated=int(self._docs_truncated),
             exhausted=bool(self._exhausted),

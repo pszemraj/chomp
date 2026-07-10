@@ -29,7 +29,7 @@ from chomp.data.grain import (
     effective_window_shuffle_seed,
 )
 from chomp.data.hf import HFStreamingTextStream, HFStreamSpec
-from chomp.data.pack import MultipackPacker, TokenPacker
+from chomp.data.pack import FFDPackerState, MultipackPacker, TokenPacker
 from chomp.data.pipeline import (
     BinPacker,
     ByteTokenizer,
@@ -101,6 +101,32 @@ def _bin_packer() -> BinPacker:
         max_docs_per_bin=None,
         pad_id=0,
     )
+
+
+def _ffd_pending_docs(packer: Any) -> list[list[int]]:
+    """Decode pending FFD chunks for queue-policy assertions."""
+    state = FFDPackerState.from_dict(packer.get_state())
+    return [row.tolist() for row in state.pending_docs]
+
+
+def _compact_ffd_state(
+    *,
+    pending_docs: list[list[int]] | None = None,
+    ready_tokens: list[list[int]] | None = None,
+    ready_segments: list[list[int]] | None = None,
+    docs_seen: int = 3,
+    docs_truncated: int = 0,
+    exhausted: bool = False,
+) -> dict[str, Any]:
+    """Build production-format compact FFD state for corruption tests."""
+    return FFDPackerState(
+        pending_docs=[np.asarray(row, dtype=np.int32) for row in pending_docs or []],
+        ready_tokens=[np.asarray(row, dtype=np.int32) for row in ready_tokens or []],
+        ready_segments=[np.asarray(row, dtype=np.int32) for row in ready_segments or []],
+        docs_seen=docs_seen,
+        docs_truncated=docs_truncated,
+        exhausted=exhausted,
+    ).to_dict()
 
 
 def _multipack_packer() -> MultipackPacker:
@@ -188,8 +214,7 @@ def test_ffd_leftover_requeue_preserves_arrival_order(mode: str) -> None:
     seq, _, _ = packer.pop_seq_with_metadata()
     np.testing.assert_array_equal(seq[:10], np.full((10,), 10, dtype=np.int32))
 
-    pending = packer.get_state()["pending_docs"]
-    assert pending == [_doc(20, 8), _doc(30, 9)]
+    assert _ffd_pending_docs(packer) == [_doc(20, 8), _doc(30, 9)]
 
 
 def test_ffd_queue_policies_remain_distinct() -> None:
@@ -215,8 +240,8 @@ def test_ffd_queue_policies_remain_distinct() -> None:
         _ = packer.pop_seq_with_metadata()
         _ = packer.pop_seq_with_metadata()
 
-    assert bin_packer.get_state()["pending_docs"] == [_doc(30, 8)]
-    assert multipack.get_state()["pending_docs"] == [_doc(30, 8), _doc(30, 4)]
+    assert _ffd_pending_docs(bin_packer) == [_doc(30, 8)]
+    assert _ffd_pending_docs(multipack) == [_doc(30, 8), _doc(30, 4)]
 
 
 @pytest.mark.parametrize("make_packer", [_bin_packer, _multipack_packer])
@@ -233,7 +258,7 @@ def test_ffd_fifo_seed_prevents_adversarial_starvation(make_packer: Callable[[],
             emitted.append(int(row[0]))
 
     assert emitted == [6, 10, 11, 12, 13, 14]
-    assert packer.get_state()["pending_docs"] == [_doc(15, 8)]
+    assert _ffd_pending_docs(packer) == [_doc(15, 8)]
 
 
 @pytest.mark.parametrize("make_packer", [_bin_packer, _multipack_packer])
@@ -321,6 +346,9 @@ def test_ffd_packer_state_roundtrip(
     for _ in range(pops_before_snapshot):
         _ = packer.pop_seq_with_metadata()
     state = packer.get_state()
+    assert "pending_docs" not in state
+    assert isinstance(state["pending_tokens_i32_b64"], str)
+    assert json.loads(json.dumps(state)) == state
     expected_stats = packer.get_stats()
     expected = packer.pop_seq_with_metadata()
 
@@ -338,19 +366,21 @@ def test_ffd_packer_state_roundtrip(
 
 @pytest.mark.parametrize(
     "missing_key",
-    ["pending_docs", "ready_tokens", "ready_segments", "docs_seen", "docs_truncated", "exhausted"],
+    [
+        "pending_tokens_i32_b64",
+        "pending_offsets",
+        "ready_tokens_i32_b64",
+        "ready_segments_i32_b64",
+        "ready_offsets",
+        "docs_seen",
+        "docs_truncated",
+        "exhausted",
+    ],
 )
 def test_ffd_packer_state_from_dict_is_strict(missing_key: str) -> None:
     """FFD packer set_state must fail loud on corrupt/foreign state, not default to []/0."""
     packer = _bin_packer()
-    full_state = {
-        "pending_docs": [],
-        "ready_tokens": [],
-        "ready_segments": [],
-        "docs_seen": 0,
-        "docs_truncated": 0,
-        "exhausted": False,
-    }
+    full_state = _compact_ffd_state(docs_seen=0)
     del full_state[missing_key]
     with pytest.raises(KeyError):
         packer.set_state(full_state)
@@ -362,7 +392,7 @@ def test_ffd_packer_state_from_dict_is_strict(missing_key: str) -> None:
         # ready row pair with mismatched inner lengths
         (
             {"ready_tokens": [[1, 2, 3, 4, 5, 6, 7, 8]], "ready_segments": [[1, 1, 1]]},
-            r"ready_tokens\[0\] and ready_segments\[0\]",
+            "matching lengths",
         ),
         # ready row shorter than seq_len (rows are padded to fixed length)
         (
@@ -399,20 +429,38 @@ def test_ffd_packer_state_from_dict_is_strict(missing_key: str) -> None:
 def test_ffd_packer_state_rejects_corrupt_queues(
     make_packer: Callable[[], Any], mutation: dict[str, Any], match: str
 ) -> None:
-    """Nested queue invariants fail loud at restore: row pairing, fixed
+    """Compact queue invariants fail loud at restore: row pairing, fixed
     seq_len ready rows, capacity-bounded pending chunks, sane counters."""
     packer = make_packer()
-    state = {
-        "pending_docs": [],
-        "ready_tokens": [],
-        "ready_segments": [],
-        "docs_seen": 3,
-        "docs_truncated": 0,
-        "exhausted": False,
-    }
-    state.update(mutation)
     with pytest.raises(ValueError, match=match):
+        state = _compact_ffd_state(
+            pending_docs=mutation.get("pending_docs"),
+            ready_tokens=mutation.get("ready_tokens"),
+            ready_segments=mutation.get("ready_segments"),
+            docs_seen=mutation.get("docs_seen", 3),
+            docs_truncated=mutation.get("docs_truncated", 0),
+        )
         packer.set_state(state)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        ({"pending_offsets": [1]}, "start at zero"),
+        ({"pending_offsets": [0, 1]}, "final offset"),
+        ({"pending_tokens_i32_b64": "not base64!"}, "valid base64"),
+        ({"ready_offsets": [0, 1]}, "final offset"),
+    ],
+)
+def test_ffd_packer_state_rejects_corrupt_compact_encoding(
+    mutation: dict[str, Any], match: str
+) -> None:
+    """Malformed payloads and offsets should fail before queue reconstruction."""
+    state = _compact_ffd_state(docs_seen=0)
+    state.update(mutation)
+
+    with pytest.raises(ValueError, match=match):
+        _bin_packer().set_state(state)
 
 
 @pytest.mark.parametrize(
