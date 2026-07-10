@@ -32,25 +32,57 @@ from tests.helpers.hf_fakes import FakeHFIterable
 from tests.helpers.io import read_jsonl
 
 
-def _eval_run_cfg(
-    run_dir: Path, *, steps: int = 2, checkpoint: CheckpointConfig | None = None
+def _eval_cfg(
+    run_dir: Path | None = None,
+    *,
+    backend: str = "local_text",
+    steps: int = 1,
+    grad_accum: int = 1,
+    checkpoint: CheckpointConfig | None = None,
+    **data_overrides: Any,
 ) -> Config:
-    """Build a local-text run config that exercises periodic eval."""
-    return Config(
-        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
-        data=DataConfig(
+    """Build the shared minimal configuration for evaluation tests.
+
+    :param Path | None run_dir: Optional run directory.
+    :param str backend: ``local_text`` or ``hf`` source.
+    :param int steps: Training steps for run-level tests.
+    :param int grad_accum: Training accumulation geometry.
+    :param CheckpointConfig | None checkpoint: Optional checkpoint policy.
+    :param data_overrides: Data fields specific to the behavior under test.
+    :return Config: Minimal evaluation configuration.
+    """
+    tokenizer = TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False)
+    if backend == "hf":
+        data = DataConfig(
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_split="train",
+            hf_eval_split="validation",
+            text_key="text",
+            shuffle=False,
+            repeat=False,
+            max_eval_samples=2,
+            tokenizer=tokenizer,
+        )
+    else:
+        data = DataConfig(
             backend="local_text",
             repeat=True,
             local_text="abcdefghijklmnopqrstuvwxyz" * 4,
             max_eval_samples=3,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
-        ),
+            tokenizer=tokenizer,
+        )
+    data = replace(data, **data_overrides)
+    return Config(
+        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
+        data=data,
         train=TrainConfig(
             seed=0,
             steps=steps,
             batch_size=1,
             seq_len=8,
-            grad_accum=1,
+            grad_accum=grad_accum,
             jit=False,
             deterministic=True,
             allow_cpu=True,
@@ -60,7 +92,7 @@ def _eval_run_cfg(
         optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
         checkpoint=checkpoint or CheckpointConfig(enabled=False),
         debug=DebugConfig(nan_check=True, check_device_every=0),
-        logging=LoggingConfig(project="chomp", run_dir=str(run_dir)),
+        logging=LoggingConfig(project="chomp", run_dir=None if run_dir is None else str(run_dir)),
     )
 
 
@@ -79,7 +111,7 @@ def test_eval_batches_assembled_once_and_reused(
     monkeypatch.setattr("chomp.train.build_eval_iterator", _counting_build)
 
     run_dir = tmp_path / "run_cache"
-    cfg = _eval_run_cfg(run_dir)
+    cfg = _eval_cfg(run_dir, steps=2)
 
     run(cfg, config_path=None, resume="none")
 
@@ -101,46 +133,6 @@ def test_eval_batches_assembled_once_and_reused(
             "device_memory_gb",
         ):
             assert key not in row
-
-
-def _packed_eval_cfg(run_dir: Path, *, grad_accum: int = 1, **data_overrides: Any) -> Config:
-    """Build a tiny packed-mode config for eval flush/zero-batch tests.
-
-    :param Path run_dir: Run directory for logging.
-    :param int grad_accum: Gradient accumulation steps (rows_per_batch knob).
-    :param data_overrides: DataConfig field overrides (packing mode/knobs).
-    :return Config: Ready-to-run configuration.
-    """
-    return Config(
-        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="hf",
-            hf_dataset="dummy",
-            hf_name="dummy",
-            hf_split="train",
-            hf_eval_split="validation",
-            shuffle=False,
-            repeat=True,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
-            **data_overrides,
-        ),
-        train=TrainConfig(
-            seed=0,
-            steps=1,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=grad_accum,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-            log_every=1000,
-            eval_every=1,
-        ),
-        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
-        checkpoint=CheckpointConfig(enabled=False),
-        debug=DebugConfig(nan_check=True, check_device_every=0),
-        logging=LoggingConfig(project="chomp", run_dir=str(run_dir)),
-    )
 
 
 @pytest.mark.parametrize(
@@ -170,7 +162,7 @@ def test_eval_flushes_partial_buffer_at_stream_end(
     )
 
     run_dir = tmp_path / f"run_flush_{mode}"
-    cfg = _packed_eval_cfg(run_dir, packing_mode=mode, max_eval_samples=8, **knobs)
+    cfg = _eval_cfg(run_dir, backend="hf", packing_mode=mode, max_eval_samples=8, **knobs)
 
     run(cfg, config_path=None, resume="none")
 
@@ -193,8 +185,9 @@ def test_eval_pads_missing_rows_and_ignores_train_grad_accum(
     )
 
     run_dir = tmp_path / "run_partial_batch"
-    cfg = _packed_eval_cfg(
+    cfg = _eval_cfg(
         run_dir,
+        backend="hf",
         grad_accum=2,
         packing_mode="bin",
         packing_buffer_docs=4,
@@ -230,40 +223,10 @@ def test_eval_fails_fast_on_zero_valid_tokens(
     )
 
     run_dir = tmp_path / "run_zero_tokens"
-    cfg = _packed_eval_cfg(run_dir, packing_mode="sequential", max_eval_samples=64)
+    cfg = _eval_cfg(run_dir, backend="hf", packing_mode="sequential", max_eval_samples=64)
 
     with pytest.raises(RuntimeError, match="zero valid loss tokens"):
         run(cfg, config_path=None, resume="none")
-
-
-def _base_cfg() -> Config:
-    """Create a base config for eval text selection tests."""
-    return Config(
-        model=ModelConfig(backend="dummy", vocab_size=256, d_model=16, dropout=0.0),
-        data=DataConfig(
-            backend="hf",
-            hf_dataset="dummy",
-            hf_name="dummy",
-            hf_split="train",
-            hf_eval_split="validation",
-            text_key="text",
-            shuffle=False,
-            repeat=False,
-            max_eval_samples=2,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
-        ),
-        train=TrainConfig(
-            steps=1,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-            log_every=1000,
-            eval_every=0,
-        ),
-    )
 
 
 def test_eval_split_selection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -280,7 +243,7 @@ def test_eval_split_selection(monkeypatch: pytest.MonkeyPatch) -> None:
     import datasets as hf_datasets
 
     monkeypatch.setattr(hf_datasets, "load_dataset", _load_dataset)
-    cfg = _base_cfg()
+    cfg = _eval_cfg(backend="hf")
     tok = build_tokenizer(cfg)
     tokens = load_or_create_eval_tokens(cfg, tokenizer=tok)
 
@@ -297,7 +260,7 @@ def test_eval_collection_closes_hf_stream(
         {"validation": [{"text": "val-a"}, {"text": "val-b"}]},
         record=record,
     )
-    cfg = _base_cfg()
+    cfg = _eval_cfg(backend="hf")
 
     load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg))
 
@@ -314,7 +277,7 @@ def test_failed_eval_collection_closes_hf_stream(
         fail_at=1,
         record=record,
     )
-    base = _base_cfg()
+    base = _eval_cfg(backend="hf")
     cfg = replace(base, data=replace(base.data, max_retries=0))
 
     with pytest.raises(RuntimeError, match="Failed to collect evaluation documents"):
@@ -350,7 +313,7 @@ def test_explicit_eval_split_failure_never_falls_back(
     import datasets as hf_datasets
 
     monkeypatch.setattr(hf_datasets, "load_dataset", _load_dataset)
-    cfg = _base_cfg()
+    cfg = _eval_cfg(backend="hf")
 
     with pytest.raises(RuntimeError, match="never falls back"):
         load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg), run_dir=tmp_path)
@@ -364,7 +327,7 @@ def test_positive_eval_sample_count_rejects_empty_source(
 ) -> None:
     """An empty configured source must fail instead of silently disabling eval."""
     patch_hf_load_dataset({"validation": [], "train": [{"text": "unused"}]})
-    cfg = _base_cfg()
+    cfg = _eval_cfg(backend="hf")
 
     with pytest.raises(RuntimeError, match="collected zero documents"):
         load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg), run_dir=tmp_path)
@@ -384,7 +347,7 @@ def test_eval_cache_manifest_records_actual_source_split(
             "train": [{"text": "train-a"}],
         }
     )
-    cfg = _base_cfg()
+    cfg = _eval_cfg(backend="hf")
     load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg), run_dir=tmp_path)
 
     with gzip.open(tmp_path / "eval_tokens.json.gz", "rt", encoding="utf-8") as handle:
@@ -395,35 +358,17 @@ def test_eval_cache_manifest_records_actual_source_split(
 
 def test_eval_empty_when_disabled() -> None:
     """Eval should return empty list when max_eval_samples=0."""
-    cfg = _base_cfg()
+    cfg = _eval_cfg(backend="hf")
     cfg = replace(cfg, data=replace(cfg.data, max_eval_samples=0))
     tok = build_tokenizer(cfg)
     assert load_or_create_eval_tokens(cfg, tokenizer=tok) == []
-
-
-def _local_eval_cfg(local_text: str = "eval persistence corpus\n") -> Config:
-    """Local-text config for eval token cache tests.
-
-    :param str local_text: Source text for the local backend.
-    :return Config: Minimal configuration with 3 eval samples.
-    """
-    return Config(
-        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="local_text",
-            repeat=True,
-            local_text=local_text,
-            max_eval_samples=3,
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
-        ),
-    )
 
 
 def test_eval_tokens_pinned_to_run_dir(tmp_path: Path) -> None:
     """The eval set is created once and reloaded from the run directory, so
     upstream source drift cannot silently change what a resumed run
     evaluates on (config-visible drift is resume-compat's job)."""
-    cfg = _local_eval_cfg(local_text="first corpus")
+    cfg = _eval_cfg(local_text="first corpus")
     tok = build_tokenizer(cfg)
     tokens_first = load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=tmp_path)
     assert tokens_first
@@ -437,7 +382,7 @@ def test_eval_tokens_pinned_to_run_dir(tmp_path: Path) -> None:
 
 def test_eval_tokens_cache_rejects_eval_knob_drift(tmp_path: Path) -> None:
     """Changing an eval-identity knob against an existing cache fails loudly."""
-    cfg = _local_eval_cfg()
+    cfg = _eval_cfg()
     tok = build_tokenizer(cfg)
     load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=tmp_path)
 
@@ -450,7 +395,7 @@ def test_eval_cache_missing_on_resume_fails(tmp_path: Path) -> None:
     """A resume whose pinned eval set vanished must fail hard: recollecting
     silently would compare post-resume eval losses against a different token
     set. data.recreate_eval_cache is the explicit one-shot override."""
-    cfg = _local_eval_cfg()
+    cfg = _eval_cfg()
     tok = build_tokenizer(cfg)
     tokens = load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=tmp_path, resume=False)
     assert tokens
@@ -468,7 +413,7 @@ def test_eval_cache_missing_on_resume_fails(tmp_path: Path) -> None:
 def test_run_resume_requires_eval_cache(tmp_path: Path) -> None:
     """The training entrypoint treats resume + missing eval cache as fatal."""
     run_dir = tmp_path / "run"
-    cfg = _eval_run_cfg(
+    cfg = _eval_cfg(
         run_dir,
         steps=1,
         checkpoint=CheckpointConfig(enabled=True, save_every=1, max_to_keep=2, async_save=False),
@@ -491,7 +436,7 @@ def test_failed_resume_does_not_persist_recreated_eval_cache(tmp_path: Path) -> 
     compatibility accepts the current configuration.
     """
     run_dir = tmp_path / "run"
-    cfg = _eval_run_cfg(
+    cfg = _eval_cfg(
         run_dir,
         steps=1,
         checkpoint=CheckpointConfig(enabled=True, save_every=1, max_to_keep=2, async_save=False),
@@ -525,7 +470,7 @@ def test_eval_tokens_cache_rejects_corruption(tmp_path: Path) -> None:
     """A cache whose content no longer matches its hash is refused."""
     import gzip
 
-    cfg = _local_eval_cfg()
+    cfg = _eval_cfg()
     tok = build_tokenizer(cfg)
     load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=tmp_path)
 
@@ -554,7 +499,7 @@ def test_null_eval_split_wires_complementary_content_partitions(
 
     monkeypatch.setattr("chomp.data.pipeline.HFStreamingTextStream", _capture_stream)
 
-    cfg = _base_cfg()
+    cfg = _eval_cfg(backend="hf")
     cfg = replace(cfg, data=replace(cfg.data, hf_eval_split=None, shuffle=True, seed=0))
     tok = build_tokenizer(cfg)
     tokens = load_or_create_eval_tokens(cfg, tokenizer=tok)
