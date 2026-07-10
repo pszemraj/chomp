@@ -49,7 +49,7 @@ from .hf import (
 )
 from .pack import BinPacker, MultipackPacker, TokenPacker
 
-DATA_PIPELINE_SCHEMA_VERSION = 10
+DATA_PIPELINE_SCHEMA_VERSION = 11
 
 
 class Tokenizer(Protocol):
@@ -489,22 +489,33 @@ def load_tokenizer_snapshot(run_dir: Path, cfg: Config) -> Tokenizer:
     return _load_tokenizer_dir(tok_dir, cfg)
 
 
-def tokenizer_snapshot_hash(run_dir: Path) -> str | None:
+def _update_framed_hash(digest: Any, data: bytes) -> None:
+    """Add one length-framed byte string to a digest.
+
+    :param Any digest: Hashlib-compatible digest object.
+    :param bytes data: Payload whose boundary must be unambiguous.
+    """
+    digest.update(len(data).to_bytes(8, byteorder="little", signed=False))
+    digest.update(data)
+
+
+def tokenizer_snapshot_hash(run_dir: Path) -> str:
     """Compute a stable hash of the tokenizer snapshot directory.
 
     :param Path run_dir: Run directory containing tokenizer snapshot.
-    :return str | None: SHA256 hash hex digest, or None if snapshot missing.
+    :raises FileNotFoundError: If the tokenizer snapshot is missing.
+    :return str: SHA256 hash hex digest.
     """
     tok_dir = Path(run_dir) / "tokenizer"
     if not tok_dir.exists():
-        return None
+        raise FileNotFoundError(f"Tokenizer snapshot not found at {tok_dir}")
 
     digest = hashlib.sha256()
     files = [p for p in tok_dir.rglob("*") if p.is_file()]
     for path in sorted(files, key=lambda p: p.relative_to(tok_dir).as_posix()):
         rel = path.relative_to(tok_dir).as_posix()
-        digest.update(rel.encode("utf-8"))
-        digest.update(path.read_bytes())
+        _update_framed_hash(digest, rel.encode("utf-8"))
+        _update_framed_hash(digest, path.read_bytes())
     return digest.hexdigest()
 
 
@@ -598,8 +609,8 @@ def _eval_tokens_sha256(tokens: list[list[int]]) -> str:
     """
     h = hashlib.sha256()
     for doc in tokens:
-        h.update(np.asarray(doc, dtype=np.int64).tobytes())
-        h.update(b"|")
+        encoded = np.asarray(doc, dtype="<i8").tobytes()
+        _update_framed_hash(h, encoded)
     return h.hexdigest()
 
 

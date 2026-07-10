@@ -35,9 +35,11 @@ from chomp.data.pipeline import (
     BinPacker,
     ByteTokenizer,
     ZeroLossTokensError,
+    _eval_tokens_sha256,
     build_eval_iterator,
     build_train_iterator,
     save_tokenizer_snapshot,
+    tokenizer_snapshot_hash,
 )
 from chomp.train import run
 from tests.helpers.config_factories import make_pipeline_cfg
@@ -57,6 +59,21 @@ def _doc(token: int, length: int) -> list[int]:
     :return list[int]: Token list of length ``length``.
     """
     return [token] * length
+
+
+def test_artifact_hashes_frame_file_and_document_boundaries(tmp_path: Path) -> None:
+    """Distinct file/document boundaries must never concatenate to one identity."""
+    first = tmp_path / "first" / "tokenizer"
+    second = tmp_path / "second" / "tokenizer"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (first / "a").write_bytes(b"bc")
+    (second / "ab").write_bytes(b"c")
+
+    assert tokenizer_snapshot_hash(first.parent) != tokenizer_snapshot_hash(second.parent)
+    assert _eval_tokens_sha256([[1, 2], [3]]) != _eval_tokens_sha256([[1], [2, 3]])
+    with pytest.raises(FileNotFoundError, match="Tokenizer snapshot"):
+        tokenizer_snapshot_hash(tmp_path / "missing")
 
 
 def test_window_shuffle_seed_normalizes_to_uint32() -> None:
