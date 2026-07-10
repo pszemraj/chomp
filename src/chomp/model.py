@@ -154,9 +154,8 @@ class DummyLM(eqx.Module):
 
 # Repo-wide floor, enforced for every megalodon model build (train and
 # generate) regardless of packing mode. Older versions lack full segment
-# isolation (supports_segment_reset), and the pyproject git URL cannot carry
-# a version specifier — a stale environment is the only way to end up below
-# this, so refuse it outright rather than degrade per-feature.
+# isolation (supports_segment_reset). pyproject pins a verified implementation
+# commit; this runtime floor also protects editable/stale environments.
 _MIN_MEGALODON_JAX = "0.1.2"
 
 
@@ -184,15 +183,15 @@ def _require_megalodon_jax_version() -> None:
         raise RuntimeError(
             "Cannot verify the installed megalodon-jax version (no package "
             f"metadata); chomp requires megalodon-jax >= {_MIN_MEGALODON_JAX}. "
-            "Reinstall it: pip install -U "
-            "'megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git'"
+            "Reinstall chomp's pinned dependencies from the project checkout: "
+            "pip install -U ."
         ) from exc
     if Version(found) < Version(_MIN_MEGALODON_JAX):
         raise RuntimeError(
             f"chomp requires megalodon-jax >= {_MIN_MEGALODON_JAX}, found {found}. "
             "Older versions only isolate attention across packed documents, "
-            "leaking ComplexEMA/TimestepNorm state. Upgrade: pip install -U "
-            "'megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git'"
+            "leaking ComplexEMA/TimestepNorm state. Reinstall chomp's pinned "
+            "dependencies from the project checkout: pip install -U ."
         )
 
 
