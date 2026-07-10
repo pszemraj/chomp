@@ -701,11 +701,13 @@ data:
 
     # Key: data.tokenizer.max_doc_tokens
     # Type: integer | null
-    # Default: null, computed as 4 * train.seq_len.
+    # Default: null, meaning documents are not truncated.
     # Required: no.
-    # Valid: any integer or null; values <= 0 disable truncation and emit a warning.
-    # Use: caps encoded document tokens before inserted BOS/EOS and before packing. Tokenization still
-    # processes the full raw document first; disabling the cap increases packer-held host memory.
+    # Valid: null or > 0.
+    # Use: optional explicit cap on encoded document tokens before inserted BOS/EOS and packing.
+    # Tokenization processes the full raw document before this cap, so it does not limit tokenizer
+    # memory or CPU time. Truncation permanently discards document tails; leave null unless that loss
+    # is intentional and monitor docs_truncated.
     max_doc_tokens: null
 
   # Key: data.device_put
@@ -763,8 +765,8 @@ train:
   # Default: 128.
   # Required: no.
   # Valid: >= 8; for Megalodon, >= model.chunk_size and divisible by model.chunk_size.
-  # Use: tokens per packed row. It also bounds generate_input_len, makes null max_doc_tokens resolve
-  # to 4 * seq_len, and strongly affects memory/recompilation. This shape is a hard resume invariant.
+  # Use: tokens per packed row. It also bounds generate_input_len and strongly affects
+  # memory/recompilation. This shape is a hard resume invariant.
   seq_len: 128
 
   # Key: train.grad_accum

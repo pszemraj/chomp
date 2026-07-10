@@ -1179,17 +1179,10 @@ def _validate_tokenizer(cfg: Config) -> None:
             f"data.tokenizer.vocab_size_multiple must be positive, got {tok.vocab_size_multiple}"
         )
 
-    if tok.max_doc_tokens is not None and tok.max_doc_tokens == 0:
-        warnings.warn(
-            "data.tokenizer.max_doc_tokens=0 disables truncation; the tokenizer will be "
-            "resolved with no max_doc_tokens cap.",
-            stacklevel=2,
-        )
-    if tok.max_doc_tokens is not None and tok.max_doc_tokens < 0:
-        warnings.warn(
-            "data.tokenizer.max_doc_tokens < 0 disables truncation; the tokenizer will be "
-            "resolved with no max_doc_tokens cap.",
-            stacklevel=2,
+    if tok.max_doc_tokens is not None and tok.max_doc_tokens <= 0:
+        _vfail(
+            "data.tokenizer.max_doc_tokens must be null (no truncation) or a positive integer, "
+            f"got {tok.max_doc_tokens}"
         )
 
     # Special token ids must be in range if enabled

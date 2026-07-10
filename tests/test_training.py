@@ -599,8 +599,6 @@ def test_exhaustion_mid_assembly_skips_final_checkpoint(tmp_path: Path) -> None:
     # so windows differ and the loss-replay check below has teeth): 7 poppable
     # seq_len=16 windows. grad_accum=2 -> batches 1-3 eat 6 windows; batch 4
     # pops window 7, then dies on window 8 with 4 leftover tokens.
-    # max_doc_tokens must be raised: null resolves to 4*seq_len=64 and would
-    # truncate the doc to 4 windows.
     text = "".join(chr(97 + (i * 7) % 26) for i in range(116))
     cfg, config_src = make_small_run_cfg(tmp_path, local_text=text, decay_steps=10)
     cfg = replace(cfg, train=replace(cfg.train, steps=10, grad_accum=2))
@@ -609,7 +607,6 @@ def test_exhaustion_mid_assembly_skips_final_checkpoint(tmp_path: Path) -> None:
         data=replace(
             cfg.data,
             repeat=False,
-            tokenizer=replace(cfg.data.tokenizer, max_doc_tokens=128),
         ),
     )
     cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=2))
@@ -730,8 +727,6 @@ def test_resume_bit_exact_with_prefetch_and_window_shuffle(
     """
     # 101 varied byte tokens; gcd(101, 16) = 1, so packed windows repeat only
     # every 101 windows — far beyond the 12 this test consumes.
-    # max_doc_tokens must be raised: null resolves to 4*seq_len=64 and would
-    # shorten the period.
     text = "".join(chr(97 + (i * 7) % 26) for i in range(101))
 
     def _make_cfg(subdir: str, steps: int) -> tuple[Config, Path]:
@@ -744,7 +739,6 @@ def test_resume_bit_exact_with_prefetch_and_window_shuffle(
                 local_text=text,
                 grain_prefetch=2,
                 window_shuffle_windows=8,
-                tokenizer=replace(cfg.data.tokenizer, max_doc_tokens=256),
             ),
         )
         # save_every > steps: the interrupted run's step-3 checkpoint is the
@@ -809,8 +803,7 @@ def test_resume_bit_exact_through_exhaustion_flush(
     If the replayed flush produced different windows than the continuous run,
     step-3 losses or the final states would diverge.
     """
-    # One 84-byte doc -> segments [16]*5 + [4] at seq_len=16 (max_doc_tokens
-    # raised past the 4*seq_len=64 default so nothing truncates). With
+    # One 84-byte doc -> segments [16]*5 + [4] at seq_len=16. With
     # bins_per_pack = grad_accum*batch_size = 2 and buffer_docs=4, two pack
     # cycles emit 4 windows and leave [16, 4] pending below threshold — only
     # the exhaustion flush turns those into windows 5 and 6. Teeth: step 3
@@ -830,7 +823,6 @@ def test_resume_bit_exact_through_exhaustion_flush(
                 packing_mode="bin",
                 grain_prefetch=2,
                 window_shuffle_windows=8,
-                tokenizer=replace(cfg.data.tokenizer, max_doc_tokens=256),
             ),
         )
         # save_every > steps: only the finally-block final save runs, so the

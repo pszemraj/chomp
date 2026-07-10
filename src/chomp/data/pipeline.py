@@ -384,24 +384,6 @@ def resolve_tokenizer_config(cfg: Config, tok: Tokenizer) -> Config:
                 f"got {token_id}"
             )
 
-    tok_cfg = updated_cfg.data.tokenizer
-    if tok_cfg.max_doc_tokens is None:
-        default_max = int(updated_cfg.train.seq_len) * 4
-        logger.info(
-            "data.tokenizer.max_doc_tokens is null; defaulting to %d (4 * seq_len). "
-            "Set to 0 to disable truncation.",
-            default_max,
-        )
-        tok_cfg = replace(tok_cfg, max_doc_tokens=default_max)
-        updated_cfg = replace(updated_cfg, data=replace(updated_cfg.data, tokenizer=tok_cfg))
-    elif tok_cfg.max_doc_tokens <= 0:
-        logger.info(
-            "data.tokenizer.max_doc_tokens=%d disables truncation; storing as null.",
-            tok_cfg.max_doc_tokens,
-        )
-        tok_cfg = replace(tok_cfg, max_doc_tokens=None)
-        updated_cfg = replace(updated_cfg, data=replace(updated_cfg.data, tokenizer=tok_cfg))
-
     # Re-validate after tokenizer-derived updates (vocab rounding, special tokens).
     validate_config(updated_cfg)
     return updated_cfg

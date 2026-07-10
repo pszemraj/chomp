@@ -19,8 +19,11 @@ with the 200,000-document shuffle buffer.
   source blocks that a 10,000-document buffer could not mix. The same runs
   showed the train-loss-below-eval signature associated with local
   memorization.
-- `data.tokenizer.max_doc_tokens: 8192` was active throughout, ruling out
-  unbounded single-document batches as the cause of those slow excursions.
+- `data.tokenizer.max_doc_tokens: 8192` was active throughout. At the 2,048-token
+  context this limited one source document to four full content windows plus a
+  small EOS tail, so the experiment supports source/domain adjacency as the
+  slow-excursion mechanism; it did not test documents spanning hundreds of
+  optimizer steps.
 - With the 200,000-document buffer, enabling a 4,096-window shuffle reduced
   step-to-step absolute loss changes by 31% (38% at p95), reduced the worst
   gradient-norm spike from 19.6 to 4.1, and improved final eval loss from

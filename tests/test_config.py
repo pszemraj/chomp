@@ -674,24 +674,25 @@ def test_tokenizer_pad_equals_eos_warns() -> None:
     assert updated.model.eos_token_id == 0
 
 
-def test_default_max_doc_tokens_inferred() -> None:
-    """max_doc_tokens should default to 4 * seq_len when unset."""
+def test_default_max_doc_tokens_disables_truncation() -> None:
+    """An unset document cap must remain None rather than silently truncating."""
     cfg = _tokenizer_resolution_cfg(train_steps=10, train_seq_len=16)
     tok = _DummyTokenizer(size=256, bos=None, eos=None, pad=None)
     updated = resolve_tokenizer_config(cfg, tok)
-    assert updated.data.tokenizer.max_doc_tokens == 64
+    assert updated.data.tokenizer.max_doc_tokens is None
 
 
-def test_zero_max_doc_tokens_disables_truncation() -> None:
-    """max_doc_tokens=0 should resolve to None (no truncation)."""
+@pytest.mark.parametrize("value", [0, -1])
+def test_nonpositive_max_doc_tokens_is_rejected(value: int) -> None:
+    """Only null or a positive explicit truncation cap is valid."""
     cfg = _tokenizer_resolution_cfg(
-        tokenizer=TokenizerConfig(kind="byte", vocab_size_multiple=128, max_doc_tokens=0),
+        tokenizer=TokenizerConfig(kind="byte", vocab_size_multiple=128, max_doc_tokens=value),
         train_steps=10,
         train_seq_len=16,
     )
     tok = _DummyTokenizer(size=256, bos=None, eos=None, pad=None)
-    updated = resolve_tokenizer_config(cfg, tok)
-    assert updated.data.tokenizer.max_doc_tokens is None
+    with pytest.raises(ValueError, match="max_doc_tokens must be null"):
+        resolve_tokenizer_config(cfg, tok)
 
 
 def test_load_config_for_checkpoint_resolves_variables(tmp_path: Path) -> None:

@@ -53,6 +53,11 @@ chomp saves a tokenizer snapshot under `run_dir/tokenizer`. Resume requires
 that snapshot and fails before modifying the run directory when it is missing;
 it never rebuilds a replacement from a potentially changed repository or path.
 
+`data.tokenizer.max_doc_tokens: null` means no truncation. A positive cap is
+explicit data loss applied after tokenization and before BOS/EOS insertion;
+`docs_truncated` reports how many documents hit it. The cap does not reduce the
+tokenizer's peak work because the full document is encoded first.
+
 ## Packing
 
 The pipeline supports `sequential`, `bin`, and `multipack` packing modes and
