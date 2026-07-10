@@ -49,7 +49,7 @@ from .hf import (
 )
 from .pack import BinPacker, MultipackPacker, TokenPacker, _positions_from_segments
 
-DATA_PIPELINE_SCHEMA_VERSION = 9
+DATA_PIPELINE_SCHEMA_VERSION = 10
 
 
 class Tokenizer(Protocol):

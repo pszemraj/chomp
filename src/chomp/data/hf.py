@@ -391,17 +391,27 @@ class HFStreamingTextStream:
     def __next__(self) -> str:
         if self._closed:
             raise ValueError("Attempting to use a closed HF streaming iterator.")
-        # Retry loop for transient failures
-        for attempt in range(self._spec.max_retries + 1):
+        # Epoch rollover is ordinary stream control flow, not a retry. Keep it
+        # outside transient-failure accounting so max_retries=0 can still
+        # repeat and the first read of every epoch gets the full retry budget.
+        attempt = 0
+        rolled_epoch = False
+        while True:
             try:
                 return self._next_item()
 
             except StopIteration:
                 if not self._spec.repeat:
                     raise
-                # Repeat => advance epoch and rebuild
+                if rolled_epoch:
+                    raise RuntimeError(
+                        "HF repeated stream produced no documents in a complete epoch. "
+                        "Check the selected split and content partition."
+                    ) from None
                 self._epoch += 1
                 self._build()
+                attempt = 0
+                rolled_epoch = True
                 continue
 
             except Exception:
@@ -421,9 +431,7 @@ class HFStreamingTextStream:
                 self._recover_iterator()
 
                 time.sleep(delay)
-
-        # Should not reach
-        raise RuntimeError("HFStreamingTextStream retry loop fell through")
+                attempt += 1
 
     def get_state(self) -> dict[str, Any]:
         """Capture stream state for checkpointing.

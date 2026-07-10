@@ -41,6 +41,7 @@ from chomp.data.pipeline import (
 )
 from chomp.train import run
 from tests.helpers.config_factories import make_pipeline_cfg
+from tests.helpers.hf_fakes import FakeHFIterable
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1225,6 +1226,67 @@ def test_hf_retry_recovers_failure_before_first_document(
     stream = HFStreamingTextStream(_hf_stream_spec(max_retries=1))
     assert next(stream) == "alpha"
     assert record.get("last_loaded") == {"index": 0}
+
+
+def test_hf_repeat_does_not_consume_retry_budget(
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+) -> None:
+    """Epoch rollover remains available when transient retries are disabled."""
+    patch_hf_load_dataset([{"text": "alpha"}])
+    stream = HFStreamingTextStream(_hf_stream_spec(repeat=True, max_retries=0))
+
+    assert [next(stream) for _ in range(3)] == ["alpha", "alpha", "alpha"]
+
+
+def test_hf_first_read_after_rollover_gets_full_retry_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A normal EOF must not spend the next epoch's transient retry allowance."""
+    import datasets
+
+    record: dict[str, Any] = {"fail_consumed": False}
+    builds = 0
+
+    def _load_dataset(
+        dataset: str,
+        *,
+        name: str,
+        split: str,
+        streaming: bool,
+        revision: str | None,
+    ) -> FakeHFIterable:
+        nonlocal builds
+        _ = (dataset, name, split, streaming, revision)
+        builds += 1
+        return FakeHFIterable(
+            items=[{"text": "alpha"}],
+            fail_at=0 if builds >= 2 else None,
+            record=record,
+        )
+
+    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
+    stream = HFStreamingTextStream(_hf_stream_spec(repeat=True, max_retries=1))
+
+    assert next(stream) == "alpha"
+    assert next(stream) == "alpha"
+    assert builds >= 3
+
+
+def test_hf_repeat_rejects_logically_empty_epoch(
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+) -> None:
+    """A repeated source filtered to no documents fails descriptively."""
+    patch_hf_load_dataset([{"text": "alpha"}])
+    stream = HFStreamingTextStream(
+        _hf_stream_spec(
+            repeat=True,
+            content_partition="eval",
+            eval_holdout_fraction=1e-20,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="no documents in a complete epoch"):
+        next(stream)
 
 
 def test_hf_retry_keeps_last_good_state_when_new_capture_fails(
