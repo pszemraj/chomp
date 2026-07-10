@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import shutil
 import signal
@@ -423,20 +422,6 @@ def test_checkpoint_root_dir_resolves_relative_to_run_dir(
     assert Path(manager.directory) == (run_dir / "ckpts").resolve()
 
 
-def test_checkpoint_resume_advances_step(tmp_path: Path) -> None:
-    """A saved checkpoint can be resumed and training continues."""
-    cfg, config_src = make_small_run_cfg(tmp_path, decay_steps=2)
-    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
-
-    ckpt_dir = default_ckpt_dir(run_dir)
-    assert (ckpt_dir / "2").exists(), "expected checkpoint at step 2"
-
-    cfg_resume = replace(cfg, train=replace(cfg.train, steps=3))
-    run_dir2 = run(cfg_resume, config_path=str(config_src), resume="latest", dry_run=False)
-    assert run_dir2 == run_dir
-    assert (ckpt_dir / "3").exists(), "expected checkpoint at step 3 after resume"
-
-
 def test_run_closes_manager_and_preflights_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -489,52 +474,6 @@ def test_resume_requires_existing_tokenizer_snapshot(tmp_path: Path) -> None:
 
     assert not tokenizer_dir.exists()
     assert not resume_record.exists()
-
-
-def test_checkpoint_restore_allows_forward(
-    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
-) -> None:
-    """Restored params can run a forward/loss computation."""
-    cfg, config_src = make_small_run_cfg(tmp_path, decay_steps=2)
-    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
-
-    cfg, tokenizer = prepare_tokenizer_and_config(cfg)
-    params, static = build_model(cfg, key=jax.random.PRNGKey(0))
-    tx, _ = build_optimizer(cfg, params)
-    state0 = init_train_state(params=params, tx=tx, key=jax.random.PRNGKey(1))
-    abstract_state = abstractify_tree(state0)
-
-    data_it = build_train_iterator(cfg, tokenizer=tokenizer)
-    ckpt_dir = default_ckpt_dir(run_dir)
-    manager = track_checkpoint_manager(
-        make_manager(
-            ckpt_dir,
-            max_to_keep=cfg.checkpoint.max_to_keep,
-            save_every=cfg.checkpoint.save_every,
-            async_save=cfg.checkpoint.async_save,
-        )
-    )
-    latest = manager.latest_step()
-    assert latest is not None
-    step, state, _meta = restore_at_step(
-        manager, step=int(latest), abstract_train_state=abstract_state, data_iter=data_it
-    )
-    assert step >= 1
-
-    bsz = int(cfg.train.batch_size)
-    seq_len = int(cfg.train.seq_len)
-    input_ids = jnp.zeros((bsz, seq_len), dtype=jnp.int32)
-    labels = input_ids.copy()
-    segs = jnp.ones((bsz, seq_len), dtype=jnp.int32)
-    batch = Batch(
-        input_ids=input_ids,
-        labels=labels,
-        segment_ids=segs,
-    )
-
-    loss = training_loss(state.params, static, batch=batch, deterministic=True, key=None)
-    loss_val = float(jax.device_get(loss))
-    assert math.isfinite(loss_val)
 
 
 def test_checkpoint_saves_final_step(tmp_path: Path) -> None:
@@ -892,7 +831,8 @@ def test_resume_bit_exact_with_prefetch_and_window_shuffle(
     cfg_int, _ = _make_cfg("run_pf_int", steps=3)
     run_dir_int = run(cfg_int, config_path=str(config_src), resume="none", dry_run=False)
     cfg_resume, _ = _make_cfg("run_pf_int", steps=6)
-    run(cfg_resume, config_path=str(config_src), resume="latest", dry_run=False)
+    resumed_run_dir = run(cfg_resume, config_path=str(config_src), resume="latest", dry_run=False)
+    assert resumed_run_dir == run_dir_int
 
     # Per-step losses agree exactly across the resume boundary (steps 4-6 ran
     # from the restored mid-window prefetching iterator).
