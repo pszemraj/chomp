@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Union, get_args, get_origin, get_type_hints
 
 import yaml
+from yaml.resolver import BaseResolver
 
 if TYPE_CHECKING:
     import jax.numpy as jnp
@@ -38,6 +39,54 @@ DatasetBackend = Literal["hf", "local_text"]
 TokenizerKind = Literal["byte", "hf"]
 PackingMode = Literal["sequential", "bin", "multipack"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects duplicate mapping keys."""
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False
+) -> dict[Any, Any]:
+    """Construct a YAML mapping while rejecting duplicate keys.
+
+    :param _UniqueKeyLoader loader: Active YAML loader.
+    :param yaml.MappingNode node: Mapping node to construct.
+    :param bool deep: Whether to construct nested objects eagerly.
+    :raises yaml.constructor.ConstructorError: If a key occurs more than once.
+    :return dict[Any, Any]: Constructed mapping.
+    """
+    loader.flatten_mapping(node)
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate key {key!r}",
+                key_node.start_mark,
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeyLoader.add_constructor(BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping)
+
+
+def _construct_unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Construct a JSON object while rejecting duplicate keys.
+
+    :param list[tuple[str, Any]] pairs: Decoded object key/value pairs.
+    :raises ValueError: If a key occurs more than once.
+    :return dict[str, Any]: Constructed JSON object.
+    """
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate JSON key: {key!r}")
+        result[key] = value
+    return result
 
 
 @dataclass(frozen=True)
@@ -475,9 +524,9 @@ def read_config_mapping(path: str | Path) -> dict[str, Any]:
     try:
         with path.open() as f:
             if path.suffix == ".json":
-                data = json.load(f) or {}
+                data = json.load(f, object_pairs_hook=_construct_unique_json_object) or {}
             else:
-                data = yaml.safe_load(f) or {}
+                data = yaml.load(f, Loader=_UniqueKeyLoader) or {}
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid JSON in {path}: {exc}") from exc
     except yaml.YAMLError as exc:
@@ -546,7 +595,7 @@ def _resolve_variables(data: dict[str, Any]) -> dict[str, Any]:
     :raises ValueError: If a variable reference is missing or circular.
     :return dict[str, Any]: Data with variables resolved (variables removed).
     """
-    raw_vars = data.get("variables") or {}
+    raw_vars = data.get("variables", {})
     if not isinstance(raw_vars, dict):
         raise ValueError("variables must be a mapping if provided")
 
@@ -628,6 +677,8 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
     unknown = sorted(set(data) - allowed)
     if unknown:
         _vfail(f"unknown top-level config section(s): {', '.join(unknown)}")
+    if "derived" in data and not isinstance(data["derived"], dict):
+        _vfail("derived must be a mapping when provided")
 
     model = ModelConfig(**(data.get("model") or {}))
     train = TrainConfig(**(data.get("train") or {}))

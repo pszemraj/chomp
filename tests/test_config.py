@@ -227,6 +227,26 @@ def test_build_config_allows_resolved_derived_section() -> None:
     assert cfg == _base_cfg()
 
 
+@pytest.mark.parametrize("suffix", [".yaml", ".json"])
+def test_config_files_reject_duplicate_keys(tmp_path: Path, suffix: str) -> None:
+    """Duplicate mapping keys must fail instead of silently taking the last value."""
+    path = tmp_path / f"duplicate{suffix}"
+    if suffix == ".json":
+        path.write_text('{"train": {"steps": 20, "steps": 30}}')
+    else:
+        path.write_text("train:\n  steps: 20\n  steps: 30\n")
+
+    with pytest.raises(ValueError, match="[Dd]uplicate|duplicate key"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("section", ["variables", "derived"])
+def test_config_metadata_sections_must_be_mappings(section: str) -> None:
+    """Preprocessing and internal metadata sections reject ambiguous non-mappings."""
+    with pytest.raises(ValueError, match=section):
+        build_config({section: []})
+
+
 def test_override_rejects_empty_dotted_path_component() -> None:
     """Malformed dot-path overrides should fail before attribute lookup."""
     with pytest.raises(ValueError, match="Invalid override path"):
