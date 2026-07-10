@@ -284,6 +284,22 @@ def restore_at_step(
     )
 
 
+def restore_meta_at_step(manager: ocp.CheckpointManager, *, step: int) -> dict[str, Any] | None:
+    """Restore checkpoint metadata without loading model or data state.
+
+    :param ocp.CheckpointManager manager: Orbax checkpoint manager.
+    :param int step: Checkpoint step number.
+    :return dict[str, Any] | None: JSON checkpoint metadata.
+    """
+    import orbax.checkpoint as ocp
+
+    restored = manager.restore(
+        int(step),
+        args=ocp.args.Composite(meta=ocp.args.JsonRestore()),
+    )
+    return restored.get("meta")
+
+
 def _restore_step(
     manager: ocp.CheckpointManager,
     *,

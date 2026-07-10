@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import shutil
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar
@@ -123,8 +124,26 @@ def _make_state() -> TrainState:
     )
 
 
+@pytest.fixture
+def track_checkpoint_manager() -> Iterator[Callable[[Any], Any]]:
+    """Track direct-test checkpoint managers and close them after each test."""
+    managers: list[Any] = []
+
+    def _track(manager: Any) -> Any:
+        """Register and return one checkpoint manager."""
+        managers.append(manager)
+        return manager
+
+    yield _track
+    for manager in reversed(managers):
+        manager.close()
+
+
 def _saved_step1_checkpoint(
-    run_dir: Path, *, async_save: bool = False
+    run_dir: Path,
+    track_checkpoint_manager: Callable[[Any], Any],
+    *,
+    async_save: bool = False,
 ) -> tuple[Config, TrainState, Any, Path]:
     """Build the standard save harness and write one step-1 checkpoint.
 
@@ -136,7 +155,9 @@ def _saved_step1_checkpoint(
     state = _make_state()
     data_it = build_train_iterator(cfg)
     ckpt_dir = default_ckpt_dir(run_dir)
-    mgr = make_manager(ckpt_dir, max_to_keep=2, save_every=1, async_save=async_save)
+    mgr = track_checkpoint_manager(
+        make_manager(ckpt_dir, max_to_keep=2, save_every=1, async_save=async_save)
+    )
 
     meta = _checkpoint_record(cfg, step=1)
     save(mgr, step=1, train_state=state, data_iter=data_it, meta=meta)
@@ -144,9 +165,13 @@ def _saved_step1_checkpoint(
     return cfg, state, mgr, ckpt_dir
 
 
-def test_async_checkpoint_roundtrip(tmp_path: Path) -> None:
+def test_async_checkpoint_roundtrip(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
     """Async checkpoint save should roundtrip state correctly."""
-    cfg, state, mgr, _ckpt_dir = _saved_step1_checkpoint(tmp_path / "run_async", async_save=True)
+    cfg, state, mgr, _ckpt_dir = _saved_step1_checkpoint(
+        tmp_path / "run_async", track_checkpoint_manager, async_save=True
+    )
 
     abstract_state = abstractify_tree(state)
     data_it_restore = build_train_iterator(cfg)
@@ -158,9 +183,13 @@ def test_async_checkpoint_roundtrip(tmp_path: Path) -> None:
     assert tree_allclose(restored.opt_state, state.opt_state, rtol=0.0, atol=0.0)
 
 
-def test_restore_params_only(tmp_path: Path) -> None:
+def test_restore_params_only(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
     """Params-only restore (generate CLI path) matches the saved params exactly."""
-    _cfg, state, _mgr, ckpt_dir = _saved_step1_checkpoint(tmp_path / "run_params_only")
+    _cfg, state, _mgr, ckpt_dir = _saved_step1_checkpoint(
+        tmp_path / "run_params_only", track_checkpoint_manager
+    )
 
     params = restore_params_only(ckpt_dir / "1", abstractify_tree(state.params))
     assert tree_allclose(params, state.params, rtol=0.0, atol=0.0)
@@ -169,7 +198,9 @@ def test_restore_params_only(tmp_path: Path) -> None:
         restore_params_only(ckpt_dir / "999", abstractify_tree(state.params))
 
 
-def test_checkpoint_data_state_roundtrip(tmp_path: Path) -> None:
+def test_checkpoint_data_state_roundtrip(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
     """Checkpoint restore should resume the data iterator position."""
     run_dir = tmp_path / "run_data_state"
     cfg = _base_cfg(run_dir)
@@ -199,11 +230,13 @@ def test_checkpoint_data_state_roundtrip(tmp_path: Path) -> None:
     next(data_it)
 
     ckpt_dir = default_ckpt_dir(run_dir)
-    mgr = make_manager(
-        ckpt_dir,
-        max_to_keep=cfg.checkpoint.max_to_keep,
-        save_every=cfg.checkpoint.save_every,
-        async_save=cfg.checkpoint.async_save,
+    mgr = track_checkpoint_manager(
+        make_manager(
+            ckpt_dir,
+            max_to_keep=cfg.checkpoint.max_to_keep,
+            save_every=cfg.checkpoint.save_every,
+            async_save=cfg.checkpoint.async_save,
+        )
     )
 
     state = TrainState(
@@ -227,17 +260,25 @@ def test_checkpoint_data_state_roundtrip(tmp_path: Path) -> None:
     assert tree_allclose(expected, restored_batch, rtol=0.0, atol=0.0)
 
 
-def test_latest_step_ignores_incomplete(tmp_path: Path) -> None:
+def test_latest_step_ignores_incomplete(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
     """Checkpoint manager should ignore incomplete checkpoint directories."""
-    _cfg, _state, mgr, ckpt_dir = _saved_step1_checkpoint(tmp_path / "run_latest")
+    _cfg, _state, mgr, ckpt_dir = _saved_step1_checkpoint(
+        tmp_path / "run_latest", track_checkpoint_manager
+    )
 
     (ckpt_dir / "2").mkdir()
     assert mgr.latest_step() == 1
 
 
-def test_corrupt_checkpoint_fails_restore(tmp_path: Path) -> None:
+def test_corrupt_checkpoint_fails_restore(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
     """Corrupted checkpoint metadata should raise an error on restore."""
-    cfg, state, mgr, ckpt_dir = _saved_step1_checkpoint(tmp_path / "run_corrupt")
+    cfg, state, mgr, ckpt_dir = _saved_step1_checkpoint(
+        tmp_path / "run_corrupt", track_checkpoint_manager
+    )
 
     corrupt_target = None
     for path in (ckpt_dir / "1").rglob("*"):
@@ -253,14 +294,18 @@ def test_corrupt_checkpoint_fails_restore(tmp_path: Path) -> None:
         restore_at_step(mgr, step=1, abstract_train_state=abstract_state, data_iter=data_it_restore)
 
 
-def test_max_to_keep_prunes_checkpoints(tmp_path: Path) -> None:
+def test_max_to_keep_prunes_checkpoints(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
     """Checkpoint manager should prune old checkpoints per max_to_keep."""
     run_dir = tmp_path / "run_prune"
     cfg = _base_cfg(run_dir)
     state = _make_state()
     data_it = build_train_iterator(cfg)
     ckpt_dir = default_ckpt_dir(run_dir)
-    mgr = make_manager(ckpt_dir, max_to_keep=2, save_every=1, async_save=False)
+    mgr = track_checkpoint_manager(
+        make_manager(ckpt_dir, max_to_keep=2, save_every=1, async_save=False)
+    )
 
     for step in (1, 2, 3):
         meta = _checkpoint_record(cfg, step=step)
@@ -287,7 +332,9 @@ def test_max_to_keep_prunes_checkpoints(tmp_path: Path) -> None:
     assert steps == [3, 4]
 
 
-def test_checkpoint_root_dir_resolves_relative_to_run_dir(tmp_path: Path) -> None:
+def test_checkpoint_root_dir_resolves_relative_to_run_dir(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
     """Relative checkpoint.root_dir should resolve against run_dir."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -295,7 +342,7 @@ def test_checkpoint_root_dir_resolves_relative_to_run_dir(tmp_path: Path) -> Non
     cfg = Config()
     cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, root_dir="ckpts"))
 
-    manager = _build_checkpoint_manager(cfg, run_dir)
+    manager = track_checkpoint_manager(_build_checkpoint_manager(cfg, run_dir))
 
     assert manager is not None
     assert Path(manager.directory) == (run_dir / "ckpts").resolve()
@@ -315,6 +362,44 @@ def test_checkpoint_resume_advances_step(tmp_path: Path) -> None:
     assert (ckpt_dir / "3").exists(), "expected checkpoint at step 3 after resume"
 
 
+def test_run_closes_manager_and_preflights_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run must close its manager and reject drift before restoring iterator state."""
+    import orbax.checkpoint as ocp
+
+    close_calls: list[int] = []
+    real_close = ocp.CheckpointManager.close
+
+    def _tracked_close(manager: Any) -> None:
+        """Record close calls while preserving Orbax cleanup behavior."""
+        close_calls.append(id(manager))
+        real_close(manager)
+
+    monkeypatch.setattr(ocp.CheckpointManager, "close", _tracked_close)
+    cfg, config_src = make_small_run_cfg(tmp_path, decay_steps=1)
+    run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+    assert len(close_calls) == 1
+
+    restore_calls = 0
+
+    def _unexpected_full_restore(*args: Any, **kwargs: Any) -> Any:
+        """Fail if incompatible metadata reaches model/data restoration."""
+        nonlocal restore_calls
+        restore_calls += 1
+        raise AssertionError("full restore ran before compatibility validation")
+
+    monkeypatch.setattr("chomp.train.restore_at_step", _unexpected_full_restore)
+    incompatible = replace(cfg, data=replace(cfg.data, local_text="different corpus"))
+    close_calls.clear()
+
+    with pytest.raises(RuntimeError, match="local_text_hash"):
+        run(incompatible, config_path=str(config_src), resume="latest", dry_run=False)
+
+    assert restore_calls == 0
+    assert len(close_calls) == 1
+
+
 def test_resume_requires_existing_tokenizer_snapshot(tmp_path: Path) -> None:
     """A missing tokenizer snapshot must fail before mutating the run directory."""
     cfg, config_src = make_small_run_cfg(tmp_path, decay_steps=1)
@@ -331,7 +416,9 @@ def test_resume_requires_existing_tokenizer_snapshot(tmp_path: Path) -> None:
     assert not resume_record.exists()
 
 
-def test_checkpoint_restore_allows_forward(tmp_path: Path) -> None:
+def test_checkpoint_restore_allows_forward(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
     """Restored params can run a forward/loss computation."""
     cfg, config_src = make_small_run_cfg(tmp_path, decay_steps=2)
     run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
@@ -344,11 +431,13 @@ def test_checkpoint_restore_allows_forward(tmp_path: Path) -> None:
 
     data_it = build_train_iterator(cfg, tokenizer=tokenizer)
     ckpt_dir = default_ckpt_dir(run_dir)
-    manager = make_manager(
-        ckpt_dir,
-        max_to_keep=cfg.checkpoint.max_to_keep,
-        save_every=cfg.checkpoint.save_every,
-        async_save=cfg.checkpoint.async_save,
+    manager = track_checkpoint_manager(
+        make_manager(
+            ckpt_dir,
+            max_to_keep=cfg.checkpoint.max_to_keep,
+            save_every=cfg.checkpoint.save_every,
+            async_save=cfg.checkpoint.async_save,
+        )
     )
     step, state, _meta = restore_latest(
         manager, abstract_train_state=abstract_state, data_iter=data_it
@@ -420,7 +509,9 @@ def test_exact_eof_after_batch_boundary_saves_final_checkpoint(
 
 
 def test_crash_between_fetch_and_step_skips_final_checkpoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    track_checkpoint_manager: Callable[[Any], Any],
 ) -> None:
     """A crash after batch fetch but before its step completes must not
     write a final checkpoint: the data iterator is one batch ahead of the
@@ -480,7 +571,9 @@ def test_crash_between_fetch_and_step_skips_final_checkpoint(
 
     states = []
     for run_dir in (run_dir_cont, Path(cfg_crash.logging.run_dir)):
-        mgr = make_manager(default_ckpt_dir(run_dir), max_to_keep=2, save_every=2, async_save=False)
+        mgr = track_checkpoint_manager(
+            make_manager(default_ckpt_dir(run_dir), max_to_keep=2, save_every=2, async_save=False)
+        )
         _, state, _ = restore_at_step(
             mgr,
             step=5,
@@ -622,7 +715,9 @@ def test_zero_loss_batch_does_not_mutate_training_state(
     assert any("Skipping final checkpoint" in record.getMessage() for record in caplog.records)
 
 
-def test_resume_bit_exact_with_prefetch_and_window_shuffle(tmp_path: Path) -> None:
+def test_resume_bit_exact_with_prefetch_and_window_shuffle(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
     """Interrupted + resumed must match continuous bit-exactly with the full
     iterator stack engaged: grain_prefetch > 0 and window shuffle enabled.
 
@@ -688,7 +783,9 @@ def test_resume_bit_exact_with_prefetch_and_window_shuffle(tmp_path: Path) -> No
     )
     states = []
     for run_dir in (run_dir_cont, run_dir_int):
-        mgr = make_manager(default_ckpt_dir(run_dir), max_to_keep=2, save_every=4, async_save=False)
+        mgr = track_checkpoint_manager(
+            make_manager(default_ckpt_dir(run_dir), max_to_keep=2, save_every=4, async_save=False)
+        )
         _, state, _ = restore_at_step(
             mgr,
             step=6,
@@ -700,7 +797,9 @@ def test_resume_bit_exact_with_prefetch_and_window_shuffle(tmp_path: Path) -> No
     assert tree_allclose(states[0].opt_state, states[1].opt_state, rtol=0.0, atol=0.0)
 
 
-def test_resume_bit_exact_through_exhaustion_flush(tmp_path: Path) -> None:
+def test_resume_bit_exact_through_exhaustion_flush(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
     """Interrupted + resumed must match continuous bit-exactly when the run
     ends in an FFD end-of-stream flush, with window shuffle + prefetch engaged.
 
@@ -765,7 +864,9 @@ def test_resume_bit_exact_through_exhaustion_flush(tmp_path: Path) -> None:
     )
     states = []
     for run_dir in (run_dir_cont, run_dir_int):
-        mgr = make_manager(default_ckpt_dir(run_dir), max_to_keep=2, save_every=4, async_save=False)
+        mgr = track_checkpoint_manager(
+            make_manager(default_ckpt_dir(run_dir), max_to_keep=2, save_every=4, async_save=False)
+        )
         _, state, _ = restore_at_step(
             mgr,
             step=3,

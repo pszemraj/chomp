@@ -50,7 +50,7 @@ from chomp.ckpt import (
     make_manager,
     resolve_ckpt_root,
     restore_at_step,
-    restore_latest,
+    restore_meta_at_step,
     save,
 )
 from chomp.config import (
@@ -408,6 +408,20 @@ def _build_checkpoint_manager(cfg: Config, run_dir: Path) -> Any | None:
     )
 
 
+def _close_manager_after_failure(manager: Any | None, *, phase: str) -> None:
+    """Close a checkpoint manager without masking an active primary failure.
+
+    :param manager: Checkpoint manager, or None when checkpointing is disabled.
+    :param str phase: Setup/finalization phase used in secondary-error logging.
+    """
+    if manager is None:
+        return
+    try:
+        manager.close()
+    except Exception:
+        logger.exception("Closing the checkpoint manager after %s failure also failed", phase)
+
+
 def _save_training_checkpoint(
     manager: Any,
     *,
@@ -473,17 +487,26 @@ def _maybe_restore_state(
         raise RuntimeError("resume requested but checkpointing is disabled")
 
     if resume == "latest":
-        step_r, state, meta = restore_latest(
-            manager, abstract_train_state=abstract_state, data_iter=data_it
-        )
+        latest = manager.latest_step()
+        if latest is None:
+            raise FileNotFoundError(f"No checkpoints found in {manager.directory}")
+        step_r = int(latest)
     else:
-        step_r, state, meta = restore_at_step(
-            manager, step=int(resume), abstract_train_state=abstract_state, data_iter=data_it
-        )
+        step_r = int(resume)
 
-    print(f"[chomp] resumed from checkpoint step {step_r}")
+    # Validate metadata before Grain restores/replays any iterator buffers.
+    # A pipeline schema or source mismatch must fail without reading up to a
+    # full document/packed shuffle window from an incompatible source.
+    meta = restore_meta_at_step(manager, step=step_r)
     check_resume_compat(cfg, meta, tokenizer_snapshot_hash=tokenizer_hash)
-    return state, meta
+    _, state, restored_meta = restore_at_step(
+        manager,
+        step=step_r,
+        abstract_train_state=abstract_state,
+        data_iter=data_it,
+    )
+    print(f"[chomp] resumed from checkpoint step {step_r}")
+    return state, restored_meta
 
 
 def _trim_trailing_token(tokens: list[int], token_id: int | None) -> list[int]:
@@ -1300,34 +1323,42 @@ def run(
     # Checkpoint manager
     manager = _build_checkpoint_manager(cfg, run_dir)
 
-    # Restore if requested
-    state, resume_meta = _maybe_restore_state(
-        resume=resume,
-        manager=manager,
-        state0=state0,
-        abstract_state=abstract_state,
-        data_it=data_it,
-        cfg=cfg,
-        tokenizer_hash=tokenizer_hash,
-    )
-
-    if eval_tokens is None:
-        # Reaching here means check_resume_compat accepted the restored
-        # checkpoint. It is now safe for the explicit override to persist a
-        # replacement cache without a rejected configuration poisoning the
-        # run directory.
-        eval_tokens = load_or_create_eval_texts(
-            cfg, tokenizer=tokenizer, run_dir=run_dir, resume=True
+    try:
+        # Restore if requested.
+        state, resume_meta = _maybe_restore_state(
+            resume=resume,
+            manager=manager,
+            state0=state0,
+            abstract_state=abstract_state,
+            data_it=data_it,
+            cfg=cfg,
+            tokenizer_hash=tokenizer_hash,
         )
 
-    train_step = make_train_step(cfg, static=static, tx=tx, lr_schedule=schedule)
-    eval_every = int(cfg.train.eval_every)
-    eval_step = None
-    if eval_tokens and eval_every > 0:
-        eval_step = make_eval_step(cfg, static=static)
+        if eval_tokens is None:
+            # Reaching here means check_resume_compat accepted the restored
+            # checkpoint. It is now safe for the explicit override to persist a
+            # replacement cache without a rejected configuration poisoning the
+            # run directory.
+            eval_tokens = load_or_create_eval_texts(
+                cfg, tokenizer=tokenizer, run_dir=run_dir, resume=True
+            )
+
+        train_step = make_train_step(cfg, static=static, tx=tx, lr_schedule=schedule)
+        eval_every = int(cfg.train.eval_every)
+        eval_step = None
+        if eval_tokens and eval_every > 0:
+            eval_step = make_eval_step(cfg, static=static)
+    except BaseException:
+        _close_manager_after_failure(manager, phase="training setup")
+        raise
 
     if dry_run:
-        wandb_run, profile_enabled = _start_run_telemetry(cfg, run_dir=run_dir, dry_run=True)
+        try:
+            wandb_run, profile_enabled = _start_run_telemetry(cfg, run_dir=run_dir, dry_run=True)
+        except BaseException:
+            _close_manager_after_failure(manager, phase="dry-run telemetry setup")
+            raise
         try:
             try:
                 batch = next(data_it)
@@ -1363,13 +1394,20 @@ def run(
             )
             print("[chomp] dry-run complete")
             print(console_line)
-            return run_dir
-        finally:
+        except BaseException:
+            _close_manager_after_failure(manager, phase="dry run")
+            _finish_run_telemetry(wandb_run, profile_enabled=profile_enabled, exit_code=1)
+            raise
+        else:
             try:
                 if manager is not None:
-                    manager.wait_until_finished()
-            finally:
+                    manager.close()
+            except BaseException:
+                _finish_run_telemetry(wandb_run, profile_enabled=profile_enabled, exit_code=1)
+                raise
+            else:
                 _finish_run_telemetry(wandb_run, profile_enabled=profile_enabled)
+        return run_dir
 
     # Training loop
     t_compile = None
@@ -1514,7 +1552,11 @@ def run(
             use_rich=cfg.logging.console_use_rich,
         )
 
-    wandb_run, profile_enabled = _start_run_telemetry(cfg, run_dir=run_dir, dry_run=False)
+    try:
+        wandb_run, profile_enabled = _start_run_telemetry(cfg, run_dir=run_dir, dry_run=False)
+    except BaseException:
+        _close_manager_after_failure(manager, phase="telemetry setup")
+        raise
     exit_code = 0
     crash_reason = None
     crash_type = None
@@ -1787,9 +1829,9 @@ def run(
 
         if manager is not None:
             try:
-                manager.wait_until_finished()
+                manager.close()
             except Exception as exc:
-                logger.exception("Waiting for async checkpoint writes failed")
+                logger.exception("Closing the checkpoint manager failed")
                 ckpt_errors.append(exc)
 
         # Checkpoint finalization failures fail the run (raise below), so the

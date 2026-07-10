@@ -30,8 +30,9 @@ Checkpoint frequency is controlled by:
 - `checkpoint.max_to_keep`
 - `checkpoint.async_save`
 
-If async saving is enabled, the manager waits on exit to avoid partial writes.
-Orbax enforces `checkpoint.max_to_keep` for retained checkpoints.
+The manager closes on every exit path, which waits for asynchronous writes and
+releases its checkpointer, metadata stores, and deleter. Orbax enforces
+`checkpoint.max_to_keep` for retained checkpoints.
 
 When `debug.nan_check` is enabled, save steps force a metrics sync so the
 finite-loss/grad-norm check runs before the write. A non-finite step is then

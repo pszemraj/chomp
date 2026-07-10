@@ -26,12 +26,9 @@ classifiers = [
 dependencies = [
   "jax>=0.7.0",
   "equinox>=0.12.0",
-  # chomp requires megalodon-jax >= 0.1.2 (supports_segment_reset: full
-  # per-document state isolation). A PEP 508 direct URL cannot carry a
-  # version specifier, so the floor is enforced at model build time
-  # (chomp.model._require_megalodon_jax_version); fresh installs from this
-  # URL always satisfy it.
-  "megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git",
+  # Commit pin includes megalodon-jax 0.1.2 supports_segment_reset support.
+  # The runtime version check remains a clear failure for editable installs.
+  "megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git@c0612735a1861dd5d72ef40937cd91b96dd8ac0d",
   "packaging>=23.0",
   "optax @ git+https://github.com/google-deepmind/optax.git@141c8d5e3746540163da8c7edf5a0072369a27c8",
   "orbax-checkpoint==0.11.31",
@@ -39,13 +36,13 @@ dependencies = [
   "tqdm",
   "rich>=13.0",
   "wandb>=0.16.0",
-  # Upper bound is deliberate: the window-shuffle resume-exactness fix
+  # Exact pin is deliberate: the window-shuffle resume-exactness fix
   # (_ResumeSafeWindowShuffleIterDataset in chomp.data.grain) patches grain's
   # private _WindowShuffleDatasetIterator._init flag. A construction-time
-  # tripwire fails fast if the attribute vanishes, but bumping past the bound
-  # must be a deliberate act: re-verify the workaround, then raise the cap.
-  "grain>=0.2.15,<0.3",
-  "datasets>=3.0.0",
+  # tripwire fails fast if the attribute vanishes, but any bump must re-verify
+  # the workaround and the full interrupted-versus-continuous resume tests.
+  "grain==0.2.15",
+  "datasets==4.5.0",
   # transformers (tokenizers)
   "transformers>=4.40.0",
   # CLI
