@@ -368,6 +368,15 @@ def resolve_tokenizer_config(cfg: Config, tok: Tokenizer) -> Config:
     if model_updates:
         updated_cfg = replace(updated_cfg, model=replace(updated_cfg.model, **model_updates))
 
+    effective_vocab = int(updated_cfg.model.vocab_size)
+    for field in ("pad_token_id", "bos_token_id", "eos_token_id"):
+        token_id = int(getattr(updated_cfg.model, field))
+        if not 0 <= token_id < effective_vocab:
+            raise ValueError(
+                f"model.{field} must be within [0, resolved vocab_size={effective_vocab}), "
+                f"got {token_id}"
+            )
+
     tok_cfg = updated_cfg.data.tokenizer
     if tok_cfg.max_doc_tokens is None:
         default_max = int(updated_cfg.train.seq_len) * 4

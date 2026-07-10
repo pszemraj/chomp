@@ -21,7 +21,7 @@ from chomp.config import (
     TokenizerConfig,
     TrainConfig,
 )
-from chomp.data.grain import _packer_stats_from_chain
+from chomp.data.grain import _packer_stats_from_chain, effective_window_shuffle_seed
 from chomp.data.hf import HFStreamingTextStream, HFStreamSpec
 from chomp.data.pack import MultipackPacker, TokenPacker
 from chomp.data.pipeline import (
@@ -48,6 +48,13 @@ def _doc(token: int, length: int) -> list[int]:
     :return list[int]: Token list of length ``length``.
     """
     return [token] * length
+
+
+def test_window_shuffle_seed_normalizes_to_uint32() -> None:
+    """Large valid data seeds must remain acceptable to Grain's uint32 shuffler."""
+    cfg = Config(data=replace(Config().data, seed=2**32 + 7))
+
+    assert effective_window_shuffle_seed(cfg) == 104_736
 
 
 def _hf_stream_spec(**overrides: Any) -> HFStreamSpec:

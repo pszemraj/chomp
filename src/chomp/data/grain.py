@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 # Seed offset for the packed-window shuffle so it is decoupled from the HF
 # document-shuffle seed (which uses data.seed directly).
 _WINDOW_SHUFFLE_SEED_OFFSET = 104_729
+_UINT32_MODULUS = 2**32
 
 
 def effective_window_shuffle_seed(cfg: Config) -> int:
@@ -23,7 +24,7 @@ def effective_window_shuffle_seed(cfg: Config) -> int:
     :param Config cfg: Training configuration.
     :return int: Effective Grain window-shuffle seed.
     """
-    return int(cfg.data.seed) + _WINDOW_SHUFFLE_SEED_OFFSET
+    return (int(cfg.data.seed) + _WINDOW_SHUFFLE_SEED_OFFSET) % _UINT32_MODULUS
 
 
 class _IteratorProtocol(Protocol):

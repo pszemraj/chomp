@@ -801,6 +801,8 @@ def _validate_config_types(value: Any, prefix: str = "") -> None:
 
 def _validate_train(cfg: Config) -> None:
     """Validate training-related config fields."""
+    if cfg.train.seed < 0:
+        _vfail(f"train.seed must be >= 0, got {cfg.train.seed}")
     if cfg.train.steps <= 0:
         _vfail(f"train.steps must be positive, got {cfg.train.steps}")
     if cfg.train.batch_size <= 0:
@@ -902,6 +904,8 @@ def _validate_model(cfg: Config) -> None:
     """Validate model-related config fields."""
     if cfg.model.vocab_size <= 0:
         _vfail(f"model.vocab_size must be positive, got {cfg.model.vocab_size}")
+    if cfg.model.pad_token_id < 0:
+        _vfail(f"model.pad_token_id must be >= 0, got {cfg.model.pad_token_id}")
     if not 0 <= cfg.model.dropout <= 1:
         _vfail(f"model.dropout must be in [0, 1], got {cfg.model.dropout}")
     if cfg.model.param_dtype != "float32":
@@ -1089,8 +1093,8 @@ def _validate_data(cfg: Config) -> None:
         warnings.warn(
             "data.window_shuffle_windows "
             f"({cfg.data.window_shuffle_windows}) is smaller than one batch "
-            f"({rows_per_batch} rows); this cannot decorrelate a batch from itself. "
-            "Use 0 to disable or a multiple of the batch row count.",
+            f"({rows_per_batch} rows), so it provides only sub-batch/local mixing. "
+            "Use 0 to disable or a multiple of the batch row count for stronger mixing.",
             stacklevel=2,
         )
 
@@ -1117,6 +1121,8 @@ def _validate_logging(cfg: Config) -> None:
         )
     if not str(cfg.logging.project).strip():
         _vfail("logging.project must be a non-empty string")
+    if cfg.logging.run_dir is not None and not cfg.logging.run_dir.strip():
+        _vfail("logging.run_dir must be a non-empty string or null")
     if not str(cfg.logging.metrics_file).strip():
         _vfail("logging.metrics_file must be a non-empty string")
     if cfg.logging.log_file is not None and not str(cfg.logging.log_file).strip():

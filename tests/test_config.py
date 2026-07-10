@@ -179,6 +179,8 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
             "gemm_backend",
         ),
         (lambda cfg: replace(cfg, model=replace(cfg.model, output_size=0)), "output_size"),
+        (lambda cfg: replace(cfg, model=replace(cfg.model, pad_token_id=-1)), "pad_token_id"),
+        (lambda cfg: replace(cfg, train=replace(cfg.train, seed=-1)), "train.seed"),
         (lambda cfg: replace(cfg, train=replace(cfg.train, eval_every=-1)), "eval_every"),
         (lambda cfg: replace(cfg, train=replace(cfg.train, generate_every=-1)), "generate_every"),
         (
@@ -402,6 +404,7 @@ def test_data_and_logging_validation_rejects_invalid_values() -> None:
             "wandb.tags",
         ),
         (lambda cfg: replace(cfg, logging=replace(cfg.logging, log_file=" ")), "log_file"),
+        (lambda cfg: replace(cfg, logging=replace(cfg.logging, run_dir=" ")), "run_dir"),
         (
             lambda cfg: replace(
                 cfg,
@@ -627,6 +630,22 @@ def test_auto_sets_special_token_ids() -> None:
     assert updated.model.bos_token_id == 10
     assert updated.model.eos_token_id == 11
     assert updated.model.pad_token_id == 12
+
+
+def test_tokenizer_resolution_rejects_out_of_range_special_ids() -> None:
+    """Resolved special IDs must fit the final aligned model vocabulary."""
+    cfg = _tokenizer_resolution_cfg(
+        model=ModelConfig(
+            backend="dummy",
+            vocab_size=512,
+            d_model=32,
+            pad_token_id=512,
+        )
+    )
+    tok = _DummyTokenizer(size=256, bos=None, eos=None, pad=None)
+
+    with pytest.raises(ValueError, match="pad_token_id.*resolved vocab_size"):
+        resolve_tokenizer_config(cfg, tok)
 
 
 def test_tokenizer_pad_equals_eos_warns() -> None:
