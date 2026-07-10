@@ -495,20 +495,6 @@ def _build_checkpoint_manager(cfg: Config, run_dir: Path) -> Any | None:
     )
 
 
-def _close_manager_after_failure(manager: Any | None, *, phase: str) -> None:
-    """Close a checkpoint manager without masking an active primary failure.
-
-    :param manager: Checkpoint manager, or None when checkpointing is disabled.
-    :param str phase: Setup/finalization phase used in secondary-error logging.
-    """
-    if manager is None:
-        return
-    try:
-        manager.close()
-    except Exception:
-        logger.exception("Closing the checkpoint manager after %s failure also failed", phase)
-
-
 def _close_iterator(iterator: Any | None, *, label: str) -> None:
     """Close a data iterator or stream when it exposes explicit cleanup.
 
@@ -525,17 +511,29 @@ def _close_iterator(iterator: Any | None, *, label: str) -> None:
             raise RuntimeError(f"Closing {label} failed") from exc
 
 
-def _close_iterator_after_failure(iterator: Any | None, *, label: str, phase: str) -> None:
-    """Close an iterator without masking an active primary failure.
+def _close_run_resources(
+    manager: Any | None, data_it: Any | None, *, phase: str
+) -> list[Exception]:
+    """Close run-owned checkpoint and data resources, collecting failures.
 
-    :param iterator: Iterator/stream to close, or None.
-    :param str label: Resource label used in secondary-error logging.
-    :param str phase: Setup/finalization phase used in secondary-error logging.
+    :param manager: Checkpoint manager, or None when disabled.
+    :param data_it: Training data iterator, or None before construction.
+    :param str phase: Lifecycle phase used in secondary-error logging.
+    :return list[Exception]: Cleanup failures in close order.
     """
+    errors: list[Exception] = []
+    if manager is not None:
+        try:
+            manager.close()
+        except Exception as exc:
+            logger.exception("Closing the checkpoint manager during %s failed", phase)
+            errors.append(exc)
     try:
-        _close_iterator(iterator, label=label)
-    except Exception:
-        logger.exception("Closing %s after %s failure also failed", label, phase)
+        _close_iterator(data_it, label="training data iterator")
+    except Exception as exc:
+        logger.exception("Closing the training data iterator during %s failed", phase)
+        errors.append(exc)
+    return errors
 
 
 def _save_training_checkpoint(
@@ -1389,18 +1387,14 @@ def _run_impl(
         if eval_tokens and eval_every > 0:
             eval_step = make_eval_step(cfg, static=static)
     except BaseException:
-        _close_manager_after_failure(manager, phase="training setup")
-        _close_iterator_after_failure(data_it, label="training data iterator", phase="setup")
+        _close_run_resources(manager, data_it, phase="training setup")
         raise
 
     if dry_run:
         try:
             wandb_run, profile_enabled = _start_run_telemetry(cfg, run_dir=run_dir, dry_run=True)
         except BaseException:
-            _close_manager_after_failure(manager, phase="dry-run telemetry setup")
-            _close_iterator_after_failure(
-                data_it, label="training data iterator", phase="dry-run telemetry setup"
-            )
+            _close_run_resources(manager, data_it, phase="dry-run telemetry setup")
             raise
         try:
             try:
@@ -1438,21 +1432,11 @@ def _run_impl(
             print("[chomp] dry-run complete")
             print(console_line)
         except BaseException:
-            _close_manager_after_failure(manager, phase="dry run")
-            _close_iterator_after_failure(data_it, label="training data iterator", phase="dry run")
+            _close_run_resources(manager, data_it, phase="dry run")
             _finish_run_telemetry(wandb_run, profile_enabled=profile_enabled, exit_code=1)
             raise
         else:
-            close_errors: list[Exception] = []
-            if manager is not None:
-                try:
-                    manager.close()
-                except Exception as exc:
-                    close_errors.append(exc)
-            try:
-                _close_iterator(data_it, label="training data iterator")
-            except Exception as exc:
-                close_errors.append(exc)
+            close_errors = _close_run_resources(manager, data_it, phase="dry-run finalization")
             if close_errors:
                 _finish_run_telemetry(wandb_run, profile_enabled=profile_enabled, exit_code=1)
                 raise RuntimeError(
@@ -1629,10 +1613,7 @@ def _run_impl(
     try:
         wandb_run, profile_enabled = _start_run_telemetry(cfg, run_dir=run_dir, dry_run=False)
     except BaseException:
-        _close_manager_after_failure(manager, phase="telemetry setup")
-        _close_iterator_after_failure(
-            data_it, label="training data iterator", phase="telemetry setup"
-        )
+        _close_run_resources(manager, data_it, phase="telemetry setup")
         raise
     exit_code = 0
     crash_reason = None
@@ -1918,18 +1899,9 @@ def _run_impl(
                     logger.exception("Final checkpoint save failed at step %s", final_step)
                     finalization_errors.append(exc)
 
-        if manager is not None:
-            try:
-                manager.close()
-            except Exception as exc:
-                logger.exception("Closing the checkpoint manager failed")
-                finalization_errors.append(exc)
-
-        try:
-            _close_iterator(data_it, label="training data iterator")
-        except Exception as exc:
-            logger.exception("Closing training data iterator failed")
-            finalization_errors.append(exc)
+        finalization_errors.extend(
+            _close_run_resources(manager, data_it, phase="training finalization")
+        )
 
         # Checkpoint or iterator finalization failures fail the run (raise
         # below), so W&B's exit code must agree. Finish telemetry only after
