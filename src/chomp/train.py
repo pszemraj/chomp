@@ -1627,6 +1627,7 @@ def _run_impl(
             item = next(gen_stream)
         except StopIteration:
             logger.warning("Generation stream exhausted; disabling generation.")
+            _close_iterator(gen_stream, label="generation stream")
             gen_settings = None
             gen_stream = None
             return

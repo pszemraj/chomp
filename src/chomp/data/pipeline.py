@@ -516,12 +516,15 @@ def _collect_texts(stream: TextStream, max_samples: int) -> list[str]:
     :return list[str]: Collected text samples.
     """
     texts: list[str] = []
-    for _ in range(int(max_samples)):
-        try:
-            texts.append(next(stream))
-        except StopIteration:
-            break
-    return texts
+    try:
+        for _ in range(int(max_samples)):
+            try:
+                texts.append(next(stream))
+            except StopIteration:
+                break
+        return texts
+    finally:
+        stream.close()
 
 
 def _tokenize_eval_texts(texts: list[str], tok: Tokenizer) -> list[list[int]]:
