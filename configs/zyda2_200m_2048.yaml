@@ -28,7 +28,7 @@ data:
   hf_name: sample-100BT
   hf_split: train
   hf_revision: bc389cd62969a275b2e3c3e11db826ba1918411a
-  hf_eval_split: validation
+  hf_eval_split: null
   text_key: text
   packing_mode: bin
   packing_buffer_docs: 256
