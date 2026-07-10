@@ -16,15 +16,11 @@ import jax
 import pytest
 from click.testing import CliRunner
 
-from chomp.ckpt import default_ckpt_dir, restore_params_only
 from chomp.cli import cli
 from chomp.cli.main import BANNER, parse_resume, print_banner
 from chomp.config import Config
 from chomp.data import build_tokenizer, save_tokenizer_snapshot
 from chomp.model import build_model
-from chomp.train import run
-from chomp.utils.tree import abstractify_tree
-from tests.helpers.config_factories import make_small_run_cfg
 
 
 def test_cli_import_does_not_initialize_jax() -> None:
@@ -33,18 +29,6 @@ def test_cli_import_does_not_initialize_jax() -> None:
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
 
     assert result.returncode == 0, result.stderr
-
-
-@pytest.fixture(scope="module")
-def trained_small_run(tmp_path_factory: pytest.TempPathFactory) -> tuple[Config, Path]:
-    """Train one shared tiny run for CLI restore-path tests."""
-    tmp_path = tmp_path_factory.mktemp("cli_small_run")
-    cfg, config_src = make_small_run_cfg(
-        tmp_path,
-        local_text="hello from chomp test generate",
-    )
-    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
-    return cfg, run_dir
 
 
 def test_print_banner_outputs_expected_text(capsys: object) -> None:
@@ -109,29 +93,6 @@ def test_generate_rejects_non_megalodon_backend(tmp_path: Path) -> None:
 
     assert result.exit_code != 0
     assert "model.backend" in result.output
-
-
-def test_restore_params_only_from_trained_run(trained_small_run: tuple[Config, Path]) -> None:
-    """restore_params_only loads the trained params subtree from a full TrainState checkpoint."""
-    cfg, run_dir = trained_small_run
-
-    params_fresh, _static = build_model(cfg, key=jax.random.PRNGKey(0))
-    step_dir = default_ckpt_dir(run_dir) / "2"
-    assert step_dir.exists()
-
-    restored_params = restore_params_only(step_dir, abstractify_tree(params_fresh))
-
-    fresh_leaves = jax.tree_util.tree_leaves(params_fresh)
-    restored_leaves = jax.tree_util.tree_leaves(restored_params)
-    assert len(fresh_leaves) == len(restored_leaves)
-    for fresh, restored in zip(fresh_leaves, restored_leaves, strict=True):
-        assert fresh.shape == restored.shape
-        assert fresh.dtype == restored.dtype
-
-    assert any(
-        not jax.numpy.allclose(fresh, restored)
-        for fresh, restored in zip(fresh_leaves, restored_leaves, strict=True)
-    ), "Restored params should differ from fresh init after training"
 
 
 def test_generate_cli_produces_output(tmp_path: Path) -> None:

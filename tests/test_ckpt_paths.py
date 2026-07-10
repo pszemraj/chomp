@@ -8,20 +8,20 @@ from pathlib import Path
 
 import pytest
 
-from chomp.ckpt import default_ckpt_dir
 from chomp.config import Config
-from chomp.train import run
 from chomp.utils.ckpt_paths import load_config_for_checkpoint, resolve_checkpoint_path
-from tests.helpers.config_factories import make_small_run_cfg
 
 
 def test_resolve_checkpoint_with_root_dir(tmp_path: Path) -> None:
     """resolve_checkpoint_path should respect checkpoint.root_dir from run config."""
-    cfg, config_src = make_small_run_cfg(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
     ckpt_root = tmp_path / "ckpt_root"
+    cfg = Config()
     cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, root_dir=str(ckpt_root)))
+    (run_dir / "config_resolved.json").write_text(json.dumps(cfg.to_dict(), indent=2))
+    (ckpt_root / "2" / "train_state").mkdir(parents=True)
 
-    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
     step_dir, found_run_dir = resolve_checkpoint_path(str(run_dir))
 
     assert found_run_dir == run_dir
@@ -32,10 +32,12 @@ def test_resolve_checkpoint_with_root_dir(tmp_path: Path) -> None:
 
 def test_resolve_checkpoint_with_step_dir(tmp_path: Path) -> None:
     """resolve_checkpoint_path should accept direct step-directory input."""
-    cfg, config_src = make_small_run_cfg(tmp_path)
-    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "config_resolved.json").write_text(json.dumps(Config().to_dict(), indent=2))
+    step_dir_input = run_dir / "checkpoints" / "1"
+    (step_dir_input / "train_state").mkdir(parents=True)
 
-    step_dir_input = default_ckpt_dir(run_dir) / "1"
     step_dir, found_run_dir = resolve_checkpoint_path(str(step_dir_input))
 
     assert found_run_dir == run_dir
