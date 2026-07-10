@@ -109,10 +109,10 @@ If a mismatch is detected, resume fails fast with a detailed error.
 
 ## Scope of exactness
 
-The exact-resume contract covers checkpoint save/restore. In-run recovery
-from transient HF streaming errors is a separate, best-effort mechanism that
-can replay up to `data.state_update_interval` recent documents; see
-[Data Pipeline: transient stream recovery](data_pipeline.md#transient-stream-recovery-best-effort).
+The exact-resume contract covers checkpoint save/restore and in-run HF retry
+reconstruction. Retry recovery restores the last compact source state and
+fast-forwards over the exact count already yielded; see
+[Data Pipeline: transient stream recovery](data_pipeline.md#transient-stream-recovery).
 
 What resume guarantees is exact **state and data replay**: parameters,
 optimizer state, RNG, and the data iterator position restore exactly, so the

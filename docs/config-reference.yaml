@@ -487,8 +487,9 @@ data:
   # Default: 2000.
   # Required: no; used only for HF streaming.
   # Valid: > 0.
-  # Use: examples between in-run retry snapshots. Lower values reduce replay after a transient
-  # failure and add overhead. Checkpoint saves capture the current HF state independently.
+  # Use: examples between in-run retry snapshots. Recovery restores the last snapshot and rereads,
+  # then discards exactly the already-yielded examples, so order stays exact. Lower values reduce
+  # recovery work and add state-capture overhead. Checkpoints capture current state independently.
   state_update_interval: 2000
 
   # Key: data.local_text

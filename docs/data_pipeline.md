@@ -115,20 +115,21 @@ checkpoint with document text. Set `data.hf_revision` to an immutable commit
 for production runs, because exact iterator replay cannot compensate for an
 upstream repository changing beneath the same name.
 
-### Transient stream recovery (best-effort)
+### Transient stream recovery
 
-Checkpoint resume is exact; in-run recovery from transient HF streaming
-errors is not. The stream caches a last-known-good state every
-`data.state_update_interval` documents (default 2000). When `next()` fails
-(network hiccup), iteration rebuilds from that cached state and retries with
-backoff, which can **replay up to `state_update_interval` recently yielded
-documents**. This is a deliberate tradeoff for long unattended runs: a rare
-duplicated slice beats a dead run. If bounding duplication matters more than
-overhead, lower `data.state_update_interval`; if strict no-replay semantics
-are required, treat any retry warning in the logs as a signal to stop and
-resume from the last checkpoint instead (checkpointed state is unaffected by
-recovery). Errors that survive `data.max_retries` still propagate and crash
-the run.
+In-run recovery from transient HF streaming errors preserves exact document
+order. The stream retains a last-known-good compact state and the exact number
+of documents yielded since it. On failure, it rebuilds from that state,
+discards precisely those already-yielded documents, and retries with backoff.
+The initial source state covers failures before the first document, and a
+failed periodic state capture retains the preceding good state.
+
+`data.state_update_interval` (default 2000) controls reconstruction work, not
+data duplication: a recovery may reread and discard up to that many documents.
+If state restore or fast-forward cannot reproduce the prior position, training
+fails and must resume from the last Chomp checkpoint rather than continuing
+from a partially reconstructed stream. Errors that survive `data.max_retries`
+also propagate and fail the run.
 
 ## Validation set
 

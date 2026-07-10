@@ -945,19 +945,74 @@ def test_hf_set_state_raises_on_missing_hf_state(
 
 
 def test_hf_retry_rebuild_roundtrip(patch_hf_load_dataset: Callable[..., dict[str, int]]) -> None:
-    """HF stream should recover from transient failure via state restore."""
-    items = [{"text": "alpha"}, {"text": "bravo"}, {"text": "charlie"}]
+    """Unshuffled recovery fast-forwards without replaying yielded documents."""
+    items = [{"text": f"document-{index}"} for index in range(10)]
     record: dict[str, Any] = {"fail_consumed": False}
-    calls = patch_hf_load_dataset(items, fail_at=1, record=record)
+    calls = patch_hf_load_dataset(items, fail_at=5, record=record)
 
-    spec = _hf_stream_spec(max_retries=1, state_update_interval=1)
+    spec = _hf_stream_spec(max_retries=1, state_update_interval=3)
     stream = HFStreamingTextStream(spec)
-    assert next(stream) == "alpha"
-    assert next(stream) == "bravo"
+    assert [next(stream) for _ in range(8)] == [f"document-{index}" for index in range(8)]
 
     assert calls["builds"] >= 2
     assert record.get("load_calls", 0) >= 1
-    assert record.get("last_loaded") == {"index": 1}
+    assert record.get("last_loaded") == {"index": 3}
+
+
+def test_hf_retry_recovers_failure_before_first_document(
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+) -> None:
+    """The initial source state makes a first-read transient failure exact."""
+    record: dict[str, Any] = {"fail_consumed": False}
+    patch_hf_load_dataset([{"text": "alpha"}, {"text": "bravo"}], fail_at=0, record=record)
+
+    stream = HFStreamingTextStream(_hf_stream_spec(max_retries=1))
+    assert next(stream) == "alpha"
+    assert record.get("last_loaded") == {"index": 0}
+
+
+def test_hf_retry_keeps_last_good_state_when_new_capture_fails(
+    patch_hf_load_dataset: Callable[..., dict[str, int]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed periodic snapshot retains its predecessor and exact replay distance."""
+    items = [{"text": f"document-{index}"} for index in range(6)]
+    record: dict[str, Any] = {"fail_consumed": False}
+    patch_hf_load_dataset(items, fail_at=2, record=record)
+    stream = HFStreamingTextStream(_hf_stream_spec(max_retries=1, state_update_interval=2))
+    initial_state = stream.get_state
+
+    assert next(stream) == "document-0"
+
+    def _capture_failure() -> dict[str, Any]:
+        """Simulate a transient source state_dict failure."""
+        raise RuntimeError("state capture failed")
+
+    monkeypatch.setattr(stream, "get_state", _capture_failure)
+    assert next(stream) == "document-1"
+    assert stream._last_state == {"epoch": 0, "hf_state": {"index": 0}}
+    assert stream._n_since_state == 2
+
+    monkeypatch.setattr(stream, "get_state", initial_state)
+    assert next(stream) == "document-2"
+    assert record.get("last_loaded") == {"index": 0}
+
+
+def test_hf_retry_fails_closed_when_reconstruction_fails(
+    patch_hf_load_dataset: Callable[..., dict[str, int]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recovery failure propagates instead of retrying a partially mutated iterator."""
+    record: dict[str, Any] = {"fail_consumed": False}
+    patch_hf_load_dataset([{"text": "alpha"}, {"text": "bravo"}], fail_at=1, record=record)
+    stream = HFStreamingTextStream(_hf_stream_spec(max_retries=1, state_update_interval=10))
+    assert next(stream) == "alpha"
+
+    def _restore_failure(_state: dict[str, Any]) -> None:
+        """Simulate a source reconstruction failure."""
+        raise RuntimeError("restore failed")
+
+    monkeypatch.setattr(stream, "set_state", _restore_failure)
+    with pytest.raises(RuntimeError, match="could not reconstruct"):
+        next(stream)
 
 
 def test_hf_shuffled_retry_reconstructs_failed_window_exactly(

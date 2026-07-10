@@ -147,6 +147,8 @@ class HFStreamingTextStream:
         self._window_cursor = 0
         self._window_index = 0
         self._window_parent_state = None
+        # Retry recovery starts exact even when the first source read fails.
+        self._last_state = self.get_state()
 
     def __iter__(self) -> HFStreamingTextStream:
         return self
@@ -156,32 +158,54 @@ class HFStreamingTextStream:
         self._n_since_state += 1
         if self._n_since_state < self._spec.state_update_interval:
             return
-        self._n_since_state = 0
         try:
-            self._last_state = self.get_state()
+            state = self.get_state()
         except Exception:
             logger.warning(
                 "HF stream state_dict() failed during periodic caching; "
                 "retry recovery will restart from the last good state (if any).",
                 exc_info=True,
             )
-            self._last_state = None
+            # Keep both the last known-good state and the exact number of
+            # documents yielded since it. Discarding either makes recovery
+            # silently replay or skip records.
+            return
+        self._last_state = state
+        self._n_since_state = 0
 
     def _recover_iterator(self) -> None:
-        """Best-effort rebuild from last cached state."""
+        """Rebuild and fast-forward exactly from the last cached state.
+
+        :raises RuntimeError: If no known-good state exists or reconstruction
+            cannot reach the exact pre-failure logical position.
+        """
         if self._last_state is None:
-            return
-        try:
-            self.set_state(self._last_state)
-            logger.info("HF stream rebuilt from last cached state after failure.")
-        except Exception:
-            # Fall back to sleeping and retrying next() on current iterator.
-            logger.warning(
-                "HF stream rebuild from cached state failed; retrying on the "
-                "current iterator instead.",
-                exc_info=True,
+            raise RuntimeError(
+                "HF retry recovery has no known-good iterator state; refusing an inexact retry."
             )
-            return
+        state = self._last_state
+        yielded_since_state = int(self._n_since_state)
+        try:
+            self.set_state(state)
+            for _ in range(yielded_since_state):
+                if self._spec.shuffle:
+                    self._next_shuffled_text()
+                else:
+                    self._read_text()
+            # Promote the reconstructed current position to the next
+            # known-good recovery point. A failure here must terminate rather
+            # than retry from partially reconstructed state.
+            self._last_state = self.get_state()
+            self._n_since_state = 0
+        except Exception as exc:
+            raise RuntimeError(
+                "HF stream could not reconstruct its exact pre-failure position; "
+                "stop and resume from the last Chomp checkpoint."
+            ) from exc
+        logger.info(
+            "HF stream rebuilt and fast-forwarded %d document(s) after failure.",
+            yielded_since_state,
+        )
 
     def _source_state(self) -> dict[str, Any]:
         """Capture the unshuffled HF source state.
@@ -236,6 +260,7 @@ class HFStreamingTextStream:
         # filled. Cache its start unconditionally so retry reconstruction
         # cannot lose a partially read buffer or replay emitted documents.
         self._last_state = self._shuffle_checkpoint(parent_state=parent_state)
+        self._n_since_state = 0
 
         for _ in range(int(self._spec.shuffle_buffer_size)):
             try:
@@ -302,7 +327,8 @@ class HFStreamingTextStream:
                     delay,
                     exc_info=True,
                 )
-                # Best-effort recovery: rebuild ds from last known state if available.
+                # Exact recovery: rebuild and discard precisely the records
+                # already yielded since the last compact state.
                 self._recover_iterator()
 
                 time.sleep(delay)
