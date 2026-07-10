@@ -28,6 +28,9 @@ All batches have **fixed shapes**:
 - `segment_ids`: `[A, B, T]` int32
 - `position_ids`: `[A, B, T]` int32
 
+The current device transfer uses all five arrays. The measured, contract-gated
+transfer reduction is tracked in [Development Guide: tracked follow-ups](dev.md#tracked-follow-ups).
+
 Where:
 
 - `A = train.grad_accum`
@@ -109,6 +112,10 @@ When stats are enabled (`data.device_put: false`), iterator stats include:
   shuffle window refills. Measured below the prefetch layer, so with
   `data.grain_prefetch > 0` the value may belong to a batch up to
   prefetch-depth ahead of the one just consumed)
+
+Original-document/source batch composition and the owned Grain shuffle
+replacement are tracked in
+[Development Guide: tracked follow-ups](dev.md#tracked-follow-ups).
 
 ## Iterator state and resume
 

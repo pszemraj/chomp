@@ -22,7 +22,9 @@ group, and weight-decay status. Its hash is a hard checkpoint-resume input.
 
 Megalodon's `rotary.inv_freq` arrays are derived RoPE constants. They remain in
 the fixed model partition, never enter optimizer state, and remain bit-identical
-through training. Trainable CEMA coefficients remain parameters.
+through training. Trainable CEMA coefficients remain parameters. Moving this
+derived constant into the upstream model's static contract is tracked in
+[Development Guide: tracked follow-ups](dev.md#tracked-follow-ups).
 
 For `optim.name=muon`, the harness uses explicit parameter partitioning:
 
