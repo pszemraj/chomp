@@ -527,16 +527,6 @@ def _collect_texts(stream: TextStream, max_samples: int) -> list[str]:
         stream.close()
 
 
-def _tokenize_eval_texts(texts: list[str], tok: Tokenizer) -> list[list[int]]:
-    """Tokenize eval texts once for reuse across eval runs.
-
-    :param list[str] texts: Raw text samples.
-    :param Tokenizer tok: Tokenizer instance.
-    :return list[list[int]]: Tokenized documents.
-    """
-    return [tok.encode(text) for text in texts]
-
-
 _EVAL_TOKENS_FILENAME = "eval_tokens.json.gz"
 
 
@@ -655,7 +645,7 @@ def _write_eval_tokens_cache(path: Path, cfg: Config, tokens: list[list[int]]) -
     tmp.replace(path)
 
 
-def load_or_create_eval_texts(
+def load_or_create_eval_tokens(
     cfg: Config, *, tokenizer: Tokenizer, run_dir: Path | None = None, resume: bool = False
 ) -> list[list[int]]:
     """Build the evaluation token set, pinned to the run directory.
@@ -740,7 +730,7 @@ def load_or_create_eval_texts(
             "disable evaluation; fix the source/split or set data.max_eval_samples=0 explicitly."
         )
 
-    tokens = _tokenize_eval_texts(texts, tokenizer)
+    tokens = [tokenizer.encode(text) for text in texts]
     if cache_path is not None:
         _write_eval_tokens_cache(cache_path, cfg, tokens)
         logger.info("Persisted %d eval documents to %s", len(tokens), cache_path)

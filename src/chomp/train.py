@@ -66,7 +66,7 @@ from chomp.data import (
     build_generation_text_stream,
     build_train_iterator,
     data_fingerprint,
-    load_or_create_eval_texts,
+    load_or_create_eval_tokens,
     load_tokenizer_snapshot,
     prepare_tokenizer_and_config,
     save_tokenizer_snapshot,
@@ -318,7 +318,7 @@ def _setup_run_dir_and_tokenizer(
     elif allow_existing and cfg.data.recreate_eval_cache:
         eval_tokens = None
     else:
-        eval_tokens = load_or_create_eval_texts(
+        eval_tokens = load_or_create_eval_tokens(
             cfg, tokenizer=tokenizer, run_dir=run_dir, resume=allow_existing
         )
 
@@ -1377,7 +1377,7 @@ def _run_impl(
             # checkpoint. It is now safe for the explicit override to persist a
             # replacement cache without a rejected configuration poisoning the
             # run directory.
-            eval_tokens = load_or_create_eval_texts(
+            eval_tokens = load_or_create_eval_tokens(
                 cfg, tokenizer=tokenizer, run_dir=run_dir, resume=True
             )
 

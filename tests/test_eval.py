@@ -25,7 +25,7 @@ from chomp.data import (
     build_eval_iterator,
     build_generation_text_stream,
     build_tokenizer,
-    load_or_create_eval_texts,
+    load_or_create_eval_tokens,
 )
 from chomp.train import run
 from tests.helpers.hf_fakes import FakeHFIterable
@@ -282,7 +282,7 @@ def test_eval_split_selection(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(hf_datasets, "load_dataset", _load_dataset)
     cfg = _base_cfg()
     tok = build_tokenizer(cfg)
-    tokens = load_or_create_eval_texts(cfg, tokenizer=tok)
+    tokens = load_or_create_eval_tokens(cfg, tokenizer=tok)
 
     assert tokens == [tok.encode("val-a"), tok.encode("val-b")]
     assert requested_splits == ["validation"]
@@ -299,7 +299,7 @@ def test_eval_collection_closes_hf_stream(
     )
     cfg = _base_cfg()
 
-    load_or_create_eval_texts(cfg, tokenizer=build_tokenizer(cfg))
+    load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg))
 
     assert record["close_calls"] == 1
 
@@ -318,7 +318,7 @@ def test_failed_eval_collection_closes_hf_stream(
     cfg = replace(base, data=replace(base.data, max_retries=0))
 
     with pytest.raises(RuntimeError, match="Failed to collect evaluation documents"):
-        load_or_create_eval_texts(cfg, tokenizer=build_tokenizer(cfg))
+        load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg))
 
     assert record["close_calls"] == 1
 
@@ -353,7 +353,7 @@ def test_explicit_eval_split_failure_never_falls_back(
     cfg = _base_cfg()
 
     with pytest.raises(RuntimeError, match="never falls back"):
-        load_or_create_eval_texts(cfg, tokenizer=build_tokenizer(cfg), run_dir=tmp_path)
+        load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg), run_dir=tmp_path)
 
     assert requested_splits == ["validation"]
     assert not (tmp_path / "eval_tokens.json.gz").exists()
@@ -367,7 +367,7 @@ def test_positive_eval_sample_count_rejects_empty_source(
     cfg = _base_cfg()
 
     with pytest.raises(RuntimeError, match="collected zero documents"):
-        load_or_create_eval_texts(cfg, tokenizer=build_tokenizer(cfg), run_dir=tmp_path)
+        load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg), run_dir=tmp_path)
 
     assert not (tmp_path / "eval_tokens.json.gz").exists()
 
@@ -385,7 +385,7 @@ def test_eval_cache_manifest_records_actual_source_split(
         }
     )
     cfg = _base_cfg()
-    load_or_create_eval_texts(cfg, tokenizer=build_tokenizer(cfg), run_dir=tmp_path)
+    load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg), run_dir=tmp_path)
 
     with gzip.open(tmp_path / "eval_tokens.json.gz", "rt", encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -398,7 +398,7 @@ def test_eval_empty_when_disabled() -> None:
     cfg = _base_cfg()
     cfg = replace(cfg, data=replace(cfg.data, max_eval_samples=0))
     tok = build_tokenizer(cfg)
-    assert load_or_create_eval_texts(cfg, tokenizer=tok) == []
+    assert load_or_create_eval_tokens(cfg, tokenizer=tok) == []
 
 
 def _local_eval_cfg(local_text: str = "eval persistence corpus\n") -> Config:
@@ -425,25 +425,25 @@ def test_eval_tokens_pinned_to_run_dir(tmp_path: Path) -> None:
     evaluates on (config-visible drift is resume-compat's job)."""
     cfg = _local_eval_cfg(local_text="first corpus")
     tok = build_tokenizer(cfg)
-    tokens_first = load_or_create_eval_texts(cfg, tokenizer=tok, run_dir=tmp_path)
+    tokens_first = load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=tmp_path)
     assert tokens_first
     assert (tmp_path / "eval_tokens.json.gz").exists()
 
     drifted = replace(cfg, data=replace(cfg.data, local_text="different corpus"))
-    assert load_or_create_eval_texts(drifted, tokenizer=tok, run_dir=tmp_path) == tokens_first
+    assert load_or_create_eval_tokens(drifted, tokenizer=tok, run_dir=tmp_path) == tokens_first
     # Sanity: without the cache the drifted source yields a different set.
-    assert load_or_create_eval_texts(drifted, tokenizer=tok) != tokens_first
+    assert load_or_create_eval_tokens(drifted, tokenizer=tok) != tokens_first
 
 
 def test_eval_tokens_cache_rejects_eval_knob_drift(tmp_path: Path) -> None:
     """Changing an eval-identity knob against an existing cache fails loudly."""
     cfg = _local_eval_cfg()
     tok = build_tokenizer(cfg)
-    load_or_create_eval_texts(cfg, tokenizer=tok, run_dir=tmp_path)
+    load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=tmp_path)
 
     drifted = replace(cfg, data=replace(cfg.data, max_eval_samples=5))
     with pytest.raises(RuntimeError, match="different eval settings"):
-        load_or_create_eval_texts(drifted, tokenizer=tok, run_dir=tmp_path)
+        load_or_create_eval_tokens(drifted, tokenizer=tok, run_dir=tmp_path)
 
 
 def test_eval_cache_missing_on_resume_fails(tmp_path: Path) -> None:
@@ -452,15 +452,15 @@ def test_eval_cache_missing_on_resume_fails(tmp_path: Path) -> None:
     set. data.recreate_eval_cache is the explicit one-shot override."""
     cfg = _local_eval_cfg()
     tok = build_tokenizer(cfg)
-    tokens = load_or_create_eval_texts(cfg, tokenizer=tok, run_dir=tmp_path, resume=False)
+    tokens = load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=tmp_path, resume=False)
     assert tokens
     (tmp_path / "eval_tokens.json.gz").unlink()
 
     with pytest.raises(RuntimeError, match="pinned eval set is missing"):
-        load_or_create_eval_texts(cfg, tokenizer=tok, run_dir=tmp_path, resume=True)
+        load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=tmp_path, resume=True)
 
     override = replace(cfg, data=replace(cfg.data, recreate_eval_cache=True))
-    recreated = load_or_create_eval_texts(override, tokenizer=tok, run_dir=tmp_path, resume=True)
+    recreated = load_or_create_eval_tokens(override, tokenizer=tok, run_dir=tmp_path, resume=True)
     assert recreated == tokens
     assert (tmp_path / "eval_tokens.json.gz").exists()
 
@@ -500,7 +500,7 @@ def test_failed_resume_does_not_persist_recreated_eval_cache(tmp_path: Path) -> 
 
     cache = run_dir / "eval_tokens.json.gz"
     tok = build_tokenizer(cfg)
-    expected_tokens = load_or_create_eval_texts(cfg, tokenizer=tok, run_dir=run_dir)
+    expected_tokens = load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=run_dir)
     cache.unlink()
 
     incompatible = replace(
@@ -518,7 +518,7 @@ def test_failed_resume_does_not_persist_recreated_eval_cache(tmp_path: Path) -> 
     correct = replace(cfg, data=replace(cfg.data, recreate_eval_cache=True))
     run(correct, config_path=None, resume="latest")
     assert cache.exists()
-    assert load_or_create_eval_texts(cfg, tokenizer=tok, run_dir=run_dir) == expected_tokens
+    assert load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=run_dir) == expected_tokens
 
 
 def test_eval_tokens_cache_rejects_corruption(tmp_path: Path) -> None:
@@ -527,7 +527,7 @@ def test_eval_tokens_cache_rejects_corruption(tmp_path: Path) -> None:
 
     cfg = _local_eval_cfg()
     tok = build_tokenizer(cfg)
-    load_or_create_eval_texts(cfg, tokenizer=tok, run_dir=tmp_path)
+    load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=tmp_path)
 
     path = tmp_path / "eval_tokens.json.gz"
     with gzip.open(path, "rt", encoding="utf-8") as f:
@@ -537,7 +537,7 @@ def test_eval_tokens_cache_rejects_corruption(tmp_path: Path) -> None:
         json.dump(payload, f)
 
     with pytest.raises(RuntimeError, match="corrupt"):
-        load_or_create_eval_texts(cfg, tokenizer=tok, run_dir=tmp_path)
+        load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=tmp_path)
 
 
 def test_null_eval_split_wires_complementary_content_partitions(
@@ -557,7 +557,7 @@ def test_null_eval_split_wires_complementary_content_partitions(
     cfg = _base_cfg()
     cfg = replace(cfg, data=replace(cfg.data, hf_eval_split=None, shuffle=True, seed=0))
     tok = build_tokenizer(cfg)
-    tokens = load_or_create_eval_texts(cfg, tokenizer=tok)
+    tokens = load_or_create_eval_tokens(cfg, tokenizer=tok)
     _ = build_generation_text_stream(cfg)
 
     assert tokens == [tok.encode("train-0"), tok.encode("train-1")]
