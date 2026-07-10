@@ -113,11 +113,9 @@ def create_run_dir(
     - If cfg.logging.run_dir is None: always create a fresh timestamped run dir.
       (Resume is not possible because we don't know which directory to use.)
 
-    - If cfg.logging.run_dir is set:
-      - if it doesn't exist: create it
-      - if it exists:
-         - allow_existing=True  => treat as resume/continue
-         - allow_existing=False => error (refuse to clobber)
+    - If cfg.logging.run_dir is set for a fresh run, create it or refuse to
+      clobber an existing directory.
+    - If allow_existing=True, require that explicit run directory to exist.
 
     We persist config snapshots:
     - fresh run: config_resolved.json + optional config_original.yaml
@@ -126,19 +124,20 @@ def create_run_dir(
     :param Config cfg: Training configuration.
     :param config_path: Optional path to original YAML config.
     :param bool allow_existing: If True, allow reusing an existing directory.
-    :raises RuntimeError: If directory exists and allow_existing=False, or resume without run_dir.
+    :raises RuntimeError: If the run directory conflicts with the requested fresh/resume mode.
     :return Path: Path to the run directory.
     """
 
     if cfg.logging.run_dir is not None:
         run_dir = Path(cfg.logging.run_dir)
-        if run_dir.exists():
-            if not allow_existing:
+        if allow_existing and not run_dir.exists():
+            raise RuntimeError(f"Resume requested but run directory does not exist: {run_dir}")
+        if not allow_existing:
+            if run_dir.exists():
                 raise RuntimeError(
                     f"Run dir already exists: {run_dir}. "
                     "Refusing to clobber. Set logging.run_dir to a new path or pass --resume."
                 )
-        else:
             run_dir.mkdir(parents=True, exist_ok=False)
     else:
         if allow_existing:

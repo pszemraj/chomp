@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import replace
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -21,6 +23,7 @@ from chomp.train import _check_finite_metrics
 from chomp.types import Batch
 from chomp.utils import devices, xla
 from chomp.utils.devices import device_platform, validate_default_device
+from chomp.utils.io import create_run_dir
 from chomp.utils.tree import param_count
 
 
@@ -37,6 +40,17 @@ def test_cpu_fails_when_disallowed() -> None:
 def test_cpu_allowed_when_configured() -> None:
     """Running on CPU with allow_cpu=True should succeed."""
     validate_default_device(allow_cpu=True)
+
+
+def test_resume_requires_an_existing_run_directory(tmp_path: Path) -> None:
+    """Resume setup must not create a missing run directory."""
+    run_dir = tmp_path / "missing-run"
+    cfg = Config(logging=replace(Config().logging, run_dir=str(run_dir)))
+
+    with pytest.raises(RuntimeError, match="does not exist"):
+        create_run_dir(cfg, config_path=None, allow_existing=True)
+
+    assert not run_dir.exists()
 
 
 def test_device_platform_detects_array() -> None:

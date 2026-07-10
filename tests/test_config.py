@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -178,7 +179,6 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
             "gemm_backend",
         ),
         (lambda cfg: replace(cfg, model=replace(cfg.model, output_size=0)), "output_size"),
-        (lambda cfg: replace(cfg, model=replace(cfg.model, max_positions=0)), "max_positions"),
         (lambda cfg: replace(cfg, train=replace(cfg.train, eval_every=-1)), "eval_every"),
         (lambda cfg: replace(cfg, train=replace(cfg.train, generate_every=-1)), "generate_every"),
         (
@@ -347,6 +347,7 @@ def test_data_and_logging_validation_rejects_invalid_values() -> None:
             lambda cfg: replace(cfg, data=replace(cfg.data, max_eval_samples=-1)),
             "max_eval_samples",
         ),
+        (lambda cfg: replace(cfg, data=replace(cfg.data, seed=-1)), "data.seed"),
         (
             lambda cfg: replace(
                 cfg,
@@ -370,7 +371,39 @@ def test_data_and_logging_validation_rejects_invalid_values() -> None:
             ),
             "wandb.tags",
         ),
+        (
+            lambda cfg: replace(
+                cfg,
+                logging=replace(
+                    cfg.logging,
+                    wandb=replace(cfg.logging.wandb, tags="scalar"),
+                ),
+            ),
+            "wandb.tags",
+        ),
         (lambda cfg: replace(cfg, logging=replace(cfg.logging, log_file=" ")), "log_file"),
+        (
+            lambda cfg: replace(
+                cfg,
+                logging=replace(
+                    cfg.logging,
+                    wandb=replace(cfg.logging.wandb, project=" "),
+                ),
+            ),
+            "wandb.project",
+        ),
+        (
+            lambda cfg: replace(cfg, checkpoint=replace(cfg.checkpoint, root_dir=" ")),
+            "checkpoint.root_dir",
+        ),
+        (
+            lambda cfg: replace(cfg, train=replace(cfg.train, profile_dir=" ")),
+            "train.profile_dir",
+        ),
+        (
+            lambda cfg: replace(cfg, debug=replace(cfg.debug, check_device_every=-1)),
+            "check_device_every",
+        ),
     ]
 
     for mutate, match in cases:
@@ -389,6 +422,30 @@ def test_wandb_tags_require_and_normalize_a_string_list() -> None:
 
     data["logging"]["wandb"]["tags"] = "baseline,smoke"
     with pytest.raises(ValueError, match="YAML/JSON list"):
+        build_config(data)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        ("data.shuffle", "false"),
+        ("data.device_put", "false"),
+        ("model.scale_emb", "false"),
+        ("model.model_dim", 128.0),
+        ("optim.lr", "0.0003"),
+        ("logging.project", 1),
+    ],
+)
+def test_config_rejects_values_with_the_wrong_type(path: str, value: object) -> None:
+    """YAML-looking strings and cross-category scalars must not change semantics silently."""
+    data = _base_cfg().to_dict()
+    target: dict[str, object] = data
+    parts = path.split(".")
+    for part in parts[:-1]:
+        target = target[part]  # type: ignore[assignment]
+    target[parts[-1]] = value
+
+    with pytest.raises(ValueError, match=re.escape(path)):
         build_config(data)
 
 

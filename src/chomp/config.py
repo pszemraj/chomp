@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import json
 import re
+import types
 import warnings
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, is_dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Union, get_args, get_origin, get_type_hints
 
 import yaml
 
@@ -83,7 +84,6 @@ class ModelConfig:
     pad_token_id: int = 0
     bos_token_id: int = 1
     eos_token_id: int = 2
-    max_positions: int = 1_000_000
     init_mode: Literal["gaussian", "xavier", "he", "bert", "none"] = "he"
     use_checkpoint: bool = False
     output_size: int = -1
@@ -682,6 +682,72 @@ def _vfail(msg: str) -> None:
     raise ValueError(f"Config validation failed: {msg}")
 
 
+def _matches_config_type(value: Any, type_hint: Any) -> bool:
+    """Return whether a parsed value satisfies a config field annotation.
+
+    Floats accept YAML integers because both are numeric configuration values;
+    booleans remain distinct from integers despite Python's bool subclassing.
+
+    :param Any value: Parsed configuration value.
+    :param Any type_hint: Resolved field annotation.
+    :return bool: True when the value satisfies the annotation.
+    """
+    origin = get_origin(type_hint)
+    if origin in (Union, types.UnionType):
+        return any(_matches_config_type(value, option) for option in get_args(type_hint))
+    if origin is Literal:
+        return any(
+            type(value) is type(option) and value == option for option in get_args(type_hint)
+        )
+    if origin is tuple:
+        if not isinstance(value, tuple):
+            return False
+        item_types = get_args(type_hint)
+        if len(item_types) == 2 and item_types[1] is Ellipsis:
+            return all(_matches_config_type(item, item_types[0]) for item in value)
+        return len(value) == len(item_types) and all(
+            _matches_config_type(item, item_type)
+            for item, item_type in zip(value, item_types, strict=True)
+        )
+    if type_hint is Any:
+        return True
+    if type_hint is bool:
+        return type(value) is bool
+    if type_hint is int:
+        return type(value) is int
+    if type_hint is float:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if type_hint is str:
+        return type(value) is str
+    if type_hint is type(None):
+        return value is None
+    return isinstance(value, type_hint)
+
+
+def _validate_config_types(value: Any, prefix: str = "") -> None:
+    """Validate every dataclass field against its resolved annotation.
+
+    :param Any value: Config dataclass or nested config dataclass.
+    :param str prefix: Dotted parent path used in validation errors.
+    :raises ValueError: If a field contains a value of the wrong type.
+    """
+    if not is_dataclass(value):
+        raise TypeError(f"Expected config dataclass, got {type(value).__name__}")
+    hints = get_type_hints(type(value))
+    for field in fields(value):
+        field_value = getattr(value, field.name)
+        path = f"{prefix}.{field.name}" if prefix else field.name
+        type_hint = hints[field.name]
+        if isinstance(type_hint, type) and is_dataclass(type_hint):
+            if type(field_value) is not type_hint:
+                _vfail(
+                    f"{path} has type {type(field_value).__name__}; expected {type_hint.__name__}"
+                )
+            _validate_config_types(field_value, path)
+        elif not _matches_config_type(field_value, type_hint):
+            _vfail(f"{path} has type {type(field_value).__name__}; expected {type_hint!s}")
+
+
 def _validate_train(cfg: Config) -> None:
     """Validate training-related config fields."""
     if cfg.train.steps <= 0:
@@ -725,6 +791,8 @@ def _validate_train(cfg: Config) -> None:
         cfg.train.generate_top_p <= 0 or cfg.train.generate_top_p > 1
     ):
         _vfail(f"train.generate_top_p must be in (0, 1] when set, got {cfg.train.generate_top_p}")
+    if cfg.train.profile_dir is not None and not cfg.train.profile_dir.strip():
+        _vfail("train.profile_dir must be a non-empty string or null")
 
 
 def _validate_optim(cfg: Config) -> None:
@@ -770,6 +838,8 @@ def _validate_optim(cfg: Config) -> None:
 
 def _validate_checkpoint(cfg: Config) -> None:
     """Validate checkpoint-related config fields."""
+    if cfg.checkpoint.root_dir is not None and not cfg.checkpoint.root_dir.strip():
+        _vfail("checkpoint.root_dir must be a non-empty string or null")
     if cfg.checkpoint.enabled:
         if cfg.checkpoint.save_every <= 0:
             _vfail(f"checkpoint.save_every must be positive, got {cfg.checkpoint.save_every}")
@@ -805,7 +875,6 @@ def _validate_model(cfg: Config) -> None:
             "cema_ndim": cfg.model.cema_ndim,
             "norm_num_groups": cfg.model.norm_num_groups,
             "norm_eps": cfg.model.norm_eps,
-            "max_positions": cfg.model.max_positions,
         }
         for name, value in positive_fields.items():
             if value <= 0:
@@ -885,6 +954,8 @@ def _validate_model(cfg: Config) -> None:
 
 def _validate_data(cfg: Config) -> None:
     """Validate data pipeline-related config fields."""
+    if cfg.data.seed < 0:
+        _vfail(f"data.seed must be >= 0, got {cfg.data.seed}")
     if cfg.data.backend == "hf":
         if not cfg.data.hf_dataset:
             _vfail("data.hf_dataset must be non-empty when data.backend='hf'")
@@ -999,8 +1070,14 @@ def _validate_logging(cfg: Config) -> None:
         _vfail("logging.metrics_file must be a non-empty string")
     if cfg.logging.log_file is not None and not str(cfg.logging.log_file).strip():
         _vfail("logging.log_file must be a non-empty string or null")
+    for name in ("project", "entity", "run_name"):
+        value = getattr(cfg.logging.wandb, name)
+        if value is not None and not value.strip():
+            _vfail(f"logging.wandb.{name} must be a non-empty string or null")
     if cfg.logging.wandb.mode not in ("online", "offline"):
         _vfail(f"logging.wandb.mode must be 'online' or 'offline', got {cfg.logging.wandb.mode!r}")
+    if not isinstance(cfg.logging.wandb.tags, tuple):
+        _vfail("logging.wandb.tags must be a YAML/JSON list of strings")
     if any(not isinstance(tag, str) or not tag.strip() for tag in cfg.logging.wandb.tags):
         _vfail("logging.wandb.tags entries must be non-empty strings")
 
@@ -1064,8 +1141,15 @@ def _validate_tokenizer(cfg: Config) -> None:
         _vfail("model.eos_token_id must be within [0, vocab_size) when add_eos=true")
 
 
+def _validate_debug(cfg: Config) -> None:
+    """Validate runtime debug-check configuration."""
+    if cfg.debug.check_device_every < 0:
+        _vfail(f"debug.check_device_every must be >= 0, got {cfg.debug.check_device_every}")
+
+
 def validate_config(cfg: Config) -> None:
     """Validate config with actionable error messages."""
+    _validate_config_types(cfg)
     _validate_train(cfg)
     _validate_optim(cfg)
     _validate_checkpoint(cfg)
@@ -1073,6 +1157,7 @@ def validate_config(cfg: Config) -> None:
     _validate_data(cfg)
     _validate_logging(cfg)
     _validate_tokenizer(cfg)
+    _validate_debug(cfg)
 
 
 def derived_deterministic(cfg: Config) -> bool:

@@ -258,7 +258,6 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
             pad_token_id=cfg.model.pad_token_id,
             bos_token_id=cfg.model.bos_token_id,
             eos_token_id=cfg.model.eos_token_id,
-            max_positions=cfg.model.max_positions,
             init_mode=cfg.model.init_mode,
             use_checkpoint=cfg.model.use_checkpoint,
             output_size=cfg.model.output_size,
