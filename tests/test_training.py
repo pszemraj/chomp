@@ -23,7 +23,6 @@ from _pytest.logging import LogCaptureFixture
 from chomp.ckpt import (
     CheckpointMeta,
     build_meta,
-    check_resume_compat,
     default_ckpt_dir,
     make_manager,
     restore_at_step,
@@ -31,6 +30,9 @@ from chomp.ckpt import (
     restore_params_only,
     save,
     validate_checkpoint_steps,
+)
+from chomp.ckpt import (
+    check_resume_compat as _check_resume_compat,
 )
 from chomp.config import (
     CheckpointConfig,
@@ -97,6 +99,28 @@ def _base_cfg(run_dir: Path) -> Config:
         optim=OptimConfig(warmup_steps=0),
         checkpoint=CheckpointConfig(enabled=True, save_every=1, max_to_keep=2, async_save=False),
         logging=LoggingConfig(project="chomp", run_dir=str(run_dir), metrics_file="metrics.jsonl"),
+    )
+
+
+def check_resume_compat(
+    cfg: Config,
+    meta: dict[str, Any] | None,
+    *,
+    tokenizer_snapshot_hash: str | None = None,
+    parameter_manifest_hash: str = "test-parameter-manifest",
+) -> None:
+    """Call resume validation with the test model-manifest identity.
+
+    :param Config cfg: Current configuration.
+    :param meta: Checkpoint metadata.
+    :param str | None tokenizer_snapshot_hash: Current tokenizer snapshot hash.
+    :param str parameter_manifest_hash: Current parameter-manifest hash.
+    """
+    _check_resume_compat(
+        cfg,
+        meta,
+        tokenizer_snapshot_hash=tokenizer_snapshot_hash,
+        parameter_manifest_hash=parameter_manifest_hash,
     )
 
 
@@ -1597,17 +1621,16 @@ def test_resume_compat_ignores_inert_packing_knobs(tmp_path: Path) -> None:
     check_resume_compat(mp_drifted, mp_meta)  # bin-only knob is inert here
 
 
-def test_resume_compat_checks_unknown_packing_fingerprint_keys(tmp_path: Path) -> None:
-    """A packing key recorded on only one side must error, never be skipped.
+@pytest.mark.parametrize("section", ["source", "tokenizer", "packing", "eval"])
+def test_resume_compat_checks_unknown_fingerprint_keys(tmp_path: Path, section: str) -> None:
+    """A fingerprint key recorded on only one side must error, never be skipped.
 
-    The packing section is compared over the union of recorded keys, so a
-    knob added to data_fingerprint (or one written by a different chomp
-    version) can never bypass compat checking — the failure mode of a
-    hand-enumerated comparison list.
+    Sections are compared over the union of recorded keys, so a field added to
+    ``data_fingerprint`` cannot bypass compatibility checking.
     """
     cfg = _base_cfg(tmp_path / "run_unknown_key")
     meta = _checkpoint_record(cfg).to_dict()
-    meta["data_fingerprint"]["packing"]["future_knob"] = 3
+    meta["data_fingerprint"][section]["future_knob"] = 3
 
     with pytest.raises(RuntimeError, match="future_knob"):
         check_resume_compat(cfg, meta)

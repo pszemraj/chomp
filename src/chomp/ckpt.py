@@ -500,15 +500,15 @@ def check_resume_compat(
     cfg: Config,
     meta: dict[str, Any] | None,
     *,
+    parameter_manifest_hash: str,
     tokenizer_snapshot_hash: str | None = None,
-    parameter_manifest_hash: str | None = None,
 ) -> None:
     """Validate checkpoint metadata against current config.
 
     :param Config cfg: Current training configuration.
     :param meta: Checkpoint metadata dict (or None if missing).
+    :param str parameter_manifest_hash: Current model/optimizer manifest hash.
     :param str | None tokenizer_snapshot_hash: Optional tokenizer snapshot hash for strict checks.
-    :param str | None parameter_manifest_hash: Current model/optimizer manifest hash.
     :raises RuntimeError: If meta is missing or config mismatches are found.
     """
 
@@ -553,154 +553,73 @@ def check_resume_compat(
             else:
                 warnings.append(msg)
 
+    def _cmp_mapping(
+        prefix: str,
+        cur: dict[str, Any],
+        prev: dict[str, Any],
+        *,
+        keys: set[str] | None = None,
+        severity: str = "error",
+        labels: dict[str, str] | None = None,
+    ) -> None:
+        """Compare selected mapping keys with consistent missing-key handling.
+
+        :param str prefix: Default dotted path prefix.
+        :param dict[str, Any] cur: Current values.
+        :param dict[str, Any] prev: Checkpoint values.
+        :param set[str] | None keys: Keys to compare, or the union when omitted.
+        :param str severity: ``error`` or ``warning``.
+        :param dict[str, str] | None labels: Optional full path overrides by key.
+        """
+        selected = keys if keys is not None else set(cur) | set(prev)
+        for key in sorted(selected):
+            path = (labels or {}).get(key, f"{prefix}.{key}" if prefix else key)
+            _cmp(path, cur.get(key), prev.get(key), severity=severity)
+
     cur_fp = data_fingerprint(cfg, tokenizer_snapshot_hash=tokenizer_snapshot_hash)
 
     current_runtime = runtime_identity()
-    for key in sorted(set(meta_runtime) | set(current_runtime)):
-        _cmp(
-            f"runtime.{key}",
-            current_runtime.get(key),
-            meta_runtime.get(key),
-            severity="error",
-        )
-
-    if parameter_manifest_hash is not None:
-        _cmp(
-            "parameter_manifest_hash",
-            parameter_manifest_hash,
-            meta.get("parameter_manifest_hash"),
-            severity="error",
-        )
-
+    _cmp_mapping("runtime", current_runtime, meta_runtime)
     _cmp(
-        "data_pipeline_schema_version",
-        cur_fp.get("data_pipeline_schema_version"),
-        meta_fp.get("data_pipeline_schema_version"),
+        "parameter_manifest_hash",
+        parameter_manifest_hash,
+        meta.get("parameter_manifest_hash"),
         severity="error",
     )
+    _cmp_mapping(
+        "",
+        cur_fp,
+        meta_fp,
+        keys={"data_pipeline_schema_version", "seq_len", "batch_size", "grad_accum"},
+        labels={
+            "seq_len": "train.seq_len",
+            "batch_size": "train.batch_size",
+            "grad_accum": "train.grad_accum",
+        },
+    )
 
-    # Data source comparisons.
+    # Fingerprint sections contain only active backend/mode keys. Comparing
+    # each section over its union catches newly added identity fields without
+    # maintaining a second hand-written schema here.
     src_prev = meta_fp.get("source") or {}
     src_cur = cur_fp.get("source") or {}
-    _cmp("data.source.backend", src_cur.get("backend"), src_prev.get("backend"), severity="error")
+    _cmp_mapping(
+        "data",
+        src_cur,
+        src_prev,
+        labels={
+            "backend": "data.source.backend",
+            "dataset": "data.hf_dataset",
+            "name": "data.hf_name",
+            "split": "data.hf_split",
+            "revision": "data.hf_revision",
+            "eval_holdout_fraction": "data.hf_eval_holdout_fraction",
+        },
+    )
 
-    if src_cur.get("backend") == "hf":
-        _cmp("data.hf_dataset", src_cur.get("dataset"), src_prev.get("dataset"), severity="error")
-        _cmp("data.hf_name", src_cur.get("name"), src_prev.get("name"), severity="error")
-        _cmp("data.hf_split", src_cur.get("split"), src_prev.get("split"), severity="error")
-        _cmp(
-            "data.hf_revision",
-            src_cur.get("revision"),
-            src_prev.get("revision"),
-            severity="error",
-        )
-        _cmp("data.text_key", src_cur.get("text_key"), src_prev.get("text_key"), severity="error")
-        _cmp("data.shuffle", src_cur.get("shuffle"), src_prev.get("shuffle"), severity="error")
-        _cmp("data.seed", src_cur.get("seed"), src_prev.get("seed"), severity="error")
-        _cmp(
-            "data.content_partition",
-            src_cur.get("content_partition"),
-            src_prev.get("content_partition"),
-            severity="error",
-        )
-        _cmp(
-            "data.content_holdout_schema_version",
-            src_cur.get("content_holdout_schema_version"),
-            src_prev.get("content_holdout_schema_version"),
-            severity="error",
-        )
-        _cmp(
-            "data.hf_eval_holdout_fraction",
-            src_cur.get("eval_holdout_fraction"),
-            src_prev.get("eval_holdout_fraction"),
-            severity="error",
-        )
-        # Hard error: buffer size drives the owned document-shuffle order, so a
-        # mismatch makes the resumed stream diverge from the continuous run.
-        _cmp(
-            "data.shuffle_buffer_size",
-            src_cur.get("shuffle_buffer_size"),
-            src_prev.get("shuffle_buffer_size"),
-            severity="error",
-        )
-        _cmp(
-            "data.shuffle_buffer_bytes",
-            src_cur.get("shuffle_buffer_bytes"),
-            src_prev.get("shuffle_buffer_bytes"),
-            severity="error",
-        )
-    elif src_cur.get("backend") == "local_text":
-        _cmp(
-            "data.local_text_hash",
-            src_cur.get("local_text_hash"),
-            src_prev.get("local_text_hash"),
-            severity="error",
-        )
-    # Both backends: repeat decides epoch rollover vs termination, so a drift
-    # changes what data the resumed run sees.
-    _cmp("data.repeat", src_cur.get("repeat"), src_prev.get("repeat"), severity="error")
-
-    # Tokenizer comparisons.
     tok_prev = meta_fp.get("tokenizer") or {}
     tok_cur = cur_fp.get("tokenizer") or {}
-    _cmp("tokenizer.kind", tok_cur.get("kind"), tok_prev.get("kind"), severity="error")
-
-    if tok_cur.get("kind") == "hf":
-        _cmp(
-            "tokenizer.hf_name_or_path",
-            tok_cur.get("hf_name_or_path"),
-            tok_prev.get("hf_name_or_path"),
-            severity="error",
-        )
-        _cmp(
-            "tokenizer.hf_use_fast",
-            tok_cur.get("hf_use_fast"),
-            tok_prev.get("hf_use_fast"),
-            severity="error",
-        )
-        _cmp(
-            "tokenizer.hf_trust_remote_code",
-            tok_cur.get("hf_trust_remote_code"),
-            tok_prev.get("hf_trust_remote_code"),
-            severity="error",
-        )
-    elif tok_cur.get("kind") == "byte":
-        _cmp(
-            "tokenizer.byte_offset",
-            tok_cur.get("byte_offset"),
-            tok_prev.get("byte_offset"),
-            severity="error",
-        )
-
-    _cmp("tokenizer.add_bos", tok_cur.get("add_bos"), tok_prev.get("add_bos"), severity="error")
-    _cmp("tokenizer.add_eos", tok_cur.get("add_eos"), tok_prev.get("add_eos"), severity="error")
-    _cmp(
-        "tokenizer.max_doc_tokens",
-        tok_cur.get("max_doc_tokens"),
-        tok_prev.get("max_doc_tokens"),
-        severity="error",
-    )
-    _cmp(
-        "tokenizer.vocab_size_multiple",
-        tok_cur.get("vocab_size_multiple"),
-        tok_prev.get("vocab_size_multiple"),
-        severity="error",
-    )
-    _cmp(
-        "tokenizer.auto_set_special_tokens",
-        tok_cur.get("auto_set_special_tokens"),
-        tok_prev.get("auto_set_special_tokens"),
-        severity="error",
-    )
-    snap_prev = tok_prev.get("snapshot_sha256")
-    snap_cur = tok_cur.get("snapshot_sha256")
-    if snap_prev is not None or snap_cur is not None:
-        _cmp(
-            "tokenizer.snapshot_sha256",
-            snap_cur,
-            snap_prev,
-            severity="error",
-        )
+    _cmp_mapping("tokenizer", tok_cur, tok_prev)
 
     # Packing/loss behavior comparisons. Compared generically over the union
     # of recorded keys (mirroring the model/optim loops below) so a knob
@@ -732,23 +651,7 @@ def check_resume_compat(
     # changing the eval set mid-run poisons every cross-run comparison.
     eval_prev = meta_fp.get("eval") or {}
     eval_cur = cur_fp.get("eval") or {}
-    for key in sorted(set(eval_prev) | set(eval_cur)):
-        _cmp(f"data.eval.{key}", eval_cur.get(key), eval_prev.get(key), severity="error")
-
-    # Batch shape invariants.
-    _cmp("train.seq_len", cur_fp.get("seq_len"), meta_fp.get("seq_len"), severity="error")
-    _cmp(
-        "train.batch_size",
-        cur_fp.get("batch_size"),
-        meta_fp.get("batch_size"),
-        severity="error",
-    )
-    _cmp(
-        "train.grad_accum",
-        cur_fp.get("grad_accum"),
-        meta_fp.get("grad_accum"),
-        severity="error",
-    )
+    _cmp_mapping("data.eval", eval_cur, eval_prev)
 
     # Model/optimizer comparisons.
     cur_cfg = cfg.to_dict()
@@ -774,8 +677,7 @@ def check_resume_compat(
     )
     model_prev = meta_cfg.get("model") or {}
     model_cur = cur_cfg.get("model") or {}
-    for key in sorted(set(model_prev) | set(model_cur)):
-        _cmp(f"model.{key}", model_cur.get(key), model_prev.get(key), severity="error")
+    _cmp_mapping("model", model_cur, model_prev)
 
     optim_prev = meta_cfg.get("optim") or {}
     optim_cur = cur_cfg.get("optim") or {}
