@@ -84,16 +84,19 @@ def _safe_version(pkg: str) -> str | None:
         return None
 
 
-@lru_cache(maxsize=1)
-def _source_revision() -> str:
-    """Return the repository commit plus tracked-source dirty status.
+def _source_revision_for(repo_root: Path) -> str:
+    """Return the repository commit plus source dirty status.
+
+    Dirty covers unstaged, staged, and untracked (non-ignored) files under
+    the source paths — ``git diff`` alone misses a brand-new uncommitted
+    module, which is exactly the drift the resume identity gate must catch.
 
     Installed wheels may not have repository metadata; their package version
     remains a stable fallback identity.
 
+    :param Path repo_root: Repository root to inspect.
     :return str: Git commit, optionally suffixed ``+dirty``, or package version.
     """
-    repo_root = Path(__file__).resolve().parents[2]
     try:
         commit = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -102,21 +105,33 @@ def _source_revision() -> str:
             capture_output=True,
             text=True,
         ).stdout.strip()
-        dirty = subprocess.run(
-            ["git", "diff", "--quiet", "--", "src", "pyproject.toml"],
+        status = subprocess.run(
+            [
+                "git",
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--",
+                "src",
+                "pyproject.toml",
+            ],
             cwd=repo_root,
-            check=False,
-        ).returncode
-        staged_dirty = subprocess.run(
-            ["git", "diff", "--cached", "--quiet", "--", "src", "pyproject.toml"],
-            cwd=repo_root,
-            check=False,
-        ).returncode
-        if dirty not in (0, 1) or staged_dirty not in (0, 1):
-            raise RuntimeError("git diff could not inspect source state")
-        return f"{commit}+dirty" if dirty or staged_dirty else commit
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        return f"{commit}+dirty" if status.strip() else commit
     except Exception:
         return f"package:{_chomp_version}"
+
+
+@lru_cache(maxsize=1)
+def _source_revision() -> str:
+    """Return the cached source revision for this chomp checkout.
+
+    :return str: Git commit, optionally suffixed ``+dirty``, or package version.
+    """
+    return _source_revision_for(Path(__file__).resolve().parents[2])
 
 
 @lru_cache(maxsize=1)

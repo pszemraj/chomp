@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import signal
+import subprocess
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -1515,6 +1516,64 @@ def test_resume_compat_hard_gates_parameter_manifest(tmp_path: Path) -> None:
     del meta["parameter_manifest_hash"]
     with pytest.raises(RuntimeError, match="parameter_manifest_hash"):
         check_resume_compat(cfg, meta, parameter_manifest_hash="test-parameter-manifest")
+
+
+def _git(repo: Path, *args: str) -> None:
+    """Run a git command in a test repository with a fixed identity."""
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=chomp-test",
+            "-c",
+            "user.email=chomp-test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            *args,
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_source_revision_flags_untracked_and_tracked_changes(tmp_path: Path) -> None:
+    """Source identity must flag untracked, unstaged, and staged src/ changes.
+
+    `git diff` alone misses a brand-new uncommitted module, letting the strict
+    runtime-identity resume gate pass on exactly the source drift it exists to
+    catch.
+    """
+    from chomp.ckpt import _source_revision_for
+
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    tracked = repo / "src" / "module.py"
+    tracked.write_text("x = 1\n")
+    _git(repo, "init", "--quiet")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--quiet", "-m", "init")
+
+    clean = _source_revision_for(repo)
+    assert not clean.startswith("package:")
+    assert not clean.endswith("+dirty")
+
+    untracked = repo / "src" / "new_module.py"
+    untracked.write_text("y = 2\n")
+    assert _source_revision_for(repo) == f"{clean}+dirty"
+    untracked.unlink()
+    assert _source_revision_for(repo) == clean
+
+    tracked.write_text("x = 2\n")
+    assert _source_revision_for(repo) == f"{clean}+dirty"
+    _git(repo, "add", "-A")
+    assert _source_revision_for(repo) == f"{clean}+dirty"
+
+    outside_scope = repo / "notes.txt"
+    outside_scope.write_text("not source\n")
+    _git(repo, "reset", "--quiet")
+    _git(repo, "checkout", "--quiet", "--", "src")
+    assert _source_revision_for(repo) == clean
 
 
 def test_resume_compat_hard_gates_runtime_identity(tmp_path: Path) -> None:
