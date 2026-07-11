@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 _UINT64_MASK = 2**64 - 1
 _SPLITMIX_INCREMENT = 0x9E3779B97F4A7C15
 CONTENT_HOLDOUT_SCHEMA_VERSION = 1
+# The blake2b domain separator embeds the schema version so that bumping the
+# version constant necessarily changes the hash function (and therefore the
+# train/eval partition); the two cannot drift apart. blake2b caps person at
+# 16 bytes.
+_CONTENT_HOLDOUT_PERSON = f"chomp-eval-v{CONTENT_HOLDOUT_SCHEMA_VERSION}".encode("ascii")
 ContentPartition = Literal["all", "train", "eval"]
 
 
@@ -42,7 +47,9 @@ def is_eval_holdout(text: str, *, fraction: float) -> bool:
     :param float fraction: Eval share in the open interval (0, 1).
     :return bool: True when the document belongs exclusively to evaluation.
     """
-    digest = hashlib.blake2b(text.encode("utf-8"), digest_size=8, person=b"chomp-eval-v1").digest()
+    digest = hashlib.blake2b(
+        text.encode("utf-8"), digest_size=8, person=_CONTENT_HOLDOUT_PERSON
+    ).digest()
     bucket = int.from_bytes(digest, "big")
     return bucket < int(float(fraction) * (2**64))
 
