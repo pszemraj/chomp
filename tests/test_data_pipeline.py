@@ -417,14 +417,23 @@ def test_ffd_packer_state_from_dict_is_strict(missing_key: str) -> None:
         packer.set_state(full_state)
 
 
+def test_ffd_packer_state_to_dict_rejects_row_pair_mismatch() -> None:
+    """Serialization must reject mismatched ready token/segment rows.
+
+    The compact wire format derives both ready queues from one shared
+    offsets list, so a mismatch is unrepresentable at restore time; to_dict
+    is the only layer that can catch it.
+    """
+    with pytest.raises(ValueError, match="matching lengths"):
+        _compact_ffd_state(
+            ready_tokens=[[1, 2, 3, 4, 5, 6, 7, 8]],
+            ready_segments=[[1, 1, 1]],
+        )
+
+
 @pytest.mark.parametrize(
     ("mutation", "match"),
     [
-        # ready row pair with mismatched inner lengths
-        (
-            {"ready_tokens": [[1, 2, 3, 4, 5, 6, 7, 8]], "ready_segments": [[1, 1, 1]]},
-            "matching lengths",
-        ),
         # ready row shorter than seq_len (rows are padded to fixed length)
         (
             {"ready_tokens": [[1, 2, 3]], "ready_segments": [[1, 1, 1]]},
@@ -447,7 +456,6 @@ def test_ffd_packer_state_from_dict_is_strict(missing_key: str) -> None:
         ({"docs_seen": 1, "docs_truncated": 2}, "invalid document counters"),
     ],
     ids=[
-        "row_pair_mismatch",
         "short_ready_row",
         "negative_segment",
         "empty_pending_chunk",
@@ -460,18 +468,22 @@ def test_ffd_packer_state_from_dict_is_strict(missing_key: str) -> None:
 def test_ffd_packer_state_rejects_corrupt_queues(
     make_packer: Callable[[], Any], mutation: dict[str, Any], match: str
 ) -> None:
-    """Compact queue invariants fail loud at restore: row pairing, fixed
-    seq_len ready rows, capacity-bounded pending chunks, sane counters."""
+    """Compact queue invariants fail loud at restore: fixed seq_len ready
+    rows, capacity-bounded pending chunks, sane counters.
+
+    State construction stays outside the raises block so every case must
+    fail in set_state itself, not in the test helper's serialization.
+    """
     packer = make_packer()
+    state = _compact_ffd_state(
+        pending_docs=mutation.get("pending_docs"),
+        ready_tokens=mutation.get("ready_tokens"),
+        ready_segments=mutation.get("ready_segments"),
+    )
+    for key in ("docs_seen", "docs_truncated"):
+        if key in mutation:
+            state["document_stats"][key] = mutation[key]
     with pytest.raises(ValueError, match=match):
-        state = _compact_ffd_state(
-            pending_docs=mutation.get("pending_docs"),
-            ready_tokens=mutation.get("ready_tokens"),
-            ready_segments=mutation.get("ready_segments"),
-        )
-        for key in ("docs_seen", "docs_truncated"):
-            if key in mutation:
-                state["document_stats"][key] = mutation[key]
         packer.set_state(state)
 
 
