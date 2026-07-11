@@ -967,7 +967,12 @@ class _FFDPackerBase(_PackerBase):
         Oversized documents are split into capacity-sized chunks first.
 
         :param tokens: Iterable of token IDs for the document.
+        :raises RuntimeError: If called after :meth:`finish` (misuse; a
+            silently buffered document would still be emitted by a later
+            flush cycle).
         """
+        if self._exhausted:
+            raise RuntimeError(f"cannot add a document after {self._mode_name} packer finish()")
         doc = self._prepare_document(tokens)
         if doc.size == 0:
             return

@@ -123,6 +123,19 @@ def _bin_packer() -> BinPacker:
     )
 
 
+def _token_packer() -> TokenPacker:
+    """Standard tiny TokenPacker for packer-level tests."""
+    return TokenPacker(
+        seq_len=8,
+        add_bos=False,
+        add_eos=False,
+        bos_id=1,
+        eos_id=2,
+        pad_id=0,
+        max_doc_tokens=None,
+    )
+
+
 def _ffd_pending_docs(packer: Any) -> list[list[int]]:
     """Decode pending FFD chunks for queue-policy assertions."""
     state = FFDPackerState.from_dict(packer.get_state())
@@ -310,6 +323,19 @@ def test_ffd_packer_flushes_pending_docs_at_stream_end(
 
     # Drained: nothing pending, nothing ready, no infinite re-flush.
     assert not packer.can_pop()
+
+
+@pytest.mark.parametrize("make_packer", [_token_packer, _bin_packer, _multipack_packer])
+def test_packer_rejects_add_document_after_finish(make_packer: Callable[[], Any]) -> None:
+    """add_document after finish() must raise, not silently buffer.
+
+    A silently buffered document would still be emitted by a later flush
+    cycle, so every packer shares the same misuse contract.
+    """
+    packer = make_packer()
+    packer.finish()
+    with pytest.raises(RuntimeError, match="after"):
+        packer.add_document(_doc(7, 3))
 
 
 @pytest.mark.parametrize("make_packer", [_bin_packer, _multipack_packer])
@@ -505,25 +531,13 @@ def test_token_packer_state_rejects_invalid_current_state(
 
 def test_token_packer_finite_tail_state_roundtrip() -> None:
     """Sequential exhaustion and its padded tail must survive a restore."""
-
-    def make_packer() -> TokenPacker:
-        return TokenPacker(
-            seq_len=8,
-            add_bos=False,
-            add_eos=False,
-            bos_id=1,
-            eos_id=2,
-            pad_id=0,
-            max_doc_tokens=None,
-        )
-
-    packer = make_packer()
+    packer = _token_packer()
     packer.add_document([4, 5, 6])
     packer.finish()
     state = packer.get_state()
     assert state["exhausted"] is True
 
-    restored = make_packer()
+    restored = _token_packer()
     restored.set_state(state)
     tokens, segments = restored.pop_seq_with_segments()
     np.testing.assert_array_equal(tokens, [4, 5, 6, 0, 0, 0, 0, 0])
@@ -532,7 +546,7 @@ def test_token_packer_finite_tail_state_roundtrip() -> None:
 
     del state["exhausted"]
     with pytest.raises(KeyError):
-        make_packer().set_state(state)
+        _token_packer().set_state(state)
 
 
 @pytest.mark.parametrize("mode", ["sequential", "bin", "multipack"])
