@@ -8,6 +8,7 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -501,6 +502,28 @@ def test_stop_signal_state_records_reason_and_restores_handlers() -> None:
         assert state.reason == "SIGTERM"
 
     assert signal.getsignal(signal.SIGTERM) is previous
+
+
+def test_stop_signal_state_warns_when_off_main_thread(caplog: LogCaptureFixture) -> None:
+    """Skipping handler install off the main thread must not be silent.
+
+    Preemption stops triggering a final checkpoint in that case; without a
+    log line the feature becomes a silent no-op.
+    """
+    previous = signal.getsignal(signal.SIGTERM)
+    state = _StopSignalState()
+
+    def _enter_and_exit() -> None:
+        with state:
+            pass
+
+    with caplog.at_level(logging.WARNING, logger="chomp.train"):
+        thread = threading.Thread(target=_enter_and_exit)
+        thread.start()
+        thread.join()
+
+    assert signal.getsignal(signal.SIGTERM) is previous
+    assert any("handlers were not" in record.message for record in caplog.records)
 
 
 def test_preemption_finishes_one_step_and_writes_aligned_checkpoint(

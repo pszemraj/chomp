@@ -157,6 +157,10 @@ class _StopSignalState:
 
     def __enter__(self) -> _StopSignalState:
         if threading.current_thread() is not threading.main_thread():
+            logger.warning(
+                "Not running on the main thread: SIGTERM/SIGUSR1 handlers were not "
+                "installed, so preemption will not trigger a final checkpoint."
+            )
             return self
         supported = [signal.SIGTERM]
         if hasattr(signal, "SIGUSR1"):
