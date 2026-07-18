@@ -211,6 +211,71 @@ def _saved_step1_checkpoint(
     return cfg, state, mgr, ckpt_dir
 
 
+def _checkpoint_steps(run_dir: Path) -> set[int]:
+    """Return numeric checkpoint steps present in a run directory.
+
+    :param Path run_dir: Training run directory.
+    :return set[int]: Completed numeric checkpoint directories, or an empty set.
+    """
+    ckpt_dir = default_ckpt_dir(run_dir)
+    if not ckpt_dir.exists():
+        return set()
+    return {int(path.name) for path in ckpt_dir.iterdir() if path.is_dir() and path.name.isdigit()}
+
+
+def _losses_by_step(run_dir: Path) -> dict[int, float]:
+    """Read logged training losses keyed by optimizer step.
+
+    :param Path run_dir: Training run directory.
+    :return dict[int, float]: Loss values from the run's metrics file.
+    """
+    rows = read_jsonl(run_dir / "metrics.jsonl")
+    return {int(row["step"]): row["loss"] for row in rows if "loss" in row and "step" in row}
+
+
+def _restore_run_states(
+    cfg: Config,
+    run_dirs: tuple[Path, Path],
+    *,
+    step: int,
+    save_every: int,
+    track_checkpoint_manager: Callable[[Any], Any],
+) -> list[TrainState]:
+    """Restore matching train states from two completed runs.
+
+    :param Config cfg: Shared model and data configuration.
+    :param tuple[Path, Path] run_dirs: Run directories to compare.
+    :param int step: Checkpoint step to restore.
+    :param int save_every: Manager cadence used by the runs.
+    :param track_checkpoint_manager: Fixture callback that closes managers after the test.
+    :return list[TrainState]: Restored states in run-directory order.
+    """
+    resolved, tokenizer = prepare_tokenizer_and_config(cfg)
+    params, _static = build_model(resolved, key=jax.random.PRNGKey(0))
+    tx, _ = build_optimizer(resolved, params)
+    abstract_state = abstractify_tree(
+        init_train_state(params=params, tx=tx, key=jax.random.PRNGKey(1))
+    )
+    states: list[TrainState] = []
+    for run_dir in run_dirs:
+        manager = track_checkpoint_manager(
+            make_manager(
+                default_ckpt_dir(run_dir),
+                max_to_keep=2,
+                save_every=save_every,
+                async_save=False,
+            )
+        )
+        _, state, _ = restore_at_step(
+            manager,
+            step=step,
+            abstract_train_state=abstract_state,
+            data_iter=build_train_iterator(resolved, tokenizer=tokenizer),
+        )
+        states.append(state)
+    return states
+
+
 def test_async_checkpoint_roundtrip(
     tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
 ) -> None:
@@ -408,8 +473,7 @@ def test_max_to_keep_prunes_checkpoints(
     )
     mgr.wait_until_finished()
 
-    steps = sorted(int(p.name) for p in ckpt_dir.iterdir() if p.is_dir() and p.name.isdigit())
-    assert steps == [3, 4]
+    assert _checkpoint_steps(run_dir) == {3, 4}
 
 
 def test_checkpoint_root_dir_resolves_relative_to_run_dir(
@@ -540,8 +604,7 @@ def test_explicit_resume_rejects_older_retained_step(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="newer step 4 already exists"):
         run(cfg, config_path=str(config_src), resume=3, dry_run=False)
 
-    ckpt_dir = default_ckpt_dir(run_dir)
-    assert {int(path.name) for path in ckpt_dir.iterdir() if path.name.isdigit()} == {1, 2, 3, 4}
+    assert _checkpoint_steps(run_dir) == {1, 2, 3, 4}
 
 
 def test_stop_signal_state_records_reason_and_restores_handlers() -> None:
@@ -618,9 +681,7 @@ def test_preemption_finishes_one_step_and_writes_aligned_checkpoint(
         and row.get("step") == 1
         for row in rows
     )
-    ckpt_dir = default_ckpt_dir(run_dir)
-    steps = {int(path.name) for path in ckpt_dir.iterdir() if path.name.isdigit()}
-    assert steps == {1}
+    assert _checkpoint_steps(run_dir) == {1}
 
 
 def test_preemption_during_final_logging_tail_is_not_lost(
@@ -710,8 +771,7 @@ def test_exact_eof_after_batch_boundary_saves_final_checkpoint(
     rows = read_jsonl(metrics_path)
     assert any(row.get("data_exhausted") and row.get("step") == 3 for row in rows)
 
-    ckpt_dir = default_ckpt_dir(run_dir)
-    steps_on_disk = {int(p.name) for p in ckpt_dir.iterdir() if p.is_dir() and p.name.isdigit()}
+    steps_on_disk = _checkpoint_steps(run_dir)
     assert steps_on_disk == {2, 3}, (
         f"exact EOF must save the aligned final checkpoint, found {steps_on_disk}"
     )
@@ -759,10 +819,7 @@ def test_crash_between_fetch_and_step_skips_final_checkpoint(
     with pytest.raises(RuntimeError, match="injected crash"):
         run(cfg_crash, config_path=str(config_src), resume="none", dry_run=False)
 
-    ckpt_dir_crash = default_ckpt_dir(Path(cfg_crash.logging.run_dir))
-    steps_on_disk = {
-        int(p.name) for p in ckpt_dir_crash.iterdir() if p.is_dir() and p.name.isdigit()
-    }
+    steps_on_disk = _checkpoint_steps(Path(cfg_crash.logging.run_dir))
     assert steps_on_disk == {2}, (
         f"final checkpoint must be skipped in the misaligned window, found {steps_on_disk}"
     )
@@ -771,25 +828,13 @@ def test_crash_between_fetch_and_step_skips_final_checkpoint(
     run(cfg_crash, config_path=str(config_src), resume="latest", dry_run=False)
 
     # Bit-exact resume contract: both step-5 train states identical.
-    cfg_ref, tokenizer = prepare_tokenizer_and_config(cfg_cont)
-    params, static = build_model(cfg_ref, key=jax.random.PRNGKey(0))
-    tx, _ = build_optimizer(cfg_ref, params)
-    abstract_state = abstractify_tree(
-        init_train_state(params=params, tx=tx, key=jax.random.PRNGKey(1))
+    states = _restore_run_states(
+        cfg_cont,
+        (run_dir_cont, Path(cfg_crash.logging.run_dir)),
+        step=5,
+        save_every=2,
+        track_checkpoint_manager=track_checkpoint_manager,
     )
-
-    states = []
-    for run_dir in (run_dir_cont, Path(cfg_crash.logging.run_dir)):
-        mgr = track_checkpoint_manager(
-            make_manager(default_ckpt_dir(run_dir), max_to_keep=2, save_every=2, async_save=False)
-        )
-        _, state, _ = restore_at_step(
-            mgr,
-            step=5,
-            abstract_train_state=abstract_state,
-            data_iter=build_train_iterator(cfg_ref, tokenizer=tokenizer),
-        )
-        states.append(state)
 
     assert int(jax.device_get(states[0].step)) == 5
     assert eqx.tree_equal(states[0].params, states[1].params)
@@ -820,17 +865,14 @@ def test_finite_partial_batch_trains_and_saves_aligned_checkpoint(tmp_path: Path
     assert any(row.get("data_exhausted") for row in rows)
     assert len([row for row in rows if row.get("step") == 4 and "loss" in row]) == 1
 
-    ckpt_dir = default_ckpt_dir(run_dir)
-    steps_on_disk = {int(p.name) for p in ckpt_dir.iterdir() if p.is_dir() and p.name.isdigit()}
-    assert steps_on_disk == {2, 4}
+    assert _checkpoint_steps(run_dir) == {2, 4}
 
     # Resume sees exact EOF at the saved aligned iterator state; it performs no
     # additional optimizer step and retains the final checkpoint.
     run(cfg, config_path=str(config_src), resume="latest", dry_run=False)
     rows = read_jsonl(metrics_path)
     assert len([row for row in rows if row.get("step") == 4 and "loss" in row]) == 1
-    steps_on_disk = {int(p.name) for p in ckpt_dir.iterdir() if p.is_dir() and p.name.isdigit()}
-    assert steps_on_disk == {2, 4}
+    assert _checkpoint_steps(run_dir) == {2, 4}
 
 
 def test_zero_loss_batch_does_not_mutate_training_state(
@@ -899,13 +941,7 @@ def test_zero_loss_batch_does_not_mutate_training_state(
 
     assert train_step_calls == 0
     assert eqx.tree_equal(captured["state"], captured["snapshot"])
-    ckpt_dir = default_ckpt_dir(run_dir)
-    saved_steps = (
-        {path.name for path in ckpt_dir.iterdir() if path.is_dir() and path.name.isdigit()}
-        if ckpt_dir.exists()
-        else set()
-    )
-    assert saved_steps == set()
+    assert _checkpoint_steps(run_dir) == set()
     assert any("Skipping final checkpoint" in record.getMessage() for record in caplog.records)
 
 
@@ -954,12 +990,8 @@ def test_resume_bit_exact_with_prefetch_and_window_shuffle(
 
     # Per-step losses agree exactly across the resume boundary (steps 4-6 ran
     # from the restored mid-window prefetching iterator).
-    def _losses(run_dir: Path) -> dict[int, float]:
-        rows = read_jsonl(run_dir / "metrics.jsonl")
-        return {int(r["step"]): r["loss"] for r in rows if "loss" in r and "step" in r}
-
-    losses_cont = _losses(run_dir_cont)
-    losses_int = _losses(run_dir_int)
+    losses_cont = _losses_by_step(run_dir_cont)
+    losses_int = _losses_by_step(run_dir_int)
     assert set(losses_cont) == set(losses_int) == {1, 2, 3, 4, 5, 6}
     # Teeth: distinct windows produce distinct step losses, so an off-by-one
     # in the replayed stream could not produce equal sequences by accident.
@@ -967,24 +999,13 @@ def test_resume_bit_exact_with_prefetch_and_window_shuffle(
     assert losses_cont == losses_int
 
     # And the step-6 train states are bit-identical.
-    cfg_ref, tokenizer = prepare_tokenizer_and_config(cfg_cont)
-    params, _static = build_model(cfg_ref, key=jax.random.PRNGKey(0))
-    tx, _ = build_optimizer(cfg_ref, params)
-    abstract_state = abstractify_tree(
-        init_train_state(params=params, tx=tx, key=jax.random.PRNGKey(1))
+    states = _restore_run_states(
+        cfg_cont,
+        (run_dir_cont, run_dir_int),
+        step=6,
+        save_every=4,
+        track_checkpoint_manager=track_checkpoint_manager,
     )
-    states = []
-    for run_dir in (run_dir_cont, run_dir_int):
-        mgr = track_checkpoint_manager(
-            make_manager(default_ckpt_dir(run_dir), max_to_keep=2, save_every=4, async_save=False)
-        )
-        _, state, _ = restore_at_step(
-            mgr,
-            step=6,
-            abstract_train_state=abstract_state,
-            data_iter=build_train_iterator(cfg_ref, tokenizer=tokenizer),
-        )
-        states.append(state)
     assert eqx.tree_equal(states[0].params, states[1].params)
     assert eqx.tree_equal(states[0].opt_state, states[1].opt_state)
 
@@ -1035,35 +1056,20 @@ def test_resume_bit_exact_through_exhaustion_flush(
     cfg_resume, _ = _make_cfg("run_flush_int", steps=3)
     run(cfg_resume, config_path=str(config_src), resume="latest", dry_run=False)
 
-    def _losses(run_dir: Path) -> dict[int, float]:
-        rows = read_jsonl(run_dir / "metrics.jsonl")
-        return {int(r["step"]): r["loss"] for r in rows if "loss" in r and "step" in r}
-
-    losses_cont = _losses(run_dir_cont)
-    losses_int = _losses(run_dir_int)
+    losses_cont = _losses_by_step(run_dir_cont)
+    losses_int = _losses_by_step(run_dir_int)
     # Step 3 exists only because the flush emitted windows 5 and 6.
     assert set(losses_cont) == set(losses_int) == {1, 2, 3}
     assert len(set(losses_cont.values())) > 1
     assert losses_cont == losses_int
 
-    cfg_ref, tokenizer = prepare_tokenizer_and_config(cfg_cont)
-    params, _static = build_model(cfg_ref, key=jax.random.PRNGKey(0))
-    tx, _ = build_optimizer(cfg_ref, params)
-    abstract_state = abstractify_tree(
-        init_train_state(params=params, tx=tx, key=jax.random.PRNGKey(1))
+    states = _restore_run_states(
+        cfg_cont,
+        (run_dir_cont, run_dir_int),
+        step=3,
+        save_every=4,
+        track_checkpoint_manager=track_checkpoint_manager,
     )
-    states = []
-    for run_dir in (run_dir_cont, run_dir_int):
-        mgr = track_checkpoint_manager(
-            make_manager(default_ckpt_dir(run_dir), max_to_keep=2, save_every=4, async_save=False)
-        )
-        _, state, _ = restore_at_step(
-            mgr,
-            step=3,
-            abstract_train_state=abstract_state,
-            data_iter=build_train_iterator(cfg_ref, tokenizer=tokenizer),
-        )
-        states.append(state)
     assert eqx.tree_equal(states[0].params, states[1].params)
     assert eqx.tree_equal(states[0].opt_state, states[1].opt_state)
 
@@ -1086,23 +1092,13 @@ def test_final_checkpoint_failure_fails_the_run(
 
     # W&B telemetry must agree with the raised failure: finish() is called
     # with a nonzero exit code, not 0-then-raise.
-    finish_codes: list[int] = []
-
-    class _FakeWandbRun:
-        summary: dict[str, Any] = {}
-
-        def log(self, *args: Any, **kwargs: Any) -> None:
-            pass
-
-        def finish(self, exit_code: int = 0) -> None:
-            finish_codes.append(int(exit_code))
-
+    dummy_wandb = DummyWandbRun()
     monkeypatch.setattr("chomp.train.save", _failing_save)
-    monkeypatch.setattr("chomp.train._maybe_init_wandb", lambda *a, **k: _FakeWandbRun())
+    monkeypatch.setattr("chomp.train._maybe_init_wandb", lambda *a, **k: dummy_wandb)
     with pytest.raises(RuntimeError, match="run finalization failed"):
         run(cfg, config_path=str(config_src), resume="none", dry_run=False)
-    assert finish_codes == [1], (
-        f"W&B must record the checkpoint finalization failure, got {finish_codes}"
+    assert dummy_wandb.finish_calls == [1], (
+        f"W&B must record the checkpoint finalization failure, got {dummy_wandb.finish_calls}"
     )
     monkeypatch.setattr("chomp.train._maybe_init_wandb", lambda *a, **k: None)
 
@@ -1213,12 +1209,7 @@ def test_periodic_save_step_forces_finite_check(
     ):
         run(cfg, config_path=str(config_src), resume="none", dry_run=False)
 
-    ckpt_dir = default_ckpt_dir(Path(cfg.logging.run_dir))
-    steps_on_disk = (
-        {int(p.name) for p in ckpt_dir.iterdir() if p.is_dir() and p.name.isdigit()}
-        if ckpt_dir.exists()
-        else set()
-    )
+    steps_on_disk = _checkpoint_steps(Path(cfg.logging.run_dir))
     assert steps_on_disk == set(), f"NaN step must never reach disk, found {steps_on_disk}"
     # The finally-block validation also refused to write the poisoned state.
     assert any("Skipping final checkpoint at step" in rec.getMessage() for rec in caplog.records)
@@ -1244,8 +1235,7 @@ def test_final_checkpoint_refuses_nonfinite_state(
     ):
         run(cfg, config_path=str(config_src), resume="none", dry_run=False)
 
-    ckpt_dir = default_ckpt_dir(Path(cfg.logging.run_dir))
-    steps_on_disk = {int(p.name) for p in ckpt_dir.iterdir() if p.is_dir() and p.name.isdigit()}
+    steps_on_disk = _checkpoint_steps(Path(cfg.logging.run_dir))
     assert steps_on_disk == {2, 4}, f"latest must stay the last good save, found {steps_on_disk}"
     assert any("Skipping final checkpoint at step" in rec.getMessage() for rec in caplog.records)
 
@@ -1288,12 +1278,7 @@ def test_checkpoint_refuses_nonfinite_post_update_state(
     with pytest.raises(RuntimeError, match=match):
         run(cfg, config_path=str(config_src), resume="none", dry_run=False)
 
-    ckpt_dir = default_ckpt_dir(Path(cfg.logging.run_dir))
-    steps_on_disk = (
-        {int(path.name) for path in ckpt_dir.iterdir() if path.name.isdigit()}
-        if ckpt_dir.exists()
-        else set()
-    )
+    steps_on_disk = _checkpoint_steps(Path(cfg.logging.run_dir))
     assert steps_on_disk == expected_steps
 
 
