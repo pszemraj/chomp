@@ -159,14 +159,13 @@ class DummyLM(eqx.Module):
 # generate) regardless of packing mode. This runtime floor also protects
 # editable or otherwise stale environments from bypassing package resolution.
 _MIN_MEGALODON_JAX = "0.2.1"
-_PARAMETER_MANIFEST_SCHEMA_VERSION = 1
+_PARAMETER_MANIFEST_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
 class ModelArrayClassification:
-    """Role assigned to one array leaf by the model adapter."""
+    """Optimizer role assigned to one trainable array leaf."""
 
-    trainable: bool
     family: str
     decay: bool
 
@@ -181,10 +180,8 @@ def _optimizer_group(
     :param Config cfg: Model and optimizer configuration.
     :param Any leaf: Candidate parameter leaf.
     :param ModelArrayClassification classification: Explicit model-family assignment.
-    :return str: ``fixed``, ``muon``, or ``adam``.
+    :return str: ``muon`` or ``adam``.
     """
-    if not classification.trainable:
-        return "fixed"
     muon = cfg.optim.muon
     if cfg.optim.name != "muon" or not hasattr(leaf, "ndim") or leaf.ndim != 2:
         return "adam"
@@ -198,12 +195,12 @@ def _optimizer_group(
 
 
 def classify_model_array(cfg: Config, path: str) -> ModelArrayClassification:
-    """Classify one backend array as a parameter or fixed buffer.
+    """Classify one backend trainable array for optimizer assignment.
 
     This is a fail-closed adapter for the supported Megalodon-JAX model layout.
     A dependency update that introduces an unknown array must be reviewed and
-    classified before training can start; silently treating every float array
-    as learned previously caused RoPE inverse frequencies to enter AdamW.
+    classified before training can start. Derived constants such as RoPE
+    frequencies must remain outside the model array tree.
 
     :param Config cfg: Model/optimizer configuration.
     :param str path: Stable dotted array path.
@@ -212,16 +209,16 @@ def classify_model_array(cfg: Config, path: str) -> ModelArrayClassification:
     """
     if cfg.model.backend == "dummy":
         if path.endswith("embed.weight"):
-            return ModelArrayClassification(True, "embedding", True)
+            return ModelArrayClassification("embedding", True)
         if path.endswith("proj.weight"):
-            return ModelArrayClassification(True, "projection", True)
+            return ModelArrayClassification("projection", True)
     elif cfg.model.backend == "megalodon":
         if path.endswith("embed.weight"):
-            return ModelArrayClassification(True, "embedding", True)
+            return ModelArrayClassification("embedding", True)
         if path.endswith("lm_head.weight"):
-            return ModelArrayClassification(True, "projection", True)
+            return ModelArrayClassification("projection", True)
         if path.endswith("lm_head.bias"):
-            return ModelArrayClassification(True, "bias", False)
+            return ModelArrayClassification("bias", False)
 
         linear_modules = (
             ".attn.wz.",
@@ -235,13 +232,13 @@ def classify_model_array(cfg: Config, path: str) -> ModelArrayClassification:
         )
         if any(module in path for module in linear_modules):
             if path.endswith(".weight"):
-                return ModelArrayClassification(True, "projection", True)
+                return ModelArrayClassification("projection", True)
             if path.endswith(".bias"):
-                return ModelArrayClassification(True, "bias", False)
+                return ModelArrayClassification("bias", False)
 
         cema_names = ("alpha", "delta", "theta", "gamma_real", "gamma_imag", "omega")
         if ".attn.cema." in path and path.rsplit(".", 1)[-1] in cema_names:
-            return ModelArrayClassification(True, "cema", False)
+            return ModelArrayClassification("cema", False)
 
         norm_paths = (
             ".attn.timenorm.weight",
@@ -253,16 +250,15 @@ def classify_model_array(cfg: Config, path: str) -> ModelArrayClassification:
             "model.norm.bias",
         )
         if any(path.endswith(suffix) for suffix in norm_paths):
-            return ModelArrayClassification(True, "norm", False)
+            return ModelArrayClassification("norm", False)
         if path.endswith(".attn.gamma") or path.endswith(".attn.beta"):
-            return ModelArrayClassification(True, "attention_affine", False)
+            return ModelArrayClassification("attention_affine", False)
         if path.endswith(".ffn.alpha"):
-            return ModelArrayClassification(True, "ffn_residual_scale", False)
+            return ModelArrayClassification("ffn_residual_scale", False)
 
     raise RuntimeError(
         f"Unclassified {cfg.model.backend} model array {path!r}. Chomp fails closed when the "
-        "pinned model layout changes; classify this leaf as a trainable parameter or fixed "
-        "buffer before training."
+        "pinned model layout changes; classify this parameter before training."
     )
 
 
@@ -275,7 +271,7 @@ def _parameter_filter_spec(cfg: Config, model: Any) -> Any:
     """
 
     def classify(path: tuple[Any, ...], leaf: Any) -> bool:
-        """Return trainable status for one pytree leaf.
+        """Validate and select one model-array leaf for training.
 
         :param tuple[Any, ...] path: JAX pytree path.
         :param Any leaf: Model leaf at the path.
@@ -283,7 +279,8 @@ def _parameter_filter_spec(cfg: Config, model: Any) -> Any:
         """
         if not eqx.is_array(leaf):
             return False
-        return classify_model_array(cfg, path_to_str(path)).trainable
+        classify_model_array(cfg, path_to_str(path))
+        return True
 
     return jax.tree_util.tree_map_with_path(classify, model)
 
@@ -327,7 +324,7 @@ def parameter_optimizer_groups(cfg: Config, params: Any) -> Any:
 
 
 def build_parameter_manifest(cfg: Config, params: Any, static: Any) -> dict[str, Any]:
-    """Build the complete parameter/buffer and optimizer assignment manifest.
+    """Build the complete parameter and optimizer assignment manifest.
 
     :param Config cfg: Model and optimizer configuration.
     :param Any params: Trainable model partition.
@@ -349,7 +346,6 @@ def build_parameter_manifest(cfg: Config, params: Any, static: Any) -> dict[str,
                 "path": path_str,
                 "shape": [int(dim) for dim in leaf.shape],
                 "dtype": str(leaf.dtype),
-                "trainable": classification.trainable,
                 "family": classification.family,
                 "optimizer_group": optimizer_group,
                 "decay": classification.decay,
@@ -429,13 +425,13 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
     """Build model and return (params, static).
 
     We always partition immediately using the backend's explicit parameter
-    contract. Ordinary arrays are not assumed trainable, while derived RoPE
+    contract. Every model array must be a classified parameter; derived RoPE
     frequencies do not appear in the model array tree at all.
 
     Why?
     - We never want to stash full Modules in TrainState
     - It keeps checkpointing straightforward
-    - It makes the learned-versus-fixed distinction executable and fail-closed
+    - It makes optimizer assignment executable and fail-closed
 
     :param Config cfg: Model configuration.
     :param jax.Array key: PRNG key for model initialization.

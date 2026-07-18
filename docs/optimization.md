@@ -14,11 +14,7 @@ Related: [Config Reference](config-reference.yaml) (`optim.*`),
 - `muon`: Muon on a safe whitelist of projection weight matrices, AdamW on the
   rest.
 
-At startup, the model adapter classifies every array as a trainable parameter
-or fixed buffer. Unknown Megalodon-JAX array paths fail startup, which prevents
-a dependency update from silently changing the trained model. The resulting
-`parameter-manifest.json` records each path, shape, dtype, family, optimizer
-group, and weight-decay status. Its hash is a hard checkpoint-resume input.
+At startup, the model adapter classifies every model array as a trainable parameter. Derived constants must remain outside the model array tree. Unknown Megalodon-JAX array paths fail startup, which prevents a dependency update from silently changing the trained model. The resulting `parameter-manifest.json` records each path, shape, dtype, family, optimizer group, and weight-decay status. Its hash is a hard checkpoint-resume input.
 
 Megalodon-JAX 0.2.1 derives RoPE frequencies from static dimension/base values during the model call, so no rotary array appears in the model tree, parameter manifest, optimizer state, or checkpoint. Trainable CEMA coefficients remain parameters.
 

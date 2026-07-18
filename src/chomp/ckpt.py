@@ -250,7 +250,7 @@ def build_meta(
     :param int step: Current training step.
     :param dict[str, Any] config: Full config dict for reproducibility.
     :param dict[str, Any] data_fingerprint: Data pipeline fingerprint.
-    :param str parameter_manifest_hash: Hash of trainable/fixed and optimizer assignments.
+    :param str parameter_manifest_hash: Hash of parameter and optimizer assignments.
     :param int tokens_seen: Cumulative loss-token count for exact resume accounting.
     :return CheckpointMeta: Populated metadata object.
     """

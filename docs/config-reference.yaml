@@ -989,8 +989,9 @@ optim:
   # Required: no.
   # Valid: >= 0; zero disables weight decay.
   # Use: AdamW decay coefficient. The explicit model-aware mask includes token embeddings and dense
-  # projection weights. It excludes biases, norms/scales, attention affine offsets, fixed RoPE
-  # buffers, and CEMA coefficients. Muon matrices additionally multiply it by muon.weight_decay_mult.
+  # projection weights. It excludes biases, norms/scales, attention affine offsets, and CEMA
+  # coefficients. Derived RoPE frequencies are not model arrays. Muon matrices additionally
+  # multiply it by muon.weight_decay_mult.
   weight_decay: 0.01
 
   # Key: optim.grad_clip_norm

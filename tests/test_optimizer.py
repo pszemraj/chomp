@@ -101,7 +101,6 @@ def test_parameter_contract_excludes_derived_rope_arrays(
     cfg, params, static = megalodon_parts
     manifest = build_parameter_manifest(cfg, params, static)
     assert not any("rotary" in entry["path"] for entry in manifest["arrays"])
-    assert all(entry["trainable"] for entry in manifest["arrays"])
 
     cfg = replace(cfg, optim=replace(cfg.optim, lr=1e-3, weight_decay=0.1, warmup_steps=0))
     tx, _ = build_optimizer(cfg, params)
@@ -194,7 +193,6 @@ def test_parameter_contract_covers_supported_model_variants(
     cfg = Config(model=replace(base, **model_updates))
     params, static = build_model(cfg, key=jax.random.PRNGKey(1))
     manifest = build_parameter_manifest(cfg, params, static)
-    assert all(entry["trainable"] for entry in manifest["arrays"])
     if model_updates.get("swiglu"):
         assert any(entry["path"].endswith("ffn.fc3.weight") for entry in manifest["arrays"])
     if model_updates.get("rescale_nffn"):
