@@ -30,8 +30,9 @@ For `optim.name=muon`, the harness uses explicit parameter partitioning:
   parameters).
 
 AdamW decay is also path-aware. It applies to token embeddings and dense
-projection weights. Biases, norm/scale parameters, attention affine offsets,
-and all CEMA coefficients receive no decoupled weight decay.
+projection weights. Biases, norm/scale parameters, normalized-FFN residual
+scales, attention affine offsets, and all CEMA coefficients receive no
+decoupled weight decay.
 
 By default, the projection whitelist excludes embeddings and other non-matmul matrices. `optim.muon.allow_tied_embed` adds the token embedding only when `model.share_emb=true`; it has no effect on an untied model. `optim.muon.allow_all_2d` replaces the whitelist with every 2D tensor.
 

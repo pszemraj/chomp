@@ -256,6 +256,8 @@ def classify_model_array(cfg: Config, path: str) -> ModelArrayClassification:
             return ModelArrayClassification(True, "norm", False)
         if path.endswith(".attn.gamma") or path.endswith(".attn.beta"):
             return ModelArrayClassification(True, "attention_affine", False)
+        if path.endswith(".ffn.alpha"):
+            return ModelArrayClassification(True, "ffn_residual_scale", False)
 
     raise RuntimeError(
         f"Unclassified {cfg.model.backend} model array {path!r}. Chomp fails closed when the "

@@ -196,7 +196,8 @@ model:
   # Default: false.
   # Required: no.
   # Valid: true | false.
-  # Use: enables Megalodon's normalized-FFN residual rescaling.
+  # Use: enables Megalodon's normalized-FFN residual rescaling. Its learned alpha vector in each
+  # layer uses Adam without decoupled weight decay, including when optim.name is muon.
   # Warning: changing this changes model semantics and is checkpoint-incompatible.
   rescale_nffn: false
 

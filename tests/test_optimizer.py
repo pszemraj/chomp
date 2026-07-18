@@ -167,6 +167,7 @@ def test_parameter_contract_fails_closed_on_unknown_array() -> None:
     "model_updates",
     [
         pytest.param({"swiglu": True}, id="swiglu"),
+        pytest.param({"rescale_nffn": True}, id="rescale-nffn"),
         pytest.param({"norm_affine": False}, id="no-norm-affine"),
         pytest.param({"share_emb": False, "output_size": 96}, id="custom-output"),
         pytest.param({"share_emb": True}, id="tied-embedding"),
@@ -196,10 +197,45 @@ def test_parameter_contract_covers_supported_model_variants(
     assert all(entry["trainable"] for entry in manifest["arrays"])
     if model_updates.get("swiglu"):
         assert any(entry["path"].endswith("ffn.fc3.weight") for entry in manifest["arrays"])
+    if model_updates.get("rescale_nffn"):
+        residual_scale = next(
+            entry for entry in manifest["arrays"] if entry["path"].endswith("ffn.alpha")
+        )
+        assert residual_scale["family"] == "ffn_residual_scale"
+        assert residual_scale["optimizer_group"] == "adam"
+        assert residual_scale["decay"] is False
     if model_updates.get("output_size"):
         assert any(entry["path"] == "lm_head.weight" for entry in manifest["arrays"])
     if model_updates.get("share_emb"):
         assert not any(entry["path"] == "lm_head.weight" for entry in manifest["arrays"])
+
+
+def test_ffn_residual_scale_is_trainable_without_weight_decay(
+    megalodon_parts: tuple[Config, Any, Any],
+) -> None:
+    """Normalized-FFN residual scales must receive Adam updates without decay.
+
+    :param tuple[Config, Any, Any] megalodon_parts: Shared base model parts.
+    """
+    cfg, _, _ = megalodon_parts
+    cfg = replace(
+        cfg,
+        model=replace(cfg.model, rescale_nffn=True),
+        optim=replace(cfg.optim, name="muon", lr=1e-3, weight_decay=1.0, warmup_steps=0),
+    )
+    params, _ = build_model(cfg, key=jax.random.PRNGKey(2))
+    path = "model.layers.[0].ffn.alpha"
+    before = _leaf_map(params)[path]
+
+    assert _leaf_map(parameter_optimizer_groups(cfg, params))[path] == "adam"
+    assert _leaf_map(parameter_decay_mask(cfg, params))[path] is False
+
+    tx, _ = build_optimizer(cfg, params)
+    opt_state = tx.init(params)
+    grads = jax.tree_util.tree_map(jnp.ones_like, params)
+    updates, _ = tx.update(grads, opt_state, params)
+    after = _leaf_map(optax.apply_updates(params, updates))[path]
+    assert not jnp.array_equal(after, before)
 
 
 def test_muon_param_labels_whitelist_excludes_embed(
