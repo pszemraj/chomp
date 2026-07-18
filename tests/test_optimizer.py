@@ -347,8 +347,8 @@ def test_muon_non_muon_params_use_plain_adamw(megalodon_params: Any) -> None:
     assert jnp.allclose(muon_map[path], adam_map[path])
 
 
-def test_grad_accum_equivalence_dummy_local_text() -> None:
-    """Scan-based grad accum should match manual averaging + single update."""
+def test_grad_accum_matches_equivalent_large_batch() -> None:
+    """Accumulated microbatches should match one equivalent physical batch."""
     cfg = Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
         data=DataConfig(
@@ -360,9 +360,9 @@ def test_grad_accum_equivalence_dummy_local_text() -> None:
         train=TrainConfig(
             seed=0,
             steps=1,
-            batch_size=2,
+            batch_size=1,
             seq_len=16,
-            grad_accum=4,
+            grad_accum=2,
             jit=False,
             allow_cpu=True,
             deterministic=True,
@@ -377,92 +377,38 @@ def test_grad_accum_equivalence_dummy_local_text() -> None:
     tx, sched = build_optimizer(cfg, params)
     state0 = init_train_state(params=params, tx=tx, key=key)
 
-    # Build one batch via the real pipeline
-    it = build_train_iterator(cfg)
-    batch = next(it)
-    batch = jax.device_put(batch)
+    accumulated = jax.device_put(next(build_train_iterator(cfg)))
+    # Give the two microbatches different valid-token counts; equal averaging
+    # would then diverge from the equivalent large-batch result.
+    accumulated = Batch(
+        input_ids=accumulated.input_ids,
+        labels=accumulated.labels.at[0, 0, -4:].set(-100),
+        segment_ids=accumulated.segment_ids,
+    )
+    batched = Batch(
+        input_ids=jnp.swapaxes(accumulated.input_ids, 0, 1),
+        labels=jnp.swapaxes(accumulated.labels, 0, 1),
+        segment_ids=jnp.swapaxes(accumulated.segment_ids, 0, 1),
+    )
+    large_batch_cfg = replace(
+        cfg,
+        train=replace(cfg.train, batch_size=2, grad_accum=1),
+    )
 
-    # --- Implementation under test ---
-    train_step = make_train_step(cfg, static=static, tx=tx, lr_schedule=sched)
-    state1, metrics = train_step(state0, batch)
-
-    # --- Reference: average microbatch grads + one update ---
-    deterministic = True
-
-    def micro_loss(
-        p: jax.Array,
-        in_ids: jax.Array,
-        labs: jax.Array,
-        segs: jax.Array,
-        k: jax.Array,
-        token_count: jax.Array,
-    ) -> jax.Array:
-        """Compute loss for a single microbatch scaled by token count.
-
-        :param jax.Array p: Model parameters.
-        :param jax.Array in_ids: Input token ids.
-        :param jax.Array labs: Label token ids.
-        :param jax.Array segs: Segment ids.
-        :param jax.Array k: PRNG key.
-        :param jax.Array token_count: Token count for scaling.
-        :return jax.Array: Scaled microbatch loss.
-        """
-        micro = Batch(
-            input_ids=in_ids,
-            labels=labs,
-            segment_ids=segs,
-        )
-        loss = training_loss(
-            p,
-            static,
-            batch=micro,
-            deterministic=deterministic,
-            key=k,
-        )
-        return loss * token_count
-
-    loss_and_grad = eqx.filter_value_and_grad(micro_loss)
-
-    grads_sum = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), state0.params)
-    loss_sum = jnp.zeros((), dtype=jnp.float32)
-    token_sum = jnp.zeros((), dtype=jnp.float32)
-
-    # Same micro-keys generation as train_step (split once)
-    rng, step_key = jax.random.split(state0.rng)
-    micro_keys = jax.random.split(step_key, cfg.train.grad_accum)
-
-    for i in range(cfg.train.grad_accum):
-        shift_labels = batch.labels[i][:, 1:]
-        valid = shift_labels != -100
-        valid = valid & (batch.segment_ids[i][:, 1:] > 0)
-        token_count = jnp.sum(valid, dtype=jnp.int32).astype(jnp.float32)
-        loss_i, grads_i = loss_and_grad(
-            state0.params,
-            batch.input_ids[i],
-            batch.labels[i],
-            batch.segment_ids[i],
-            micro_keys[i],
-            token_count,
-        )
-        loss_sum = loss_sum + loss_i.astype(jnp.float32)
-        grads_sum = jax.tree_util.tree_map(lambda a, b: a + b, grads_sum, grads_i)
-        token_sum = token_sum + token_count
-
-    loss_ref = loss_sum / token_sum
-    grads_ref = jax.tree_util.tree_map(lambda g: g / token_sum, grads_sum)
-
-    updates_ref, opt_state_ref = tx.update(grads_ref, state0.opt_state, state0.params)
-    params_ref = optax.apply_updates(state0.params, updates_ref)
+    accumulated_step = make_train_step(cfg, static=static, tx=tx, lr_schedule=sched)
+    batched_step = make_train_step(large_batch_cfg, static=static, tx=tx, lr_schedule=sched)
+    accumulated_state, accumulated_metrics = accumulated_step(state0, accumulated)
+    batched_state, batched_metrics = batched_step(state0, batched)
 
     plat = jax.devices()[0].platform
     if plat == "cpu":
-        rtol, atol = 0.0, 1e-8
+        rtol, atol = 1e-6, 1e-7
     else:
         rtol, atol = 1e-5, 1e-5
 
-    assert eqx.tree_equal(state1.params, params_ref, rtol=rtol, atol=atol)
-    assert eqx.tree_equal(state1.opt_state, opt_state_ref, rtol=rtol, atol=atol)
-    assert jnp.allclose(metrics["loss"], loss_ref)
+    assert eqx.tree_equal(accumulated_state, batched_state, rtol=rtol, atol=atol)
+    assert jnp.allclose(accumulated_metrics["loss"], batched_metrics["loss"], rtol=rtol, atol=atol)
+    assert accumulated_metrics["token_sum"] == batched_metrics["token_sum"]
 
 
 def test_bf16_params_accumulate_grads_in_fp32() -> None:
