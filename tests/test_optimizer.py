@@ -120,6 +120,28 @@ def test_parameter_contract_excludes_derived_rope_arrays(
     assert not jnp.array_equal(before.model.embed.weight, after.model.embed.weight)
 
 
+def test_bounded_megalodon_loss_matches_full_logits(
+    megalodon_parts: tuple[Config, Any, Any],
+) -> None:
+    """The Chomp adapter should preserve loss when chunking the vocabulary head."""
+    _, params, static = megalodon_parts
+    input_ids = jnp.arange(16, dtype=jnp.int32)[None, :]
+    batch = Batch(
+        input_ids=input_ids,
+        labels=input_ids,
+        segment_ids=jnp.ones_like(input_ids),
+    )
+    kwargs = {
+        "batch": batch,
+        "deterministic": True,
+        "key": None,
+        "use_packed_segments": True,
+    }
+    full = training_loss(params, static, **kwargs)
+    bounded = training_loss(params, static, loss_chunk_size=3, **kwargs)
+    assert jnp.allclose(full, bounded, rtol=1e-6, atol=1e-6)
+
+
 def test_parameter_decay_policy_is_model_aware(
     megalodon_parts: tuple[Config, Any, Any],
 ) -> None:

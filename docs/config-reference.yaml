@@ -369,6 +369,19 @@ model:
   # recommended for stable long-run training.
   loss_softmax_dtype: float32
 
+  # Key: model.loss_chunk_size
+  # Type: integer | null
+  # Default: null, which materializes the full FP32 (batch, sequence, vocabulary) logits tensor.
+  # Required: no; valid only when model.backend is megalodon.
+  # Valid: null or an integer > 0. The value is static and changing it recompiles train/eval steps.
+  # Use: a positive value projects at most this many flattened shifted token states at once during
+  # loss computation, bounding vocabulary-head intermediates without changing attention, packing,
+  # masking, or loss math. The backward pass rematerializes each chunk, trading throughput for lower
+  # peak memory. Full-logits storage is approximately batch_size * (seq_len - 1) * vocab_size * 4
+  # bytes per microbatch before backward/compiler workspace. Choose the largest value that fits;
+  # start with 256 for 32K-vocabulary long-context runs and benchmark against null on the target GPU.
+  loss_chunk_size: null
+
 # Key: data
 # Type: mapping
 # Default: omitted or {}, which applies every nested default below.

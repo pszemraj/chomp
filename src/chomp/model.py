@@ -517,6 +517,7 @@ def training_loss(
     deterministic: bool,
     key: jax.Array | None,
     use_packed_segments: bool = False,
+    loss_chunk_size: int | None = None,
 ) -> jax.Array:
     """Compute training loss.
 
@@ -531,6 +532,7 @@ def training_loss(
     :param bool deterministic: If False, apply dropout.
     :param key: PRNG key required when deterministic=False.
     :param bool use_packed_segments: Whether to pass segment IDs to backend loss.
+    :param int | None loss_chunk_size: Maximum token states projected per loss-head chunk.
     :return jax.Array: Scalar loss value.
     """
 
@@ -545,6 +547,8 @@ def training_loss(
     }
     if use_packed_segments:
         kwargs["segment_ids"] = batch.segment_ids
+    if loss_chunk_size is not None:
+        kwargs["loss_chunk_size"] = loss_chunk_size
     return model.compute_loss(  # type: ignore[attr-defined]
         batch.input_ids,
         batch.labels,

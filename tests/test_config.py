@@ -127,6 +127,10 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
             lambda cfg: replace(cfg, model=replace(cfg.model, loss_softmax_dtype="float16")),
             "loss_softmax_dtype",
         ),
+        (
+            lambda cfg: replace(cfg, model=replace(cfg.model, loss_chunk_size=0)),
+            "loss_chunk_size",
+        ),
         (lambda cfg: replace(cfg, model=replace(cfg.model, output_size=0)), "output_size"),
         (
             lambda cfg: replace(cfg, model=replace(cfg.model, share_emb=True, output_size=128)),
@@ -165,6 +169,11 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
     for mutate, match in cases:
         with pytest.raises(ValueError, match=match):
             validate_config(mutate(_base_cfg()))
+
+    base = _base_cfg()
+    dummy = replace(base, model=replace(base.model, backend="dummy", loss_chunk_size=8))
+    with pytest.raises(ValueError, match="only when model.backend='megalodon'"):
+        validate_config(dummy)
 
 
 def test_build_config_rejects_unknown_top_level_sections() -> None:

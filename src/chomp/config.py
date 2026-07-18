@@ -155,6 +155,7 @@ class ModelConfig:
     accum_dtype: Literal["float32"] = "float32"
     attention_softmax_dtype: Literal["float32", "bfloat16"] = "float32"
     loss_softmax_dtype: Literal["float32", "bfloat16"] = "float32"
+    loss_chunk_size: int | None = None
 
 
 @dataclass(frozen=True)
@@ -926,6 +927,8 @@ def _validate_model(cfg: Config) -> None:
     if cfg.model.backend == "dummy":
         if cfg.model.d_model <= 0:
             _vfail(f"model.d_model must be positive, got {cfg.model.d_model}")
+        if cfg.model.loss_chunk_size is not None:
+            _vfail("model.loss_chunk_size is supported only when model.backend='megalodon'")
     else:
         positive_fields = {
             "model_dim": cfg.model.model_dim,
@@ -992,6 +995,10 @@ def _validate_model(cfg: Config) -> None:
             _vfail(f"model.attention_dropout must be in [0, 1), got {cfg.model.attention_dropout}")
         if not 0 <= cfg.model.hidden_dropout < 1:
             _vfail(f"model.hidden_dropout must be in [0, 1), got {cfg.model.hidden_dropout}")
+        if cfg.model.loss_chunk_size is not None and cfg.model.loss_chunk_size <= 0:
+            _vfail(
+                f"model.loss_chunk_size must be positive when set, got {cfg.model.loss_chunk_size}"
+            )
     if cfg.model.output_size != -1 and cfg.model.output_size <= 0:
         _vfail(f"model.output_size must be -1 or positive, got {cfg.model.output_size}")
     if cfg.model.share_emb and cfg.model.output_size not in (-1, cfg.model.vocab_size):

@@ -1885,10 +1885,12 @@ def test_training_loss_passes_segments_iff_packed() -> None:
             key: jax.Array | None = None,
             segment_ids: jax.Array | None = None,
             position_ids: jax.Array | None = None,
+            loss_chunk_size: int | None = None,
         ) -> jax.Array:
             _ = (input_ids, labels, attention_mask, deterministic, key)
             calls["segment_ids"] = segment_ids
             calls["position_ids"] = position_ids
+            calls["loss_chunk_size"] = loss_chunk_size
             return jnp.zeros(())
 
     params, static = eqx.partition(_SpyLM(w=jnp.zeros(1)), eqx.is_array)
@@ -1899,16 +1901,24 @@ def test_training_loss_passes_segments_iff_packed() -> None:
     )
 
     training_loss(
-        params, static, batch=micro, deterministic=True, key=None, use_packed_segments=True
+        params,
+        static,
+        batch=micro,
+        deterministic=True,
+        key=None,
+        use_packed_segments=True,
+        loss_chunk_size=7,
     )
     assert calls["segment_ids"] is not None
     assert calls["position_ids"] is None
+    assert calls["loss_chunk_size"] == 7
 
     training_loss(
         params, static, batch=micro, deterministic=True, key=None, use_packed_segments=False
     )
     assert calls["segment_ids"] is None
     assert calls["position_ids"] is None
+    assert calls["loss_chunk_size"] is None
 
 
 def test_megalodon_version_floor_enforced(monkeypatch: pytest.MonkeyPatch) -> None:

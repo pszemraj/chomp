@@ -31,6 +31,8 @@ whose global step will log or evaluate. Non-observable steps still compute the
 exact shifted loss-token count required for accounting, but skip the redundant
 Python-side diagnostic scan.
 
+`model.loss_chunk_size` optionally bounds Megalodon vocabulary-head intermediates in both training and evaluation. Its complete memory/throughput contract and starting recommendation are inline in the [Config Reference](config-reference.yaml).
+
 ## Optimizer selection
 
 The train loop treats `adamw` and `muon` as one optimizer step per outer
