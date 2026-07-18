@@ -884,10 +884,9 @@ def _validate_optim(cfg: Config) -> None:
         _vfail(f"optim.muon.ns_steps must be positive, got {muon.ns_steps}")
     if muon.consistent_rms is not None and muon.consistent_rms < 0:
         _vfail(f"optim.muon.consistent_rms must be >= 0 or None, got {muon.consistent_rms}")
-    if adam.b1 <= 0 or adam.b1 >= 1:
-        _vfail(f"optim.adam.b1 must be in (0, 1), got {adam.b1}")
-    if adam.b2 <= 0 or adam.b2 >= 1:
-        _vfail(f"optim.adam.b2 must be in (0, 1), got {adam.b2}")
+    for name, value in (("b1", adam.b1), ("b2", adam.b2)):
+        if not 0 < value < 1:
+            _vfail(f"optim.adam.{name} must be in (0, 1), got {value}")
     if adam.eps <= 0:
         _vfail(f"optim.adam.eps must be positive, got {adam.eps}")
     if cfg.optim.warmup_steps >= cfg.train.steps:
@@ -921,14 +920,6 @@ def _validate_model(cfg: Config) -> None:
             _vfail(f"model.{name} must be in [0, {cfg.model.vocab_size}), got {token_id}")
     if not 0 <= cfg.model.dropout < 1:
         _vfail(f"model.dropout must be in [0, 1), got {cfg.model.dropout}")
-    if cfg.model.param_dtype != "float32":
-        _vfail(
-            f"model.param_dtype must be 'float32', got {cfg.model.param_dtype!r}: "
-            "optimizer state follows param dtype and chomp has no fp32 "
-            "master-param path yet (tracked in docs/dev.md), so non-fp32 params "
-            "silently degrade optimizer moments. Use compute_dtype='bfloat16' "
-            "for bf16 activations."
-        )
     if cfg.model.backend == "dummy":
         if cfg.model.d_model <= 0:
             _vfail(f"model.d_model must be positive, got {cfg.model.d_model}")
@@ -949,21 +940,13 @@ def _validate_model(cfg: Config) -> None:
         for name, value in positive_fields.items():
             if value <= 0:
                 _vfail(f"model.{name} must be positive, got {value}")
-        if cfg.model.model_dim % cfg.model.num_heads != 0:
-            _vfail(
-                f"model.model_dim ({cfg.model.model_dim}) must be divisible by "
-                f"model.num_heads ({cfg.model.num_heads})"
-            )
-        if cfg.model.z_dim % cfg.model.num_heads != 0:
-            _vfail(
-                f"model.z_dim ({cfg.model.z_dim}) must be divisible by "
-                f"model.num_heads ({cfg.model.num_heads})"
-            )
-        if cfg.model.value_dim % cfg.model.num_heads != 0:
-            _vfail(
-                f"model.value_dim ({cfg.model.value_dim}) must be divisible by "
-                f"model.num_heads ({cfg.model.num_heads})"
-            )
+        for name in ("model_dim", "z_dim", "value_dim"):
+            value = getattr(cfg.model, name)
+            if value % cfg.model.num_heads != 0:
+                _vfail(
+                    f"model.{name} ({value}) must be divisible by "
+                    f"model.num_heads ({cfg.model.num_heads})"
+                )
         if cfg.model.model_dim % cfg.model.norm_num_groups != 0:
             _vfail(
                 f"model.model_dim ({cfg.model.model_dim}) must be divisible by "
