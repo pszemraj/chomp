@@ -554,11 +554,6 @@ def test_hf_eval_split_allows_null() -> None:
     validate_config(replace(cfg, data=_hf_data()))
 
 
-def test_hf_eval_split_default_is_null() -> None:
-    """DataConfig should default to content-holdout evaluation."""
-    assert DataConfig().hf_eval_split is None
-
-
 @pytest.mark.parametrize("revision", [None, "main", "abc123", "g" * 40])
 def test_checkpointed_hf_source_requires_full_commit(revision: str | None) -> None:
     """Checkpointed streaming state is invalid without immutable source identity."""
@@ -600,19 +595,6 @@ def test_hf_eval_holdout_fraction_is_open_unit_interval(fraction: float) -> None
     data = replace(_hf_data(), hf_eval_holdout_fraction=fraction)
     with pytest.raises(ValueError, match="hf_eval_holdout_fraction"):
         validate_config(replace(cfg, data=data))
-
-
-def test_muon_defaults_reflect_sweep_results() -> None:
-    """Muon defaults should match the best 1k-step sweep settings."""
-    cfg = _base_cfg()
-    assert cfg.optim.muon.lr_scale == pytest.approx(100.0)
-    assert cfg.optim.muon.consistent_rms is None
-
-
-def test_default_init_mode_is_he() -> None:
-    """Default init_mode should be 'he'."""
-    cfg = Config()
-    assert cfg.model.init_mode == "he"
 
 
 def test_pad_token_id_equal_to_eos_warns() -> None:

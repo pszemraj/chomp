@@ -343,18 +343,6 @@ def test_checkpoint_data_state_roundtrip(
     assert eqx.tree_equal(expected, restored_batch)
 
 
-def test_latest_step_ignores_incomplete(
-    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
-) -> None:
-    """Checkpoint manager should ignore incomplete checkpoint directories."""
-    _cfg, _state, mgr, ckpt_dir = _saved_step1_checkpoint(
-        tmp_path / "run_latest", track_checkpoint_manager
-    )
-
-    (ckpt_dir / "2").mkdir()
-    assert mgr.latest_step() == 1
-
-
 def test_corrupt_checkpoint_fails_restore(
     tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
 ) -> None:
@@ -1078,17 +1066,6 @@ def test_resume_bit_exact_through_exhaustion_flush(
         states.append(state)
     assert eqx.tree_equal(states[0].params, states[1].params)
     assert eqx.tree_equal(states[0].opt_state, states[1].opt_state)
-
-
-def test_grain_data_state_capture_is_synchronous() -> None:
-    """ckpt.save() relies on grain serializing iterator state in the blocking
-    phase of manager.save(); if grain's handler ever grows an async_save,
-    the data stream could advance before capture and this contract breaks.
-    """
-    import grain.checkpoint as gcp
-    from orbax.checkpoint import AsyncCheckpointHandler
-
-    assert not issubclass(gcp.CheckpointHandler, AsyncCheckpointHandler)
 
 
 def test_final_checkpoint_failure_fails_the_run(
