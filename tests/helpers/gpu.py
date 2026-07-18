@@ -43,6 +43,7 @@ def run_training_smoke(run_dir: str, *, backend: str, device_put: bool = False) 
     """
     from chomp.config import Config
     from chomp.train import run
+    from tests.helpers.config_factories import make_tiny_megalodon_model
 
     cfg = Config()
     if backend == "dummy":
@@ -60,22 +61,8 @@ def run_training_smoke(run_dir: str, *, backend: str, device_put: bool = False) 
         deterministic = True
         marker = "GPU_SMOKE_OK"
     elif backend == "megalodon":
-        model = replace(
-            cfg.model,
-            backend="megalodon",
+        model = make_tiny_megalodon_model(
             vocab_size=256,
-            model_dim=32,
-            num_layers=1,
-            num_heads=1,
-            z_dim=16,
-            value_dim=32,
-            ffn_hidden_dim=64,
-            cema_ndim=4,
-            chunk_size=8,
-            norm_num_groups=4,
-            dropout=0.0,
-            attention_dropout=0.0,
-            hidden_dropout=0.0,
             use_checkpoint=True,
             compute_dtype="bfloat16",
             loss_chunk_size=7,

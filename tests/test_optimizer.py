@@ -30,6 +30,7 @@ from chomp.train import (
 )
 from chomp.types import Batch
 from chomp.utils.tree import path_to_str
+from tests.helpers.config_factories import make_tiny_megalodon_model
 
 
 @pytest.fixture(scope="module")
@@ -41,22 +42,7 @@ def megalodon_parts() -> tuple[Config, Any, Any]:
 
     :return tuple[Config, Any, Any]: Config, trainable params, and fixed partition.
     """
-    cfg = Config(
-        model=ModelConfig(
-            backend="megalodon",
-            vocab_size=128,
-            model_dim=32,
-            num_layers=2,
-            num_heads=1,
-            z_dim=16,
-            value_dim=32,
-            ffn_hidden_dim=64,
-            cema_ndim=4,
-            chunk_size=16,
-            norm_num_groups=4,
-            share_emb=False,
-        )
-    )
+    cfg = Config(model=make_tiny_megalodon_model(num_layers=2, chunk_size=16, share_emb=False))
     params, static = build_model(cfg, key=jax.random.PRNGKey(0))
     return cfg, params, static
 
@@ -174,20 +160,7 @@ def test_parameter_contract_covers_supported_model_variants(
     model_updates: dict[str, Any],
 ) -> None:
     """Every array in each supported Megalodon layout must classify explicitly."""
-    base = ModelConfig(
-        backend="megalodon",
-        vocab_size=128,
-        model_dim=32,
-        num_layers=1,
-        num_heads=1,
-        z_dim=16,
-        value_dim=32,
-        ffn_hidden_dim=64,
-        cema_ndim=4,
-        chunk_size=16,
-        norm_num_groups=4,
-        share_emb=False,
-    )
+    base = make_tiny_megalodon_model(chunk_size=16, share_emb=False)
     cfg = Config(model=replace(base, **model_updates))
     params, static = build_model(cfg, key=jax.random.PRNGKey(1))
     manifest = build_parameter_manifest(cfg, params, static)

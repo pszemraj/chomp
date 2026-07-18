@@ -70,7 +70,7 @@ from chomp.train import (
 from chomp.types import Batch, TrainState
 from chomp.utils.io import RunDirectoryLock
 from chomp.utils.tree import abstractify_tree
-from tests.helpers.config_factories import make_small_run_cfg
+from tests.helpers.config_factories import make_small_run_cfg, make_tiny_megalodon_model
 from tests.helpers.io import read_jsonl
 
 
@@ -1415,21 +1415,7 @@ def test_deterministic_checkpointing_warns(tmp_path: Path, caplog: LogCaptureFix
     """
     run_dir = tmp_path / "dry_run_warn"
     cfg = Config(
-        model=ModelConfig(
-            backend="megalodon",
-            vocab_size=128,
-            model_dim=32,
-            num_layers=1,
-            num_heads=1,
-            z_dim=16,
-            value_dim=32,
-            ffn_hidden_dim=64,
-            cema_ndim=4,
-            chunk_size=8,
-            norm_num_groups=4,
-            dropout=0.0,
-            use_checkpoint=True,
-        ),
+        model=make_tiny_megalodon_model(use_checkpoint=True),
         data=DataConfig(
             backend="local_text",
             repeat=True,
@@ -2144,21 +2130,7 @@ def test_megalodon_version_floor_enforced(monkeypatch: pytest.MonkeyPatch) -> No
 
     pytest.importorskip("megalodon_jax")
 
-    cfg = Config(
-        model=ModelConfig(
-            backend="megalodon",
-            vocab_size=64,
-            model_dim=32,
-            num_layers=1,
-            num_heads=1,
-            z_dim=16,
-            value_dim=32,
-            ffn_hidden_dim=64,
-            cema_ndim=4,
-            chunk_size=8,
-            norm_num_groups=4,
-        )
-    )
+    cfg = Config(model=make_tiny_megalodon_model(vocab_size=64))
 
     real_version = real_metadata.version
 
@@ -2184,20 +2156,6 @@ def test_megalodon_version_floor_enforced(monkeypatch: pytest.MonkeyPatch) -> No
 def test_megalodon_backend_advertises_segment_reset() -> None:
     """The installed megalodon-jax must expose the full-isolation capability flag."""
     pytest.importorskip("megalodon_jax")
-    cfg = Config(
-        model=ModelConfig(
-            backend="megalodon",
-            vocab_size=64,
-            model_dim=32,
-            num_layers=1,
-            num_heads=1,
-            z_dim=16,
-            value_dim=32,
-            ffn_hidden_dim=64,
-            cema_ndim=4,
-            chunk_size=8,
-            norm_num_groups=4,
-        )
-    )
+    cfg = Config(model=make_tiny_megalodon_model(vocab_size=64))
     params, static = build_model(cfg, key=jax.random.PRNGKey(0))
     assert supports_packed_segments(params, static)

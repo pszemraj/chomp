@@ -21,6 +21,7 @@ from chomp.cli.main import parse_resume
 from chomp.config import Config
 from chomp.data import build_tokenizer, save_tokenizer_snapshot
 from chomp.model import build_model
+from tests.helpers.config_factories import make_tiny_megalodon_model
 
 
 def test_cli_import_does_not_initialize_jax() -> None:
@@ -96,22 +97,9 @@ def test_generate_cli_produces_output(tmp_path: Path) -> None:
     cfg = Config()
     cfg = replace(
         cfg,
-        model=replace(
-            cfg.model,
-            backend="megalodon",
+        model=make_tiny_megalodon_model(
             vocab_size=256,
-            model_dim=32,
-            num_layers=1,
-            num_heads=1,
-            z_dim=16,
-            value_dim=32,
-            ffn_hidden_dim=64,
             cema_ndim=16,
-            chunk_size=8,
-            norm_num_groups=4,
-            dropout=0.0,
-            attention_dropout=0.0,
-            hidden_dropout=0.0,
             param_dtype="float32",
             compute_dtype="float32",
             accum_dtype="float32",

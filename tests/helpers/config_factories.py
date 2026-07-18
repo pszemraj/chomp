@@ -19,6 +19,30 @@ from chomp.config import (
 DEFAULT_SMALL_RUN_TEXT = "hello from chomp"
 
 
+def make_tiny_megalodon_model(**overrides: Any) -> ModelConfig:
+    """Build the shared smoke-sized Megalodon model configuration.
+
+    :param overrides: ModelConfig fields specific to the test.
+    :return ModelConfig: Tiny valid Megalodon model configuration.
+    """
+    fields: dict[str, Any] = {
+        "backend": "megalodon",
+        "vocab_size": 128,
+        "model_dim": 32,
+        "num_layers": 1,
+        "num_heads": 1,
+        "z_dim": 16,
+        "value_dim": 32,
+        "ffn_hidden_dim": 64,
+        "cema_ndim": 4,
+        "chunk_size": 8,
+        "norm_num_groups": 4,
+        "dropout": 0.0,
+    }
+    fields.update(overrides)
+    return ModelConfig(**fields)
+
+
 def make_pipeline_cfg(
     *,
     batch_size: int = 1,
