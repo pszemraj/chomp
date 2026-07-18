@@ -435,7 +435,6 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
 
     :param Config cfg: Model configuration.
     :param jax.Array key: PRNG key for model initialization.
-    :raises ImportError: If megalodon backend requested but not installed.
     :raises RuntimeError: If the installed megalodon-jax is older than the repo-wide floor.
     :raises ValueError: If model.backend is unknown.
     :return tuple: (params, static) pytrees from eqx.partition.
@@ -449,14 +448,9 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
             key=key,
         )
     elif cfg.model.backend == "megalodon":
-        try:
-            from megalodon_jax.config import MegalodonConfig
-            from megalodon_jax.model import MegalodonForCausalLM
-        except Exception as e:  # pragma: no cover
-            raise ImportError(
-                "model.backend='megalodon' requires the `megalodon_jax` package. "
-                "Install it (e.g., pip install -e /path/to/megalodon-jax)."
-            ) from e
+        from megalodon_jax.config import MegalodonConfig
+        from megalodon_jax.model import MegalodonForCausalLM
+
         _require_megalodon_jax_version()
 
         mcfg = MegalodonConfig(
@@ -579,7 +573,6 @@ def generate_tokens(
     :param int | None top_k: Optional top-k cutoff.
     :param float | None top_p: Optional nucleus-sampling threshold.
     :param jax.Array | None key: Sampling key; ignored for greedy decoding.
-    :raises ImportError: If ``megalodon_jax`` is unavailable.
     :return tuple[list[int], jax.Array | None]: Continuation tokens and next sampling key.
     """
     from megalodon_jax import generate as mega_generate

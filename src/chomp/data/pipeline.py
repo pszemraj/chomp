@@ -168,14 +168,8 @@ class HFTokenizer:
         :param str name_or_path: HuggingFace model name or local path.
         :param bool use_fast: Whether to use fast Rust tokenizer.
         :param bool trust_remote_code: Whether to allow custom tokenizer code.
-        :raises ImportError: If transformers is not installed.
         """
-        try:
-            from transformers import AutoTokenizer
-        except Exception as e:  # pragma: no cover
-            raise ImportError(
-                "HFTokenizer requires transformers. Install with: pip install transformers tokenizers"
-            ) from e
+        from transformers import AutoTokenizer
 
         self._tok = AutoTokenizer.from_pretrained(
             name_or_path,

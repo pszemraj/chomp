@@ -122,25 +122,21 @@ def _console_handler(level: int, *, use_rich: bool) -> logging.Handler:
     """Build a console handler with optional Rich formatting.
 
     :param int level: Logging level to set on the handler.
-    :param bool use_rich: If True, use RichHandler when available.
+    :param bool use_rich: If True, use RichHandler.
     :return logging.Handler: Configured console handler.
     """
 
     if use_rich:
-        try:
-            from rich.logging import RichHandler
+        from rich.logging import RichHandler
 
-            handler: logging.Handler = RichHandler(
-                show_time=True,
-                show_level=True,
-                show_path=False,
-                markup=True,
-                rich_tracebacks=False,
-            )
-            handler.setFormatter(logging.Formatter("%(message)s"))
-        except Exception:
-            handler = logging.StreamHandler()
-            handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+        handler: logging.Handler = RichHandler(
+            show_time=True,
+            show_level=True,
+            show_path=False,
+            markup=True,
+            rich_tracebacks=False,
+        )
+        handler.setFormatter(logging.Formatter("%(message)s"))
     else:
         handler = logging.StreamHandler()
         handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
@@ -154,7 +150,7 @@ def setup_python_logging(level: str, *, use_rich: bool = True) -> None:
     """Configure Python logging with a console handler.
 
     :param str level: Log level name (DEBUG, INFO, WARNING, ERROR).
-    :param bool use_rich: If True, use Rich for nicer console logs when available.
+    :param bool use_rich: If True, use Rich for nicer console logs.
     """
     numeric_level = getattr(logging, level, logging.INFO)
     root = logging.getLogger()

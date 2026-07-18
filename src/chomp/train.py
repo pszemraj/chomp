@@ -414,12 +414,7 @@ def _maybe_init_wandb(cfg: Config, *, run_dir: Path, dry_run: bool) -> Any | Non
     """
     wandb_cfg = cfg.logging.wandb
     if wandb_cfg.enabled and not dry_run:
-        try:
-            import wandb
-        except Exception as exc:  # pragma: no cover - optional runtime dependency
-            raise RuntimeError(
-                "wandb is enabled but not installed. Install with `pip install wandb`."
-            ) from exc
+        import wandb
 
         tags = list(wandb_cfg.tags) if wandb_cfg.tags else None
         wandb_run = wandb.init(
@@ -765,19 +760,16 @@ def _emit_generation_output(
     :param bool use_rich: Whether to render Rich panels.
     """
     if use_rich:
-        try:
-            from rich.console import Console
-            from rich.panel import Panel
-            from rich.rule import Rule
-        except Exception:
-            use_rich = False
-        else:
-            console = Console()
-            with tqdm.external_write_mode(file=sys.stdout, nolock=False):
-                console.print(Rule(f"Step {step} | Generation"))
-                console.print(Panel(prompt_text, title="Prompt", style="cyan"))
-                console.print(Panel(generated_text, title="Generated", style="magenta"))
-            return
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.rule import Rule
+
+        console = Console()
+        with tqdm.external_write_mode(file=sys.stdout, nolock=False):
+            console.print(Rule(f"Step {step} | Generation"))
+            console.print(Panel(prompt_text, title="Prompt", style="cyan"))
+            console.print(Panel(generated_text, title="Generated", style="magenta"))
+        return
 
     bar = "=" * 50
     tqdm.write(f"{bar} Step {step} {bar}")
@@ -1655,10 +1647,6 @@ def _run_impl(
                 top_p=gen_settings.top_p,
                 key=gen_key,
             )
-        except ImportError as exc:  # pragma: no cover - optional runtime dependency
-            logger.warning("Generation requested but megalodon_jax unavailable: %s", exc)
-            gen_settings = None
-            return
         except Exception as exc:
             logger.warning("Generation failed at step %d: %s", step, exc)
             return

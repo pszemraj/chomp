@@ -142,10 +142,6 @@ def generate(
             top_p=top_p,
             key=gen_key,
         )
-    except ImportError as exc:
-        raise click.ClickException(
-            "megalodon_jax is required for generation. Install with: pip install megalodon-jax"
-        ) from exc
     except Exception as exc:
         raise click.ClickException(f"Generation failed: {exc}") from exc
 
