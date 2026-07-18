@@ -269,36 +269,24 @@ def test_eval_split_selection(monkeypatch: pytest.MonkeyPatch) -> None:
     assert requested_splits == ["validation"]
 
 
-def test_eval_collection_closes_hf_stream(
-    patch_hf_load_dataset: Callable[..., dict[str, int]],
+@pytest.mark.parametrize("fail_at", [None, 1], ids=["success", "failure"])
+def test_eval_collection_always_closes_hf_stream(
+    patch_hf_load_dataset: Callable[..., dict[str, int]], fail_at: int | None
 ) -> None:
-    """Bounded eval collection releases its source iterator immediately."""
+    """Eval collection releases its source after success or failure."""
     record: dict[str, Any] = {}
     patch_hf_load_dataset(
         {"validation": [{"text": "val-a"}, {"text": "val-b"}]},
-        record=record,
-    )
-    cfg = _eval_cfg(backend="hf")
-
-    load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg))
-
-    assert record["close_calls"] == 1
-
-
-def test_failed_eval_collection_closes_hf_stream(
-    patch_hf_load_dataset: Callable[..., dict[str, int]],
-) -> None:
-    """Eval collection errors do not leak the partially consumed source."""
-    record: dict[str, Any] = {"fail_consumed": False}
-    patch_hf_load_dataset(
-        {"validation": [{"text": "val-a"}, {"text": "val-b"}]},
-        fail_at=1,
+        fail_at=fail_at,
         record=record,
     )
     base = _eval_cfg(backend="hf")
-    cfg = replace(base, data=replace(base.data, max_retries=0))
+    cfg = replace(base, data=replace(base.data, max_retries=0)) if fail_at is not None else base
 
-    with pytest.raises(RuntimeError, match="Failed to collect evaluation documents"):
+    if fail_at is not None:
+        with pytest.raises(RuntimeError, match="Failed to collect evaluation documents"):
+            load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg))
+    else:
         load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg))
 
     assert record["close_calls"] == 1

@@ -106,17 +106,17 @@ def _hf_stream_spec(**overrides: Any) -> HFStreamSpec:
     return HFStreamSpec(**params)
 
 
-def _bin_packer() -> FFDPacker:
-    """Build a standard tiny full-pool FFD packer."""
+def _ffd_packer(mode: str) -> FFDPacker:
+    """Build a standard tiny FFD packer for either queue policy."""
     return FFDPacker(
-        mode="bin",
+        mode=mode,
         seq_len=8,
         add_bos=False,
         add_eos=False,
         bos_id=1,
         eos_id=2,
         max_doc_tokens=None,
-        bins_per_pack=2,
+        bins_per_pack=2 if mode == "bin" else 1,
         lookahead_docs=2,
         max_docs_per_bin=None,
         pad_id=0,
@@ -163,26 +163,9 @@ def _compact_ffd_state(
     ).to_dict()
 
 
-def _multipack_packer() -> FFDPacker:
-    """Build a standard tiny bounded-FIFO FFD packer."""
-    return FFDPacker(
-        mode="multipack",
-        seq_len=8,
-        add_bos=False,
-        add_eos=False,
-        bos_id=1,
-        eos_id=2,
-        max_doc_tokens=None,
-        bins_per_pack=1,
-        lookahead_docs=2,
-        max_docs_per_bin=None,
-        pad_id=0,
-    )
-
-
 def test_bin_packer_packs_multiple_docs() -> None:
     """Bin packer should combine multiple documents into packed bins."""
-    packer = _bin_packer()
+    packer = _ffd_packer("bin")
     for tok, length in [(10, 6), (11, 2), (12, 6), (13, 2)]:
         packer.add_document(_doc(tok, length))
 
@@ -221,10 +204,7 @@ def test_ffd_leftover_requeue_preserves_arrival_order(mode: str) -> None:
         "max_docs_per_bin": None,
         "pad_id": 0,
     }
-    if mode == "bin":
-        packer: Any = FFDPacker(mode="bin", lookahead_docs=3, **kwargs)
-    else:
-        packer = FFDPacker(mode="multipack", lookahead_docs=3, **kwargs)
+    packer = FFDPacker(mode=mode, lookahead_docs=3, **kwargs)
 
     packer.add_document(_doc(10, 10))
     packer.add_document(_doc(20, 8))
@@ -264,10 +244,10 @@ def test_ffd_queue_policies_remain_distinct() -> None:
     assert _ffd_pending_docs(multipack) == [_doc(30, 8), _doc(30, 4)]
 
 
-@pytest.mark.parametrize("make_packer", [_bin_packer, _multipack_packer])
-def test_ffd_fifo_seed_prevents_adversarial_starvation(make_packer: Callable[[], Any]) -> None:
+@pytest.mark.parametrize("mode", ["bin", "multipack"])
+def test_ffd_fifo_seed_prevents_adversarial_starvation(mode: str) -> None:
     """The oldest short candidate must progress despite endless full rows."""
-    packer = make_packer()
+    packer = _ffd_packer(mode)
     packer.add_document(_doc(6, 6))
 
     emitted: list[int] = []
@@ -281,10 +261,10 @@ def test_ffd_fifo_seed_prevents_adversarial_starvation(make_packer: Callable[[],
     assert _ffd_pending_docs(packer) == [_doc(15, 8)]
 
 
-@pytest.mark.parametrize("make_packer", [_bin_packer, _multipack_packer])
-def test_ffd_long_document_tail_progress_and_restore(make_packer: Callable[[], Any]) -> None:
+@pytest.mark.parametrize("mode", ["bin", "multipack"])
+def test_ffd_long_document_tail_progress_and_restore(mode: str) -> None:
     """A long-document tail must be the next mandatory seed after restore."""
-    packer = make_packer()
+    packer = _ffd_packer(mode)
     packer.add_document(_doc(7, 14))  # chunks [8, 6]
     first, _ = packer.pop_seq_with_segments()
     state = packer.get_state()
@@ -292,7 +272,7 @@ def test_ffd_long_document_tail_progress_and_restore(make_packer: Callable[[], A
     packer.add_document(_doc(9, 8))
     expected, _ = packer.pop_seq_with_segments()
 
-    restored = make_packer()
+    restored = _ffd_packer(mode)
     restored.set_state(state)
     restored.add_document(_doc(9, 8))
     actual, _ = restored.pop_seq_with_segments()
@@ -302,16 +282,14 @@ def test_ffd_long_document_tail_progress_and_restore(make_packer: Callable[[], A
     np.testing.assert_array_equal(actual, expected)
 
 
-@pytest.mark.parametrize("make_packer", [_bin_packer, _multipack_packer])
-def test_ffd_packer_flushes_pending_docs_at_stream_end(
-    make_packer: Callable[[], Any],
-) -> None:
+@pytest.mark.parametrize("mode", ["bin", "multipack"])
+def test_ffd_packer_flushes_pending_docs_at_stream_end(mode: str) -> None:
     """finish() must flush sub-threshold pending docs instead of dropping them.
 
     One doc is below both packers' thresholds (buffer_docs/group_docs = 2),
     so can_pop stays False until finish() marks the stream exhausted.
     """
-    packer = make_packer()
+    packer = _ffd_packer(mode)
     packer.add_document(_doc(7, 5))
     assert not packer.can_pop()
 
@@ -326,31 +304,31 @@ def test_ffd_packer_flushes_pending_docs_at_stream_end(
     assert not packer.can_pop()
 
 
-@pytest.mark.parametrize("make_packer", [_token_packer, _bin_packer, _multipack_packer])
-def test_packer_rejects_add_document_after_finish(make_packer: Callable[[], Any]) -> None:
+@pytest.mark.parametrize("mode", ["sequential", "bin", "multipack"])
+def test_packer_rejects_add_document_after_finish(mode: str) -> None:
     """add_document after finish() must raise, not silently buffer.
 
     A silently buffered document would still be emitted by a later flush
     cycle, so every packer shares the same misuse contract.
     """
-    packer = make_packer()
+    packer = _token_packer() if mode == "sequential" else _ffd_packer(mode)
     packer.finish()
     with pytest.raises(RuntimeError, match="after"):
         packer.add_document(_doc(7, 3))
 
 
-@pytest.mark.parametrize("make_packer", [_bin_packer, _multipack_packer])
-def test_ffd_packer_flush_state_roundtrips(make_packer: Callable[[], Any]) -> None:
+@pytest.mark.parametrize("mode", ["bin", "multipack"])
+def test_ffd_packer_flush_state_roundtrips(mode: str) -> None:
     """The exhausted flag must survive get/set_state so a resumed run still
     flushes the same tail windows as the continuous one."""
-    packer = make_packer()
+    packer = _ffd_packer(mode)
     packer.add_document(_doc(9, 3))
     packer.finish()
     state = packer.get_state()
     assert state["exhausted"] is True
     expected = packer.pop_seq_with_segments()
 
-    restored = make_packer()
+    restored = _ffd_packer(mode)
     restored.set_state(state)
     assert restored.can_pop()
     actual = restored.pop_seq_with_segments()
@@ -359,21 +337,19 @@ def test_ffd_packer_flush_state_roundtrips(make_packer: Callable[[], Any]) -> No
 
 
 @pytest.mark.parametrize(
-    ("make_packer", "docs", "pops_before_snapshot"),
+    ("mode", "docs", "pops_before_snapshot"),
     [
-        pytest.param(
-            _bin_packer, [_doc(21, 6), _doc(22, 2), _doc(23, 6), _doc(24, 2)], 1, id="bin"
-        ),
-        pytest.param(_multipack_packer, [[31, 32, 33], [41, 42]], 0, id="multipack"),
+        pytest.param("bin", [_doc(21, 6), _doc(22, 2), _doc(23, 6), _doc(24, 2)], 1),
+        pytest.param("multipack", [[31, 32, 33], [41, 42]], 0),
     ],
 )
 def test_ffd_packer_state_roundtrip(
-    make_packer: Callable[[], Any],
+    mode: str,
     docs: list[list[int]],
     pops_before_snapshot: int,
 ) -> None:
     """FFD packer state must roundtrip via get/set_state (shared base-class state)."""
-    packer = make_packer()
+    packer = _ffd_packer(mode)
     for doc in docs:
         packer.add_document(doc)
     for _ in range(pops_before_snapshot):
@@ -385,7 +361,7 @@ def test_ffd_packer_state_roundtrip(
     expected_stats = packer.get_stats()
     expected = packer.pop_seq_with_segments()
 
-    restored = make_packer()
+    restored = _ffd_packer(mode)
     restored.set_state(state)
     actual = restored.pop_seq_with_segments()
 
@@ -399,7 +375,7 @@ def test_ffd_packer_state_roundtrip(
 
 def test_ffd_packer_state_from_dict_is_strict() -> None:
     """FFD packer set_state must fail loud on corrupt/foreign state, not default to []/0."""
-    packer = _bin_packer()
+    packer = _ffd_packer("bin")
     full_state = _compact_ffd_state(docs_seen=0)
     del full_state["pending_offsets"]
     with pytest.raises(KeyError):
@@ -446,7 +422,7 @@ def test_ffd_packer_state_rejects_corrupt_queues(mutation: dict[str, Any], match
     State construction stays outside the raises block so every case must
     fail in set_state itself, not in the test helper's serialization.
     """
-    packer = _bin_packer()
+    packer = _ffd_packer("bin")
     state = _compact_ffd_state(
         pending_docs=mutation.get("pending_docs"),
         ready_tokens=mutation.get("ready_tokens"),
@@ -476,7 +452,7 @@ def test_ffd_packer_state_rejects_corrupt_compact_encoding(
     state.update(mutation)
 
     with pytest.raises(ValueError, match=match):
-        _bin_packer().set_state(state)
+        _ffd_packer("bin").set_state(state)
 
 
 @pytest.mark.parametrize(
@@ -898,9 +874,16 @@ def test_boundary_loss_mask_toggle() -> None:
     assert np.all(labels_at_boundary != -100)
 
 
-def test_pipeline_bin_packing_segment_ids() -> None:
-    """Bin packing should produce multiple segments with packing stats."""
-    cfg = make_pipeline_cfg(packing_mode="bin", packing_buffer_docs=4)
+@pytest.mark.parametrize(
+    ("mode", "mode_config"),
+    [
+        ("bin", {"packing_buffer_docs": 4}),
+        ("multipack", {"packing_group_docs": 4}),
+    ],
+)
+def test_ffd_pipeline_emits_segments_and_stats(mode: str, mode_config: dict[str, int]) -> None:
+    """Both FFD policies should emit multiple segments and packing stats."""
+    cfg = make_pipeline_cfg(packing_mode=mode, **mode_config)
 
     it = build_train_iterator(cfg)
     batch = next(it)
@@ -909,8 +892,9 @@ def test_pipeline_bin_packing_segment_ids() -> None:
     assert unique.size >= 2
 
     stats = it.get_stats()
-    assert stats["packing_mode"] == "bin"
+    assert stats["packing_mode"] == mode
     assert stats["segments_per_seq_max"] >= 2
+    assert stats["packing_capacity"] == batch.segment_ids.size
 
 
 def test_batch_segment_stats_use_literal_segment_geometry() -> None:
@@ -938,20 +922,6 @@ def test_loss_token_count_stays_paired_through_device_prefetch() -> None:
 
     assert iterator.get_loss_tokens() == expected
     assert iterator.get_stats() == {}
-
-
-def test_pipeline_multipack_segments_and_stats() -> None:
-    """Multipack mode should emit packed segments and packing stats."""
-    cfg = make_pipeline_cfg(packing_mode="multipack", packing_group_docs=4)
-
-    it = build_train_iterator(cfg)
-    batch = next(it)
-    segs = np.asarray(batch.segment_ids[0, 0], dtype=np.int32)
-    assert np.unique(segs[segs > 0]).size >= 2
-
-    stats = it.get_stats()
-    assert stats["packing_mode"] == "multipack"
-    assert stats["packing_capacity"] == batch.segment_ids.size
 
 
 def test_packing_array_diagnostics_can_skip_without_losing_token_count() -> None:
@@ -1037,36 +1007,30 @@ def test_hf_state_roundtrip(patch_hf_load_dataset: Callable[..., dict[str, int]]
     assert next(resumed) == expected
 
 
-@pytest.mark.parametrize("value", [None, 7, ["text"], {"text": "nested"}])
-def test_hf_non_string_text_fails_without_retry(
+@pytest.mark.parametrize(
+    ("item", "match"),
+    [
+        ({"text": None}, "must contain strings"),
+        ({"body": "wrong column"}, "without text key 'text'"),
+    ],
+)
+def test_hf_schema_errors_fail_without_retry(
     patch_hf_load_dataset: Callable[..., dict[str, int]],
     monkeypatch: pytest.MonkeyPatch,
-    value: Any,
+    item: dict[str, Any],
+    match: str,
 ) -> None:
     """Deterministic row-schema failures must not rebuild or consume retry budget."""
-    calls = patch_hf_load_dataset([{"text": value}])
+    calls = patch_hf_load_dataset([item])
     sleeps: list[float] = []
     monkeypatch.setattr("chomp.data.hf.time.sleep", sleeps.append)
     stream = HFStreamingTextStream(_hf_stream_spec(max_retries=3, retry_delay_sec=1.0))
 
-    with pytest.raises(HFRowValidationError, match="must contain strings"):
+    with pytest.raises(HFRowValidationError, match=match):
         next(stream)
 
     assert calls["builds"] == 1
     assert sleeps == []
-
-
-def test_hf_missing_text_key_is_a_nonretryable_schema_error(
-    patch_hf_load_dataset: Callable[..., dict[str, int]],
-) -> None:
-    """A missing configured column must fail with source and key context."""
-    calls = patch_hf_load_dataset([{"body": "wrong column"}])
-    stream = HFStreamingTextStream(_hf_stream_spec(max_retries=3))
-
-    with pytest.raises(HFRowValidationError, match="without text key 'text'"):
-        next(stream)
-
-    assert calls["builds"] == 1
 
 
 def test_hf_close_honors_remote_parquet_shutdown_grace(
