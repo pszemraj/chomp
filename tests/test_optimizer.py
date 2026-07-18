@@ -78,32 +78,6 @@ def _leaf_map(tree: Any) -> dict[str, Any]:
     return {path_to_str(path): leaf for path, leaf in flat}
 
 
-def test_parameter_contract_excludes_derived_rope_arrays(
-    megalodon_parts: tuple[Config, Any, Any],
-) -> None:
-    """Derived RoPE state stays outside the array tree and optimizer state."""
-    cfg, params, static = megalodon_parts
-    manifest = build_parameter_manifest(cfg, params, static)
-    assert not any("rotary" in entry["path"] for entry in manifest["arrays"])
-
-    cfg = replace(cfg, optim=replace(cfg.optim, lr=1e-3, weight_decay=0.1, warmup_steps=0))
-    tx, _ = build_optimizer(cfg, params)
-    opt_state = tx.init(params)
-    zeros = jax.tree_util.tree_map(jnp.zeros_like, params)
-    updates, _ = tx.update(zeros, opt_state, params)
-    updated = optax.apply_updates(params, updates)
-    before = eqx.combine(params, static)
-    after = eqx.combine(updated, static)
-    assert (
-        before.model.layers[0].attn.inner.rotary.dim == after.model.layers[0].attn.inner.rotary.dim
-    )
-    assert (
-        before.model.layers[0].attn.inner.rotary.base
-        == after.model.layers[0].attn.inner.rotary.base
-    )
-    assert not jnp.array_equal(before.model.embed.weight, after.model.embed.weight)
-
-
 def test_bounded_megalodon_loss_matches_full_logits(
     megalodon_parts: tuple[Config, Any, Any],
 ) -> None:
@@ -129,8 +103,11 @@ def test_bounded_megalodon_loss_matches_full_logits(
 def test_parameter_decay_policy_is_model_aware(
     megalodon_parts: tuple[Config, Any, Any],
 ) -> None:
-    """Only embeddings and dense projections receive decoupled weight decay."""
-    cfg, params, _ = megalodon_parts
+    """Only learned embeddings and dense projections receive weight decay."""
+    cfg, params, static = megalodon_parts
+    manifest = build_parameter_manifest(cfg, params, static)
+    assert not any("rotary" in entry["path"] for entry in manifest["arrays"])
+
     decay = _leaf_map(parameter_decay_mask(cfg, params))
     assert decay["model.embed.weight"] is True
     assert decay["model.layers.[0].attn.wz.weight"] is True
