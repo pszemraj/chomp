@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
@@ -53,28 +54,18 @@ def megalodon_params(megalodon_parts: tuple[Config, Any, Any]) -> Any:
     return megalodon_parts[1]
 
 
-def _dim_map(dim_nums: Any) -> dict[str, MuonDimensionNumbers | None]:
-    """Create a mapping from parameter path to Muon dimension numbers.
-
-    :param Any dim_nums: Muon dimension numbers pytree.
-    :return dict[str, MuonDimensionNumbers | None]: Map of path string to dim spec.
-    """
-
-    def _is_leaf(node: Any) -> bool:
-        """Return True when a node should be treated as a leaf in the dim tree."""
-        return node is None or isinstance(node, MuonDimensionNumbers)
-
-    flat_dims, _ = jax.tree_util.tree_flatten_with_path(dim_nums, is_leaf=_is_leaf)
-    return {path_to_str(path): dim for path, dim in flat_dims}
-
-
-def _leaf_map(tree: Any) -> dict[str, Any]:
+def _leaf_map(
+    tree: Any,
+    *,
+    is_leaf: Callable[[Any], bool] | None = None,
+) -> dict[str, Any]:
     """Create a mapping from parameter path to a leaf value.
 
     :param Any tree: Pytree to flatten.
+    :param Callable[[Any], bool] | None is_leaf: Optional custom leaf predicate, defaults to None.
     :return dict[str, Any]: Map of path string to leaf value.
     """
-    flat, _ = jax.tree_util.tree_flatten_with_path(tree)
+    flat, _ = jax.tree_util.tree_flatten_with_path(tree, is_leaf=is_leaf)
     return {path_to_str(path): leaf for path, leaf in flat}
 
 
@@ -228,7 +219,10 @@ def test_muon_dim_numbers_match_eqx_orientation(megalodon_params: Any) -> None:
     """Muon dimension numbers should treat eqx Linear weights as (out, in)."""
     params = megalodon_params
     dim_nums = _muon_weight_dim_numbers(params)
-    dims = _dim_map(dim_nums)
+    dims = _leaf_map(
+        dim_nums,
+        is_leaf=lambda node: node is None or isinstance(node, MuonDimensionNumbers),
+    )
 
     spec = dims["model.layers.[0].attn.wz.weight"]
     assert isinstance(spec, MuonDimensionNumbers)
