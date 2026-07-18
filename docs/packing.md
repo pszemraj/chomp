@@ -182,11 +182,3 @@ If they leave a complete batch with zero valid shifted targets, assembly fails
 before the optimizer, schedule, model RNG, or training step can advance. This
 usually indicates one-token documents, a tokenizer special-token collision, or
 an over-restrictive masking configuration.
-
-## Derived attention and positions
-
-The batch carries `segment_ids`, from which the compiled model derives the
-attention mask and segment-local positions. Strict `bin` and `multipack`
-packing uses those local positions to reset RoPE at each segment boundary.
-Sequential packing uses segment IDs for loss masking and diagnostics without
-enabling model-state segmentation.

@@ -17,11 +17,6 @@ Each checkpoint stores three items:
    non-negative `tokens_seen`, parameter-manifest hash, and strict runtime
    identity)
 
-FFD packer queues in `data_state` use flat little-endian int32 payloads plus
-row offsets. Grain's JSON handler stores those payloads as base64 rather than
-materializing nested Python integer lists, which bounds serialization object
-overhead for long contexts and large pending buffers.
-
 The run directory also includes a required tokenizer snapshot under `tokenizer/` and the pinned eval token set `eval_tokens.json.gz`. It also contains `parameter-manifest.json`, which lists every trainable parameter with its optimizer group and decay policy. Eval cache creation, drift checks, and the `data.recreate_eval_cache` override are covered in [Data Pipeline validation set](data_pipeline.md#validation-set).
 
 Tokenizer snapshots are written to a temporary sibling, loaded back for
@@ -139,19 +134,11 @@ If a mismatch is detected, resume fails fast with a detailed error.
 
 ## Scope of exactness
 
-The exact-resume contract covers checkpoint save/restore and in-run HF retry
-reconstruction. Retry recovery restores the last compact source state and
-fast-forwards over the exact count already yielded; see
-[Data Pipeline: transient stream recovery](data_pipeline.md#transient-stream-recovery).
+The exact-resume contract covers checkpoint save/restore and the [in-run HF retry reconstruction](data_pipeline.md#transient-stream-recovery).
 
 What resume guarantees is exact **state and data replay**: parameters,
 optimizer state, RNG, and the data iterator position restore exactly, so the
 resumed run optimizes the same objective over the same batches in the same
 order as the continuous run.
 
-GPU step arithmetic is not bit-identical by default because production uses
-XLA's fast nondeterministic kernels. Setup, cost, and the opt-in deterministic
-flag are documented in
-[Training: GPU environment notes](training.md#gpu-environment-notes). The
-effective setting is recorded in checkpoint metadata, and resume warns if it
-changes.
+GPU step arithmetic is bit-identical only with the opt-in setting described in [Training: GPU environment notes](training.md#gpu-environment-notes). The effective setting is recorded in checkpoint metadata, and resume warns if it changes.

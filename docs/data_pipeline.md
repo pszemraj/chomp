@@ -100,12 +100,7 @@ The wrapper provides:
 The packing iterator itself remains a small, explicit Python object; Grain only
 wraps it for performance and checkpoint integration.
 
-When stats are enabled (`data.device_put: false`), iterator stats include:
-
-- `packing_tokens`, `packing_capacity`, `packing_utilization`
-- `loss_tokens_host` (valid shifted labels after masking)
-- `boundary_transitions` (segment boundary count)
-- `segments_per_seq_mean`, `segments_per_seq_min`, `segments_per_seq_max`
+When stats are enabled (`data.device_put: false`), the iterator exposes packing utilization, exact host loss-token counts, and boundary/segment summaries. Their logged field names and meanings are listed under [Training metrics](training.md#metrics).
 
 Original-document/source batch composition and the owned Grain shuffle
 replacement are tracked in

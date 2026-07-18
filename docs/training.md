@@ -4,7 +4,8 @@ Training step behavior and metrics written to `metrics.jsonl`.
 
 Related: [Config Reference](config-reference.yaml),
 [Optimization and Optimizers](optimization.md), [Data Pipeline](data_pipeline.md),
-[Packing and Boundary Semantics](packing.md), [Checkpointing and Resume](checkpointing.md).
+[Packing and Boundary Semantics](packing.md), [Checkpointing and Resume](checkpointing.md),
+[Comma stability study](comma_stability_matrix.md).
 
 ## Train step contract
 
@@ -29,13 +30,6 @@ exact shifted loss-token count required for accounting, but skip the redundant
 Python-side diagnostic scan.
 
 `model.loss_chunk_size` optionally bounds Megalodon vocabulary-head intermediates in both training and evaluation. Its complete memory/throughput contract and starting recommendation are inline in the [Config Reference](config-reference.yaml).
-
-## Optimizer selection
-
-The train loop treats `adamw` and `muon` as one optimizer step per outer
-iteration. Muon parameter partitioning, `optim.muon.*` behavior, and
-sweep-backed defaults live in [Optimization and Optimizers](optimization.md).
-For exact knob definitions, see [Config Reference](config-reference.yaml) (`optim.*`).
 
 ## Determinism
 
@@ -66,19 +60,6 @@ kernel selection), and it is expensive: measured ~25-35% slower steps on a
 effective setting is recorded in checkpoint meta, and resume warns if it
 drifted across the boundary; see
 [Checkpointing: scope of exactness](checkpointing.md#scope-of-exactness).
-
-## Packed batches
-
-Packing modes, segment isolation, position IDs, and loss masking are defined in
-[Packing and Boundary Semantics](packing.md). The stream-to-batch path is
-described in [Data Pipeline](data_pipeline.md).
-
-## Input-order stability
-
-Guidance for domain-ordered and long-document streams lives in
-[Packing: window shuffling](packing.md#window-shuffling-batch-decorrelation).
-The supporting ablation is recorded in the
-[Comma stability study](comma_stability_matrix.md).
 
 ## Evaluation
 
