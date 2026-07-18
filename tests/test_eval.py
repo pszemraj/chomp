@@ -304,6 +304,20 @@ def test_failed_eval_collection_closes_hf_stream(
     assert record["close_calls"] == 1
 
 
+def test_malformed_eval_row_never_creates_cache(
+    tmp_path: Path,
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+) -> None:
+    """A non-string text field must fail before an eval cache is persisted."""
+    patch_hf_load_dataset({"validation": [{"text": None}]})
+    cfg = _eval_cfg(backend="hf")
+
+    with pytest.raises(RuntimeError, match="Failed to collect evaluation documents"):
+        load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg), run_dir=tmp_path)
+
+    assert not (tmp_path / "eval_tokens.json.gz").exists()
+
+
 @pytest.mark.parametrize(
     "failure",
     [FileNotFoundError("missing validation split"), PermissionError("authentication failed")],

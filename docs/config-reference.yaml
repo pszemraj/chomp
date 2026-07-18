@@ -464,7 +464,8 @@ data:
   # Default: text.
   # Required: nonempty when data.backend is hf; ignored for local_text.
   # Valid: nonempty dataset column name.
-  # Use: names the field containing document text.
+  # Use: names the field containing document text. Every selected row must contain this field as a
+  # string; missing, null, numeric, list, or mapping values fail immediately without transient retry.
   text_key: text
 
   # Key: data.shuffle

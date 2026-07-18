@@ -148,8 +148,9 @@ failed periodic state capture retains the preceding good state.
 data duplication: a recovery may reread and discard up to that many documents.
 If state restore or fast-forward cannot reproduce the prior position, training
 fails and must resume from the last Chomp checkpoint rather than continuing
-from a partially reconstructed stream. Errors that survive `data.max_retries`
-also propagate and fail the run.
+from a partially reconstructed stream. Errors that survive `data.max_retries` also propagate and fail the run.
+
+The configured `data.text_key` must exist in every selected row and contain a string. Missing fields and non-string values are deterministic schema failures: Chomp does not stringify them, retry them, or persist a partially collected eval cache.
 
 ## Validation set
 

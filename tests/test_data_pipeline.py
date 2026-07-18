@@ -30,7 +30,7 @@ from chomp.data.grain import (
     _packer_stats_from_chain,
     effective_window_shuffle_seed,
 )
-from chomp.data.hf import HFStreamingTextStream, HFStreamSpec
+from chomp.data.hf import HFRowValidationError, HFStreamingTextStream, HFStreamSpec
 from chomp.data.pack import FFDPackerState, MultipackPacker, TokenPacker, _DocumentStats
 from chomp.data.pipeline import (
     BinPacker,
@@ -1047,6 +1047,38 @@ def test_hf_state_roundtrip(patch_hf_load_dataset: Callable[..., dict[str, int]]
     resumed = HFStreamingTextStream(spec)
     resumed.set_state(state)
     assert next(resumed) == expected
+
+
+@pytest.mark.parametrize("value", [None, 7, ["text"], {"text": "nested"}])
+def test_hf_non_string_text_fails_without_retry(
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+    monkeypatch: pytest.MonkeyPatch,
+    value: Any,
+) -> None:
+    """Deterministic row-schema failures must not rebuild or consume retry budget."""
+    calls = patch_hf_load_dataset([{"text": value}])
+    sleeps: list[float] = []
+    monkeypatch.setattr("chomp.data.hf.time.sleep", sleeps.append)
+    stream = HFStreamingTextStream(_hf_stream_spec(max_retries=3, retry_delay_sec=1.0))
+
+    with pytest.raises(HFRowValidationError, match="must contain strings"):
+        next(stream)
+
+    assert calls["builds"] == 1
+    assert sleeps == []
+
+
+def test_hf_missing_text_key_is_a_nonretryable_schema_error(
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+) -> None:
+    """A missing configured column must fail with source and key context."""
+    calls = patch_hf_load_dataset([{"body": "wrong column"}])
+    stream = HFStreamingTextStream(_hf_stream_spec(max_retries=3))
+
+    with pytest.raises(HFRowValidationError, match="without text key 'text'"):
+        next(stream)
+
+    assert calls["builds"] == 1
 
 
 def test_hf_close_honors_remote_parquet_shutdown_grace(

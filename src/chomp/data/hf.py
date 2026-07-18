@@ -37,6 +37,10 @@ _CONTENT_HOLDOUT_PERSON = f"chomp-eval-v{CONTENT_HOLDOUT_SCHEMA_VERSION}".encode
 ContentPartition = Literal["all", "train", "eval"]
 
 
+class HFRowValidationError(ValueError):
+    """An HF row violates the configured document-text schema."""
+
+
 def is_eval_holdout(text: str, *, fraction: float) -> bool:
     """Return the stable content-hash holdout assignment for one document.
 
@@ -294,17 +298,26 @@ class HFStreamingTextStream:
     def _read_text(self) -> str:
         """Read and validate one document from the HF source.
 
+        :raises HFRowValidationError: If the configured field is missing or not a string.
         :return str: Text payload from the dataset item.
         """
         while True:
             self._source_started = True
             item = next(self._it)
             if self._spec.text_key not in item:
-                raise KeyError(
-                    f"HF item missing text key {self._spec.text_key!r}. Keys: {sorted(item.keys())}"
+                raise HFRowValidationError(
+                    f"HF dataset {self._spec.dataset!r} split {self._spec.split!r} produced "
+                    f"a row without text key {self._spec.text_key!r}; available keys: "
+                    f"{sorted(item.keys())}"
                 )
             value = item[self._spec.text_key]
-            text = value if isinstance(value, str) else str(value)
+            if not isinstance(value, str):
+                raise HFRowValidationError(
+                    f"HF dataset {self._spec.dataset!r} split {self._spec.split!r} field "
+                    f"{self._spec.text_key!r} must contain strings, got "
+                    f"{type(value).__name__}."
+                )
+            text = value
             if self._spec.content_partition == "all":
                 return text
             held_out = is_eval_holdout(text, fraction=self._spec.eval_holdout_fraction)
@@ -420,6 +433,12 @@ class HFStreamingTextStream:
                 attempt = 0
                 rolled_epoch = True
                 continue
+
+            except HFRowValidationError:
+                # Schema violations are deterministic source defects. Rebuild
+                # and backoff cannot repair the offending row, and treating it
+                # as transient only wastes retries before the same failure.
+                raise
 
             except Exception:
                 if attempt >= self._spec.max_retries:
