@@ -16,7 +16,7 @@ All project commands should run inside the `mega-jax` conda environment.
 conda run --name mega-jax <command>
 ```
 
-Stateful data/checkpoint dependencies and development tools are exactly pinned in [`pyproject.toml`](../pyproject.toml). The model stack uses bounded compatible release lines starting at JAX/JAXLIB 0.10.2, Equinox 0.13.8, Optax 0.2.8, and Megalodon-JAX 0.2.1. Upgrade a bound only with the full resume/checkpoint and escalated GPU suites. JAX accelerator plugins must resolve to the same release as the selected JAX core; the `cuda13` extra handles the pip-managed CUDA 13 stack.
+Stateful data/checkpoint dependencies and development tools are exactly pinned in [`pyproject.toml`](../pyproject.toml). The model stack uses bounded compatible release lines starting at JAX 0.10.2, Equinox 0.13.8, Optax 0.2.8, and Megalodon-JAX 0.2.1. The base JAX dependency includes its `cuda13` extra, which resolves matching jaxlib and CUDA plugin versions plus the pip-managed CUDA 13 runtime. CPU-only installations are unsupported. Upgrade a bound only with the full resume/checkpoint and escalated GPU suites.
 
 ## Lint and format
 

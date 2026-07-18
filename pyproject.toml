@@ -23,8 +23,9 @@ classifiers = [
 # Stateful data/checkpoint dependencies stay exact. The model stack follows
 # compatible release lines; checkpoints record and hard-gate resolved versions.
 dependencies = [
-  "jax>=0.10.2,<0.11",
-  "jaxlib>=0.10.2,<0.11",
+  # Chomp is a Linux/NVIDIA training harness. JAX's CUDA extra installs the
+  # matching jaxlib, CUDA plugin, and pip-managed CUDA 13 runtime libraries.
+  "jax[cuda13]>=0.10.2,<0.11",
   "equinox>=0.13.8,<0.14",
   # 0.2.1 is the first published release with the model/config contract used here.
   # The runtime version check remains a clear failure for editable installs.
@@ -53,7 +54,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-cuda13 = ["jax[cuda13]>=0.10.2,<0.11"]
 dev = ["pytest==9.0.1", "ruff==0.14.11"]
 
 [project.scripts]
