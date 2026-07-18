@@ -22,7 +22,9 @@ Orbax notes:
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -85,7 +87,7 @@ def _safe_version(pkg: str) -> str | None:
 
 
 def _source_revision_for(repo_root: Path) -> str:
-    """Return the repository commit plus source dirty status.
+    """Return the repository commit plus content-addressed dirty source state.
 
     Dirty covers unstaged, staged, and untracked (non-ignored) files under
     the source paths — ``git diff`` alone misses a brand-new uncommitted
@@ -95,7 +97,7 @@ def _source_revision_for(repo_root: Path) -> str:
     remains a stable fallback identity.
 
     :param Path repo_root: Repository root to inspect.
-    :return str: Git commit, optionally suffixed ``+dirty``, or package version.
+    :return str: Git commit, optionally suffixed by a dirty-tree digest, or package version.
     """
     try:
         commit = subprocess.run(
@@ -120,16 +122,58 @@ def _source_revision_for(repo_root: Path) -> str:
             capture_output=True,
             text=True,
         ).stdout
-        return f"{commit}+dirty" if status.strip() else commit
     except Exception:
         return f"package:{_chomp_version}"
+
+    if not status.strip():
+        return commit
+
+    try:
+        listed = subprocess.run(
+            [
+                "git",
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "--",
+                "src",
+                "pyproject.toml",
+            ],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+        ).stdout
+        digest = hashlib.sha256()
+        for raw_path in sorted(path for path in listed.split(b"\0") if path):
+            path = repo_root / os.fsdecode(raw_path)
+            digest.update(len(raw_path).to_bytes(8, "big"))
+            digest.update(raw_path)
+            if path.is_symlink():
+                payload = os.fsencode(os.readlink(path))
+                kind = b"symlink"
+            else:
+                try:
+                    payload = path.read_bytes()
+                    kind = b"file"
+                except FileNotFoundError:
+                    payload = b""
+                    kind = b"deleted"
+            digest.update(len(kind).to_bytes(8, "big"))
+            digest.update(kind)
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+    except Exception as exc:
+        raise RuntimeError(f"Could not fingerprint dirty source tree at {repo_root}") from exc
+    return f"{commit}+dirty.{digest.hexdigest()}"
 
 
 @lru_cache(maxsize=1)
 def _source_revision() -> str:
     """Return the cached source revision for this chomp checkout.
 
-    :return str: Git commit, optionally suffixed ``+dirty``, or package version.
+    :return str: Git commit, optionally suffixed by a dirty-tree digest, or package version.
     """
     return _source_revision_for(Path(__file__).resolve().parents[2])
 
@@ -177,6 +221,16 @@ def runtime_identity() -> dict[str, Any]:
         "packages": {name: _safe_version(name) for name in packages},
         "backend": backend,
     }
+
+
+def refresh_runtime_identity() -> dict[str, Any]:
+    """Capture and cache the runtime identity for a new run.
+
+    :return dict[str, Any]: Runtime identity frozen for all checkpoints in the run.
+    """
+    _source_revision.cache_clear()
+    runtime_identity.cache_clear()
+    return runtime_identity()
 
 
 def build_meta(

@@ -1756,18 +1756,22 @@ def test_source_revision_flags_untracked_and_tracked_changes(tmp_path: Path) -> 
 
     clean = _source_revision_for(repo)
     assert not clean.startswith("package:")
-    assert not clean.endswith("+dirty")
+    assert "+dirty." not in clean
 
     untracked = repo / "src" / "new_module.py"
     untracked.write_text("y = 2\n")
-    assert _source_revision_for(repo) == f"{clean}+dirty"
+    untracked_identity = _source_revision_for(repo)
+    assert untracked_identity.startswith(f"{clean}+dirty.")
+    untracked.write_text("y = 3\n")
+    assert _source_revision_for(repo) != untracked_identity
     untracked.unlink()
     assert _source_revision_for(repo) == clean
 
     tracked.write_text("x = 2\n")
-    assert _source_revision_for(repo) == f"{clean}+dirty"
+    unstaged_identity = _source_revision_for(repo)
+    assert unstaged_identity.startswith(f"{clean}+dirty.")
     _git(repo, "add", "-A")
-    assert _source_revision_for(repo) == f"{clean}+dirty"
+    assert _source_revision_for(repo) == unstaged_identity
 
     outside_scope = repo / "notes.txt"
     outside_scope.write_text("not source\n")

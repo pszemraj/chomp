@@ -129,6 +129,8 @@ Remaining warnings are logged so you can make an informed decision, but
 anything that changes what data the resumed run sees or what it optimizes
 is an error, not a warning.
 
+Source identity is the Git commit for a clean checkout. For a dirty checkout it also contains a SHA-256 digest of every tracked or untracked, non-ignored file under `src/` plus `pyproject.toml`, including deletions. The identity is captured once at the public `run()` boundary and reused for every checkpoint in that process, so distinct uncommitted code cannot share a resume identity and mid-run filesystem edits cannot change it.
+
 ## Typical usage
 
 ```bash

@@ -50,6 +50,7 @@ from chomp.ckpt import (
     build_meta,
     check_resume_compat,
     make_manager,
+    refresh_runtime_identity,
     resolve_ckpt_root,
     restore_at_step,
     restore_meta_at_step,
@@ -1338,6 +1339,7 @@ def run(
     """
 
     validate_default_device(allow_cpu=cfg.train.allow_cpu)
+    refresh_runtime_identity()
 
     if dry_run and resume != "none":
         raise RuntimeError("dry_run does not support resume; use a fresh run.")
