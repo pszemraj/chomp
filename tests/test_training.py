@@ -1454,9 +1454,17 @@ def test_deterministic_checkpointing_warns(tmp_path: Path, caplog: LogCaptureFix
     run_dir = tmp_path / "dry_run_warn"
     cfg = Config(
         model=ModelConfig(
-            backend="dummy",
+            backend="megalodon",
             vocab_size=128,
-            d_model=32,
+            model_dim=32,
+            num_layers=1,
+            num_heads=1,
+            z_dim=16,
+            value_dim=32,
+            ffn_hidden_dim=64,
+            cema_ndim=4,
+            chunk_size=8,
+            norm_num_groups=4,
             dropout=0.0,
             use_checkpoint=True,
         ),

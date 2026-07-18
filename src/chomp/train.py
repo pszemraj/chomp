@@ -135,18 +135,15 @@ class _StopSignalState:
 
     @property
     def reason(self) -> str:
-        """Return the recorded signal name, or a generic stop reason."""
-        if self._signum is None:
-            return "stop_requested"
-        try:
-            return signal.Signals(self._signum).name
-        except ValueError:
-            return f"signal_{self._signum}"
+        """Return the recorded signal name."""
+        assert self._signum is not None, "stop reason requested before a signal arrived"
+        return signal.Signals(self._signum).name
 
     @property
     def exit_code(self) -> int:
         """Return a shell status that preserves the terminating signal."""
-        return 75 if self._signum is None else 128 + int(self._signum)
+        assert self._signum is not None, "exit code requested before a signal arrived"
+        return 128 + self._signum
 
     def _handle(self, signum: int, _frame: Any) -> None:
         """Record a signal using operations safe for the Python handler.
@@ -689,21 +686,6 @@ def _maybe_restore_state(
     return state, restored_meta
 
 
-def _trim_trailing_token(tokens: list[int], token_id: int | None) -> list[int]:
-    """Trim trailing token_id values from a token list.
-
-    :param list[int] tokens: Token list to trim.
-    :param int | None token_id: Token id to remove from the tail.
-    :return list[int]: Trimmed token list.
-    """
-    if token_id is None:
-        return tokens
-    out = list(tokens)
-    while out and out[-1] == token_id:
-        out.pop()
-    return out
-
-
 def _validate_packing_capabilities(cfg: Config, *, params: Any, static: Any) -> None:
     """Fail fast when strict packed semantics are requested but unsupported.
 
@@ -730,18 +712,20 @@ def _select_prompt_tokens(
     tokens: list[int],
     *,
     input_len: int,
-    eos_token_id: int | None,
+    eos_token_id: int,
     rng: random.Random,
 ) -> list[int]:
     """Select a prompt slice from tokenized text.
 
     :param list[int] tokens: Tokenized text.
     :param int input_len: Target prompt length.
-    :param int | None eos_token_id: EOS token id for trimming, if any.
+    :param int eos_token_id: EOS token id to trim from the tail.
     :param random.Random rng: RNG used to choose prefix/suffix.
     :return list[int]: Prompt token slice.
     """
-    tokens = _trim_trailing_token(tokens, eos_token_id)
+    tokens = list(tokens)
+    while tokens and tokens[-1] == eos_token_id:
+        tokens.pop()
     if not tokens:
         return []
     if len(tokens) <= input_len:
@@ -950,10 +934,19 @@ def build_optimizer(
 
     # NOTE: grad clipping is done manually in make_train_step to avoid
     # computing global_norm twice (once for clipping, once for logging).
+    adam_cfg = cfg.optim.adam
+    adam_tx = optax.adamw(
+        learning_rate=schedule,
+        b1=adam_cfg.b1,
+        b2=adam_cfg.b2,
+        eps=adam_cfg.eps,
+        weight_decay=cfg.optim.weight_decay,
+        mask=lambda tree: parameter_decay_mask(cfg, tree),
+        nesterov=adam_cfg.nesterov,
+    )
 
     if cfg.optim.name == "muon":
         muon_cfg = cfg.optim.muon
-        adam_cfg = cfg.optim.adam
         if cfg.model.backend == "megalodon" and muon_cfg.allow_all_2d:
             logger.warning(
                 "optim.muon.allow_all_2d=true will apply Muon to all 2D tensors, including "
@@ -1023,15 +1016,6 @@ def build_optimizer(
             ]
         )
         muon_tx = optax.chain(*muon_transforms)
-        adam_tx = optax.adamw(
-            learning_rate=schedule,
-            b1=adam_cfg.b1,
-            b2=adam_cfg.b2,
-            eps=adam_cfg.eps,
-            weight_decay=cfg.optim.weight_decay,
-            mask=lambda tree: parameter_decay_mask(cfg, tree),
-            nesterov=adam_cfg.nesterov,
-        )
         # Equinox model pytrees are callable, so Optax would mistake the label
         # pytree itself for a label function. Return the precomputed groups from
         # a wrapper instead of reclassifying parameters on every invocation.
@@ -1039,16 +1023,7 @@ def build_optimizer(
             {"muon": muon_tx, "adam": adam_tx}, lambda _params: optimizer_groups
         )
     else:
-        adam_cfg = cfg.optim.adam
-        tx = optax.adamw(
-            learning_rate=schedule,
-            b1=adam_cfg.b1,
-            b2=adam_cfg.b2,
-            eps=adam_cfg.eps,
-            weight_decay=cfg.optim.weight_decay,
-            mask=lambda tree: parameter_decay_mask(cfg, tree),
-            nesterov=adam_cfg.nesterov,
-        )
+        tx = adam_tx
 
     return tx, schedule
 
@@ -1212,7 +1187,7 @@ def make_train_step(
             ),
         )
 
-        token_denom = jnp.maximum(token_sum, 1).astype(jnp.float32)
+        token_denom = token_sum.astype(jnp.float32)
         loss = loss_sum / token_denom
         grads = jax.tree_util.tree_map(lambda g: g / token_denom, grad_sum)
 
@@ -1411,7 +1386,7 @@ def _run_impl(
         allow_existing=allow_existing,
         dry_run=dry_run,
     )
-    if cfg.model.use_checkpoint and derived_deterministic(cfg):
+    if cfg.model.backend == "megalodon" and cfg.model.use_checkpoint and derived_deterministic(cfg):
         logger.warning(
             "train.deterministic=true disables activation checkpointing in megalodon-jax. "
             "Set train.deterministic=false (and keep dropout at 0.0 for deterministic math) "

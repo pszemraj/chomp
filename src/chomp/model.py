@@ -117,7 +117,7 @@ class DummyLM(eqx.Module):
         attention_mask: jax.Array | None = None,
         segment_ids: jax.Array | None = None,
         *,
-        ignore_index: int = -100,
+        ignore_index: int = IGNORE_INDEX,
         deterministic: bool = True,
         key: jax.Array | None = None,
     ) -> jax.Array:

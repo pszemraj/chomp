@@ -268,7 +268,6 @@ class MetricsWriter:
         :param dict[str, Any] row: Dictionary of metrics to write.
         """
         self._f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        self._f.flush()
 
     def close(self) -> None:
         """Close the file handle."""
