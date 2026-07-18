@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -36,7 +37,7 @@ def test_cpu_allowed_when_configured() -> None:
 
 def test_non_gpu_accelerator_is_not_accepted_as_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
     """The production device gate must require a CUDA-backed GPU."""
-    monkeypatch.setattr(jax, "devices", lambda: [_Dev("tpu")])
+    monkeypatch.setattr(jax, "devices", lambda: [SimpleNamespace(platform="tpu")])
 
     with pytest.raises(RuntimeError, match="required CUDA GPU backend"):
         validate_default_device(allow_cpu=False)
@@ -73,48 +74,19 @@ def test_device_platform_detects_array() -> None:
     assert isinstance(plat, str) and plat
 
 
-class _Dev:
-    """Mock device with platform attribute."""
-
-    def __init__(self, platform: str) -> None:
-        self.platform = platform
-
-
-def _arr_with_device_property(platform: str) -> object:
-    """Build a mock array exposing a .device property."""
-
-    class _Arr:
-        def __init__(self) -> None:
-            self.device = _Dev(platform)
-
-    return _Arr()
-
-
 def test_device_platform_handles_supported_object_shapes() -> None:
     """device_platform reads .device.platform and returns None for unknown objects."""
     for arr, expected in [
-        (_arr_with_device_property("gpu"), "gpu"),
+        (SimpleNamespace(device=SimpleNamespace(platform="gpu")), "gpu"),
         (object(), None),
     ]:
         assert device_platform(arr) == expected  # type: ignore[arg-type]
 
 
-def _make_batch() -> Batch:
-    """Create a minimal Batch for testing.
-
-    :return Batch: Batch with minimal shapes.
-    """
-    arr = jax.numpy.zeros((1, 1, 1), dtype=jax.numpy.int32)
-    return Batch(
-        input_ids=arr,
-        labels=arr,
-        segment_ids=arr,
-    )
-
-
 def test_assert_batch_on_device_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
     """assert_batch_on_device should enforce platform checks across key combinations."""
-    batch = _make_batch()
+    arr = jax.numpy.zeros((1, 1, 1), dtype=jax.numpy.int32)
+    batch = Batch(input_ids=arr, labels=arr, segment_ids=arr)
     for platform, allow_cpu, should_raise in [
         ("gpu", False, False),
         ("cpu", False, True),
