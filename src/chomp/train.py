@@ -84,7 +84,7 @@ from chomp.model import (
     write_parameter_manifest,
 )
 from chomp.types import IGNORE_INDEX, Batch, TrainState
-from chomp.utils.devices import assert_batch_on_device
+from chomp.utils.devices import assert_batch_on_device, validate_default_device
 from chomp.utils.io import (
     MetricsWriter,
     RunDirectoryLock,
@@ -652,13 +652,20 @@ def _maybe_restore_state(
     if manager is None:
         raise RuntimeError("resume requested but checkpointing is disabled")
 
+    latest = manager.latest_step()
     if resume == "latest":
-        latest = manager.latest_step()
         if latest is None:
             raise FileNotFoundError(f"No checkpoints found in {manager.directory}")
         step_r = int(latest)
     else:
         step_r = int(resume)
+        if latest is not None and step_r < int(latest):
+            raise RuntimeError(
+                f"Refusing to resume checkpoint step {step_r} in place because newer "
+                f"step {int(latest)} already exists in {manager.directory}. Use "
+                "--resume latest, or copy the older checkpoint into a new run directory "
+                "before branching from it."
+            )
 
     # Validate metadata before Grain restores/replays any iterator buffers.
     # A pipeline schema or source mismatch must fail without reading up to a
@@ -1330,6 +1337,8 @@ def run(
     :return Path: Path to the run directory.
     """
 
+    validate_default_device(allow_cpu=cfg.train.allow_cpu)
+
     if dry_run and resume != "none":
         raise RuntimeError("dry_run does not support resume; use a fresh run.")
 
@@ -1866,6 +1875,11 @@ def _run_impl(
                                 mem_stats=mem_stats,
                             )
                         )
+                # A signal can arrive during the final step's evaluation,
+                # generation, or logging tail after the post-update poll.
+                # Record it while the metrics writer is still open so a
+                # completed preemption cannot be reported as success.
+                _record_stop_if_requested(mw)
             except Exception as exc:
                 exit_code = 1
                 crash_type = type(exc).__name__

@@ -73,6 +73,21 @@ from tests.helpers.config_factories import make_small_run_cfg
 from tests.helpers.io import read_jsonl
 
 
+class _FakeStopSignal:
+    """Mutable signal state for deterministic preemption tests."""
+
+    def __init__(self, reason: str = "SIGTERM", exit_code: int = 143) -> None:
+        self.requested = False
+        self.reason = reason
+        self.exit_code = exit_code
+
+    def __enter__(self) -> _FakeStopSignal:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
+
+
 def _base_cfg(run_dir: Path) -> Config:
     """Create a base config for checkpoint tests.
 
@@ -491,6 +506,20 @@ def test_checkpoint_saves_final_step(tmp_path: Path) -> None:
     assert (ckpt_dir / "3").exists(), "expected final checkpoint at step 3"
 
 
+def test_explicit_resume_rejects_older_retained_step(tmp_path: Path) -> None:
+    """In-place rollback must not collide with newer finalized checkpoints."""
+    cfg, config_src = make_small_run_cfg(tmp_path, decay_steps=4)
+    cfg = replace(cfg, train=replace(cfg.train, steps=4))
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, max_to_keep=4))
+    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+
+    with pytest.raises(RuntimeError, match="newer step 4 already exists"):
+        run(cfg, config_path=str(config_src), resume=3, dry_run=False)
+
+    ckpt_dir = default_ckpt_dir(run_dir)
+    assert {int(path.name) for path in ckpt_dir.iterdir() if path.name.isdigit()} == {1, 2, 3, 4}
+
+
 def test_stop_signal_state_records_reason_and_restores_handlers() -> None:
     """The signal bridge should defer work and restore the process handler."""
     previous = signal.getsignal(signal.SIGTERM)
@@ -536,18 +565,7 @@ def test_preemption_finishes_one_step_and_writes_aligned_checkpoint(
     cfg = replace(cfg, train=replace(cfg.train, steps=5))
     cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=100))
 
-    class _FakeStop:
-        requested = False
-        reason = "SIGTERM"
-        exit_code = 143
-
-        def __enter__(self) -> _FakeStop:
-            return self
-
-        def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-            return None
-
-    stop = _FakeStop()
+    stop = _FakeStopSignal()
     monkeypatch.setattr(train_mod, "_StopSignalState", lambda: stop)
     real_make_train_step = train_mod.make_train_step
 
@@ -579,6 +597,58 @@ def test_preemption_finishes_one_step_and_writes_aligned_checkpoint(
     ckpt_dir = default_ckpt_dir(run_dir)
     steps = {int(path.name) for path in ckpt_dir.iterdir() if path.name.isdigit()}
     assert steps == {1}
+
+
+def test_preemption_during_final_logging_tail_is_not_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A signal after the last post-update poll must still report preemption."""
+    import chomp.train as train_mod
+
+    cfg, config_src = make_small_run_cfg(tmp_path, decay_steps=3)
+    cfg = replace(cfg, train=replace(cfg.train, steps=3, log_every=1))
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=100))
+
+    stop = _FakeStopSignal()
+    monkeypatch.setattr(train_mod, "_StopSignalState", lambda: stop)
+    real_write = train_mod.MetricsWriter.write
+
+    def _write_and_signal(writer: Any, row: dict[str, Any]) -> None:
+        real_write(writer, row)
+        if row.get("step") == 3 and "loss" in row:
+            stop.requested = True
+
+    monkeypatch.setattr(train_mod.MetricsWriter, "write", _write_and_signal)
+
+    with pytest.raises(TrainingPreempted) as exc_info:
+        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+
+    assert exc_info.value.signal_name == "SIGTERM"
+    rows = read_jsonl(exc_info.value.run_dir / cfg.logging.metrics_file)
+    assert any(row.get("preemption_requested") and row.get("step") == 3 for row in rows)
+    assert (default_ckpt_dir(exc_info.value.run_dir) / "3").exists()
+
+
+def test_run_enforces_device_before_artifact_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The public Python API must enforce the GPU policy before writing a run."""
+    cfg, config_src = make_small_run_cfg(tmp_path)
+    cfg = replace(cfg, train=replace(cfg.train, allow_cpu=False))
+    run_dir = Path(cfg.logging.run_dir or "")
+    calls: list[bool] = []
+
+    def _reject_device(*, allow_cpu: bool) -> None:
+        calls.append(allow_cpu)
+        raise RuntimeError("injected non-CUDA backend")
+
+    monkeypatch.setattr("chomp.train.validate_default_device", _reject_device)
+
+    with pytest.raises(RuntimeError, match="injected non-CUDA backend"):
+        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+
+    assert calls == [False]
+    assert not run_dir.exists()
 
 
 def test_run_lock_fails_before_fresh_artifact_setup(tmp_path: Path) -> None:

@@ -863,8 +863,8 @@ train:
   # Required: no.
   # Valid: true | false.
   # Lifecycle: debug only.
-  # Use: false fails fast if JAX selects CPU. Enable only for small smoke tests; CPU training is not
-  # a sensible production fallback.
+  # Use: false requires JAX's default device and every checked batch to use the CUDA GPU backend at
+  # both the Python API and CLI boundary. Enable only for small CPU smoke tests.
   allow_cpu: false
 
   # Key: train.log_every

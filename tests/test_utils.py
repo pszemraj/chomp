@@ -34,6 +34,14 @@ def test_cpu_allowed_when_configured() -> None:
     validate_default_device(allow_cpu=True)
 
 
+def test_non_gpu_accelerator_is_not_accepted_as_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The production device gate must require a CUDA-backed GPU."""
+    monkeypatch.setattr(jax, "devices", lambda: [_Dev("tpu")])
+
+    with pytest.raises(RuntimeError, match="required CUDA GPU backend"):
+        validate_default_device(allow_cpu=False)
+
+
 def test_resume_requires_an_existing_run_directory(tmp_path: Path) -> None:
     """Resume setup must not create a missing run directory."""
     run_dir = tmp_path / "missing-run"
@@ -110,6 +118,7 @@ def test_assert_batch_on_device_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
     for platform, allow_cpu, should_raise in [
         ("gpu", False, False),
         ("cpu", False, True),
+        ("tpu", False, True),
         (None, True, False),
         (None, False, True),
     ]:

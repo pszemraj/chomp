@@ -18,17 +18,21 @@ if TYPE_CHECKING:
 
 
 def validate_default_device(*, allow_cpu: bool) -> None:
-    """Fail fast if JAX is running on CPU (unless explicitly allowed)."""
+    """Require JAX's default backend to be CUDA unless CPU debugging is allowed.
+
+    :param bool allow_cpu: Whether a non-GPU backend is permitted for debugging.
+    :raises RuntimeError: If JAX has no devices or the default device is not a GPU.
+    """
 
     devs = jax.devices()
     if not devs:
         raise RuntimeError("JAX reports no devices. JAX installation is broken.")
 
     platform = devs[0].platform
-    if platform == "cpu" and not allow_cpu:
+    if platform != "gpu" and not allow_cpu:
         raise RuntimeError(
-            "JAX is using CPU backend but train.allow_cpu=false. "
-            "Install a CUDA-enabled jaxlib and ensure CUDA is visible. "
+            f"JAX is using {platform!r}, not the required CUDA GPU backend, while "
+            "train.allow_cpu=false. Ensure the CUDA device is visible. "
             "Set train.allow_cpu=true only for debugging."
         )
 
@@ -63,8 +67,7 @@ def assert_batch_on_device(batch: Batch, *, allow_cpu: bool) -> None:
             )
         return
 
-    if plat == "cpu" and not allow_cpu:
+    if plat != "gpu" and not allow_cpu:
         raise RuntimeError(
-            "Batch appears to be on CPU but train.allow_cpu=false. "
-            "This usually means you don't have CUDA-enabled jaxlib installed."
+            f"Batch is on {plat!r}, not the required CUDA GPU backend, while train.allow_cpu=false."
         )

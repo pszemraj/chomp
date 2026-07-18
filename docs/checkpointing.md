@@ -57,6 +57,8 @@ A save succeeds only when Orbax explicitly accepts it. Before save and after
 restore, Chomp requires the checkpoint directory step, metadata step, and
 `TrainState.step` to agree; any mismatch is treated as corruption.
 
+`--resume latest` continues the newest finalized checkpoint. An explicit step may select that newest step, but Chomp rejects an older retained step in the same checkpoint root because subsequent saves would collide with the already finalized future. To branch from an older step, copy it into a new run directory first.
+
 When `debug.nan_check` is enabled, save steps force a metrics sync and validate loss, gradient norm, learning rate, post-update parameters, and optimizer state before the write. A non-finite step is rejected even when the save cadence does not land on a logging step.
 
 ## Run ownership and preemption
@@ -68,15 +70,7 @@ metrics, manifest, or checkpoint artifacts. Lock files persist so every
 process contends on the same inode; the operating-system lock, not file
 existence, determines ownership.
 
-On `SIGTERM` or `SIGUSR1`, the main-thread handler records only a stop flag.
-The loop does no IO inside the signal handler: it finishes an optimizer step
-already in flight, stops at the next aligned model/data boundary, writes a
-`preemption_requested` metrics row with `preemption_signal`, forces the final
-checkpoint, and closes Orbax before exiting. A request received between
-steps stops before another batch is consumed. The Python API raises
-`TrainingPreempted` only after finalization; the CLI exits with `128 + signal`
-(143 for SIGTERM, 138 for SIGUSR1), so schedulers can distinguish a completed
-preemption from success or a training failure.
+On `SIGTERM` or `SIGUSR1`, the main-thread handler records only a stop flag. The loop does no IO inside the signal handler: it finishes an optimizer step already in flight, stops at the next aligned model/data boundary, writes a `preemption_requested` metrics row with `preemption_signal`, forces the final checkpoint, and closes Orbax before exiting. A request received between steps stops before another batch is consumed; a request during the final step's evaluation, generation, or logging tail is recorded before finalization. The Python API raises `TrainingPreempted` only after finalization; the CLI exits with `128 + signal` (143 for SIGTERM, 138 for SIGUSR1), so schedulers can distinguish a completed preemption from success or a training failure.
 
 ## Final checkpoint policy
 

@@ -69,10 +69,6 @@ def train(
 
     # Deferred import keeps config-only CLI startup from initializing JAX.
     from chomp.train import TrainingPreempted, run
-    from chomp.utils.devices import validate_default_device
-
-    # Fail fast on CPU unless explicitly allowed
-    validate_default_device(allow_cpu=cfg.train.allow_cpu)
 
     try:
         run_dir_path = run(  # type: ignore[arg-type]
