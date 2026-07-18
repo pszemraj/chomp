@@ -1068,6 +1068,49 @@ def _poison_loss_at_step(monkeypatch: pytest.MonkeyPatch, poison_step: int) -> N
     monkeypatch.setattr("chomp.train.make_train_step", _poisoned_make)
 
 
+def _poison_state_at_step(monkeypatch: pytest.MonkeyPatch, *, poison_step: int, field: str) -> None:
+    """Inject NaNs into post-update parameters or optimizer state.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch chomp.train.
+    :param int poison_step: One-based step whose state becomes non-finite.
+    :param str field: TrainState field to poison: params or opt_state.
+    """
+    import chomp.train as train_mod
+
+    real_make = train_mod.make_train_step
+
+    def _poisoned_make(cfg: Config, **kwargs: Any) -> Any:
+        step_fn = real_make(cfg, **kwargs)
+
+        def wrapped(state: Any, batch: Batch) -> tuple[Any, dict[str, Any]]:
+            new_state, metrics = step_fn(state, batch)
+            target = getattr(new_state, field)
+            poisoned = jax.tree_util.tree_map(
+                lambda leaf: (
+                    jnp.where(
+                        new_state.step == poison_step,
+                        jnp.full_like(leaf, jnp.nan),
+                        leaf,
+                    )
+                    if hasattr(leaf, "dtype") and jnp.issubdtype(leaf.dtype, jnp.inexact)
+                    else leaf
+                ),
+                target,
+            )
+            values = {
+                "step": new_state.step,
+                "params": new_state.params,
+                "opt_state": new_state.opt_state,
+                "rng": new_state.rng,
+                field: poisoned,
+            }
+            return TrainState(**values), metrics
+
+        return wrapped
+
+    monkeypatch.setattr("chomp.train.make_train_step", _poisoned_make)
+
+
 def test_periodic_save_step_forces_finite_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: LogCaptureFixture
 ) -> None:
@@ -1122,6 +1165,70 @@ def test_final_checkpoint_refuses_nonfinite_state(
     steps_on_disk = {int(p.name) for p in ckpt_dir.iterdir() if p.is_dir() and p.name.isdigit()}
     assert steps_on_disk == {2, 4}, f"latest must stay the last good save, found {steps_on_disk}"
     assert any("Skipping final checkpoint at step" in rec.getMessage() for rec in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("field", "poison_step", "save_every", "expected_steps", "match"),
+    [
+        ("params", 3, 3, set(), "Non-finite parameters at step 3"),
+        ("opt_state", 5, 2, {2, 4}, "Non-finite optimizer state at step 5"),
+    ],
+)
+def test_checkpoint_refuses_nonfinite_post_update_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    poison_step: int,
+    save_every: int,
+    expected_steps: set[int],
+    match: str,
+) -> None:
+    """Finite pre-update metrics cannot authorize a poisoned TrainState save.
+
+    :param Path tmp_path: Temporary test directory.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch the train step.
+    :param str field: TrainState partition poisoned after the optimizer update.
+    :param int poison_step: Step whose state becomes non-finite.
+    :param int save_every: Periodic checkpoint cadence for this case.
+    :param set[int] expected_steps: Last known-good checkpoints expected on disk.
+    :param str match: Expected validation failure text.
+    """
+    cfg, config_src = make_small_run_cfg(
+        tmp_path,
+        run_subdir=f"run_nonfinite_{field}",
+        decay_steps=5,
+    )
+    cfg = replace(cfg, train=replace(cfg.train, steps=5, log_every=1000))
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=save_every))
+    _poison_state_at_step(monkeypatch, poison_step=poison_step, field=field)
+
+    with pytest.raises(RuntimeError, match=match):
+        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+
+    ckpt_dir = default_ckpt_dir(Path(cfg.logging.run_dir))
+    steps_on_disk = (
+        {int(path.name) for path in ckpt_dir.iterdir() if path.name.isdigit()}
+        if ckpt_dir.exists()
+        else set()
+    )
+    assert steps_on_disk == expected_steps
+
+
+def test_checkpoint_disabled_run_rejects_nonfinite_final_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final metric validity remains a run invariant without checkpointing."""
+    cfg, config_src = make_small_run_cfg(
+        tmp_path,
+        run_subdir="run_nonfinite_no_checkpoint",
+        decay_steps=2,
+    )
+    cfg = replace(cfg, train=replace(cfg.train, steps=2, log_every=1000))
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, enabled=False))
+    _poison_loss_at_step(monkeypatch, poison_step=2)
+
+    with pytest.raises(RuntimeError, match="Non-finite loss at step 2"):
+        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
 
 
 def test_resume_rejects_seq_len_mismatch(tmp_path: Path) -> None:

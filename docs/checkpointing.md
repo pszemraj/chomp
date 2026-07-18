@@ -57,9 +57,7 @@ A save succeeds only when Orbax explicitly accepts it. Before save and after
 restore, Chomp requires the checkpoint directory step, metadata step, and
 `TrainState.step` to agree; any mismatch is treated as corruption.
 
-When `debug.nan_check` is enabled, save steps force a metrics sync so the
-finite-loss/grad-norm check runs before the write. A non-finite step is then
-rejected even when the save cadence does not land on a logging step.
+When `debug.nan_check` is enabled, save steps force a metrics sync and validate loss, gradient norm, learning rate, post-update parameters, and optimizer state before the write. A non-finite step is rejected even when the save cadence does not land on a logging step.
 
 ## Run ownership and preemption
 
@@ -91,9 +89,7 @@ step is written only when it is safe to resume from:
   resume uses the last periodic checkpoint. Finite streams right-pad their
   final window and missing batch rows; after that batch completes, exact EOF is
   aligned and the final checkpoint is written.
-- **Validity**: when `debug.nan_check` is enabled, the last step's metrics are
-  re-checked for finiteness before the write, so "latest" cannot become a NaN
-  tombstone.
+- **Validity**: when `debug.nan_check` is enabled, the last step's metrics, parameters, and optimizer state are re-checked for finiteness, so "latest" cannot become a NaN tombstone. Final validity is a run invariant even when checkpointing is disabled.
 
 A final save that fails on an otherwise clean exit fails the run; training
 never exits successfully with an unwritten checkpoint.

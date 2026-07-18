@@ -21,10 +21,7 @@ boundary masks.
 Batch assembly computes the same shifted valid-target count on the host and
 pairs it with the batch through prefetch/device transfer. The trainer updates
 `tokens_seen` from that Python integer without synchronizing every optimizer
-step. Logging, evaluation, checkpoint, first-compile, and finite-check cadences
-synchronize queued work and verify the current host count against the compiled
-int32 counter. Evaluation likewise accumulates all batch totals on device and
-synchronizes once per pass.
+step. Logging, evaluation, checkpoint, first-compile, and finite-check cadences synchronize queued work and verify the current host count against the compiled int32 counter. At save and final boundaries, the finite check also covers the post-update parameters and optimizer state. Evaluation likewise accumulates all batch totals on device and synchronizes once per pass.
 
 Full packing diagnostics scan attention and segment arrays only for batches
 whose global step will log or evaluate. Non-observable steps still compute the
@@ -86,9 +83,7 @@ The supporting ablation is recorded in the
 ## Evaluation
 
 If `train.eval_every > 0` and `data.max_eval_samples > 0`, chomp runs a full
-pass over the pinned eval token set and logs `eval_loss`. Eval text selection,
-cache identity checks, packed eval flushing, and zero-batch/zero-token failures are documented in
-[Data Pipeline validation set](data_pipeline.md#validation-set).
+pass over the pinned eval token set and logs `eval_loss`. A non-finite loss reduction fails the run before a metric is logged. Eval text selection, cache identity checks, packed eval flushing, and zero-batch/zero-token failures are documented in [Data Pipeline validation set](data_pipeline.md#validation-set).
 
 Eval batches are assembled once and cached host-side for the whole run; device
 transfer happens per batch each eval, so no device memory is held between evals.

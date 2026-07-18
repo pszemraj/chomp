@@ -125,6 +125,34 @@ def test_eval_batches_assembled_once_and_reused(
     assert len(eval_rows) == 2  # both evals produced a loss from the cached batches
 
 
+def test_nonfinite_eval_fails_before_metric_logging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-finite eval reduction must fail the run instead of logging NaN."""
+    run_dir = tmp_path / "run_nonfinite_eval"
+    cfg = _eval_cfg(run_dir)
+
+    def _nonfinite_eval_step(_params: Any, _batch: Any) -> tuple[float, int]:
+        """Return a poisoned loss with a nonzero denominator.
+
+        :param _params: Ignored model parameters.
+        :param _batch: Ignored eval batch.
+        :return tuple[float, int]: NaN loss sum and one valid token.
+        """
+        return float("nan"), 1
+
+    monkeypatch.setattr(
+        "chomp.train.make_eval_step",
+        lambda *_args, **_kwargs: _nonfinite_eval_step,
+    )
+
+    with pytest.raises(RuntimeError, match="non-finite loss sum"):
+        run(cfg, config_path=None, resume="none", dry_run=False)
+
+    rows = read_jsonl(run_dir / cfg.logging.metrics_file)
+    assert not any("eval_loss" in row for row in rows)
+
+
 @pytest.mark.parametrize(
     ("mode", "knobs"),
     [

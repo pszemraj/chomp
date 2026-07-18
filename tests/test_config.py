@@ -287,6 +287,31 @@ def test_optim_validation_rejects_invalid_values() -> None:
 
 
 @pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda cfg: replace(cfg, model=replace(cfg.model, norm_eps=float("nan"))),
+        lambda cfg: replace(cfg, data=replace(cfg.data, retry_delay_sec=float("inf"))),
+        lambda cfg: replace(cfg, train=replace(cfg.train, generate_temperature=float("nan"))),
+        lambda cfg: replace(cfg, optim=replace(cfg.optim, lr=float("nan"))),
+        lambda cfg: replace(
+            cfg,
+            optim=replace(
+                cfg.optim,
+                muon=replace(cfg.optim.muon, consistent_rms=float("-inf")),
+            ),
+        ),
+    ],
+)
+def test_config_rejects_nonfinite_float_fields(mutate: Callable[[Config], Config]) -> None:
+    """Every float-valued config field must reject NaN and infinity.
+
+    :param Callable[[Config], Config] mutate: Mutation that inserts a non-finite float.
+    """
+    with pytest.raises(ValueError, match="must be finite"):
+        validate_config(mutate(_base_cfg()))
+
+
+@pytest.mark.parametrize(
     ("mode", "knob"),
     [
         ("bin", "packing_buffer_docs"),

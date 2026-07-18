@@ -20,6 +20,7 @@ Design stance (hard-earned):
 from __future__ import annotations
 
 import json
+import math
 import re
 import types
 import warnings
@@ -796,6 +797,8 @@ def _validate_config_types(value: Any, prefix: str = "") -> None:
         field_value = getattr(value, field.name)
         path = f"{prefix}.{field.name}" if prefix else field.name
         type_hint = hints[field.name]
+        if isinstance(field_value, float) and not math.isfinite(field_value):
+            _vfail(f"{path} must be finite, got {field_value}")
         if isinstance(type_hint, type) and is_dataclass(type_hint):
             if type(field_value) is not type_hint:
                 _vfail(

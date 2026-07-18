@@ -156,8 +156,9 @@ def test_dummy_param_count() -> None:
 @pytest.mark.parametrize(
     ("metrics", "match"),
     [
-        ({"loss": float("nan"), "grad_norm": 1.0}, "loss"),
-        ({"loss": 1.0, "grad_norm": float("inf")}, "grad_norm"),
+        ({"loss": float("nan"), "grad_norm": 1.0, "lr": 1e-3}, "loss"),
+        ({"loss": 1.0, "grad_norm": float("inf"), "lr": 1e-3}, "grad_norm"),
+        ({"loss": 1.0, "grad_norm": 1.0, "lr": float("nan")}, "lr"),
     ],
 )
 def test_finite_check_rejects_nonfinite_metrics(metrics: dict[str, float], match: str) -> None:

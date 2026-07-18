@@ -1334,9 +1334,7 @@ debug:
   # Default: true.
   # Required: no.
   # Valid: true | false.
-  # Use: checks synchronized loss and gradient-norm metrics for NaN/Inf before periodic saves and at
-  # logging/evaluation/first-compile sync points, and rechecks before the final save. Keep true so a
-  # non-finite state is not persisted; it does not force a host sync on every ordinary step.
+  # Use: checks synchronized loss, gradient norm, and learning rate plus post-update parameters and optimizer state for NaN/Inf before periodic saves, and validates the final step even when checkpointing is disabled. Evaluation also rejects non-finite loss. Keep true; checks run at existing synchronization/save/final cadences rather than forcing a host sync on every ordinary step.
   nan_check: true
 
   # Key: debug.check_device_every

@@ -191,17 +191,60 @@ def _count_tokens(labels: jax.Array, segment_ids: jax.Array) -> jax.Array:
 
 
 def _check_finite_metrics(metrics: dict[str, Any], *, step: int) -> None:
-    """Fail fast if loss/grad_norm are non-finite.
+    """Fail fast if synchronized training metrics are non-finite.
 
-    :param dict[str, Any] metrics: Dictionary containing 'loss' and 'grad_norm' values.
+    :param dict[str, Any] metrics: Dictionary containing loss, grad_norm, and lr values.
     :param int step: Current training step (for error messages).
-    :raises RuntimeError: If loss or grad_norm is NaN or Inf.
+    :raises RuntimeError: If loss, grad_norm, or lr is NaN or Inf.
     """
 
-    for name in ("loss", "grad_norm"):
+    for name in ("loss", "grad_norm", "lr"):
         value = float(metrics[name])
         if not math.isfinite(value):
             raise RuntimeError(f"Non-finite {name} at step {step}: {value}")
+
+
+def _tree_all_finite(tree: Any) -> jax.Array:
+    """Reduce all inexact array leaves in a pytree to one device boolean.
+
+    :param Any tree: Pytree whose floating or complex arrays are checked.
+    :return jax.Array: Scalar true when every inexact array value is finite.
+    """
+    flags = [
+        jnp.all(jnp.isfinite(leaf))
+        for leaf in jax.tree_util.tree_leaves(tree)
+        if eqx.is_inexact_array(leaf)
+    ]
+    if not flags:
+        return jnp.array(True)
+    return jnp.all(jnp.stack(flags))
+
+
+@eqx.filter_jit
+def _train_state_finite_flags(state: TrainState) -> tuple[jax.Array, jax.Array]:
+    """Check parameter and optimizer-state finiteness on device.
+
+    :param TrainState state: Post-update training state.
+    :return tuple[jax.Array, jax.Array]: Parameter and optimizer-state finite flags.
+    """
+    return _tree_all_finite(state.params), _tree_all_finite(state.opt_state)
+
+
+def _check_finite_train_state(state: TrainState, *, step: int) -> None:
+    """Reject a post-update state containing non-finite learned values.
+
+    :param TrainState state: Post-update training state to validate.
+    :param int step: Current training step for the failure message.
+    :raises RuntimeError: If parameters or optimizer state contain NaN or Inf.
+    """
+    params_finite, opt_state_finite = jax.device_get(_train_state_finite_flags(state))
+    invalid: list[str] = []
+    if not bool(params_finite):
+        invalid.append("parameters")
+    if not bool(opt_state_finite):
+        invalid.append("optimizer state")
+    if invalid:
+        raise RuntimeError(f"Non-finite {' and '.join(invalid)} at step {step}")
 
 
 def _device_memory_stats_gb() -> dict[str, float]:
@@ -1562,8 +1605,17 @@ def _run_impl(
                 "data.mask_boundary_loss / data.train_on_eos against the eval "
                 "document lengths."
             )
+        total_loss_value = float(total_loss_host)
+        if not math.isfinite(total_loss_value):
+            raise RuntimeError(
+                f"Evaluation produced a non-finite loss sum over {int(total_tokens_host)} "
+                f"valid tokens: {total_loss_value}"
+            )
+        eval_loss = total_loss_value / int(total_tokens_host)
+        if not math.isfinite(eval_loss):
+            raise RuntimeError(f"Evaluation produced a non-finite mean loss: {eval_loss}")
         return {
-            "eval_loss": float(total_loss_host) / int(total_tokens_host),
+            "eval_loss": eval_loss,
             "eval_tokens": int(total_tokens_host),
         }
 
@@ -1740,6 +1792,8 @@ def _run_impl(
 
                     # Checkpoint save (after state updated + finite-checked)
                     if save_interval:
+                        if cfg.debug.nan_check:
+                            _check_finite_train_state(state, step=step_i)
                         _save_training_checkpoint(
                             manager,
                             step=step_i,
@@ -1854,6 +1908,36 @@ def _run_impl(
         finalization_errors: list[Exception] = []
 
         final_step = None
+        try:
+            final_step = int(jax.device_get(state.step))
+        except Exception as exc:
+            logger.exception("Could not read state.step during run finalization")
+            finalization_errors.append(exc)
+
+        final_state_valid = True
+        if (
+            final_step is not None
+            and final_step > start_step
+            and cfg.debug.nan_check
+            and metrics is not None
+        ):
+            try:
+                _check_finite_metrics(jax.device_get(metrics), step=final_step)
+                _check_finite_train_state(state, step=final_step)
+            except Exception as exc:
+                final_state_valid = False
+                if manager is not None:
+                    logger.error(
+                        "Skipping final checkpoint at step %s (%s). Resume from "
+                        "the last periodic checkpoint%s.",
+                        final_step,
+                        exc,
+                        f" (step {last_saved_step})" if last_saved_step >= 0 else "",
+                    )
+                else:
+                    logger.error("Final train state at step %s is invalid: %s", final_step, exc)
+                finalization_errors.append(exc)
+
         if manager is not None and not data_state_aligned:
             logger.warning(
                 "Skipping final checkpoint: the data iterator is ahead of the "
@@ -1862,52 +1946,29 @@ def _run_impl(
                 "the last periodic checkpoint%s.",
                 f" (step {last_saved_step})" if last_saved_step >= 0 else "",
             )
-        elif manager is not None:
-            try:
-                final_step = int(jax.device_get(state.step))
-            except Exception as exc:
-                logger.exception("Could not read state.step for the final checkpoint")
-                finalization_errors.append(exc)
         if (
             manager is not None
+            and data_state_aligned
             and final_step is not None
             and final_step > start_step
             and final_step != last_saved_step
+            and final_state_valid
         ):
-            final_state_valid = True
-            if cfg.debug.nan_check and metrics is not None:
-                # The in-loop finite check only runs on sync steps, and a
-                # non-finite step may itself be why we are unwinding.
-                # Re-validate the last completed step's metrics (they always
-                # match `state`) so "latest" can never be a NaN tombstone.
-                try:
-                    _check_finite_metrics(jax.device_get(metrics), step=final_step)
-                except Exception as exc:
-                    final_state_valid = False
-                    logger.error(
-                        "Skipping final checkpoint at step %s (%s). Resume from "
-                        "the last periodic checkpoint%s.",
-                        final_step,
-                        exc,
-                        f" (step {last_saved_step})" if last_saved_step >= 0 else "",
-                    )
-                    finalization_errors.append(exc)
-            if final_state_valid:
-                try:
-                    _save_training_checkpoint(
-                        manager,
-                        step=final_step,
-                        cfg=cfg,
-                        tokenizer_hash=tokenizer_hash,
-                        parameter_manifest_hash=parameter_manifest_hash,
-                        tokens_seen=int(tokens_seen_count),
-                        train_state=state,
-                        data_iter=data_it,
-                        force=True,
-                    )
-                except Exception as exc:
-                    logger.exception("Final checkpoint save failed at step %s", final_step)
-                    finalization_errors.append(exc)
+            try:
+                _save_training_checkpoint(
+                    manager,
+                    step=final_step,
+                    cfg=cfg,
+                    tokenizer_hash=tokenizer_hash,
+                    parameter_manifest_hash=parameter_manifest_hash,
+                    tokens_seen=int(tokens_seen_count),
+                    train_state=state,
+                    data_iter=data_it,
+                    force=True,
+                )
+            except Exception as exc:
+                logger.exception("Final checkpoint save failed at step %s", final_step)
+                finalization_errors.append(exc)
 
         finalization_errors.extend(
             _close_run_resources(manager, data_it, phase="training finalization")
