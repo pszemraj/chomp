@@ -443,7 +443,7 @@ def test_max_to_keep_prunes_checkpoints(
         make_manager(ckpt_dir, max_to_keep=2, save_every=1, async_save=False)
     )
 
-    for step in (1, 2, 3):
+    for step in (1, 2, 3, 4):
         state = TrainState(
             step=jnp.array(step),
             params=state.params,
@@ -459,19 +459,6 @@ def test_max_to_keep_prunes_checkpoints(
             meta=meta,
         )
         mgr.wait_until_finished()
-
-    state = TrainState(
-        step=jnp.array(4), params=state.params, opt_state=state.opt_state, rng=state.rng
-    )
-    meta = _checkpoint_record(cfg, step=4)
-    save(
-        mgr,
-        step=4,
-        train_state=state,
-        data_iter=data_it,
-        meta=meta,
-    )
-    mgr.wait_until_finished()
 
     assert _checkpoint_steps(run_dir) == {3, 4}
 
