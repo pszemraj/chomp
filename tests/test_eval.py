@@ -384,8 +384,8 @@ def test_eval_cache_manifest_records_actual_source_split(
 
     with gzip.open(tmp_path / "eval_tokens.json.gz", "rt", encoding="utf-8") as handle:
         payload = json.load(handle)
-    assert payload["manifest"]["source_split"] == "validation"
-    assert payload["manifest"]["hf_revision"] == cfg.data.hf_revision
+    assert payload["manifest"]["source"]["split"] == "validation"
+    assert payload["manifest"]["source"]["revision"] == cfg.data.hf_revision
 
 
 def test_eval_empty_when_disabled() -> None:

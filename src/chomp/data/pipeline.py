@@ -49,7 +49,7 @@ from .hf import (
 )
 from .pack import FFDPacker, TokenPacker
 
-DATA_PIPELINE_SCHEMA_VERSION = 11
+DATA_PIPELINE_SCHEMA_VERSION = 12
 
 
 class Tokenizer(Protocol):
@@ -254,6 +254,58 @@ def build_tokenizer(cfg: Config) -> Tokenizer:
     raise ValueError(f"Unknown tokenizer.kind: {tok.kind!r}")
 
 
+def _hf_source_fields(
+    cfg: Config,
+    *,
+    split: str,
+    repeat: bool,
+    content_partition: ContentPartition = "all",
+) -> dict[str, Any]:
+    """Resolve the effective HF source fields shared by runtime and artifacts.
+
+    :param Config cfg: Training configuration.
+    :param str split: Dataset split name.
+    :param bool repeat: Whether to repeat the stream when exhausted.
+    :param ContentPartition content_partition: All, training, or held-out documents.
+    :return dict[str, Any]: Fields accepted by :class:`HFStreamSpec`.
+    """
+    return {
+        "dataset": cfg.data.hf_dataset,
+        "name": cfg.data.hf_name,
+        "split": split,
+        "text_key": cfg.data.text_key,
+        "revision": cfg.data.hf_revision,
+        # Hash selection already samples sparsely across the source. Filling a
+        # second document-shuffle window would scan roughly
+        # shuffle_buffer_size / holdout_fraction source documents before the
+        # first eval row, for no disjointness benefit.
+        "shuffle": cfg.data.shuffle and content_partition != "eval",
+        "shuffle_buffer_size": cfg.data.shuffle_buffer_size,
+        "shuffle_buffer_bytes": cfg.data.shuffle_buffer_bytes,
+        "seed": int(cfg.data.seed),
+        "repeat": repeat,
+        "content_partition": content_partition,
+        "eval_holdout_fraction": cfg.data.hf_eval_holdout_fraction,
+    }
+
+
+def _hf_source_identity(fields: dict[str, Any]) -> dict[str, Any]:
+    """Return only source fields that affect effective stream behavior.
+
+    :param dict[str, Any] fields: Resolved fields from :func:`_hf_source_fields`.
+    :return dict[str, Any]: Stable source identity for caches and checkpoints.
+    """
+    identity = dict(fields)
+    if not identity["shuffle"]:
+        for key in ("shuffle_buffer_size", "shuffle_buffer_bytes", "seed"):
+            identity.pop(key)
+    if identity["content_partition"] == "all":
+        identity.pop("eval_holdout_fraction")
+    else:
+        identity["content_holdout_schema_version"] = CONTENT_HOLDOUT_SCHEMA_VERSION
+    return identity
+
+
 def _build_hf_stream(
     cfg: Config,
     *,
@@ -270,22 +322,12 @@ def _build_hf_stream(
     :return HFStreamingTextStream: Streaming text stream wrapper.
     """
     spec = HFStreamSpec(
-        dataset=cfg.data.hf_dataset,
-        name=cfg.data.hf_name,
-        split=split,
-        text_key=cfg.data.text_key,
-        revision=cfg.data.hf_revision,
-        # Hash selection already samples sparsely across the source. Filling a
-        # second document-shuffle window would scan roughly
-        # shuffle_buffer_size / holdout_fraction source documents before the
-        # first eval row, for no disjointness benefit.
-        shuffle=cfg.data.shuffle and content_partition != "eval",
-        shuffle_buffer_size=cfg.data.shuffle_buffer_size,
-        shuffle_buffer_bytes=cfg.data.shuffle_buffer_bytes,
-        seed=int(cfg.data.seed),
-        repeat=repeat,
-        content_partition=content_partition,
-        eval_holdout_fraction=cfg.data.hf_eval_holdout_fraction,
+        **_hf_source_fields(
+            cfg,
+            split=split,
+            repeat=repeat,
+            content_partition=content_partition,
+        ),
         max_retries=cfg.data.max_retries,
         retry_delay_sec=cfg.data.retry_delay_sec,
         state_update_interval=cfg.data.state_update_interval,
@@ -572,30 +614,18 @@ def _eval_cache_manifest(cfg: Config) -> dict[str, Any]:
     manifest: dict[str, Any] = {
         "backend": cfg.data.backend,
         "max_eval_samples": int(cfg.data.max_eval_samples),
-        "hf_eval_split": cfg.data.hf_eval_split,
-        "hf_split": cfg.data.hf_split,
-        "hf_revision": cfg.data.hf_revision,
-        "source_split": _eval_source_split(cfg),
     }
     if cfg.data.backend == "hf":
-        manifest.update(
-            {
-                "hf_dataset": cfg.data.hf_dataset,
-                "hf_name": cfg.data.hf_name,
-                "text_key": cfg.data.text_key,
-            }
+        content_partition: ContentPartition = "eval" if _content_holdout_enabled(cfg) else "all"
+        fields = _hf_source_fields(
+            cfg,
+            split=_eval_source_split(cfg),
+            repeat=False,
+            content_partition=content_partition,
         )
-    if _content_holdout_enabled(cfg):
-        manifest["content_holdout"] = {
-            "schema_version": CONTENT_HOLDOUT_SCHEMA_VERSION,
-            "fraction": cfg.data.hf_eval_holdout_fraction,
-        }
-    elif cfg.data.backend == "hf":
-        manifest["shuffle"] = cfg.data.shuffle
-        if cfg.data.shuffle:
-            manifest["shuffle_buffer_size"] = cfg.data.shuffle_buffer_size
-            manifest["shuffle_buffer_bytes"] = cfg.data.shuffle_buffer_bytes
-            manifest["seed"] = cfg.data.seed
+        manifest["source"] = _hf_source_identity(fields)
+    else:
+        manifest["source"] = {"split": _eval_source_split(cfg)}
     return manifest
 
 
@@ -801,26 +831,14 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
     d = cfg.data
     t = cfg.data.tokenizer
     if d.backend == "hf":
-        src = {
-            "backend": "hf",
-            "dataset": d.hf_dataset,
-            "name": d.hf_name,
-            "split": d.hf_split,
-            "revision": d.hf_revision,
-            "text_key": d.text_key,
-            "shuffle": d.shuffle,
-            "shuffle_buffer_size": d.shuffle_buffer_size,
-            "shuffle_buffer_bytes": d.shuffle_buffer_bytes,
-            "seed": d.seed,
-            # repeat decides whether the stream rolls into the next epoch or
-            # terminates — a data-order/termination semantic, so it is part of
-            # the resume identity for HF exactly as for local_text.
-            "repeat": d.repeat,
-            "content_partition": "train" if _content_holdout_enabled(cfg) else "all",
-        }
-        if _content_holdout_enabled(cfg):
-            src["content_holdout_schema_version"] = CONTENT_HOLDOUT_SCHEMA_VERSION
-            src["eval_holdout_fraction"] = d.hf_eval_holdout_fraction
+        content_partition: ContentPartition = "train" if _content_holdout_enabled(cfg) else "all"
+        fields = _hf_source_fields(
+            cfg,
+            split=d.hf_split,
+            repeat=d.repeat,
+            content_partition=content_partition,
+        )
+        src = {"backend": "hf", **_hf_source_identity(fields)}
     else:
         src = {
             "backend": "local_text",
@@ -843,27 +861,22 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
     if tokenizer_snapshot_hash is not None:
         tok["snapshot_sha256"] = tokenizer_snapshot_hash
 
-    # Mode-specific knobs are recorded only when the active mode consumes
-    # them, so editing an inert default between save and resume cannot block
-    # resume (check_resume_compat compares via .get(); a mode change itself
-    # is always an error). Fingerprints written before this gating recorded
-    # inert knobs unconditionally and fail resume-compat — accepted, per the
-    # no-backward-compat policy (docs/dev.md); they already fail on the
-    # packed-window shuffle keys regardless.
+    # Record only active mode knobs and effective shuffle geometry so inert
+    # defaults and raw budgets cannot reject a behaviorally identical resume.
+    window_shuffle_rows = resolve_window_shuffle_rows(cfg)
     packing = {
         "mode": d.packing_mode,
         "mask_boundary_loss": d.mask_boundary_loss,
         "train_on_eos": d.train_on_eos,
         "grain_prefetch": d.grain_prefetch,
-        "window_shuffle_tokens": d.window_shuffle_tokens,
-        "window_shuffle_rows": resolve_window_shuffle_rows(cfg),
+        "window_shuffle_rows": window_shuffle_rows,
         # device_put does not change sample order, but it moves the
         # host->device transfer into the iterator and disables iterator
         # stats — recorded so resume can warn (or error under prefetch,
         # where iterator mechanics already differ).
         "device_put": d.device_put,
     }
-    if d.window_shuffle_tokens > 0:
+    if window_shuffle_rows > 0:
         # The shuffle reconstructs current and future windows from this seed
         # after restore. Keep the fingerprint tied to the effective value used
         # by Grain so changing either data.seed or the internal offset cannot
