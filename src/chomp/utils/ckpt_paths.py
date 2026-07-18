@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from chomp.config import build_config, read_config_mapping
+from chomp.config import build_config, load_config, read_config_mapping
 
 
 def _is_step_dir(path: Path) -> bool:
@@ -113,7 +113,7 @@ def load_config_for_checkpoint(
     :raises FileNotFoundError: If no config source can be found.
     """
     if config_override:
-        return build_config(read_config_mapping(config_override))
+        return load_config(config_override)
 
     if run_dir is not None:
         try:
@@ -149,6 +149,23 @@ def _infer_run_dir_from_meta(step_dir: Path) -> Path | None:
     return None
 
 
+def _latest_configured_step(cfg: Any, run_dir: Path) -> Path:
+    """Resolve the latest checkpoint selected by a run configuration.
+
+    :param Any cfg: Resolved Chomp configuration.
+    :param Path run_dir: Run directory used to resolve relative checkpoint roots.
+    :raises FileNotFoundError: If the configured root has no checkpoint steps.
+    :return Path: Latest valid checkpoint step directory.
+    """
+    from chomp.ckpt import resolve_ckpt_root
+
+    ckpt_root = resolve_ckpt_root(cfg, run_dir)
+    step_dir = _latest_step_dir(ckpt_root)
+    if step_dir is None:
+        raise FileNotFoundError(f"No step directories found in {ckpt_root}")
+    return step_dir
+
+
 def resolve_checkpoint_path(
     checkpoint_path: str | Path, *, config_override: str | None = None
 ) -> tuple[Path, Path | None]:
@@ -172,16 +189,10 @@ def resolve_checkpoint_path(
         return path, run_dir
 
     if (path / "config_resolved.json").exists():
-        from chomp.ckpt import resolve_ckpt_root
-
         run_dir = path
         # Use the run's resolved config to locate checkpoints, regardless of overrides.
         cfg = build_config(_read_run_dir_config(run_dir))
-        ckpt_root = resolve_ckpt_root(cfg, run_dir)
-        step_dir = _latest_step_dir(ckpt_root)
-        if step_dir is None:
-            raise FileNotFoundError(f"No step directories found in {ckpt_root}")
-        return step_dir, run_dir
+        return _latest_configured_step(cfg, run_dir), run_dir
 
     step_dir = _latest_step_dir(path)
     if step_dir is not None:
@@ -191,17 +202,11 @@ def resolve_checkpoint_path(
         return step_dir, run_dir
 
     if config_override is not None:
-        from chomp.ckpt import resolve_ckpt_root
-
         run_dir = path
         cfg = load_config_for_checkpoint(
             step_dir=path, run_dir=run_dir, config_override=config_override
         )
-        ckpt_root = resolve_ckpt_root(cfg, run_dir)
-        step_dir = _latest_step_dir(ckpt_root)
-        if step_dir is None:
-            raise FileNotFoundError(f"No step directories found in {ckpt_root}")
-        return step_dir, run_dir
+        return _latest_configured_step(cfg, run_dir), run_dir
 
     raise FileNotFoundError(
         f"Could not find checkpoint at {path}. Provide a run_dir, checkpoint root, or step dir."

@@ -504,12 +504,23 @@ def restore_at_step(
     :return tuple: (step, train_state, meta).
     """
 
-    return _restore_step(
-        manager,
-        step=int(step),
-        abstract_train_state=abstract_train_state,
-        data_iter=data_iter,
+    import grain.checkpoint as gcp
+    import orbax.checkpoint as ocp
+
+    step = int(step)
+    restored = manager.restore(
+        step,
+        args=ocp.args.Composite(
+            train_state=ocp.args.StandardRestore(abstract_train_state),
+            data_state=gcp.CheckpointRestore(_checkpoint_target(data_iter)),
+            meta=ocp.args.JsonRestore(),
+        ),
     )
+
+    train_state = restored["train_state"]
+    meta = restored.get("meta")
+    validate_checkpoint_steps(directory_step=step, meta=meta, train_state=train_state)
+    return step, train_state, meta
 
 
 def restore_meta_at_step(manager: ocp.CheckpointManager, *, step: int) -> dict[str, Any] | None:
@@ -528,40 +539,6 @@ def restore_meta_at_step(manager: ocp.CheckpointManager, *, step: int) -> dict[s
     meta = restored.get("meta")
     validate_checkpoint_steps(directory_step=int(step), meta=meta, train_state=None)
     return meta
-
-
-def _restore_step(
-    manager: ocp.CheckpointManager,
-    *,
-    step: int,
-    abstract_train_state: Any,
-    data_iter: Any,
-) -> tuple[int, Any, dict[str, Any] | None]:
-    """Restore checkpoint at the specified step.
-
-    :param ocp.CheckpointManager manager: Orbax checkpoint manager.
-    :param int step: Step number to restore.
-    :param Any abstract_train_state: ShapeDtypeStruct tree for restoration target.
-    :param Any data_iter: Data iterator to restore via Grain's handler.
-    :return tuple: (step, train_state, meta).
-    """
-    import grain.checkpoint as gcp
-    import orbax.checkpoint as ocp
-
-    restored = manager.restore(
-        step,
-        args=ocp.args.Composite(
-            train_state=ocp.args.StandardRestore(abstract_train_state),
-            data_state=gcp.CheckpointRestore(_checkpoint_target(data_iter)),
-            meta=ocp.args.JsonRestore(),
-        ),
-    )
-
-    # Orbax returns a dict-like mapping for Composite.
-    train_state = restored["train_state"]
-    meta = restored.get("meta")
-    validate_checkpoint_steps(directory_step=int(step), meta=meta, train_state=train_state)
-    return step, train_state, meta
 
 
 def restore_params_only(step_dir: Path, abstract_params: Any) -> Any:
