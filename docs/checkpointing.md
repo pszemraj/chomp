@@ -17,7 +17,7 @@ Each checkpoint stores three items:
    non-negative `tokens_seen`, parameter-manifest hash, and strict runtime
    identity)
 
-The run directory also includes a required tokenizer snapshot under `tokenizer/` and the pinned eval token set `eval_tokens.json.gz`. It also contains `parameter-manifest.json`, which lists every trainable parameter with its optimizer group and decay policy. Eval cache creation, drift checks, and the `data.recreate_eval_cache` override are covered in [Data Pipeline validation set](data_pipeline.md#validation-set).
+The run directory also includes a required tokenizer snapshot under `tokenizer/`, the pinned `eval_tokens.json.gz` set when evaluation data is enabled, and `parameter-manifest.json`, which lists every trainable parameter with its optimizer group and decay policy. Eval cache creation, drift checks, and the `data.recreate_eval_cache` override are covered in [Data Pipeline validation set](data_pipeline.md#validation-set).
 
 Tokenizer snapshots are written to a temporary sibling, loaded back for
 validation, and atomically renamed. A failed or interrupted save never leaves

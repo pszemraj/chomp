@@ -139,10 +139,7 @@ Resume remains exact: the shuffle checkpoints only the upstream state at the
 window start plus permutation progress, then reconstructs and replays the
 window deterministically. Eval batches are never shuffled.
 
-The shuffle window stores only int32 token and segment-ID arrays. Position IDs
-are derived from segment IDs during batch assembly after shuffling. The two
-arrays use about 8 bytes per budgeted token: about 64 MiB at the default,
-independent of context length. Replay work is bounded by the same token budget.
+The shuffle window stores only int32 token and segment-ID arrays. The compiled model derives position IDs from segment IDs after batching. The two buffered arrays use about 8 bytes per budgeted token: about 64 MiB at the default, independent of context length. Replay work is bounded by the same token budget.
 
 Guidance:
 

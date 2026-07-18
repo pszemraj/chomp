@@ -182,5 +182,5 @@ At end of stream the `bin`/`multipack` packers flush their remaining pending
 documents into padded windows, so an eval doc set below the pack threshold
 still emits windows. Eval uses `A=1` and pads missing final rows independently
 of `train.grad_accum`. If it yields no usable window or emits batches whose
-labels are entirely masked (zero valid loss tokens), training raises instead
-of silently emitting a null eval loss.
+labels are entirely masked (zero valid loss tokens), the run fails instead of
+silently emitting a null eval loss.

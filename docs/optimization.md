@@ -50,8 +50,7 @@ In practice that means:
 
 ## Muon sweep: 10k-step comparison
 
-A controlled 10k-step comparison used a 200M Megalodon config (see
-[`configs/custom/muon-lr-scale-10k/`](../configs/custom/muon-lr-scale-10k/)):
+A controlled 10k-step comparison used a 200M Megalodon config stored locally under the gitignored `configs/custom/muon-lr-scale-10k/` directory:
 
 - Train steps: 10,000
 - Eval every: 1,000

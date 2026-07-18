@@ -422,8 +422,8 @@ data:
   # Default: train.
   # Required: nonempty when data.backend is hf; ignored for local_text.
   # Valid: nonempty split name.
-  # Use: selects the training split. Despite being inactive as a local-text source selector, this
-  # value is recorded in the eval-cache manifest and changing it can reject a local-text resume.
+  # Use: selects the training split and the source for a content-hash holdout when
+  # data.hf_eval_split is null. It is ignored for local_text.
   hf_split: train
 
   # Key: data.hf_revision
@@ -486,7 +486,7 @@ data:
   # Use: number of HF documents in each chomp-owned shuffle window. Larger windows improve mixing
   # and consume more host memory, but data.shuffle_buffer_bytes can end a window first. Checkpoints
   # replay the current source window from compact state; they do not serialize its documents. Resume
-  # hard-compares this value even when shuffle is false.
+  # hard-compares this value only when document shuffling is active.
   shuffle_buffer_size: 10000
 
   # Key: data.shuffle_buffer_bytes
@@ -497,7 +497,8 @@ data:
   # Use: host-memory budget for each chomp-owned document-shuffle window. A window ends after reaching
   # this byte budget or data.shuffle_buffer_size, whichever occurs first. The document that reaches
   # the budget remains in the window, so one oversized document can exceed it; no document is dropped
-  # or read ahead. Lower this on memory-constrained hosts. Resume hard-compares this value.
+  # or read ahead. Lower this on memory-constrained hosts. Resume hard-compares this value only when
+  # document shuffling is active.
   shuffle_buffer_bytes: 536870912
 
   # Key: data.seed
@@ -506,8 +507,8 @@ data:
   # Required: no.
   # Valid: >= 0.
   # Use: document- and packed-training-window shuffle seed. Packed windows internally add a fixed
-  # offset and normalize the result modulo 2**32 for Grain. HF resume hard-compares the raw value even
-  # when document shuffle is false; either backend hard-compares the packed-window seed when enabled.
+  # offset and normalize the result modulo 2**32 for Grain. Resume compares the seed only for each
+  # active shuffle layer; changing it is inert when both shuffle mechanisms are disabled.
   seed: 0
 
   # Key: data.repeat
@@ -651,7 +652,7 @@ data:
   # Valid: >= 0; zero disables evaluation data.
   # Use: maximum source examples collected into the pinned evaluation token cache. Setup collects
   # them even when eval_every is 0; max_eval_samples 0 or --dry-run skips collection. This is not a
-  # token/window count: zero collected documents fails at setup, while too few full A*B rows or
+  # token/window count: zero collected documents fails at setup, while no usable packed window or
   # all-masked labels fails when evaluation first runs. Changing it is rejected on resume.
   max_eval_samples: 1000
 
@@ -792,9 +793,9 @@ train:
   # Default: 0.
   # Required: no.
   # Valid: >= 0.
-  # Use: fresh model/dropout RNG plus two periodic-generation RNGs. Data ordering normally uses
-  # data.seed; train-split eval uses train.seed when data.seed is 0. Restored model/dropout RNG
-  # supersedes this value on resume, and generation RNGs restart rather than restore.
+  # Use: fresh model/dropout RNG plus two periodic-generation RNGs. Data ordering uses data.seed.
+  # Restored model/dropout RNG supersedes this value on resume, and generation RNGs restart rather
+  # than restore.
   seed: 0
 
   # Key: train.steps
@@ -882,8 +883,8 @@ train:
   # Default: 2500.
   # Required: no.
   # Valid: >= 0; zero disables periodic evaluation.
-  # Use: exact global-step interval. Evaluation also requires nonempty pinned eval tokens and enough
-  # windows for one full grad_accum * batch_size batch. This cadence may change on resume.
+  # Use: exact global-step interval. Evaluation also requires nonempty pinned eval tokens and at least
+  # one usable packed window; its A=1 batches pad missing final rows. This cadence may change on resume.
   eval_every: 2500
 
   # Key: train.generate_every
@@ -1165,7 +1166,8 @@ checkpoint:
   # Required: no.
   # Valid: true | false.
   # Use: enables checkpoint saves and resume. When false, every other checkpoint key is operationally
-  # inactive but still type/value-validated, and any --resume request fails even if files exist.
+  # inactive but still type-validated, and any --resume request fails even if files exist. Positive
+  # save/retention constraints apply only when this is true.
   enabled: true
 
   # Key: checkpoint.root_dir

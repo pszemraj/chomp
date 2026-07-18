@@ -24,7 +24,7 @@ pairs it with the batch through prefetch/device transfer. The trainer updates
 `tokens_seen` from that Python integer without synchronizing every optimizer
 step. Logging, evaluation, checkpoint, first-compile, and finite-check cadences synchronize queued work and verify the current host count against the compiled int32 counter. At save and final boundaries, the finite check also covers the post-update parameters and optimizer state. Evaluation likewise accumulates all batch totals on device and synchronizes once per pass.
 
-Full packing diagnostics scan attention and segment arrays only for batches
+Full packing diagnostics scan segment arrays only for batches
 whose global step will log or evaluate. Non-observable steps still compute the
 exact shifted loss-token count required for accounting, but skip the redundant
 Python-side diagnostic scan.
@@ -143,10 +143,11 @@ Data exhaustion and crashes append event rows to the same file.
 If `logging.wandb.enabled=true`, Weights & Biases receives the training rows plus
 detailed wall-clock, packing-capacity, eval-token, and current-device-memory
 metrics. The local file instead retains the process peak-memory value and its
-explicit `step` field. chomp also uploads `config_original.yaml` as a W&B
-artifact at run start, and W&B logs go to the default `./wandb` directory (or
-`WANDB_DIR` if set). Set `logging.wandb.enabled=false` to disable W&B; `mode`
-selects online or offline logging only.
+explicit `step` field. When the run was started from a config file, chomp also
+uploads `config_original.yaml` as a W&B artifact. W&B logs go to the default
+`./wandb` directory (or `WANDB_DIR` if set). Set
+`logging.wandb.enabled=false` to disable W&B; `mode` selects online or offline
+logging only.
 
 Console output is throttled by `train.log_every` and prints a compact
 one-line summary (loss, grad norm, LR, step time, throughput, optional eval
