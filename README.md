@@ -41,13 +41,9 @@ chomp generate runs/my_run --prompt "Hello world" --max-tokens 64
 | [`configs/zyda2_100m_2048.yaml`](configs/zyda2_100m_2048.yaml) | 100M, 100k-step Zyda-2 comparison |
 | [`configs/zyda2_200m_2048.yaml`](configs/zyda2_200m_2048.yaml) | 200M, 100k-step Zyda-2 capacity run |
 
-The 100k recipes use 2 sequences per microbatch, 8 accumulation slices, and
-2,048-token rows: about 3.28 billion packed token slots before boundary and
-padding masks. The Smol-Data recipe is the default choice for source diversity;
-the Zyda-2 recipes provide a stable corpus comparison and a larger model option.
+The 100k recipes use 2 sequences per microbatch, 8 accumulation slices, and 2,048-token rows: about 3.28 billion packed token slots before boundary and padding masks. The Smol-Data recipe is the default choice for source diversity; the Zyda-2 recipes provide a stable corpus comparison and a larger model option.
 
-Personal top-level configs in `configs/custom/` are gitignored. Reusable
-experiment suites can be tracked in named subdirectories there.
+Personal top-level configs in `configs/custom/` are gitignored. Reusable experiment suites can be tracked in named subdirectories there.
 
 ## Key features
 

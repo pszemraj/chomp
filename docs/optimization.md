@@ -1,18 +1,15 @@
 # Optimization and Optimizers
 
-Optimizer behavior in the training harness, with emphasis on Muon support and
-recent sweep results.
+Optimizer behavior in the training harness, with emphasis on Muon support and recent sweep results.
 
-Related: [Config Reference](config-reference.yaml) (`optim.*`),
-[Training Loop](training.md).
+Related: [Config Reference](config-reference.yaml) (`optim.*`), [Training Loop](training.md).
 
 ## Supported optimizers
 
 `optim.name` selects the optimizer:
 
 - `adamw` (default): standard AdamW on all parameters.
-- `muon`: Muon on a safe whitelist of projection weight matrices, AdamW on the
-  rest.
+- `muon`: Muon on a safe whitelist of projection weight matrices, AdamW on the rest.
 
 At startup, the model adapter classifies every model array as a trainable parameter. Derived constants must remain outside the model array tree. Unknown Megalodon-JAX array paths fail startup, which prevents a dependency update from silently changing the trained model. The resulting `parameter-manifest.json` records each path, shape, dtype, family, optimizer group, and weight-decay status. Its hash is a hard checkpoint-resume input.
 
@@ -20,33 +17,23 @@ Megalodon-JAX 0.2.1 derives RoPE frequencies from static dimension/base values d
 
 For `optim.name=muon`, the harness uses explicit parameter partitioning:
 
-- Muon is applied only to matmul-style projection weights (for Megalodon:
-  `attn.wz/wv/wr/wh1/wh2`, `ffn.fc1/fc2/fc3`, and `lm_head`).
-- AdamW is applied everywhere else (including embeddings, norms, and CEMA
-  parameters).
+- Muon is applied only to matmul-style projection weights (for Megalodon: `attn.wz/wv/wr/wh1/wh2`, `ffn.fc1/fc2/fc3`, and `lm_head`).
+- AdamW is applied everywhere else (including embeddings, norms, and CEMA parameters).
 
-AdamW decay is also path-aware. It applies to token embeddings and dense
-projection weights. Biases, norm/scale parameters, normalized-FFN residual
-scales, attention affine offsets, and all CEMA coefficients receive no
-decoupled weight decay.
+AdamW decay is also path-aware. It applies to token embeddings and dense projection weights. Biases, norm/scale parameters, normalized-FFN residual scales, attention affine offsets, and all CEMA coefficients receive no decoupled weight decay.
 
 By default, the projection whitelist excludes embeddings and other non-matmul matrices. `optim.muon.allow_tied_embed` adds the token embedding only when `model.share_emb=true`; it has no effect on an untied model. `optim.muon.allow_all_2d` replaces the whitelist with every 2D tensor.
 
 ## Why Muon needs special handling
 
-Optax's Muon lives in `optax.contrib` and is designed for matrix parameters.
-Megalodon includes several 2D tensors that are not matmul weights, so Muon
-selection must be path-aware rather than "all 2D tensors" by default.
+Optax's Muon lives in `optax.contrib` and is designed for matrix parameters. Megalodon includes several 2D tensors that are not matmul weights, so Muon selection must be path-aware rather than "all 2D tensors" by default.
 
-Muon also typically operates in a very different step-size regime than AdamW.
-In practice that means:
+Muon also typically operates in a very different step-size regime than AdamW. In practice that means:
 
 - `optim.lr` is treated as the AdamW learning rate.
 - Muon's effective learning rate is `optim.lr * optim.muon.lr_scale`.
-- Muon-specific scaling options (like `optim.muon.consistent_rms`) can materially
-  change what `optim.muon.lr_scale` values are stable.
-- When `optim.muon.consistent_rms=null`, we skip Muon shape scaling
-  (`scale_by_shape`) to preserve the earlier Muon-only behavior.
+- Muon-specific scaling options (like `optim.muon.consistent_rms`) can materially change what `optim.muon.lr_scale` values are stable.
+- When `optim.muon.consistent_rms=null`, we skip Muon shape scaling (`scale_by_shape`) to preserve the earlier Muon-only behavior.
 
 ## Muon sweep: 10k-step comparison
 
@@ -77,14 +64,10 @@ All values below are eval loss at step 10,000 (lower is better).
 
 - Muon reduced eval loss relative to AdamW in this setup.
 - `optim.muon.lr_scale=100` slightly edges out `150`.
-- We continue to keep `optim.muon.consistent_rms=null` until a focused sweep
-  shows a benefit.
+- We continue to keep `optim.muon.consistent_rms=null` until a focused sweep shows a benefit.
 
 ## Notes and cautions
 
-- These are still short-horizon results (10k steps). They are useful for
-  direction finding but are not definitive pretraining conclusions.
-- Optimizer behavior can change meaningfully when schedule horizons, packing
-  policies, or parameter sharding strategies change.
-- If you resume from checkpoints, treat schedule horizons and effective
-  optimizer settings as part of the run identity.
+- These are still short-horizon results (10k steps). They are useful for direction finding but are not definitive pretraining conclusions.
+- Optimizer behavior can change meaningfully when schedule horizons, packing policies, or parameter sharding strategies change.
+- If you resume from checkpoints, treat schedule horizons and effective optimizer settings as part of the run identity.
