@@ -37,18 +37,12 @@ Muon also typically operates in a very different step-size regime than AdamW. In
 
 ## Muon sweep: 10k-step comparison
 
-A controlled 10k-step comparison used a 200M Megalodon config stored locally under the gitignored `configs/custom/muon-lr-scale-10k/` directory:
+A controlled 10k-step comparison used untracked local 200M Megalodon configs under `configs/custom/`:
 
 - Train steps: 10,000
 - Eval every: 1,000
 - `optim.muon.consistent_rms=null` (no shape scaling)
 - W&B project: `muon-lr-scale-10k`
-
-Command pattern (example):
-
-```bash
-conda run --name mega-jax chomp train configs/custom/muon-lr-scale-10k/muon_lr100_10k.yaml
-```
 
 ### Results summary
 
