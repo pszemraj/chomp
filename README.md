@@ -54,7 +54,7 @@ Personal experiments under `configs/custom/` are ignored recursively and never b
 
 ## Documentation
 
-- [Config Reference](docs/config-reference.yaml): annotated, copyable field/type/default reference
+- [Config Reference](docs/config-reference.yaml): per-key types, defaults, constraints, and interactions
 - [Training](docs/training.md): train step behavior, generation, and metrics
 - [Data Pipeline](docs/data_pipeline.md): stream-to-batch path and eval-set construction
 - [Packing](docs/packing.md): packing strategy and boundary-masking semantics

@@ -18,7 +18,6 @@ from chomp.config import (
     TrainConfig,
     build_config,
     load_config,
-    read_config_mapping,
     resolve_window_shuffle_rows,
     validate_config,
 )
@@ -54,12 +53,6 @@ def _hf_data(*, hf_eval_split: object | None = None) -> DataConfig:
         repeat=True,
         tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
     )
-
-
-def test_config_reference_is_a_valid_default_config() -> None:
-    """The copyable config reference must load as the default configuration."""
-    path = Path(__file__).parents[1] / "docs" / "config-reference.yaml"
-    assert build_config(read_config_mapping(path)) == Config()
 
 
 def test_model_and_train_validation_rejects_invalid_values() -> None:

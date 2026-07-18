@@ -1,1352 +1,433 @@
 # chomp configuration reference
 #
-# This is valid YAML containing every accepted configuration key at its literal default.
-# Copy it, remove keys you do not need, and change values deliberately. Omitted keys use the
-# defaults shown here. Unknown keys and invalid combinations fail before training starts.
-#
-# Run with: chomp train CONFIG.yaml
-# Repeatable scalar override: --override train.steps=2000
-# Run-directory override: --run-dir PATH takes precedence over logging.run_dir.
-# Resume selector: --resume none | latest | POSITIVE_STEP. The aliases 0, no, and false mean none;
-# resume needs an existing compatible run directory and checkpoint. --dry-run validates, builds
-# model/data, compiles one step when train.jit is true, and exits.
-# CLI overrides run after variable interpolation. Set list values such as logging.wandb.tags here,
-# not through --override. A null-default field parses its override as a YAML scalar; put YAML quotes
-# inside the shell argument to force a numeric-looking string, for example
-# --override 'train.profile_dir="123"'.
+# Reference only: the typed placeholders below intentionally make this invalid as a chomp config. Runnable scenario configs live under configs/.
+# Every section and key is optional to author unless its comment says otherwise. Omission applies the literal or computed default stated on that key.
+# Duplicate keys, unknown sections or fields, non-finite numbers, and invalid field values or interactions fail before training. YAML integers are accepted for float fields; booleans are not integers.
 
-# Key: variables
-# Type: mapping[str, value]
-# Default: {}.
-# Required: no.
-# Valid: arbitrary nested YAML values. Duplicate mapping keys are rejected while loading.
-# Use: reference a value as $variables.path to preserve its type, or interpolate it inside a string
-# as {$variables.path} or ${variables.path}. Missing and circular references fail; a malformed
-# variable-like substring remains literal and warns.
-# Example: define variables: {length: 2048}, then set train.seq_len: $variables.length.
-variables: {}
+# variables -- mapping[str, value]; default: {}. Values may be nested. A full `$variables.path` reference preserves type; `{$variables.path}` and `${variables.path}` interpolate into strings. Missing or circular references fail.
+variables: "<mapping[str, value]>"
 
-# Key: derived
-# Type: mapping
-# Default: {}.
-# Required: no.
-# Valid: any mapping; authored values are ignored.
-# Lifecycle: internal use only.
-# Warning: resolved snapshots contain runtime-derived values here. Do not set this section in an
-# authored experiment; the loader accepts it only so saved resolved configs can be loaded again.
-derived: {}
+# derived -- mapping; default: {}. Internal use only: resolved snapshots record computed fields here, and authored values are ignored.
+derived: "<mapping>"
 
-# Key: model
-# Type: mapping
-# Default: omitted or {}, which applies every nested default below.
-# Required: no.
-# Valid: only the model.* keys listed in this section.
-# Use: selects the model implementation, architecture, initialization, and precision policy. Every
-# model.* value is a hard resume invariant, including fields inactive under the selected backend.
+# model -- mapping | null; default: {}. Fields other than the shared vocabulary/dropout and DummyLM width are Megalodon-only. Every raw model field is a hard resume invariant, including backend-inactive fields.
 model:
-  # Key: model.backend
-  # Type: enum string
-  # Default: megalodon.
-  # Required: no.
-  # Valid: megalodon | dummy.
-  # Use: megalodon is the training backend. dummy is a debug-only MLP; it uses d_model and ignores
-  # Megalodon-only architecture fields.
-  backend: megalodon
+  # model.backend -- string; default: megalodon; one of: megalodon | dummy. `dummy` is a debug-only MLP using vocab_size, d_model, and dropout.
+  backend: "<megalodon | dummy>"
 
-  # Key: model.vocab_size
-  # Type: integer
-  # Default: 256.
-  # Required: no.
-  # Valid: > 0; byte tokenization also requires >= data.tokenizer.byte_offset + 256.
-  # Use: tokenizer setup raises this to the tokenizer vocabulary size, then rounds it up to
-  # data.tokenizer.vocab_size_multiple. The resolved value determines embedding/output shapes.
-  vocab_size: 256
+  # model.vocab_size -- int; default: 256; > 0. Setup resolves this to round_up(max(configured value, tokenizer length), data.tokenizer.vocab_size_multiple); every special-token ID must fit the result.
+  vocab_size: "<int>"
 
-  # Key: model.d_model
-  # Type: integer
-  # Default: 128.
-  # Required: no.
-  # Valid: > 0 when model.backend is dummy.
-  # Lifecycle: debug only.
-  # Use: hidden width for DummyLM; ignored by Megalodon. Keep it small for inexpensive smoke tests.
-  d_model: 128
+  # model.d_model -- int; default: 128; > 0 when backend=dummy; ignored by Megalodon. Keep small for smoke tests. [Debug only]
+  d_model: "<int>"
 
-  # Key: model.dropout
-  # Type: number
-  # Default: 0.0.
-  # Required: no.
-  # Valid: >= 0.0 and < 1.0.
-  # Use: dropout for either backend. A nonzero value makes train.deterministic resolve to false when
-  # train.deterministic is null. Use 0.0 for dropout-free replay tests.
-  dropout: 0.0
+  # model.dropout -- float; default: 0.0; 0 <= value < 1. Shared model dropout; effective train.deterministic=true disables it, while nonzero contributes to the null deterministic default.
+  dropout: "<float>"
 
-  # Key: model.model_dim
-  # Type: integer
-  # Default: 128.
-  # Required: no.
-  # Valid: > 0 and divisible by model.num_heads and model.norm_num_groups.
-  # Use: Megalodon hidden width. Larger values increase parameter and activation memory substantially.
-  model_dim: 128
+  # model.model_dim -- int; default: 128; > 0 and divisible by model.num_heads and model.norm_num_groups. Megalodon hidden width.
+  model_dim: "<int>"
 
-  # Key: model.num_layers
-  # Type: integer
-  # Default: 2.
-  # Required: no.
-  # Valid: > 0.
-  # Use: Megalodon layer count. Increase only after a smaller configuration compiles and fits.
-  num_layers: 2
+  # model.num_layers -- int; default: 2; > 0. Megalodon layer count.
+  num_layers: "<int>"
 
-  # Key: model.num_heads
-  # Type: integer
-  # Default: 1.
-  # Required: no.
-  # Valid: > 0 and must divide model.model_dim, model.z_dim, and model.value_dim.
-  # Use: Megalodon attention-head count.
-  num_heads: 1
+  # model.num_heads -- int; default: 1; > 0; must divide model.model_dim, model.z_dim, and model.value_dim, and z_dim / num_heads must be even for RoPE.
+  num_heads: "<int>"
 
-  # Key: model.z_dim
-  # Type: integer
-  # Default: 64.
-  # Required: no.
-  # Valid: > 0, divisible by model.num_heads, and z_dim / num_heads must be even for RoPE.
-  # Use: Megalodon query/key projection width.
-  z_dim: 64
+  # model.z_dim -- int; default: 64; > 0; divisible by model.num_heads with an even quotient. Megalodon query/key width.
+  z_dim: "<int>"
 
-  # Key: model.value_dim
-  # Type: integer
-  # Default: 128.
-  # Required: no.
-  # Valid: > 0 and divisible by model.num_heads.
-  # Use: Megalodon value projection width.
-  value_dim: 128
+  # model.value_dim -- int; default: 128; > 0 and divisible by model.num_heads. Megalodon value width.
+  value_dim: "<int>"
 
-  # Key: model.ffn_hidden_dim
-  # Type: integer
-  # Default: 256.
-  # Required: no.
-  # Valid: > 0.
-  # Use: Megalodon feed-forward hidden width. Roughly 2x to 4x model.model_dim is a practical start.
-  ffn_hidden_dim: 256
+  # model.ffn_hidden_dim -- int; default: 256; > 0. Feed-forward width; the maintained recipes use roughly 2.5x to 4x model.model_dim.
+  ffn_hidden_dim: "<int>"
 
-  # Key: model.cema_ndim
-  # Type: integer
-  # Default: 16.
-  # Required: no.
-  # Valid: > 0.
-  # Use: number of CEMA components per channel. Higher values add recurrent-state capacity and cost.
-  cema_ndim: 16
+  # model.cema_ndim -- int; default: 16; > 0. CEMA components per channel; higher values add recurrent capacity and cost.
+  cema_ndim: "<int>"
 
-  # Key: model.chunk_size
-  # Type: integer
-  # Default: 128.
-  # Required: no.
-  # Valid: > 0, <= train.seq_len, and must divide train.seq_len.
-  # Use: Megalodon attention chunk length. Larger chunks expose more local context and use more memory.
-  chunk_size: 128
+  # model.chunk_size -- int; default: 128; > 0, <= train.seq_len, and must divide train.seq_len. Sets local attention chunk length unless attention_window is set, and always sets the default generation length.
+  chunk_size: "<int>"
 
-  # Key: model.attention_window
-  # Type: integer | null
-  # Default: null, which uses released chunk-local attention with a cache capacity of
-  # model.chunk_size.
-  # Required: no.
-  # Valid: null or an integer > 0.
-  # Lifecycle: experimental architecture extension.
-  # Use: a positive value replaces chunk-local attention with a causal sliding window of this width
-  # in training and generation; it also becomes the fixed inference cache capacity. Keep null for
-  # released Megalodon semantics. Changing it is checkpoint-incompatible.
-  attention_window: null
+  # model.attention_window -- int | null; default: null, which keeps released chunk-local attention and cache capacity model.chunk_size. A positive value enables causal sliding-window attention and sets inference cache capacity. [Experimental]
+  attention_window: "<int | null>"
 
-  # Key: model.norm_num_groups
-  # Type: integer
-  # Default: 32.
-  # Required: no.
-  # Valid: > 0, smaller than model.model_dim, and must divide model.model_dim. A featurewise value
-  # equal to model_dim is unsupported because this training model does not configure the learned
-  # TimestepNorm prior it requires.
-  # Use: Megalodon TimestepNorm group count. The default is a good starting point when divisible.
-  norm_num_groups: 32
+  # model.norm_num_groups -- int; default: 32; > 0, smaller than model.model_dim, and must divide model.model_dim. Equality is unsupported because featurewise TimestepNorm needs an unconfigured learned prior.
+  norm_num_groups: "<int>"
 
-  # Key: model.norm_eps
-  # Type: number
-  # Default: 1.0e-5.
-  # Required: no.
-  # Valid: > 0.
-  # Use: numerical-stability epsilon for Megalodon normalization.
-  norm_eps: 1.0e-5
+  # model.norm_eps -- float; default: 1e-5; > 0. Numerical-stability epsilon for Megalodon normalization.
+  norm_eps: "<float>"
 
-  # Key: model.rope_base
-  # Type: number | null
-  # Default: null, computed by Megalodon as 10000.
-  # Required: no.
-  # Valid: null or > 0.
-  # Use: RoPE frequency base. Change it only as part of a deliberate long-context scaling strategy.
-  # Frequencies are derived per model call and never serialized or exposed to the optimizer.
-  rope_base: null
+  # model.rope_base -- float | null; default: null, which Megalodon resolves to 10000; otherwise > 0. Change only as part of a deliberate context-scaling design.
+  rope_base: "<float | null>"
 
-  # Key: model.swiglu
-  # Type: boolean
-  # Default: false.
-  # Required: no.
-  # Valid: true | false.
-  # Use: enables SwiGLU in Megalodon's feed-forward network.
-  swiglu: false
+  # model.swiglu -- bool; default: false. Enables SwiGLU in the Megalodon feed-forward network.
+  swiglu: "<bool>"
 
-  # Key: model.rescale_nffn
-  # Type: boolean
-  # Default: false.
-  # Required: no.
-  # Valid: true | false.
-  # Use: enables Megalodon's normalized-FFN residual rescaling. Its learned alpha vector in each
-  # layer uses Adam without decoupled weight decay, including when optim.name is muon.
-  # Warning: changing this changes model semantics and is checkpoint-incompatible.
-  rescale_nffn: false
+  # model.rescale_nffn -- bool; default: false. Enables learned normalized-FFN residual rescaling; its scale uses Adam without weight decay.
+  rescale_nffn: "<bool>"
 
-  # Key: model.scale_emb
-  # Type: boolean
-  # Default: false.
-  # Required: no.
-  # Valid: true | false.
-  # Use: multiplies Megalodon embeddings by sqrt(model.model_dim).
-  # Warning: changing this changes model semantics and is checkpoint-incompatible.
-  scale_emb: false
+  # model.scale_emb -- bool; default: false. Multiplies embeddings by sqrt(model.model_dim).
+  scale_emb: "<bool>"
 
-  # Key: model.share_emb
-  # Type: boolean
-  # Default: true.
-  # Required: no.
-  # Valid: true | false.
-  # Use: true ties the language-model output projection to the input embedding matrix, reducing
-  # parameters and preserving Chomp's pre-0.2.1 model topology. false creates a separate output
-  # matrix even when output_size equals vocab_size.
-  # Interaction: true requires model.output_size to be -1 or equal model.vocab_size. Changing this
-  # changes parameter topology and is checkpoint-incompatible.
-  share_emb: true
+  # model.share_emb -- bool; default: true. Ties Megalodon input/output embeddings and requires output_size=-1 or vocab_size. DummyLM remains untied, though the flag still gates Muon embedding eligibility.
+  share_emb: "<bool>"
 
-  # Key: model.norm_affine
-  # Type: boolean
-  # Default: true.
-  # Required: no.
-  # Valid: true | false.
-  # Use: enables learned affine parameters in RMSNorm and FFN LayerNorm. TimestepNorm remains affine.
-  norm_affine: true
+  # model.norm_affine -- bool; default: true. Enables learned affine parameters in RMSNorm and FFN LayerNorm; TimestepNorm remains affine.
+  norm_affine: "<bool>"
 
-  # Key: model.attention_dropout
-  # Type: number
-  # Default: 0.0.
-  # Required: no.
-  # Valid: >= 0.0 and < 1.0.
-  # Use: Megalodon attention dropout. Nonzero makes the computed deterministic default false.
-  attention_dropout: 0.0
+  # model.attention_dropout -- float; default: 0.0; 0 <= value < 1. Megalodon-only; effective train.deterministic=true disables it, while nonzero contributes to the null deterministic default.
+  attention_dropout: "<float>"
 
-  # Key: model.attention_dropout_mode
-  # Type: enum string
-  # Default: post_softmax.
-  # Required: no.
-  # Valid: post_softmax | dropkey.
-  # Use: selects whether model.attention_dropout masks attention probabilities after softmax or
-  # masks attention scores before softmax. Only affects training when attention_dropout > 0;
-  # post_softmax is the recommended default.
-  attention_dropout_mode: post_softmax
+  # model.attention_dropout_mode -- string; default: post_softmax; one of: post_softmax | dropkey. Used only when attention_dropout > 0; keep post_softmax unless reproducing a deliberate DropKey run.
+  attention_dropout_mode: "<post_softmax | dropkey>"
 
-  # Key: model.hidden_dropout
-  # Type: number
-  # Default: 0.0.
-  # Required: no.
-  # Valid: >= 0.0 and < 1.0.
-  # Use: Megalodon hidden-state dropout. Nonzero makes the computed deterministic default false.
-  hidden_dropout: 0.0
+  # model.hidden_dropout -- float; default: 0.0; 0 <= value < 1. Megalodon-only; effective train.deterministic=true disables it, while nonzero contributes to the null deterministic default.
+  hidden_dropout: "<float>"
 
-  # Key: model.pad_token_id
-  # Type: integer
-  # Default: 0.
-  # Required: no.
-  # Valid: an integer in [0, effective model.vocab_size).
-  # Use: padding filler ID and tokenizer metadata. HF auto-special-token setup may replace it;
-  # attention/segment masks, not token value, determine which positions are padding.
-  # Warning: sharing it with eos_token_id warns because external tooling may infer padding from IDs.
-  pad_token_id: 0
+  # model.pad_token_id -- int; default: 0; 0 <= value < effective vocab_size. HF auto-special-token setup may replace it; equality with eos_token_id warns because external tooling may treat EOS as padding.
+  pad_token_id: "<int>"
 
-  # Key: model.bos_token_id
-  # Type: integer
-  # Default: 1.
-  # Required: no.
-  # Valid: in [0, effective model.vocab_size); byte mode additionally requires it below
-  # data.tokenizer.byte_offset when add_bos is true.
-  # Use: beginning-of-sequence token ID. HF auto-special-token setup may replace it. Periodic and
-  # standalone generation consume this ID even when add_bos is false.
-  bos_token_id: 1
+  # model.bos_token_id -- int; default: 1; 0 <= value < effective vocab_size. HF auto-special-token setup may replace it; byte BOS insertion also requires it below data.tokenizer.byte_offset.
+  bos_token_id: "<int>"
 
-  # Key: model.eos_token_id
-  # Type: integer
-  # Default: 2.
-  # Required: no.
-  # Valid: in [0, effective model.vocab_size); byte mode additionally requires it below
-  # data.tokenizer.byte_offset when add_eos is true.
-  # Use: end-of-sequence token ID. HF auto-special-token setup may replace it. Periodic and
-  # standalone generation consume it even when add_eos is false; an out-of-vocabulary ID cannot
-  # terminate generation.
-  eos_token_id: 2
+  # model.eos_token_id -- int; default: 2; 0 <= value < effective vocab_size. HF auto-special-token setup may replace it; byte EOS insertion also requires it below data.tokenizer.byte_offset.
+  eos_token_id: "<int>"
 
-  # Key: model.init_mode
-  # Type: enum string
-  # Default: he.
-  # Required: no.
-  # Valid: gaussian | xavier | he | bert.
-  # Use: Megalodon parameter initializer. he is recommended for fresh training.
-  init_mode: he
+  # model.init_mode -- string; default: he; one of: gaussian | xavier | he | bert. Used only for fresh Megalodon initialization; restored parameters replace it, but the raw value remains a resume invariant. `he` is recommended.
+  init_mode: "<gaussian | xavier | he | bert>"
 
-  # Key: model.use_checkpoint
-  # Type: boolean
-  # Default: false.
-  # Required: no.
-  # Valid: true | false.
-  # Use: requests model-internal activation checkpointing to trade compute for lower memory.
-  # Interaction: derived deterministic training disables it in Megalodon and emits a warning.
-  use_checkpoint: false
+  # model.use_checkpoint -- bool; default: false. Trades compute for activation memory. Effective train.deterministic=true disables it, so the full recipes set deterministic=false even with zero dropout.
+  use_checkpoint: "<bool>"
 
-  # Key: model.output_size
-  # Type: integer
-  # Default: -1, computed as the effective vocabulary size.
-  # Required: no.
-  # Valid: -1 or > 0.
-  # Use: Megalodon output width. -1 resolves to effective model.vocab_size. Tying is controlled only
-  # by model.share_emb; when share_emb is false, the output matrix remains separate at every width.
-  # Interaction: share_emb=true requires -1 or model.vocab_size. Labels must remain below the
-  # resolved output size, so keep -1 unless a custom head is deliberate.
-  output_size: -1
+  # model.output_size -- int; default: -1, computed as effective vocab_size; otherwise > 0. With share_emb=true it must be -1 or model.vocab_size; keep -1 for causal-LM training.
+  output_size: "<-1 | positive int>"
 
-  # Key: model.use_associative_segment_scan
-  # Type: boolean
-  # Default: true.
-  # Required: no.
-  # Valid: true | false.
-  # Lifecycle: experimental.
-  # Use: affects Megalodon only for bin/multipack with strict segments. true is faster with higher
-  # peak memory; false uses a sequential constant-memory CEMA scan.
-  use_associative_segment_scan: true
+  # model.use_associative_segment_scan -- bool; default: true. Used only for strict bin/multipack batches: true is the faster parallel CEMA reset path; false uses a compact sequential forward carry, but compiled backward-memory savings are not guaranteed. [Experimental]
+  use_associative_segment_scan: "<bool>"
 
-  # Key: model.param_dtype
-  # Type: enum string
-  # Default: float32.
-  # Required: no.
-  # Valid: float32 only.
-  # Use: parameter and optimizer-state dtype.
-  # Warning: chomp has no FP32 master-parameter path. Lower-precision parameters would also lower
-  # optimizer-state precision; use bfloat16 only for compute_dtype.
-  param_dtype: float32
+  # model.param_dtype -- string; default and only valid value: float32. Chomp has no FP32 master-parameter path, so lower-precision parameters and optimizer state are unsupported.
+  param_dtype: "<float32>"
 
-  # Key: model.compute_dtype
-  # Type: enum string
-  # Default: bfloat16.
-  # Required: no.
-  # Valid: float32 | bfloat16. FP16 is unsupported.
-  # Use: activation/GEMM dtype. bfloat16 is recommended on supported accelerators. float32 requires
-  # model.accum_dtype to remain float32.
-  compute_dtype: bfloat16
+  # model.compute_dtype -- string; default: bfloat16; one of: float32 | bfloat16. BF16 is recommended on supported GPUs; FP16 is unsupported.
+  compute_dtype: "<float32 | bfloat16>"
 
-  # Key: model.accum_dtype
-  # Type: enum string
-  # Default: float32.
-  # Required: no.
-  # Valid: float32 only.
-  # Use: Megalodon GEMM preferred accumulation plus attention score/value matmul accumulation dtype,
-  # unrelated to train.grad_accum. Megalodon requires FP32 for numerical stability.
-  accum_dtype: float32
+  # model.accum_dtype -- string; default and only valid value: float32. Controls model-internal attention/CEMA accumulation, not train.grad_accum.
+  accum_dtype: "<float32>"
 
-  # Key: model.attention_softmax_dtype
-  # Type: enum string
-  # Default: float32.
-  # Required: no.
-  # Valid: float32 | bfloat16.
-  # Use: attention softmax dtype, independent of the language-model loss. FP32 is recommended;
-  # BF16 is an opt-in direct lower-precision reduction and is not released-source parity.
-  attention_softmax_dtype: float32
+  # model.attention_softmax_dtype -- string; default: float32; one of: float32 | bfloat16. Keep FP32 for numerical stability; BF16 is an explicit lower-precision reduction.
+  attention_softmax_dtype: "<float32 | bfloat16>"
 
-  # Key: model.loss_softmax_dtype
-  # Type: enum string
-  # Default: float32.
-  # Required: no.
-  # Valid: float32 | bfloat16.
-  # Use: causal-LM log-softmax and loss-reduction dtype, independent of attention. FP32 is
-  # recommended for stable long-run training.
-  loss_softmax_dtype: float32
+  # model.loss_softmax_dtype -- string; default: float32; one of: float32 | bfloat16. Keep FP32 for stable causal-loss reduction.
+  loss_softmax_dtype: "<float32 | bfloat16>"
 
-  # Key: model.loss_chunk_size
-  # Type: integer | null
-  # Default: null, which materializes the full FP32 (batch, sequence, vocabulary) logits tensor.
-  # Required: no; valid only when model.backend is megalodon.
-  # Valid: null or an integer > 0. The value is static and changing it recompiles train/eval steps.
-  # Use: a positive value projects at most this many flattened shifted token states at once during
-  # loss computation, bounding vocabulary-head intermediates without changing attention, packing,
-  # masking, or loss math. The backward pass rematerializes each chunk, trading throughput for lower
-  # peak memory. Full-logits storage is approximately batch_size * (seq_len - 1) * vocab_size * 4
-  # bytes per microbatch before backward/compiler workspace. Choose the largest value that fits;
-  # start with 256 for 32K-vocabulary long-context runs and benchmark against null on the target GPU.
-  loss_chunk_size: null
+  # model.loss_chunk_size -- int | null; default: null; null or > 0; Megalodon-only. A positive static value chunks vocabulary projection during train/eval loss, reducing peak memory without changing loss math but rematerializing work in backward.
+  # Full-logit storage is about batch_size * seq_len * vocab_size * 4 bytes per microbatch. For memory-bound 32K-vocabulary long-context runs, start at 256 and choose the largest value that fits; null is fastest.
+  loss_chunk_size: "<int | null>"
 
-# Key: data
-# Type: mapping
-# Default: omitted or {}, which applies every nested default below.
-# Required: no.
-# Valid: only the data.* keys listed in this section.
-# Use: selects the source, packing behavior, evaluation sample, tokenizer, and input pipeline.
+# data -- mapping | null; default: {}. Source, order, packing, tokenizer, and objective fields participate in resume compatibility according to their active semantics.
 data:
-  # Key: data.backend
-  # Type: enum string
-  # Default: hf.
-  # Required: no.
-  # Valid: hf | local_text.
-  # Use: hf streams a Hugging Face dataset. local_text tokenizes the literal data.local_text value
-  # once per source epoch and repeats it only when data.repeat is true; it is debug-only and is not
-  # a local file path.
-  backend: hf
+  # data.backend -- string; default: hf; one of: hf | local_text. `local_text` consumes literal inline text and is debug-only.
+  backend: "<hf | local_text>"
 
-  # Key: data.hf_dataset
-  # Type: string
-  # Default: Zyphra/Zyda-2.
-  # Required: nonempty when data.backend is hf; ignored for local_text.
-  # Valid: nonempty Hugging Face dataset repository ID.
-  # Use: identifies the streaming dataset repository.
-  hf_dataset: Zyphra/Zyda-2
+  # data.hf_dataset -- string; default: Zyphra/Zyda-2; nonempty when backend=hf. Changing repositories normally requires replacing the Zyda-specific default hf_name and hf_revision too.
+  hf_dataset: "<nonempty string>"
 
-  # Key: data.hf_name
-  # Type: string
-  # Default: sample-100BT.
-  # Required: nonempty when data.backend is hf; ignored for local_text.
-  # Valid: nonempty dataset configuration/subset name.
-  # Use: selects the named Hugging Face dataset configuration.
-  hf_name: sample-100BT
+  # data.hf_name -- string; default: sample-100BT; nonempty when backend=hf; ignored by local_text. Hugging Face dataset configuration/subset name.
+  hf_name: "<nonempty string>"
 
-  # Key: data.hf_split
-  # Type: string
-  # Default: train.
-  # Required: nonempty when data.backend is hf; ignored for local_text.
-  # Valid: nonempty split name.
-  # Use: selects the training split and the source for a content-hash holdout when
-  # data.hf_eval_split is null. It is ignored for local_text.
-  hf_split: train
+  # data.hf_split -- string; default: train; nonempty when backend=hf; ignored by local_text. Training split and source for a null-split content holdout.
+  hf_split: "<nonempty string>"
 
-  # Key: data.hf_revision
-  # Type: string | null
-  # Default: bc389cd62969a275b2e3c3e11db826ba1918411a (the pinned default Zyda-2 commit).
-  # Required: a full commit when data.backend is hf and checkpoint.enabled is true; otherwise no.
-  # Valid: null or a nonempty branch, tag, or commit.
-  # Constraint: checkpointed HF runs accept only an exact 40-hex commit. null, branches, and tags are
-  # accepted only when checkpoint.enabled is false, for explicitly non-resumable exploration.
-  # Use: pins the dataset repository revision passed to Hugging Face so source contents and shard
-  # layout cannot drift between starts. Resume hard-compares this value for HF sources.
-  hf_revision: bc389cd62969a275b2e3c3e11db826ba1918411a
+  # data.hf_revision -- string | null; default: bc389cd62969a275b2e3c3e11db826ba1918411a. With backend=hf and checkpoint.enabled=true this is required to be a full 40-hex commit; otherwise null, branch, tag, or commit is accepted.
+  # This value belongs to hf_dataset: always replace both together. It pins source contents and shard layout for resume.
+  hf_revision: "<revision string | null>"
 
-  # Key: data.hf_eval_split
-  # Type: string | null
-  # Default: null, which creates a deterministic content-hash holdout from data.hf_split.
-  # Required: no; ignored for local_text.
-  # Valid: null or a nonempty split name different from data.hf_split when max_eval_samples > 0.
-  # Use: exact evaluation split. Any loading, authentication, schema, decoding, or collection error
-  # fails startup; there is no implicit fallback. null assigns documents by stable content hash:
-  # held-out content feeds eval and is excluded from training, including duplicate copies.
-  # Resume: this value is hard-compared even for local_text because it identifies the pinned eval set.
-  hf_eval_split: null
+  # data.hf_eval_split -- string | null; default: null. Null creates a content-hash holdout from hf_split and excludes it from training; an explicit nonempty split must differ from hf_split when evaluation is enabled.
+  # Explicit-split collection follows data.shuffle; hash-holdout collection does not. Collection/schema failures never fall back to the training split.
+  hf_eval_split: "<nonempty string | null>"
 
-  # Key: data.hf_eval_holdout_fraction
-  # Type: number
-  # Default: 0.01 (1% of content identities).
-  # Required: no; used only for hf when hf_eval_split is null and max_eval_samples > 0.
-  # Valid: > 0 and < 1.
-  # Use: share of stable content hashes reserved exclusively for eval. 0.01 is recommended; lower
-  # values retain more training data but scan more source documents to collect max_eval_samples.
-  # Holdout collection does not apply document-window shuffle. Changing this changes training order.
-  # Resume: hard-compared when active; the hash-partition schema is also hard-gated.
-  hf_eval_holdout_fraction: 0.01
+  # data.hf_eval_holdout_fraction -- float; default: 0.01; 0 < value < 1 for every HF config, even when inactive. Used only when hf_eval_split=null and max_eval_samples>0; 0.01 is the maintained choice.
+  hf_eval_holdout_fraction: "<float>"
 
-  # Key: data.text_key
-  # Type: string
-  # Default: text.
-  # Required: nonempty when data.backend is hf; ignored for local_text.
-  # Valid: nonempty dataset column name.
-  # Use: names the field containing document text. Every selected row must contain this field as a
-  # string; missing, null, numeric, list, or mapping values fail immediately without transient retry.
-  text_key: text
+  # data.text_key -- string; default: text; nonempty when backend=hf; ignored by local_text. Every selected row must contain a string at this key; schema failures are not retried.
+  text_key: "<nonempty string>"
 
-  # Key: data.shuffle
-  # Type: boolean
-  # Default: true.
-  # Required: no.
-  # Valid: true | false.
-  # Use: enables chomp's fixed-window HF document shuffle; local_text ignores it. Packed
-  # training-row shuffling is separately controlled by data.window_shuffle_tokens. Eval rows are
-  # never window-shuffled.
-  shuffle: true
+  # data.shuffle -- bool; default: true; HF-only. Shuffles owned document windows for training and explicit-split eval; hash-holdout eval and generation prompts remain unshuffled. Packed-row shuffle is separate.
+  shuffle: "<bool>"
 
-  # Key: data.shuffle_buffer_size
-  # Type: integer
-  # Default: 10000.
-  # Required: no; used only for the HF backend when data.shuffle is true.
-  # Valid: > 0 when shuffle is true.
-  # Use: number of HF documents in each chomp-owned shuffle window. Larger windows improve mixing
-  # and consume more host memory, but data.shuffle_buffer_bytes can end a window first. Checkpoints
-  # replay the current source window from compact state; they do not serialize its documents. Resume
-  # hard-compares this value only when document shuffling is active.
-  shuffle_buffer_size: 10000
+  # data.shuffle_buffer_size -- int; default: 10000; > 0 when HF shuffle is active. Document-count cap per owned window; full recipes use 200000 together with the byte cap for stronger mixing.
+  shuffle_buffer_size: "<int>"
 
-  # Key: data.shuffle_buffer_bytes
-  # Type: integer
-  # Default: 536870912 (512 MiB of UTF-8 document payload).
-  # Required: no; used only for the HF backend when data.shuffle is true.
-  # Valid: > 0 when shuffle is true.
-  # Use: host-memory budget for each chomp-owned document-shuffle window. A window ends after reaching
-  # this byte budget or data.shuffle_buffer_size, whichever occurs first. The document that reaches
-  # the budget remains in the window, so one oversized document can exceed it; no document is dropped
-  # or read ahead. Lower this on memory-constrained hosts. Resume hard-compares this value only when
-  # document shuffling is active.
-  shuffle_buffer_bytes: 536870912
+  # data.shuffle_buffer_bytes -- int; default: 536870912 (512 MiB); > 0 when HF shuffle is active. UTF-8 payload cap per window; one oversized threshold-crossing document may exceed it.
+  shuffle_buffer_bytes: "<int>"
 
-  # Key: data.seed
-  # Type: integer
-  # Default: 0.
-  # Required: no.
-  # Valid: >= 0.
-  # Use: document- and packed-training-window shuffle seed. Packed windows internally add a fixed
-  # offset and normalize the result modulo 2**32 for Grain. Resume compares the seed only for each
-  # active shuffle layer; changing it is inert when both shuffle mechanisms are disabled.
-  seed: 0
+  # data.seed -- int; default: 0; >= 0. Seeds active HF document and packed-row shuffles; model/dropout RNG uses train.seed.
+  seed: "<int>"
 
-  # Key: data.repeat
-  # Type: boolean
-  # Default: true.
-  # Required: no.
-  # Valid: true | false.
-  # Use: repeats the training source after exhaustion. Keep true for step-based training; false
-  # stops early if a finite source ends before train.steps. A usable final window and missing batch
-  # rows are padded, trained, and saved before exact exhaustion is reported.
-  repeat: true
+  # data.repeat -- bool; default: true. Repeats training sources for step-based runs; false trains a padded usable tail and stops early at finite exhaustion.
+  repeat: "<bool>"
 
-  # Key: data.max_retries
-  # Type: integer
-  # Default: 3.
-  # Required: no; used only for HF streaming.
-  # Valid: >= 0; zero disables retries.
-  # Use: maximum recovery attempts after an HF read failure.
-  max_retries: 3
+  # data.max_retries -- int; default: 3; >= 0; HF-only; zero disables transient read retries. Deterministic row/schema failures always fail immediately.
+  max_retries: "<int>"
 
-  # Key: data.retry_delay_sec
-  # Type: number
-  # Default: 1.0.
-  # Required: no; used only for HF streaming retries.
-  # Valid: >= 0.
-  # Use: base delay in seconds for exponential HF retry backoff: retry_delay_sec * 2**attempt.
-  retry_delay_sec: 1.0
+  # data.retry_delay_sec -- float; default: 1.0; >= 0; HF-only. Exponential retry delay is value * 2**attempt seconds.
+  retry_delay_sec: "<float>"
 
-  # Key: data.state_update_interval
-  # Type: integer
-  # Default: 2000.
-  # Required: no; used only for HF streaming.
-  # Valid: > 0.
-  # Use: examples between in-run retry snapshots. Recovery restores the last snapshot and rereads,
-  # then discards exactly the already-yielded examples, so order stays exact. Lower values reduce
-  # recovery work and add state-capture overhead. Checkpoints capture current state independently.
-  state_update_interval: 2000
+  # data.state_update_interval -- int; default: 2000; > 0; HF-only. Documents between compact in-run retry states; lower values reduce recovery rereads and increase capture overhead, independently of checkpoints.
+  state_update_interval: "<int>"
 
-  # Key: data.local_text
-  # Type: string
-  # Default: "Hello from chomp.\n".
-  # Required: nonempty when data.backend is local_text; ignored for hf.
-  # Valid: nonempty literal text.
-  # Lifecycle: debug only.
-  # Use: inline content, not a path. Use YAML block syntax for multiline input. For a quick smoke run,
-  # set data.window_shuffle_tokens to 0; its default otherwise fills one token-budgeted window first.
-  local_text: "Hello from chomp.\n"
+  # data.local_text -- string; default: "Hello from chomp.\n"; nonempty when backend=local_text; ignored by HF. Literal text, not a path. For quick local smoke tests set max_eval_samples=0 and window_shuffle_tokens=0. [Debug only]
+  local_text: "<nonempty string>"
 
-  # Key: data.packing_mode
-  # Type: enum string
-  # Default: sequential.
-  # Required: no.
-  # Valid: sequential | bin | multipack.
-  # Use: sequential treats the corpus as a continuous token stream and right-pads its finite final
-  # tail. bin and multipack use First-Fit-Decreasing and flush tails into padded rows; both can
-  # combine unrelated documents. Missing rows in a finite final batch are padded, never discarded.
-  packing_mode: sequential
+  # data.packing_mode -- string; default: sequential; one of: sequential | bin | multipack. Sequential preserves stream order and lets recurrent state cross documents while boundary loss remains masked by default; FFD modes combine documents and can isolate state.
+  packing_mode: "<sequential | bin | multipack>"
 
-  # Key: data.packing_buffer_docs
-  # Type: integer
-  # Default: 128.
-  # Required: only used when data.packing_mode is bin.
-  # Valid: > 0 and >= train.batch_size * train.grad_accum in bin mode.
-  # Use: prepared-segment lookahead for bin FFD packing. Long source documents may contribute several
-  # seq_len-sized segments. Larger values can improve utilization and increase memory/startup latency.
-  packing_buffer_docs: 128
+  # data.packing_buffer_docs -- int; default: 128; in bin mode must be > 0 and >= train.batch_size * train.grad_accum. Lookahead counts prepared chunks despite the legacy name; larger values trade startup memory for utilization.
+  packing_buffer_docs: "<int>"
 
-  # Key: data.packing_max_docs_per_bin
-  # Type: integer | null
-  # Default: null, meaning no document-count cap.
-  # Required: no; used only for bin and multipack.
-  # Valid: null or > 0.
-  # Use: caps segments per packed row, not necessarily source documents because long documents are
-  # split first. Lower caps reduce segmentation overhead and may waste tokens.
-  packing_max_docs_per_bin: null
+  # data.packing_max_docs_per_bin -- int | null; default: null (no cap); otherwise > 0; used only by bin/multipack. Caps prepared segments per row, not original source documents.
+  packing_max_docs_per_bin: "<int | null>"
 
-  # Key: data.packing_group_docs
-  # Type: integer
-  # Default: 512.
-  # Required: only used when data.packing_mode is multipack.
-  # Valid: > 0 in multipack mode.
-  # Use: multipack prepared-segment lookahead. The effective trigger is max(packing_group_docs,
-  # train.batch_size * train.grad_accum); only end-of-stream flush can emit below that threshold.
-  # Larger groups improve packing and increase memory/latency.
-  packing_group_docs: 512
+  # data.packing_group_docs -- int; default: 512; > 0 in multipack mode. Effective lookahead is max(this, train.batch_size * train.grad_accum); larger groups increase memory and latency.
+  packing_group_docs: "<int>"
 
-  # Key: data.packing_strict_segments
-  # Type: boolean
-  # Default: true.
-  # Required: no; used only for bin and multipack.
-  # Valid: true | false; true requires data.mask_boundary_loss to be true.
-  # Use: isolates attention, RoPE, CEMA, and TimestepNorm between packed documents. Keep true.
-  # Warning: false deliberately permits cross-document recurrent-state and attention leakage.
-  packing_strict_segments: true
+  # data.packing_strict_segments -- bool; default: true; used only by bin/multipack and requires mask_boundary_loss=true. Keep true to isolate attention, RoPE, CEMA, and TimestepNorm; false deliberately leaks state across documents.
+  packing_strict_segments: "<bool>"
 
-  # Key: data.mask_boundary_loss
-  # Type: boolean
-  # Default: true.
-  # Required: must be true for bin/multipack when data.packing_strict_segments is true.
-  # Valid: true | false subject to the interaction above.
-  # Use: excludes next-token targets crossing document boundaries. Keep true for independent docs.
-  # Warning: false changes loss-token counts and token-weighted gradient accumulation. If masking
-  # leaves an entire batch with no valid shifted targets, batch assembly fails before optimization.
-  mask_boundary_loss: true
+  # data.mask_boundary_loss -- bool; default: true. Masks cross-document next-token targets in every packing mode and must remain true for strict bin/multipack; keep true for independent documents.
+  mask_boundary_loss: "<bool>"
 
-  # Key: data.train_on_eos
-  # Type: boolean
-  # Default: true.
-  # Required: no.
-  # Valid: true | false.
-  # Use: false masks every label equal to model.eos_token_id, including naturally encoded collisions,
-  # not only EOS inserted by add_eos. With default byte mode, raw byte 0x02 maps to EOS ID 2.
-  # Warning: if this and boundary/padding masks remove every shifted target in a batch, training
-  # fails before changing parameters, optimizer state, schedule, RNG, or step.
-  train_on_eos: true
+  # data.train_on_eos -- bool; default: true. False masks every label numerically equal to the effective EOS ID, including natural token-ID collisions; an all-masked batch fails before any optimizer/state change.
+  train_on_eos: "<bool>"
 
-  # Key: data.window_shuffle_tokens
-  # Type: integer
-  # Default: 8388608 (2^23 packed tokens; 4096 rows at seq_len 2048).
-  # Required: no.
-  # Valid: zero, or >= train.seq_len * train.batch_size * train.grad_accum.
-  # Use: packed-token memory budget for training-row shuffle; eval never uses it. Chomp divides by
-  # train.seq_len and rounds rows down to a train.batch_size * train.grad_accum multiple. The two
-  # buffered int32 arrays use about 8 bytes per budgeted token (64 MiB at default), independent of
-  # context length. zero disables shuffling and is not recommended for domain-ordered/long-doc data.
-  window_shuffle_tokens: 8388608
+  # data.window_shuffle_tokens -- int; default: 8388608; zero disables, otherwise >= train.seq_len * train.batch_size * train.grad_accum. The budget becomes batch-aligned packed rows; two int32 buffers use about 8 bytes per token.
+  # Keep enabled for domain-ordered or long-document corpora. Smoke configs disable it to avoid filling a large window before their first step.
+  window_shuffle_tokens: "<int>"
 
-  # Key: data.grain_prefetch
-  # Type: integer
-  # Default: 0.
-  # Required: no.
-  # Valid: >= 0; zero disables prefetch.
-  # Use: Grain batches prefetched ahead. Raise only after measuring input stalls; prefetched batches
-  # consume memory. With data.device_put true, background-thread device transfers may be unsafe.
-  grain_prefetch: 0
+  # data.grain_prefetch -- int; default: 0; >= 0; zero disables. Counts assembled batches; raise only after measuring input stalls because it consumes memory and can interact poorly with device_put=true.
+  grain_prefetch: "<int>"
 
-  # Key: data.max_eval_samples
-  # Type: integer
-  # Default: 1000.
-  # Required: no.
-  # Valid: >= 0; zero disables evaluation data.
-  # Use: maximum source examples collected into the pinned evaluation token cache. Setup collects
-  # them even when eval_every is 0; max_eval_samples 0 or --dry-run skips collection. This is not a
-  # token/window count: zero collected documents fails at setup, while no usable packed window or
-  # all-masked labels fails when evaluation first runs. Changing it is rejected on resume.
-  max_eval_samples: 1000
+  # data.max_eval_samples -- int; default: 1000; >= 0; zero disables eval data. Positive values collect/cache up to this many documents even when train.eval_every=0; local_text produces repeated copies of the same text.
+  max_eval_samples: "<int>"
 
-  # Key: data.recreate_eval_cache
-  # Type: boolean
-  # Default: false, so a missing cache aborts resume when data.max_eval_samples > 0.
-  # Required: no; read only when resuming with a missing pinned evaluation cache.
-  # Valid: true | false.
-  # Lifecycle: one-shot operational recovery switch.
-  # Warning: true rebuilds only after resume compatibility succeeds, but a newly sampled cache can
-  # break metric comparability across the resume boundary. Turn it back off after recovery.
-  recreate_eval_cache: false
+  # data.recreate_eval_cache -- bool; default: false. One-shot recovery used only when resuming with a missing pinned eval cache; true rebuilds after compatibility succeeds but breaks metric comparability across the boundary. [Operational recovery]
+  recreate_eval_cache: "<bool>"
 
-  # Key: data.tokenizer
-  # Type: mapping
-  # Default: omitted or {}, which applies every data.tokenizer.* default below.
-  # Required: no.
-  # Valid: only the data.tokenizer.* keys listed in this block.
-  # Use: selects tokenization, special tokens, truncation, and vocabulary alignment.
+  # data.tokenizer -- mapping | null; default: {}. Every raw tokenizer child is a hard resume invariant, including fields inactive under the selected tokenizer kind.
   tokenizer:
-    # Key: data.tokenizer.kind
-    # Type: enum string
-    # Default: byte.
-    # Required: no.
-    # Valid: byte | hf.
-    # Use: hf is recommended for real pretraining. byte maps UTF-8 bytes and supports offline/debug
-    # runs. The resolved tokenizer identity is resume-critical.
-    kind: byte
+    # data.tokenizer.kind -- string; default: byte; one of: byte | hf. Use HF for pretraining; byte is an offline infrastructure tokenizer.
+    kind: "<byte | hf>"
 
-    # Key: data.tokenizer.hf_name_or_path
-    # Type: string | null
-    # Default: pszemraj/bytebpe-tokenizer-32k-mlm.
-    # Required: nonempty when data.tokenizer.kind is hf; ignored for byte.
-    # Valid: Hugging Face repository ID or local tokenizer directory, or null in byte mode.
-    # Use: selects the tokenizer assets loaded by transformers.
-    hf_name_or_path: pszemraj/bytebpe-tokenizer-32k-mlm
+    # data.tokenizer.hf_name_or_path -- string | null; default: pszemraj/bytebpe-tokenizer-32k-mlm; nonempty when kind=hf. Fresh runs snapshot these assets; resume loads only the snapshot and fails if it is missing.
+    hf_name_or_path: "<repository ID | local path | null>"
 
-    # Key: data.tokenizer.hf_use_fast
-    # Type: boolean
-    # Default: true.
-    # Required: no; used only for hf.
-    # Valid: true | false.
-    # Use: requests a fast tokenizer. Keep true unless the selected tokenizer lacks one.
-    hf_use_fast: true
+    # data.tokenizer.hf_use_fast -- bool; default: true; HF-only. Keep true unless the selected tokenizer has no fast implementation.
+    hf_use_fast: "<bool>"
 
-    # Key: data.tokenizer.hf_trust_remote_code
-    # Type: boolean
-    # Default: false.
-    # Required: no; used only for hf.
-    # Valid: true | false.
-    # Use: passes the remote-code permission to the Hugging Face tokenizer loader.
-    # Warning: true permits the tokenizer repository to execute custom Python. Enable only for a
-    # trusted and reviewed repository.
-    hf_trust_remote_code: false
+    # data.tokenizer.hf_trust_remote_code -- bool; default: false; HF-only. True executes custom Python from the tokenizer repository; enable only for reviewed, trusted code.
+    hf_trust_remote_code: "<bool>"
 
-    # Key: data.tokenizer.vocab_size_multiple
-    # Type: integer
-    # Default: 128.
-    # Required: no.
-    # Valid: > 0.
-    # Use: rounds the effective embedding vocabulary up to this alignment. 128 is accelerator-friendly
-    # for HF tokenizers. Byte mode with byte_offset > 0 may create unused output IDs above offset+255;
-    # generated unused IDs cannot be decoded as bytes, so test generation or use a compatible size.
-    vocab_size_multiple: 128
+    # data.tokenizer.vocab_size_multiple -- int; default: 128; > 0. Effective vocabulary is round_up(max(model.vocab_size, tokenizer length), this value); 128 is the maintained GPU alignment.
+    vocab_size_multiple: "<int>"
 
-    # Key: data.tokenizer.auto_set_special_tokens
-    # Type: boolean
-    # Default: true.
-    # Required: no; used only for hf.
-    # Valid: true | false.
-    # Use: copies tokenizer-provided pad/BOS/EOS IDs into model config when available. Keep true;
-    # when false, verify model.pad_token_id, bos_token_id, and eos_token_id explicitly.
-    # Resume: its raw value is hard-compared even in byte mode, where it has no tokenization effect.
-    auto_set_special_tokens: true
+    # data.tokenizer.auto_set_special_tokens -- bool; default: true; HF-only. Copies available pad/BOS/EOS IDs into model config; a missing pad is first filled from EOS when available. Enabled BOS/EOS insertion requires the corresponding tokenizer ID.
+    auto_set_special_tokens: "<bool>"
 
-    # Key: data.tokenizer.byte_offset
-    # Type: integer
-    # Default: 0.
-    # Required: no; used only for byte.
-    # Valid: >= 0; must be > 0 if byte mode inserts BOS or EOS.
-    # Use: reserves IDs below the offset for special tokens and maps bytes to offset..offset+255.
-    # Interaction: model.vocab_size must be at least byte_offset + 256.
-    byte_offset: 0
+    # data.tokenizer.byte_offset -- int; default: 0; >= 0; byte-only. Reserves IDs below the offset and maps bytes to offset..offset+255; model.vocab_size must cover that range, and BOS/EOS insertion requires offset > 0.
+    byte_offset: "<int>"
 
-    # Key: data.tokenizer.add_bos
-    # Type: boolean
-    # Default: false.
-    # Required: no.
-    # Valid: true | false.
-    # Use: prepends BOS to every train/eval document entering a packer; generation prompts do not add
-    # it. Byte mode requires byte_offset > 0 and
-    # model.bos_token_id < byte_offset; the ID must also be inside the effective vocabulary.
-    add_bos: false
+    # data.tokenizer.add_bos -- bool; default: false. Prepends BOS after truncation and before packing, not to generation prompts. Byte mode requires bos_token_id < byte_offset; HF auto-special mode requires a tokenizer BOS ID.
+    add_bos: "<bool>"
 
-    # Key: data.tokenizer.add_eos
-    # Type: boolean
-    # Default: false.
-    # Required: no.
-    # Valid: true | false.
-    # Use: appends EOS to every train/eval document entering a packer; generation prompts do not add
-    # it. Byte mode requires byte_offset > 0 and
-    # model.eos_token_id < byte_offset. data.train_on_eos controls whether it contributes to loss.
-    add_eos: false
+    # data.tokenizer.add_eos -- bool; default: false. Appends EOS after truncation and before packing; data.train_on_eos controls its loss. Byte mode requires eos_token_id < byte_offset; HF auto-special mode requires a tokenizer EOS ID.
+    add_eos: "<bool>"
 
-    # Key: data.tokenizer.max_doc_tokens
-    # Type: integer | null
-    # Default: null, meaning documents are not truncated.
-    # Required: no.
-    # Valid: null or > 0.
-    # Use: optional explicit cap on encoded document tokens before inserted BOS/EOS and packing.
-    # Tokenization processes the full raw document before this cap, so it does not limit tokenizer
-    # memory or CPU time. Truncation permanently discards document tails; leave null unless that loss
-    # is intentional. Monitor source_tokens_discarded, source_truncation_fraction, docs_truncated,
-    # and the source_doc_tokens_p*_upper length bounds when a positive cap is active.
-    max_doc_tokens: null
+    # data.tokenizer.max_doc_tokens -- int | null; default: null (no truncation); otherwise > 0. Applied after full tokenization and before inserted specials, so it discards document tails without reducing tokenizer peak work; leave null unless intentional.
+    max_doc_tokens: "<int | null>"
 
-  # Key: data.device_put
-  # Type: boolean
-  # Default: false.
-  # Required: no.
-  # Valid: true | false.
-  # Lifecycle: experimental performance option.
-  # Use: true transfers batches inside the iterator; false transfers in the training loop. Keep
-  # false unless profiling shows a benefit. It affects only the training iterator; eval transfers in
-  # its loop. true disables pipeline stats and can interact poorly with grain_prefetch background
-  # threads. A resume change warns without prefetch and hard-fails if either side uses prefetch.
-  device_put: false
+  # data.device_put -- bool; default: false. True transfers training batches inside the iterator, disables pipeline diagnostics, and warns with threaded prefetch; keep false unless profiling proves a benefit. Resume drift warns without prefetch and fails when either side uses prefetch. [Experimental]
+  device_put: "<bool>"
 
-# Key: train
-# Type: mapping
-# Default: omitted or {}, which applies every nested default below.
-# Required: no.
-# Valid: only the train.* keys listed in this section.
-# Use: controls training duration, batch shape, evaluation, generation, and profiling.
+# train -- mapping | null; default: {}. Shape fields define one compiled optimizer step and are hard resume invariants.
 train:
-  # Key: train.seed
-  # Type: integer
-  # Default: 0.
-  # Required: no.
-  # Valid: >= 0.
-  # Use: fresh model/dropout RNG plus two periodic-generation RNGs. Data ordering uses data.seed.
-  # Restored model/dropout RNG supersedes this value on resume, and generation RNGs restart rather
-  # than restore.
-  seed: 0
+  # train.seed -- int; default: 0; >= 0. Seeds fresh model/dropout and periodic-generation RNGs; data order uses data.seed. Restored model RNG wins on resume, while generation RNGs restart.
+  seed: "<int>"
 
-  # Key: train.steps
-  # Type: integer
-  # Default: 100.
-  # Required: no.
-  # Valid: > 0 and > optim.warmup_steps.
-  # Use: total target optimizer step, not additional resumed steps. With optim.decay_steps null, it
-  # also fixes the schedule horizon. Resume warns on a changed target but hard-fails if the effective
-  # schedule horizon changes; set explicit decay_steps before the first run if later extension is
-  # planned. A run already at or above this target performs no updates.
-  steps: 100
+  # train.steps -- int; default: 100; > 0 and > optim.warmup_steps. Total target step, not additional resumed work; null optim.decay_steps also derives its LR horizon from this value. Default is smoke-scale; full recipes use 100000.
+  steps: "<int>"
 
-  # Key: train.batch_size
-  # Type: integer
-  # Default: 2.
-  # Required: no.
-  # Valid: > 0.
-  # Use: packed rows per accumulation slice. One outer optimizer step consumes batch_size * grad_accum
-  # rows; valid tokens are lower when masks/padding apply. It also sets the bin-buffer minimum and the
-  # smallest useful window-shuffle size. This shape is a hard resume invariant.
-  batch_size: 2
+  # train.batch_size -- int; default: 2; > 0. Packed rows per accumulation slice; contributes to packing/shuffle minima. Full recipes use 2 and scale effective batch with grad_accum.
+  batch_size: "<int>"
 
-  # Key: train.seq_len
-  # Type: integer
-  # Default: 128.
-  # Required: no.
-  # Valid: >= 8; for Megalodon, >= model.chunk_size and divisible by model.chunk_size.
-  # Use: tokens per packed row. It also bounds generate_input_len and strongly affects
-  # memory/recompilation. This shape is a hard resume invariant.
-  seq_len: 128
+  # train.seq_len -- int; default: 128; >= 8; for Megalodon must be >= and divisible by model.chunk_size. Default is smoke-scale; full recipes use 2048. Changing it recompiles and breaks resume.
+  seq_len: "<int>"
 
-  # Key: train.grad_accum
-  # Type: integer
-  # Default: 1.
-  # Required: no.
-  # Valid: > 0.
-  # Use: scan slices accumulated before one outer update. Loss/gradients are weighted by valid loss
-  # tokens rather than equally per slice; accumulation, normalization, and clipping are FP32. This is
-  # a hard resume invariant and contributes to packing thresholds.
-  grad_accum: 1
+  # train.grad_accum -- int; default: 1; > 0. Accumulation slices per optimizer step; loss is weighted by valid tokens. Full recipes use 8 with batch_size=2 and seq_len=2048.
+  grad_accum: "<int>"
 
-  # Key: train.jit
-  # Type: boolean
-  # Default: true.
-  # Required: no.
-  # Valid: true | false.
-  # Use: JIT-compiles train and eval steps. Keep true for training; false is eager/debug mode and a
-  # dry run does not compile in that mode.
-  jit: true
+  # train.jit -- bool; default: true. JIT-compiles train/eval; keep true for training and use false only for focused eager debugging.
+  jit: "<bool>"
 
-  # Key: train.deterministic
-  # Type: boolean | null
-  # Default: null, computed as true only when all active model dropouts are zero.
-  # Required: no.
-  # Valid: true | false | null; an explicit boolean overrides the computed rule.
-  # Use: controls dropout/key behavior only. It does not enable deterministic GPU kernels or bit-exact
-  # arithmetic; use XLA_FLAGS=--xla_gpu_deterministic_ops=true separately when required.
-  # Interaction: effective true bypasses model.use_checkpoint in Megalodon. For zero-dropout math with
-  # activation checkpointing, set this explicitly false and keep all dropout rates 0. The raw value is
-  # hard-compared on resume, so null -> true is rejected even when effective behavior matches.
-  deterministic: null
+  # train.deterministic -- bool | null; default: null, computed true only when every active dropout is zero. Explicit values override that rule; effective true disables model.use_checkpoint. Raw-value drift fails resume; this controls dropout, not deterministic GPU kernels.
+  deterministic: "<bool | null>"
 
-  # Key: train.allow_cpu
-  # Type: boolean
-  # Default: false.
-  # Required: no.
-  # Valid: true | false.
-  # Lifecycle: debug only.
-  # Use: false requires JAX's default device and every checked batch to use the CUDA GPU backend at
-  # both the Python API and CLI boundary. Enable only for small CPU smoke tests.
-  allow_cpu: false
+  # train.allow_cpu -- bool; default: false. False requires GPU execution; true permits CPU or any other non-GPU/indeterminate backend rather than forcing CPU. [Debug only]
+  allow_cpu: "<bool>"
 
-  # Key: train.log_every
-  # Type: integer
-  # Default: 25.
-  # Required: no.
-  # Valid: > 0.
-  # Use: outer-step interval for local/W&B/console metric rows. Eval forces a row off cadence;
-  # checkpoint-only syncs do not. Generation has separate console output.
-  log_every: 25
+  # train.log_every -- int; default: 25; > 0. Completed-step metric cadence; evaluation can force an off-cadence row. Full recipes use 25; smoke uses 1.
+  log_every: "<int>"
 
-  # Key: train.eval_every
-  # Type: integer
-  # Default: 2500.
-  # Required: no.
-  # Valid: >= 0; zero disables periodic evaluation.
-  # Use: exact global-step interval. Evaluation also requires nonempty pinned eval tokens and at least
-  # one usable packed window; its A=1 batches pad missing final rows. This cadence may change on resume.
-  eval_every: 2500
+  # train.eval_every -- int; default: 2500; >= 0; zero disables scheduled evaluation. Evaluation also requires data.max_eval_samples > 0 and a usable pinned eval set; cadence may change on resume.
+  eval_every: "<int>"
 
-  # Key: train.generate_every
-  # Type: integer
-  # Default: 5000.
-  # Required: no.
-  # Valid: >= 0; zero disables periodic generation.
-  # Use: exact global-step sample interval for non-dry Megalodon runs; set 0 if samples are unwanted.
-  # It samples from a bounded pool of up to 16 unshuffled training-split documents and does not affect
-  # optimization. The prompt RNG is not checkpointed, so prompt selection restarts on resume. Prompt
-  # loading failures disable sampling; individual generation failures warn and training continues.
-  generate_every: 5000
+  # train.generate_every -- int; default: 5000; >= 0; zero disables. Periodic sampling runs only for non-dry Megalodon training; prompt/setup failures disable sampling, and generation RNGs restart on resume.
+  generate_every: "<int>"
 
-  # Key: train.generate_input_len
-  # Type: integer | null
-  # Default: null, computed as max(1, train.seq_len // 2).
-  # Required: no; used only when periodic generation is enabled.
-  # Valid: null or an integer from 1 through train.seq_len.
-  # Use: target source-token prompt length. Trailing EOS is trimmed; short documents use what remains,
-  # while long documents randomly select a prefix or suffix of this length.
-  generate_input_len: null
+  # train.generate_input_len -- int | null; default: null, computed as max(1, train.seq_len // 2); otherwise 1..train.seq_len. Generation-only prompt target length.
+  generate_input_len: "<int | null>"
 
-  # Key: train.generate_max_tokens
-  # Type: integer | null
-  # Default: null, computed as model.chunk_size + 16.
-  # Required: no; used only when periodic generation is enabled.
-  # Valid: null or > 0.
-  # Use: maximum new tokens per generated sample. Larger values increase sampling time.
-  generate_max_tokens: null
+  # train.generate_max_tokens -- int | null; default: null, computed as model.chunk_size + 16; otherwise > 0. Maximum new tokens per periodic sample.
+  generate_max_tokens: "<int | null>"
 
-  # Key: train.generate_temperature
-  # Type: number | null
-  # Default: null, which uses the generation backend default.
-  # Required: no; used only when periodic generation is enabled.
-  # Valid: null or >= 0; zero requests greedy selection.
-  # Use: sampling temperature. null currently means backend default 1.0. Zero is greedy and does not
-  # consume a sampling key; positive values use seeded stochastic sampling.
-  generate_temperature: null
+  # train.generate_temperature -- float | null; default: null, which uses the installed backend default (currently 1.0); otherwise >= 0. Zero is greedy and ignores stochastic filters.
+  generate_temperature: "<float | null>"
 
-  # Key: train.generate_top_k
-  # Type: integer | null
-  # Default: null, which uses the generation backend default.
-  # Required: no; used only when periodic generation is enabled.
-  # Valid: null or > 0.
-  # Use: top-k sampling cutoff; the greedy temperature=0 path ignores stochastic filters.
-  generate_top_k: null
+  # train.generate_top_k -- int | null; default: null (backend default); otherwise > 0. Generation-only top-k cutoff; irrelevant when temperature=0.
+  generate_top_k: "<int | null>"
 
-  # Key: train.generate_top_p
-  # Type: number | null
-  # Default: null, which uses the generation backend default.
-  # Required: no; used only when periodic generation is enabled.
-  # Valid: null or > 0 and <= 1.
-  # Use: nucleus-sampling probability threshold; the greedy temperature=0 path ignores it.
-  generate_top_p: null
+  # train.generate_top_p -- float | null; default: null (backend default); otherwise 0 < value <= 1. Generation-only nucleus cutoff; irrelevant when temperature=0.
+  generate_top_p: "<float | null>"
 
-  # Key: train.profile
-  # Type: boolean
-  # Default: false.
-  # Required: no.
-  # Valid: true | false.
-  # Use: enables a full-run JAX trace starting before the loop/dry-run step, including first-step
-  # compilation and later eval/generation/finalization. Traces add overhead and can become very large.
-  profile: false
+  # train.profile -- bool; default: false. Enables a full-run JAX trace including first compilation; traces add overhead and can be large, so enable only for focused profiling.
+  profile: "<bool>"
 
-  # Key: train.profile_dir
-  # Type: string | null
-  # Default: null, computed as <resolved run directory>/trace.
-  # Required: no; used only when train.profile is true.
-  # Valid: null or a nonempty filesystem path string.
-  # Use: profiler trace output directory. An explicit relative path resolves from the process working
-  # directory, not logging.run_dir.
-  profile_dir: null
+  # train.profile_dir -- string | null; default: null, computed as <run_dir>/trace; otherwise nonempty. Used only with profile=true; explicit relative paths resolve from the process working directory.
+  profile_dir: "<nonempty string | null>"
 
-# Key: optim
-# Type: mapping
-# Default: omitted or {}, which applies every nested default below.
-# Required: no.
-# Valid: only the optim.* keys listed in this section.
-# Use: selects AdamW or Muon and configures the warmup-plus-cosine schedule.
+# optim -- mapping | null; default: {}. Selects the optimizer and warmup-plus-cosine schedule; all supplied nested values are validated even when inactive. Top-level and Adam values are hard resume invariants; Muon values are compared when either run uses Muon.
 optim:
-  # Key: optim.name
-  # Type: enum string
-  # Default: adamw.
-  # Required: no.
-  # Valid: adamw | muon.
-  # Use: adamw updates every parameter with AdamW. muon updates eligible 2D matrices with Muon and
-  # all others with nested Adam; if no matrix matches, runtime warns and effectively uses AdamW for
-  # all parameters. Optimizer selection/state is a hard resume invariant.
-  name: adamw
+  # optim.name -- string; default: adamw; one of: adamw | muon. Muon handles eligible projection matrices and nested Adam handles all others; no eligible matrices falls back to AdamW with a warning. Maintained full-run recipes use Muon; AdamW is the conventional baseline.
+  name: "<adamw | muon>"
 
-  # Key: optim.lr
-  # Type: number
-  # Default: 0.0003.
-  # Required: no.
-  # Valid: > 0.
-  # Use: peak Adam learning rate after warmup. Muon matrix updates use this schedule multiplied by
-  # optim.muon.lr_scale. Tune it with effective batch size.
-  lr: 0.0003
+  # optim.lr -- float; default: 0.0003; > 0. Peak Adam learning rate after warmup; Muon uses this schedule multiplied by optim.muon.lr_scale.
+  lr: "<float>"
 
-  # Key: optim.weight_decay
-  # Type: number
-  # Default: 0.01.
-  # Required: no.
-  # Valid: >= 0; zero disables weight decay.
-  # Use: AdamW decay coefficient. The explicit model-aware mask includes token embeddings and dense
-  # projection weights. It excludes biases, norms/scales, attention affine offsets, and CEMA
-  # coefficients. Derived RoPE frequencies are not model arrays. Muon matrices additionally
-  # multiply it by muon.weight_decay_mult.
-  weight_decay: 0.01
+  # optim.weight_decay -- float; default: 0.01; >= 0; zero disables. Model-aware decay applies to embeddings/dense projections, not biases, norms/scales, attention offsets, or CEMA coefficients; Muon also applies weight_decay_mult.
+  weight_decay: "<float>"
 
-  # Key: optim.grad_clip_norm
-  # Type: number
-  # Default: 1.0.
-  # Required: no.
-  # Valid: >= 0; zero disables clipping.
-  # Use: global threshold over the combined valid-token-normalized gradient tree before optimizer
-  # partitioning. Logged grad_norm is pre-clipping. 1.0 is a safe start.
-  grad_clip_norm: 1.0
+  # optim.grad_clip_norm -- float; default: 1.0; >= 0; zero disables. Global clipping occurs after valid-token normalization and before optimizer partitioning; logged grad_norm is pre-clipping. Keep 1.0 as the starting point.
+  grad_clip_norm: "<float>"
 
-  # Key: optim.warmup_steps
-  # Type: integer
-  # Default: 10.
-  # Required: no.
-  # Valid: >= 0 and < train.steps.
-  # Use: linear-warmup duration. No warmup-ratio alternative exists.
-  warmup_steps: 10
+  # optim.warmup_steps -- int; default: 10; >= 0 and < train.steps. Linear warmup duration; no ratio alternative exists. Maintained 100k-step recipes use 1000.
+  warmup_steps: "<int>"
 
-  # Key: optim.decay_steps
-  # Type: integer | null
-  # Default: null, computed as train.steps - optim.warmup_steps.
-  # Required: no.
-  # Valid: null or > 0.
-  # Use: post-warmup cosine duration. Total horizon is warmup_steps + decay_steps; after it, Optax
-  # holds the min_lr_ratio floor. An explicit horizon may precede or exceed train.steps. Resume compares
-  # the effective horizon, so null -> an explicitly equal duration is allowed but any drift hard-fails.
-  decay_steps: null
+  # optim.decay_steps -- int | null; default: null, computed as train.steps - warmup_steps; otherwise > 0. This post-warmup duration plus warmup_steps is a hard resume invariant; use null for a fixed-horizon run, or set it before the first checkpoint if train.steps may later increase.
+  decay_steps: "<int | null>"
 
-  # Key: optim.min_lr_ratio
-  # Type: number
-  # Default: 0.0.
-  # Required: no.
-  # Valid: 0.0 through 1.0 inclusive.
-  # Use: floor divided by optim.lr at/after the schedule horizon. It is not necessarily the final-step
-  # LR when explicit decay_steps makes the training and schedule horizons differ.
-  min_lr_ratio: 0.0
+  # optim.min_lr_ratio -- float; default: 0.0; 0 <= value <= 1. Final schedule floor divided by optim.lr; maintained 100k-step recipes use 0.1, while an explicit decay horizon may end before or after train.steps.
+  min_lr_ratio: "<float>"
 
-  # Key: optim.muon
-  # Type: mapping
-  # Default: omitted or {}, which applies every optim.muon.* default below.
-  # Required: no; used only when optim.name is muon.
-  # Valid: only the optim.muon.* keys listed in this block.
-  # Use: configures Muon updates for eligible matrices. These values are validated even under AdamW;
-  # resume ignores their drift only when both saved and current optimizers are non-Muon.
+  # optim.muon -- mapping | null; default: {}; used only when optim.name=muon. Inactive values remain type/constraint validated.
   muon:
-    # Key: optim.muon.lr_scale
-    # Type: number
-    # Default: 100.0.
-    # Required: no; used only for Muon-eligible parameters.
-    # Valid: > 0.
-    # Use: multiplier from the Adam schedule to the Muon matrix learning rate. The large default is
-    # intentional for Muon's parameterization; do not apply Adam LR intuition directly.
-    lr_scale: 100.0
+    # optim.muon.lr_scale -- float; default: 100.0; > 0. Multiplier from the Adam schedule to Muon matrix LR; 100 is the maintained choice and narrowly beat 150 in the repository's 10k-step sweep.
+    lr_scale: "<float>"
 
-    # Key: optim.muon.weight_decay_mult
-    # Type: number
-    # Default: 1.0.
-    # Required: no; used only for Muon-eligible parameters.
-    # Valid: >= 0.
-    # Use: multiplier on optim.weight_decay for Muon matrices; zero disables their decay.
-    weight_decay_mult: 1.0
+    # optim.muon.weight_decay_mult -- float; default: 1.0; >= 0. Multiplies optim.weight_decay for Muon matrices; zero disables their decay.
+    weight_decay_mult: "<float>"
 
-    # Key: optim.muon.momentum
-    # Type: number
-    # Default: 0.95.
-    # Required: no; used only when optim.name is muon.
-    # Valid: > 0 and < 1.
-    # Use: Muon momentum coefficient.
-    momentum: 0.95
+    # optim.muon.momentum -- float; default: 0.95; 0 < value < 1. Muon momentum coefficient.
+    momentum: "<float>"
 
-    # Key: optim.muon.ns_steps
-    # Type: integer
-    # Default: 5.
-    # Required: no; used only when optim.name is muon.
-    # Valid: > 0.
-    # Use: Newton-Schulz orthogonalization iterations. More iterations cost more compute; keep 5
-    # unless reproducing a recipe that specifies otherwise.
-    ns_steps: 5
+    # optim.muon.ns_steps -- int; default: 5; > 0. Newton-Schulz iterations; more costs compute, so keep 5 unless reproducing another recipe.
+    ns_steps: "<int>"
 
-    # Key: optim.muon.nesterov
-    # Type: boolean
-    # Default: true.
-    # Required: no; used only when optim.name is muon.
-    # Valid: true | false.
-    # Use: enables Nesterov momentum for Muon matrix updates.
-    nesterov: true
+    # optim.muon.nesterov -- bool; default: true. Enables Nesterov momentum on Muon matrices.
+    nesterov: "<bool>"
 
-    # Key: optim.muon.consistent_rms
-    # Type: number | null
-    # Default: null, which omits Muon's optional shape/RMS scaling transform.
-    # Required: no; used only when optim.name is muon.
-    # Valid: null or >= 0.
-    # Use: enables an additional shape transform scaling updates by sqrt(max(fan_in, fan_out)) times
-    # this value. null skips that transform. Zero suppresses the Muon gradient component but decay may
-    # still act, so use null to disable and a positive value only for a known recipe.
-    consistent_rms: null
+    # optim.muon.consistent_rms -- float | null; default and recommendation: null, which omits optional shape/RMS scaling; otherwise >= 0. Zero suppresses the Muon gradient component while decay may remain. Non-null uses a private Optax contrib helper. [Experimental]
+    consistent_rms: "<float | null>"
 
-    # Key: optim.muon.allow_all_2d
-    # Type: boolean
-    # Default: false.
-    # Required: no; used only when optim.name is muon.
-    # Valid: true | false.
-    # Lifecycle: experimental eligibility override.
-    # Warning: true takes precedence over the whitelist/allow_tied_embed and sends every 2D tensor to
-    # the fixed Muon orientation, including embeddings and non-matmul CEMA/attention gamma parameters.
-    # Keep false unless that partition is explicitly intended; inspect logged split/sample paths.
-    allow_all_2d: false
+    # optim.muon.allow_all_2d -- bool; default: false. True overrides the conservative whitelist and sends every 2D tensor, including embeddings and non-matmul CEMA/attention arrays, to Muon. [Experimental; high-risk]
+    allow_all_2d: "<bool>"
 
-    # Key: optim.muon.allow_tied_embed
-    # Type: boolean
-    # Default: false.
-    # Required: no; used only when optim.name is muon.
-    # Valid: true | false.
-    # Lifecycle: experimental eligibility override.
-    # Use: when allow_all_2d is false and model.share_emb is true, adds only embed.weight to the
-    # conservative Muon whitelist. It has no effect on an untied embedding or other 2D tensors.
-    allow_tied_embed: false
+    # optim.muon.allow_tied_embed -- bool; default: false. With allow_all_2d=false and model.share_emb=true, adds the embedding to Muon eligibility; for DummyLM this follows the flag even though its input/output weights are not tied. [Experimental]
+    allow_tied_embed: "<bool>"
 
-  # Key: optim.adam
-  # Type: mapping
-  # Default: omitted or {}, which applies every optim.adam.* default below.
-  # Required: no; used for all parameters under adamw and the non-Muon partition under muon.
-  # Valid: only the optim.adam.* keys listed in this block.
-  # Use: configures Adam moment estimation and is always resume-critical. The conservative Muon
-  # whitelist contains 2D attention wz/wv/wr/wh1/wh2, FFN fc1/fc2/fc3, and lm_head weights; all
-  # other leaves, including embeddings/norms/CEMA, use this Adam block unless overrides expand Muon.
+  # optim.adam -- mapping | null; default: {}. Configures every parameter under AdamW and the non-Muon partition under Muon.
   adam:
-    # Key: optim.adam.b1
-    # Type: number
-    # Default: 0.9.
-    # Required: no.
-    # Valid: > 0 and < 1.
-    # Use: Adam first-moment coefficient.
-    b1: 0.9
+    # optim.adam.b1 -- float; default: 0.9; 0 < value < 1. Adam first-moment coefficient.
+    b1: "<float>"
 
-    # Key: optim.adam.b2
-    # Type: number
-    # Default: 0.999.
-    # Required: no.
-    # Valid: > 0 and < 1.
-    # Use: Adam second-moment coefficient.
-    b2: 0.999
+    # optim.adam.b2 -- float; default: 0.999; 0 < value < 1. Adam second-moment coefficient.
+    b2: "<float>"
 
-    # Key: optim.adam.eps
-    # Type: number
-    # Default: 1.0e-8.
-    # Required: no.
-    # Valid: > 0.
-    # Use: Adam denominator epsilon.
-    eps: 1.0e-8
+    # optim.adam.eps -- float; default: 1e-8; > 0. Adam denominator epsilon.
+    eps: "<float>"
 
-    # Key: optim.adam.nesterov
-    # Type: boolean
-    # Default: false.
-    # Required: no.
-    # Valid: true | false.
-    # Use: enables Nesterov-style Adam for all Adam-labeled parameters.
-    nesterov: false
+    # optim.adam.nesterov -- bool; default: false. Enables Nesterov-style Adam for every Adam-labeled parameter.
+    nesterov: "<bool>"
 
-# Key: checkpoint
-# Type: mapping
-# Default: omitted or {}, which applies every nested default below.
-# Required: no.
-# Valid: only the checkpoint.* keys listed in this section.
-# Use: controls Orbax checkpoint storage, cadence, retention, and resume availability.
+# checkpoint -- mapping | null; default: {}. Controls Orbax save/resume behavior.
 checkpoint:
-  # Key: checkpoint.enabled
-  # Type: boolean
-  # Default: true.
-  # Required: no.
-  # Valid: true | false.
-  # Use: enables checkpoint saves and resume. When false, every other checkpoint key is operationally
-  # inactive but still type-validated, and any --resume request fails even if files exist. Positive
-  # save/retention constraints apply only when this is true.
-  enabled: true
+  # checkpoint.enabled -- bool; default: true. False disables saves/resume and makes positive save/retention constraints inactive; with data.backend=hf, true requires data.hf_revision to be a full 40-hex commit. Keep true for real runs.
+  enabled: "<bool>"
 
-  # Key: checkpoint.root_dir
-  # Type: string | null
-  # Default: null, computed as <resolved run directory>/checkpoints.
-  # Required: no; used only when checkpoint.enabled is true.
-  # Valid: null or a nonempty filesystem path string. Relative paths resolve under the final run
-  # directory; absolute paths are used as written.
-  # Use: separates checkpoint storage from other artifacts when needed. An absolute root outside the
-  # run directory is locked for the run and receives a .chomp-owner.json marker binding it to that
-  # run; fresh runs require an empty root, and resume requires the matching marker.
-  root_dir: null
+  # checkpoint.root_dir -- string | null; default: null, computed as <run_dir>/checkpoints; otherwise nonempty. Relative paths resolve under run_dir; any resolved path outside run_dir receives its own lock and ownership marker. Prefer null.
+  root_dir: "<nonempty string | null>"
 
-  # Key: checkpoint.save_every
-  # Type: integer
-  # Default: 5000.
-  # Required: no; used only when checkpoint.enabled is true.
-  # Valid: > 0 when checkpointing is enabled.
-  # Use: periodic save interval in optimizer steps. A final save is also attempted during clean,
-  # crash, and interrupt unwinding when train/data state is aligned and metrics are finite. Smaller
-  # intervals reduce lost work and add I/O.
-  save_every: 5000
+  # checkpoint.save_every -- int; default: 5000; > 0 when enabled. Periodic optimizer-step cadence; aligned final save is separate. Maintained 100k recipes use 2500 to limit lost work.
+  save_every: "<int>"
 
-  # Key: checkpoint.max_to_keep
-  # Type: integer
-  # Default: 3.
-  # Required: no; used only when checkpoint.enabled is true.
-  # Valid: > 0 when checkpointing is enabled.
-  # Use: number of retained checkpoints.
-  # Warning: Orbax deletes older checkpoints beyond this count. Raise it if deeper rollback is needed.
-  max_to_keep: 3
+  # checkpoint.max_to_keep -- int; default: 3; > 0 when enabled. Orbax permanently deletes older checkpoints beyond this count; increase it when deeper rollback is required.
+  max_to_keep: "<int>"
 
-  # Key: checkpoint.async_save
-  # Type: boolean
-  # Default: true.
-  # Required: no; used only when checkpoint.enabled is true.
-  # Valid: true | false.
-  # Use: true overlaps save I/O with training and is recommended for throughput. Clean shutdown waits
-  # for outstanding saves; abrupt process termination may leave the newest asynchronous save unusable.
-  async_save: true
+  # checkpoint.async_save -- bool; default: true; used only when enabled. Overlaps I/O with training and is recommended for GPU runs; graceful shutdown waits, but abrupt termination can lose the newest in-flight save.
+  async_save: "<bool>"
 
-# Key: logging
-# Type: mapping
-# Default: omitted or {}, which applies every nested default below.
-# Required: no.
-# Valid: only the logging.* keys listed in this section.
-# Use: controls local artifacts, console/file logging, and optional W&B reporting.
+# logging -- mapping | null; default: {}. Relative artifact paths resolve under the final run directory unless stated otherwise.
 logging:
-  # Key: logging.project
-  # Type: string
-  # Default: chomp.
-  # Required: no.
-  # Valid: nonempty string.
-  # Use: groups automatically created run directories under runs/<project>. It is also the computed
-  # W&B project when logging.wandb.project is null.
-  project: chomp
+  # logging.project -- string; default: chomp; nonempty. Groups generated runs under runs/<project> and is the fallback W&B project.
+  project: "<nonempty string>"
 
-  # Key: logging.run_dir
-  # Type: string | null
-  # Default: null, computed as runs/<logging.project>/<YYYYMMDD_HHMMSS>_<config-stem>.
-  # Required: an explicit existing path is required for resume; otherwise no.
-  # Valid: null or a nonempty filesystem path string.
-  # Precedence: chomp train --run-dir PATH overrides this key.
-  # Warning: a fresh run refuses to overwrite an existing directory. Resume immediately refuses null
-  # or a nonexistent directory so it cannot silently create a different run.
-  run_dir: null
+  # logging.run_dir -- string | null; default: null, computed as runs/<project>/<timestamp>_<config stem>; otherwise nonempty. `--run-dir` takes precedence. Fresh runs refuse existing paths; resume requires the exact existing path.
+  run_dir: "<nonempty string | null>"
 
-  # Key: logging.metrics_file
-  # Type: string
-  # Default: metrics.jsonl.
-  # Required: no.
-  # Valid: nonempty filename or filesystem path string.
-  # Use: metrics JSONL output. Relative paths resolve under the final run directory; absolute paths
-  # are used as written.
-  metrics_file: metrics.jsonl
+  # logging.metrics_file -- string; default: metrics.jsonl; nonempty. Relative paths resolve under run_dir; absolute paths are outside its lock. Writes append; never resolve this to logging.log_file or log text will corrupt JSONL.
+  metrics_file: "<nonempty string>"
 
-  # Key: logging.level
-  # Type: enum string
-  # Default: INFO.
-  # Required: no.
-  # Valid: DEBUG | INFO | WARNING | ERROR.
-  # Use: Python console and file log threshold. INFO is recommended for normal training.
-  level: INFO
+  # logging.level -- string; default: INFO; one of: DEBUG | INFO | WARNING | ERROR. INFO is recommended; DEBUG is for diagnosis.
+  level: "<DEBUG | INFO | WARNING | ERROR>"
 
-  # Key: logging.console_use_rich
-  # Type: boolean
-  # Default: true.
-  # Required: no.
-  # Valid: true | false.
-  # Use: enables Rich console formatting. Use false for plain machine-captured logs or incompatible
-  # terminals.
-  console_use_rich: true
+  # logging.console_use_rich -- bool; default: true. Rich interactive formatting; use false for plain machine-captured logs.
+  console_use_rich: "<bool>"
 
-  # Key: logging.log_file
-  # Type: string | null
-  # Default: train.log.
-  # Required: no.
-  # Valid: null or a nonempty filename/path string.
-  # Use: local text log. null disables file logging; relative paths resolve under the final run
-  # directory and absolute paths are used as written.
-  log_file: train.log
+  # logging.log_file -- string | null; default: train.log; null disables; otherwise nonempty. Relative paths resolve under run_dir; absolute paths are outside its lock. Writes append; never resolve this to metrics_file.
+  log_file: "<nonempty string | null>"
 
-  # Key: logging.wandb
-  # Type: mapping
-  # Default: omitted or {}, which applies every logging.wandb.* default below.
-  # Required: no.
-  # Valid: only the logging.wandb.* keys listed in this block.
-  # Use: controls optional Weights & Biases telemetry.
+  # logging.wandb -- mapping | null; default: {}. Nested values are validated even when disabled.
   wandb:
-    # Key: logging.wandb.enabled
-    # Type: boolean
-    # Default: false, so W&B does not initialize and no credentials are needed.
-    # Required: no.
-    # Valid: true | false.
-    # Use: enables W&B for normal training. Dry runs skip W&B even when true. Online mode requires
-    # valid W&B authentication and network access before training starts.
-    enabled: false
+    # logging.wandb.enabled -- bool; default: false. Enables W&B only for non-dry runs; online use requires authentication. Chomp resume starts a new W&B run, and local W&B files use WANDB_DIR or ./wandb rather than logging.run_dir.
+    enabled: "<bool>"
 
-    # Key: logging.wandb.project
-    # Type: string | null
-    # Default: null, computed as logging.project.
-    # Required: no; used only when logging.wandb.enabled is true.
-    # Valid: null or a nonempty W&B project string.
-    # Use: remote W&B project name.
-    project: null
+    # logging.wandb.project -- string | null; default: null, computed as logging.project; otherwise nonempty. Set only when remote grouping should differ from local grouping.
+    project: "<nonempty string | null>"
 
-    # Key: logging.wandb.entity
-    # Type: string | null
-    # Default: null, which uses the authenticated account's W&B default entity.
-    # Required: no; used only when logging.wandb.enabled is true.
-    # Valid: null or a nonempty W&B user/team string.
-    # Use: directs the run to a specific W&B account or team.
-    entity: null
+    # logging.wandb.entity -- string | null; default: null, which uses the authenticated account's default entity; otherwise nonempty.
+    entity: "<nonempty string | null>"
 
-    # Key: logging.wandb.run_name
-    # Type: string | null
-    # Default: null, computed as the final logging.run_dir basename.
-    # Required: no; used only when logging.wandb.enabled is true.
-    # Valid: null or a nonempty display-name string.
-    # Use: W&B run display name.
-    run_name: null
+    # logging.wandb.run_name -- string | null; default: null, computed as the final run-directory basename; otherwise nonempty.
+    run_name: "<nonempty string | null>"
 
-    # Key: logging.wandb.mode
-    # Type: enum string
-    # Default: online.
-    # Required: no; used only when logging.wandb.enabled is true.
-    # Valid: online | offline.
-    # Use: online sends telemetry to W&B; offline writes a local W&B run for later syncing and does
-    # not require live service connectivity.
-    mode: online
+    # logging.wandb.mode -- string; default: online; one of: online | offline. Offline writes local W&B state for later syncing without live service access.
+    mode: "<online | offline>"
 
-    # Key: logging.wandb.tags
-    # Type: list[string]
-    # Default: [].
-    # Required: no; used only when logging.wandb.enabled is true.
-    # Valid: YAML/JSON list of nonempty strings.
-    # Use: W&B run tags. Set this list in the config file; list-valued --override is unsupported.
-    tags: []
+    # logging.wandb.tags -- list[string]; default: []; every entry nonempty. Set in YAML; scalar CLI overrides do not support lists.
+    tags: "<list[nonempty string]>"
 
-# Key: debug
-# Type: mapping
-# Default: omitted or {}, which applies every nested default below.
-# Required: no.
-# Valid: only the debug.* keys listed in this section.
-# Use: controls runtime correctness checks.
+# debug -- mapping | null; default: {}. Runtime correctness checks; keep defaults for real training.
 debug:
-  # Key: debug.nan_check
-  # Type: boolean
-  # Default: true.
-  # Required: no.
-  # Valid: true | false.
-  # Use: checks synchronized loss, gradient norm, and learning rate plus post-update parameters and optimizer state for NaN/Inf before periodic saves, and validates the final step even when checkpointing is disabled. Evaluation also rejects non-finite loss. Keep true; checks run at existing synchronization/save/final cadences rather than forcing a host sync on every ordinary step.
-  nan_check: true
+  # debug.nan_check -- bool; default: true. Validates synchronized metrics and pre-save/final parameters plus optimizer state. False permits non-finite state to be checkpointed; keep true.
+  nan_check: "<bool>"
 
-  # Key: debug.check_device_every
-  # Type: integer
-  # Default: 100.
-  # Required: no.
-  # Valid: >= 0; zero disables periodic assertions.
-  # Use: optimizer-step interval for checking batch placement on the selected device. Dry runs check
-  # once whenever the value is positive.
-  check_device_every: 100
+  # debug.check_device_every -- int; default: 100; >= 0; zero disables periodic batch assertions. Checks the first batch and then after every N completed steps; it does not disable the initial GPU requirement from train.allow_cpu=false.
+  check_device_every: "<int>"
