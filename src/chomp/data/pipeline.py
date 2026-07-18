@@ -47,7 +47,7 @@ from .hf import (
     HFStreamSpec,
     LocalTextStream,
 )
-from .pack import BinPacker, MultipackPacker, TokenPacker
+from .pack import FFDPacker, TokenPacker
 
 DATA_PIPELINE_SCHEMA_VERSION = 11
 
@@ -1017,14 +1017,12 @@ def _assemble_batch(
     return batch, loss_tokens_host
 
 
-def _build_packer(
-    cfg: Config, *, rows_per_pack: int | None = None
-) -> TokenPacker | BinPacker | MultipackPacker:
+def _build_packer(cfg: Config, *, rows_per_pack: int | None = None) -> TokenPacker | FFDPacker:
     """Create the configured token packer.
 
     :param Config cfg: Training configuration.
     :param rows_per_pack: Optional FFD output-row count per packing cycle.
-    :return TokenPacker | BinPacker | MultipackPacker: Configured packer.
+    :return TokenPacker | FFDPacker: Configured packer.
     """
     bins_per_pack = (
         int(cfg.train.grad_accum) * int(cfg.train.batch_size)
@@ -1040,18 +1038,17 @@ def _build_packer(
         "max_doc_tokens": cfg.data.tokenizer.max_doc_tokens,
         "pad_id": cfg.model.pad_token_id,
     }
-    if cfg.data.packing_mode == "bin":
-        return BinPacker(
-            **common,
-            bins_per_pack=bins_per_pack,
-            buffer_docs=cfg.data.packing_buffer_docs,
-            max_docs_per_bin=cfg.data.packing_max_docs_per_bin,
+    if cfg.data.packing_mode in ("bin", "multipack"):
+        lookahead_docs = (
+            cfg.data.packing_buffer_docs
+            if cfg.data.packing_mode == "bin"
+            else cfg.data.packing_group_docs
         )
-    if cfg.data.packing_mode == "multipack":
-        return MultipackPacker(
+        return FFDPacker(
             **common,
+            mode=cfg.data.packing_mode,
             bins_per_pack=bins_per_pack,
-            group_docs=cfg.data.packing_group_docs,
+            lookahead_docs=lookahead_docs,
             max_docs_per_bin=cfg.data.packing_max_docs_per_bin,
         )
     if cfg.data.packing_mode == "sequential":

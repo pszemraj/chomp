@@ -22,7 +22,7 @@ import math
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -853,22 +853,20 @@ def _render_bin(b: _Bin, *, capacity: int, pad_id: int) -> tuple[np.ndarray, np.
     return tokens, segs
 
 
-class _FFDPackerBase(_PackerBase):
-    """Shared machinery for the FFD-based packers (bin, multipack).
+class FFDPacker(_PackerBase):
+    """Pack documents with FFD using an explicit queue policy.
 
-    Subclasses select whether each cycle consumes the entire pending pool
-    (bin) or one bounded FIFO group (multipack). Every cycle seeds bins with
-    the oldest candidates before using FFD for fill, so no pending chunk can
-    starve behind a continuing stream of larger arrivals. Once `finish()`
-    marks the stream exhausted, sub-threshold pending documents are flushed
-    into padded bins instead of being dropped.
+    ``bin`` consumes the entire pending pool each cycle. ``multipack`` consumes
+    one bounded FIFO group. Both seed bins with the oldest candidates before
+    using FFD for fill, so no pending chunk can starve behind a continuing
+    stream of larger arrivals. Once :meth:`finish` marks the stream exhausted,
+    sub-threshold pending documents are flushed into padded bins.
     """
-
-    _mode_name = "ffd"
 
     def __init__(
         self,
         *,
+        mode: Literal["bin", "multipack"],
         seq_len: int,
         add_bos: bool,
         add_eos: bool,
@@ -877,12 +875,13 @@ class _FFDPackerBase(_PackerBase):
         max_doc_tokens: int | None,
         bins_per_pack: int,
         lookahead_docs: int,
-        bounded_group: bool,
         max_docs_per_bin: int | None,
         pad_id: int,
     ):
-        """Initialize shared FFD packer state.
+        """Initialize FFD packer state.
 
+        :param mode: Queue policy: ``bin`` consumes the full pool and
+            ``multipack`` consumes one bounded FIFO group.
         :param int seq_len: Fixed sequence length (T) for output.
         :param bool add_bos: Whether to prepend BOS token to each document.
         :param bool add_eos: Whether to append EOS token to each document.
@@ -891,7 +890,6 @@ class _FFDPackerBase(_PackerBase):
         :param max_doc_tokens: Optional max tokens per document before truncation.
         :param int bins_per_pack: Number of sequences to pack per cycle.
         :param int lookahead_docs: Pending-document threshold for packing.
-        :param bool bounded_group: Whether one cycle consumes at most the threshold.
         :param max_docs_per_bin: Optional cap on docs per bin.
         :param int pad_id: Padding token ID.
         :raises ValueError: If an input argument is invalid.
@@ -904,14 +902,18 @@ class _FFDPackerBase(_PackerBase):
             eos_id=eos_id,
             max_doc_tokens=max_doc_tokens,
         )
+        if mode not in ("bin", "multipack"):
+            raise ValueError(f"mode must be 'bin' or 'multipack', got {mode!r}")
         if bins_per_pack <= 0:
             raise ValueError(f"bins_per_pack must be positive, got {bins_per_pack}")
+        if lookahead_docs <= 0:
+            raise ValueError(f"lookahead_docs must be positive, got {lookahead_docs}")
         if max_docs_per_bin is not None and max_docs_per_bin <= 0:
             raise ValueError(f"max_docs_per_bin must be positive when set, got {max_docs_per_bin}")
 
+        self._mode = mode
         self._bins_per_pack = int(bins_per_pack)
         self._lookahead_docs = int(lookahead_docs)
-        self._bounded_group = bool(bounded_group)
         self._max_docs_per_bin = None if max_docs_per_bin is None else int(max_docs_per_bin)
         self._pad_id = int(pad_id)
 
@@ -929,7 +931,7 @@ class _FFDPackerBase(_PackerBase):
     def _pack(self) -> None:
         """FFD-pack candidates selected by the configured queue policy."""
         candidate_count = len(self._pending_docs)
-        if self._bounded_group:
+        if self._mode == "multipack":
             candidate_count = min(candidate_count, self._pack_threshold())
         candidates = [self._pending_docs.popleft() for _ in range(candidate_count)]
         bins, leftovers = _ffd_pack(
@@ -976,7 +978,7 @@ class _FFDPackerBase(_PackerBase):
             flush cycle).
         """
         if self._exhausted:
-            raise RuntimeError(f"cannot add a document after {self._mode_name} packer finish()")
+            raise RuntimeError(f"cannot add a document after {self._mode} packer finish()")
         doc = self._prepare_document(tokens)
         if doc.size == 0:
             return
@@ -1002,7 +1004,7 @@ class _FFDPackerBase(_PackerBase):
         :return tuple[np.ndarray, np.ndarray]: Fixed-length token and segment arrays.
         """
         if not self.can_pop():
-            raise RuntimeError(f"{self._mode_name} packer has no ready sequences")
+            raise RuntimeError(f"{self._mode} packer has no ready sequences")
         return self._ready.popleft()
 
     def get_state(self) -> dict[str, Any]:
@@ -1053,111 +1055,3 @@ class _FFDPackerBase(_PackerBase):
         )
         self._document_stats = st.document_stats
         self._exhausted = bool(st.exhausted)
-
-
-class BinPacker(_FFDPackerBase):
-    """Bin-pack documents into fixed-length sequences (FFD heuristic).
-
-    Buffers at least `buffer_docs` documents, then FFD-packs the entire
-    pending pool each cycle; leftovers stay pending for the next cycle.
-    """
-
-    _mode_name = "bin"
-
-    def __init__(
-        self,
-        *,
-        seq_len: int,
-        add_bos: bool,
-        add_eos: bool,
-        bos_id: int,
-        eos_id: int,
-        max_doc_tokens: int | None,
-        bins_per_pack: int,
-        buffer_docs: int,
-        max_docs_per_bin: int | None,
-        pad_id: int,
-    ):
-        """Initialize the bin packer.
-
-        :param int seq_len: Fixed sequence length for output.
-        :param bool add_bos: Whether to prepend BOS to each document.
-        :param bool add_eos: Whether to append EOS to each document.
-        :param int bos_id: BOS token ID.
-        :param int eos_id: EOS token ID.
-        :param max_doc_tokens: Optional max tokens per document before truncation.
-        :param int bins_per_pack: Number of bins emitted per pack cycle.
-        :param int buffer_docs: Minimum docs to buffer before packing.
-        :param max_docs_per_bin: Optional cap on documents per bin.
-        :param int pad_id: Padding token ID.
-        :raises ValueError: If an input argument is invalid.
-        """
-        if buffer_docs <= 0:
-            raise ValueError(f"buffer_docs must be positive, got {buffer_docs}")
-        super().__init__(
-            seq_len=seq_len,
-            add_bos=add_bos,
-            add_eos=add_eos,
-            bos_id=bos_id,
-            eos_id=eos_id,
-            max_doc_tokens=max_doc_tokens,
-            bins_per_pack=bins_per_pack,
-            lookahead_docs=buffer_docs,
-            bounded_group=False,
-            max_docs_per_bin=max_docs_per_bin,
-            pad_id=pad_id,
-        )
-
-
-class MultipackPacker(_FFDPackerBase):
-    """Groupwise FFD sample packer with segment-local position IDs.
-
-    FFD-packs a bounded FIFO group of `group_docs` candidates per cycle;
-    leftovers return to the front of the queue to preserve stream locality.
-    """
-
-    _mode_name = "multipack"
-
-    def __init__(
-        self,
-        *,
-        seq_len: int,
-        add_bos: bool,
-        add_eos: bool,
-        bos_id: int,
-        eos_id: int,
-        max_doc_tokens: int | None,
-        bins_per_pack: int,
-        group_docs: int,
-        max_docs_per_bin: int | None,
-        pad_id: int,
-    ):
-        """Initialize the multipack packer.
-
-        :param int seq_len: Fixed sequence length for output.
-        :param bool add_bos: Whether to prepend BOS to each document.
-        :param bool add_eos: Whether to append EOS to each document.
-        :param int bos_id: BOS token ID.
-        :param int eos_id: EOS token ID.
-        :param max_doc_tokens: Optional max tokens per document before truncation.
-        :param int bins_per_pack: Number of bins emitted per pack cycle.
-        :param int group_docs: Number of candidate documents to consider per cycle.
-        :param max_docs_per_bin: Optional cap on packed segments per sequence.
-        :param int pad_id: Padding token ID.
-        :raises ValueError: If an input argument is invalid.
-        """
-        if group_docs <= 0:
-            raise ValueError(f"group_docs must be positive, got {group_docs}")
-        super().__init__(
-            seq_len=seq_len,
-            add_bos=add_bos,
-            add_eos=add_eos,
-            bos_id=bos_id,
-            eos_id=eos_id,
-            max_doc_tokens=max_doc_tokens,
-            bins_per_pack=bins_per_pack,
-            lookahead_docs=group_docs,
-            bounded_group=True,
-            max_docs_per_bin=max_docs_per_bin,
-            pad_id=pad_id,
-        )

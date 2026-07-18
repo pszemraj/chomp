@@ -31,9 +31,8 @@ from chomp.data.grain import (
     effective_window_shuffle_seed,
 )
 from chomp.data.hf import HFRowValidationError, HFStreamingTextStream, HFStreamSpec
-from chomp.data.pack import FFDPackerState, MultipackPacker, TokenPacker, _DocumentStats
+from chomp.data.pack import FFDPacker, FFDPackerState, TokenPacker, _DocumentStats
 from chomp.data.pipeline import (
-    BinPacker,
     ByteTokenizer,
     ZeroLossTokensError,
     _eval_tokens_sha256,
@@ -107,9 +106,10 @@ def _hf_stream_spec(**overrides: Any) -> HFStreamSpec:
     return HFStreamSpec(**params)
 
 
-def _bin_packer() -> BinPacker:
-    """Standard tiny BinPacker for packer-level tests."""
-    return BinPacker(
+def _bin_packer() -> FFDPacker:
+    """Build a standard tiny full-pool FFD packer."""
+    return FFDPacker(
+        mode="bin",
         seq_len=8,
         add_bos=False,
         add_eos=False,
@@ -117,7 +117,7 @@ def _bin_packer() -> BinPacker:
         eos_id=2,
         max_doc_tokens=None,
         bins_per_pack=2,
-        buffer_docs=2,
+        lookahead_docs=2,
         max_docs_per_bin=None,
         pad_id=0,
     )
@@ -163,9 +163,10 @@ def _compact_ffd_state(
     ).to_dict()
 
 
-def _multipack_packer() -> MultipackPacker:
-    """Standard tiny MultipackPacker for packer-level tests."""
-    return MultipackPacker(
+def _multipack_packer() -> FFDPacker:
+    """Build a standard tiny bounded-FIFO FFD packer."""
+    return FFDPacker(
+        mode="multipack",
         seq_len=8,
         add_bos=False,
         add_eos=False,
@@ -173,7 +174,7 @@ def _multipack_packer() -> MultipackPacker:
         eos_id=2,
         max_doc_tokens=None,
         bins_per_pack=1,
-        group_docs=2,
+        lookahead_docs=2,
         max_docs_per_bin=None,
         pad_id=0,
     )
@@ -221,9 +222,9 @@ def test_ffd_leftover_requeue_preserves_arrival_order(mode: str) -> None:
         "pad_id": 0,
     }
     if mode == "bin":
-        packer: Any = BinPacker(buffer_docs=3, **kwargs)
+        packer: Any = FFDPacker(mode="bin", lookahead_docs=3, **kwargs)
     else:
-        packer = MultipackPacker(group_docs=3, **kwargs)
+        packer = FFDPacker(mode="multipack", lookahead_docs=3, **kwargs)
 
     packer.add_document(_doc(10, 10))
     packer.add_document(_doc(20, 8))
@@ -249,8 +250,8 @@ def test_ffd_queue_policies_remain_distinct() -> None:
         "max_docs_per_bin": None,
         "pad_id": 0,
     }
-    bin_packer = BinPacker(buffer_docs=3, **common)
-    multipack = MultipackPacker(group_docs=3, **common)
+    bin_packer = FFDPacker(mode="bin", lookahead_docs=3, **common)
+    multipack = FFDPacker(mode="multipack", lookahead_docs=3, **common)
     for packer in (bin_packer, multipack):
         packer.add_document(_doc(10, 2))
         packer.add_document(_doc(20, 2))
@@ -548,11 +549,27 @@ def test_document_truncation_metrics_are_complete_and_resume_stable(mode: str) -
         packer: Any = TokenPacker(**common)
         restored: Any = TokenPacker(**common)
     elif mode == "bin":
-        packer = BinPacker(bins_per_pack=1, buffer_docs=2, max_docs_per_bin=None, **common)
-        restored = BinPacker(bins_per_pack=1, buffer_docs=2, max_docs_per_bin=None, **common)
+        packer = FFDPacker(
+            mode="bin", bins_per_pack=1, lookahead_docs=2, max_docs_per_bin=None, **common
+        )
+        restored = FFDPacker(
+            mode="bin", bins_per_pack=1, lookahead_docs=2, max_docs_per_bin=None, **common
+        )
     else:
-        packer = MultipackPacker(bins_per_pack=1, group_docs=2, max_docs_per_bin=None, **common)
-        restored = MultipackPacker(bins_per_pack=1, group_docs=2, max_docs_per_bin=None, **common)
+        packer = FFDPacker(
+            mode="multipack",
+            bins_per_pack=1,
+            lookahead_docs=2,
+            max_docs_per_bin=None,
+            **common,
+        )
+        restored = FFDPacker(
+            mode="multipack",
+            bins_per_pack=1,
+            lookahead_docs=2,
+            max_docs_per_bin=None,
+            **common,
+        )
 
     for length in (0, 1, 2, 4, 5, 8, 9):
         packer.add_document(list(range(length)))
