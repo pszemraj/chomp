@@ -20,13 +20,11 @@ def _pin_deterministic_gpu_ops() -> None:
     os.environ["XLA_FLAGS"] = f"{os.environ.get('XLA_FLAGS', '')} {flag}".strip()
 
 
-# Ensure XLA env quirks are applied before any JAX imports in tests.
 # Deterministic GPU ops are pinned HERE ONLY (production does not set them —
 # fast kernels are the default): the exact-resume tests assert atol=0 state
 # equality to catch harness replay bugs, and without the flag XLA kernel
 # choices depend on prior GPU state, adding low-order optimizer-state noise
 # under full-suite ordering that has nothing to do with the harness.
-xla.configure_blackwell_xla_env()
 _pin_deterministic_gpu_ops()
 
 # Tests should not rely on users exporting preallocation flags.

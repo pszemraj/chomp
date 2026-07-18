@@ -118,3 +118,80 @@ print("GPU_SMOKE_OK")
     p = _run_on_gpu(code, cwd=tmp_path)
     assert p.returncode == 0, f"stdout:\n{p.stdout}\nstderr:\n{p.stderr}"
     assert "GPU_SMOKE_OK" in p.stdout
+
+
+def test_megalodon_gpu_train_smoke(tmp_path: Path) -> None:
+    """Published Megalodon should train through the packed BF16/JIT path on GPU."""
+    run_dir = tmp_path / "megalodon_run"
+    code = f"""
+from dataclasses import replace
+
+from chomp.config import Config, validate_config
+from chomp.train import run
+from chomp.utils.devices import validate_default_device
+
+cfg = Config()
+cfg = replace(
+    cfg,
+    model=replace(
+        cfg.model,
+        backend="megalodon",
+        vocab_size=256,
+        model_dim=32,
+        num_layers=1,
+        num_heads=1,
+        z_dim=16,
+        value_dim=32,
+        ffn_hidden_dim=64,
+        cema_ndim=4,
+        chunk_size=8,
+        norm_num_groups=4,
+        dropout=0.0,
+        attention_dropout=0.0,
+        hidden_dropout=0.0,
+        use_checkpoint=True,
+        compute_dtype="bfloat16",
+        loss_chunk_size=7,
+    ),
+    data=replace(
+        cfg.data,
+        backend="local_text",
+        local_text="real megalodon gpu smoke path with packed documents",
+        repeat=True,
+        max_eval_samples=0,
+        packing_mode="bin",
+        packing_buffer_docs=4,
+        packing_strict_segments=True,
+        mask_boundary_loss=True,
+    ),
+    train=replace(
+        cfg.train,
+        steps=1,
+        batch_size=1,
+        seq_len=32,
+        grad_accum=1,
+        allow_cpu=False,
+        log_every=1,
+        eval_every=0,
+        jit=True,
+        deterministic=False,
+    ),
+    optim=replace(cfg.optim, lr=1e-3, warmup_steps=0, min_lr_ratio=0.0),
+    checkpoint=replace(cfg.checkpoint, enabled=False),
+    logging=replace(
+        cfg.logging,
+        run_dir={str(run_dir)!r},
+        wandb=replace(cfg.logging.wandb, enabled=False),
+    ),
+    debug=replace(cfg.debug, check_device_every=1),
+)
+validate_config(cfg)
+validate_default_device(allow_cpu=False)
+out_dir = run(cfg)
+metrics_path = out_dir / cfg.logging.metrics_file
+assert metrics_path.exists() and metrics_path.read_text().strip()
+print("MEGALODON_GPU_SMOKE_OK")
+"""
+    p = _run_on_gpu(code, cwd=tmp_path)
+    assert p.returncode == 0, f"stdout:\n{p.stdout}\nstderr:\n{p.stderr}"
+    assert "MEGALODON_GPU_SMOKE_OK" in p.stdout

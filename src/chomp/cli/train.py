@@ -12,7 +12,6 @@ import click
 from chomp.cli.main import parse_resume, print_banner
 from chomp.config import load_config
 from chomp.utils.io import setup_python_logging
-from chomp.utils.xla import configure_blackwell_xla_env
 
 
 @click.command()
@@ -68,14 +67,7 @@ def train(
     # Logging first so subsequent errors are readable
     setup_python_logging(cfg.logging.level, use_rich=cfg.logging.console_use_rich)
 
-    # Configure XLA env quirks before JAX backend init. Kernel determinism
-    # (--xla_gpu_deterministic_ops) is deliberately NOT set here: fast
-    # nondeterministic kernels are the production default (~25-35% faster
-    # steps measured); bit-exact resume is an opt-in debugging mode — see
-    # docs/checkpointing.md, "Scope of exactness".
-    configure_blackwell_xla_env()
-
-    # Deferred import: chomp.train triggers JAX init, must run after XLA env config
+    # Deferred import keeps config-only CLI startup from initializing JAX.
     from chomp.train import TrainingPreempted, run
     from chomp.utils.devices import validate_default_device
 

@@ -71,12 +71,7 @@ def generate(
     :param int seed: Random seed for sampling.
     :param config_override: Path to override config file (optional).
     """
-    from chomp.utils.xla import configure_blackwell_xla_env
-
-    # Configure XLA env quirks before JAX backend init.
-    configure_blackwell_xla_env()
-
-    # Deferred imports: must run after XLA env config
+    # Deferred imports keep CLI startup from initializing JAX before arguments are validated.
     import jax
 
     from chomp.ckpt import restore_params_only
