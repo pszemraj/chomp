@@ -106,33 +106,31 @@ def _hf_stream_spec(**overrides: Any) -> HFStreamSpec:
     return HFStreamSpec(**params)
 
 
-def _ffd_packer(mode: str) -> FFDPacker:
-    """Build a standard tiny FFD packer for either queue policy."""
+def _packer(mode: str, **overrides: Any) -> TokenPacker | FFDPacker:
+    """Build a standard tiny packer for the requested mode.
+
+    :param str mode: Packing mode to construct.
+    :param overrides: Common packer settings to replace.
+    :return TokenPacker | FFDPacker: Configured test packer.
+    """
+    params: dict[str, Any] = {
+        "seq_len": 8,
+        "add_bos": False,
+        "add_eos": False,
+        "bos_id": 1,
+        "eos_id": 2,
+        "max_doc_tokens": None,
+        "pad_id": 0,
+    }
+    params.update(overrides)
+    if mode == "sequential":
+        return TokenPacker(**params)
     return FFDPacker(
         mode=mode,
-        seq_len=8,
-        add_bos=False,
-        add_eos=False,
-        bos_id=1,
-        eos_id=2,
-        max_doc_tokens=None,
         bins_per_pack=2 if mode == "bin" else 1,
         lookahead_docs=2,
         max_docs_per_bin=None,
-        pad_id=0,
-    )
-
-
-def _token_packer() -> TokenPacker:
-    """Standard tiny TokenPacker for packer-level tests."""
-    return TokenPacker(
-        seq_len=8,
-        add_bos=False,
-        add_eos=False,
-        bos_id=1,
-        eos_id=2,
-        pad_id=0,
-        max_doc_tokens=None,
+        **params,
     )
 
 
@@ -165,7 +163,7 @@ def _compact_ffd_state(
 
 def test_bin_packer_packs_multiple_docs() -> None:
     """Bin packer should combine multiple documents into packed bins."""
-    packer = _ffd_packer("bin")
+    packer = _packer("bin")
     for tok, length in [(10, 6), (11, 2), (12, 6), (13, 2)]:
         packer.add_document(_doc(tok, length))
 
@@ -247,7 +245,7 @@ def test_ffd_queue_policies_remain_distinct() -> None:
 @pytest.mark.parametrize("mode", ["bin", "multipack"])
 def test_ffd_fifo_seed_prevents_adversarial_starvation(mode: str) -> None:
     """The oldest short candidate must progress despite endless full rows."""
-    packer = _ffd_packer(mode)
+    packer = _packer(mode)
     packer.add_document(_doc(6, 6))
 
     emitted: list[int] = []
@@ -264,7 +262,7 @@ def test_ffd_fifo_seed_prevents_adversarial_starvation(mode: str) -> None:
 @pytest.mark.parametrize("mode", ["bin", "multipack"])
 def test_ffd_long_document_tail_progress_and_restore(mode: str) -> None:
     """A long-document tail must be the next mandatory seed after restore."""
-    packer = _ffd_packer(mode)
+    packer = _packer(mode)
     packer.add_document(_doc(7, 14))  # chunks [8, 6]
     first, _ = packer.pop_seq_with_segments()
     state = packer.get_state()
@@ -272,7 +270,7 @@ def test_ffd_long_document_tail_progress_and_restore(mode: str) -> None:
     packer.add_document(_doc(9, 8))
     expected, _ = packer.pop_seq_with_segments()
 
-    restored = _ffd_packer(mode)
+    restored = _packer(mode)
     restored.set_state(state)
     restored.add_document(_doc(9, 8))
     actual, _ = restored.pop_seq_with_segments()
@@ -289,7 +287,7 @@ def test_ffd_packer_flushes_pending_docs_at_stream_end(mode: str) -> None:
     One doc is below both packers' thresholds (buffer_docs/group_docs = 2),
     so can_pop stays False until finish() marks the stream exhausted.
     """
-    packer = _ffd_packer(mode)
+    packer = _packer(mode)
     packer.add_document(_doc(7, 5))
     assert not packer.can_pop()
 
@@ -311,7 +309,7 @@ def test_packer_rejects_add_document_after_finish(mode: str) -> None:
     A silently buffered document would still be emitted by a later flush
     cycle, so every packer shares the same misuse contract.
     """
-    packer = _token_packer() if mode == "sequential" else _ffd_packer(mode)
+    packer = _packer(mode)
     packer.finish()
     with pytest.raises(RuntimeError, match="after"):
         packer.add_document(_doc(7, 3))
@@ -321,14 +319,14 @@ def test_packer_rejects_add_document_after_finish(mode: str) -> None:
 def test_ffd_packer_flush_state_roundtrips(mode: str) -> None:
     """The exhausted flag must survive get/set_state so a resumed run still
     flushes the same tail windows as the continuous one."""
-    packer = _ffd_packer(mode)
+    packer = _packer(mode)
     packer.add_document(_doc(9, 3))
     packer.finish()
     state = packer.get_state()
     assert state["exhausted"] is True
     expected = packer.pop_seq_with_segments()
 
-    restored = _ffd_packer(mode)
+    restored = _packer(mode)
     restored.set_state(state)
     assert restored.can_pop()
     actual = restored.pop_seq_with_segments()
@@ -349,7 +347,7 @@ def test_ffd_packer_state_roundtrip(
     pops_before_snapshot: int,
 ) -> None:
     """FFD packer state must roundtrip via get/set_state (shared base-class state)."""
-    packer = _ffd_packer(mode)
+    packer = _packer(mode)
     for doc in docs:
         packer.add_document(doc)
     for _ in range(pops_before_snapshot):
@@ -361,7 +359,7 @@ def test_ffd_packer_state_roundtrip(
     expected_stats = packer.get_stats()
     expected = packer.pop_seq_with_segments()
 
-    restored = _ffd_packer(mode)
+    restored = _packer(mode)
     restored.set_state(state)
     actual = restored.pop_seq_with_segments()
 
@@ -375,7 +373,7 @@ def test_ffd_packer_state_roundtrip(
 
 def test_ffd_packer_state_from_dict_is_strict() -> None:
     """FFD packer set_state must fail loud on corrupt/foreign state, not default to []/0."""
-    packer = _ffd_packer("bin")
+    packer = _packer("bin")
     full_state = _compact_ffd_state(docs_seen=0)
     del full_state["pending_offsets"]
     with pytest.raises(KeyError):
@@ -422,7 +420,7 @@ def test_ffd_packer_state_rejects_corrupt_queues(mutation: dict[str, Any], match
     State construction stays outside the raises block so every case must
     fail in set_state itself, not in the test helper's serialization.
     """
-    packer = _ffd_packer("bin")
+    packer = _packer("bin")
     state = _compact_ffd_state(
         pending_docs=mutation.get("pending_docs"),
         ready_tokens=mutation.get("ready_tokens"),
@@ -452,7 +450,7 @@ def test_ffd_packer_state_rejects_corrupt_compact_encoding(
     state.update(mutation)
 
     with pytest.raises(ValueError, match=match):
-        _ffd_packer("bin").set_state(state)
+        _packer("bin").set_state(state)
 
 
 @pytest.mark.parametrize(
@@ -491,13 +489,13 @@ def test_token_packer_state_rejects_invalid_current_state(
 
 def test_token_packer_finite_tail_state_roundtrip() -> None:
     """Sequential exhaustion and its padded tail must survive a restore."""
-    packer = _token_packer()
+    packer = _packer("sequential")
     packer.add_document([4, 5, 6])
     packer.finish()
     state = packer.get_state()
     assert state["exhausted"] is True
 
-    restored = _token_packer()
+    restored = _packer("sequential")
     restored.set_state(state)
     tokens, segments = restored.pop_seq_with_segments()
     np.testing.assert_array_equal(tokens, [4, 5, 6, 0, 0, 0, 0, 0])
@@ -506,46 +504,14 @@ def test_token_packer_finite_tail_state_roundtrip() -> None:
 
     del state["exhausted"]
     with pytest.raises(KeyError):
-        _token_packer().set_state(state)
+        _packer("sequential").set_state(state)
 
 
 @pytest.mark.parametrize("mode", ["sequential", "bin", "multipack"])
 def test_document_truncation_metrics_are_complete_and_resume_stable(mode: str) -> None:
     """Explicit truncation should report token loss and bounded length quantiles."""
-    common: dict[str, Any] = {
-        "seq_len": 8,
-        "add_bos": False,
-        "add_eos": False,
-        "bos_id": 1,
-        "eos_id": 2,
-        "pad_id": 0,
-        "max_doc_tokens": 4,
-    }
-    if mode == "sequential":
-        packer: Any = TokenPacker(**common)
-        restored: Any = TokenPacker(**common)
-    elif mode == "bin":
-        packer = FFDPacker(
-            mode="bin", bins_per_pack=1, lookahead_docs=2, max_docs_per_bin=None, **common
-        )
-        restored = FFDPacker(
-            mode="bin", bins_per_pack=1, lookahead_docs=2, max_docs_per_bin=None, **common
-        )
-    else:
-        packer = FFDPacker(
-            mode="multipack",
-            bins_per_pack=1,
-            lookahead_docs=2,
-            max_docs_per_bin=None,
-            **common,
-        )
-        restored = FFDPacker(
-            mode="multipack",
-            bins_per_pack=1,
-            lookahead_docs=2,
-            max_docs_per_bin=None,
-            **common,
-        )
+    packer = _packer(mode, max_doc_tokens=4)
+    restored = _packer(mode, max_doc_tokens=4)
 
     for length in (0, 1, 2, 4, 5, 8, 9):
         packer.add_document(list(range(length)))
