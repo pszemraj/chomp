@@ -13,13 +13,7 @@ import pytest
 from chomp.config import (
     CheckpointConfig,
     Config,
-    DataConfig,
-    DebugConfig,
-    LoggingConfig,
-    ModelConfig,
-    OptimConfig,
     TokenizerConfig,
-    TrainConfig,
 )
 from chomp.data import (
     build_eval_iterator,
@@ -28,6 +22,7 @@ from chomp.data import (
     load_or_create_eval_tokens,
 )
 from chomp.train import run
+from tests.helpers.config_factories import make_pipeline_cfg
 from tests.helpers.hf_fakes import FakeHFIterable
 from tests.helpers.io import read_jsonl
 
@@ -51,48 +46,44 @@ def _eval_cfg(
     :param data_overrides: Data fields specific to the behavior under test.
     :return Config: Minimal evaluation configuration.
     """
-    tokenizer = TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False)
+    data: dict[str, Any] = {
+        "tokenizer": TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False)
+    }
     if backend == "hf":
-        data = DataConfig(
+        data.update(
             backend="hf",
             hf_dataset="dummy",
             hf_name="dummy",
             hf_split="train",
             hf_eval_split="validation",
+            hf_revision=None,
             text_key="text",
             shuffle=False,
             repeat=False,
             max_eval_samples=2,
-            tokenizer=tokenizer,
         )
     else:
-        data = DataConfig(
+        data.update(
             backend="local_text",
             repeat=True,
             local_text="abcdefghijklmnopqrstuvwxyz" * 4,
             max_eval_samples=3,
-            tokenizer=tokenizer,
         )
-    data = replace(data, **data_overrides)
-    return Config(
-        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
-        data=data,
-        train=TrainConfig(
-            seed=0,
+    data.update(data_overrides)
+    cfg = make_pipeline_cfg(seq_len=8, vocab_size=256, **data)
+    return replace(
+        cfg,
+        train=replace(
+            cfg.train,
             steps=steps,
-            batch_size=1,
-            seq_len=8,
             grad_accum=grad_accum,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
             log_every=1000,
             eval_every=1,
         ),
-        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
+        optim=replace(cfg.optim, lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0),
         checkpoint=checkpoint or CheckpointConfig(enabled=False),
-        debug=DebugConfig(nan_check=True, check_device_every=0),
-        logging=LoggingConfig(project="chomp", run_dir=None if run_dir is None else str(run_dir)),
+        debug=replace(cfg.debug, nan_check=True, check_device_every=0),
+        logging=replace(cfg.logging, run_dir=None if run_dir is None else str(run_dir)),
     )
 
 

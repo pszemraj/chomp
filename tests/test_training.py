@@ -70,7 +70,11 @@ from chomp.train import (
 from chomp.types import Batch, TrainState
 from chomp.utils.io import RunDirectoryLock
 from chomp.utils.tree import abstractify_tree
-from tests.helpers.config_factories import make_small_run_cfg, make_tiny_megalodon_model
+from tests.helpers.config_factories import (
+    make_pipeline_cfg,
+    make_small_run_cfg,
+    make_tiny_megalodon_model,
+)
 from tests.helpers.io import read_jsonl
 
 
@@ -95,24 +99,15 @@ def _base_cfg(run_dir: Path) -> Config:
     :param Path run_dir: Run directory path.
     :return Config: Config configured for checkpoint tests.
     """
-    return Config(
-        model=ModelConfig(backend="dummy", vocab_size=256, d_model=16, dropout=0.0),
-        data=DataConfig(
-            backend="local_text",
-            repeat=True,
-            local_text="checkpoint integrity text\n",
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
-        ),
-        train=TrainConfig(
-            steps=1,
-            batch_size=1,
-            seq_len=8,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-        ),
-        optim=OptimConfig(warmup_steps=0),
+    cfg = make_pipeline_cfg(
+        seq_len=8,
+        vocab_size=256,
+        local_text="checkpoint integrity text\n",
+        tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+    )
+    return replace(
+        cfg,
+        model=replace(cfg.model, d_model=16),
         checkpoint=CheckpointConfig(enabled=True, save_every=1, max_to_keep=2, async_save=False),
         logging=LoggingConfig(project="chomp", run_dir=str(run_dir), metrics_file="metrics.jsonl"),
     )
