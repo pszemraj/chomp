@@ -70,6 +70,8 @@ metrics, manifest, or checkpoint artifacts. Lock files persist so every
 process contends on the same inode; the operating-system lock, not file
 existence, determines ownership.
 
+An absolute `checkpoint.root_dir` outside the run directory has its own lock held over the same lifetime. Chomp stores `.chomp-owner.json` inside that root with the canonical run-directory path. A fresh run accepts only an empty unowned root (or an empty root already marked for the same interrupted setup); resume requires the existing marker to match. This prevents different run directories from mixing steps in one Orbax tree, both concurrently and sequentially.
+
 On `SIGTERM` or `SIGUSR1`, the main-thread handler records only a stop flag. The loop does no IO inside the signal handler: it finishes an optimizer step already in flight, stops at the next aligned model/data boundary, writes a `preemption_requested` metrics row with `preemption_signal`, forces the final checkpoint, and closes Orbax before exiting. A request received between steps stops before another batch is consumed; a request during the final step's evaluation, generation, or logging tail is recorded before finalization. The Python API raises `TrainingPreempted` only after finalization; the CLI exits with `128 + signal` (143 for SIGTERM, 138 for SIGUSR1), so schedulers can distinguish a completed preemption from success or a training failure.
 
 ## Final checkpoint policy

@@ -439,6 +439,41 @@ def test_checkpoint_root_dir_resolves_relative_to_run_dir(
     assert Path(manager.directory) == (run_dir / "ckpts").resolve()
 
 
+def test_external_checkpoint_root_is_locked_owned_and_resumable(
+    tmp_path: Path,
+) -> None:
+    """One external Orbax tree must belong to exactly one inactive or active run."""
+    checkpoint_root = tmp_path / "external-checkpoints"
+    cfg, config_src = make_small_run_cfg(tmp_path, run_subdir="owner-run", decay_steps=1)
+    cfg = replace(
+        cfg,
+        checkpoint=replace(cfg.checkpoint, root_dir=str(checkpoint_root)),
+    )
+    run_dir = Path(cfg.logging.run_dir or "")
+
+    with (
+        RunDirectoryLock(checkpoint_root, resource_name="Checkpoint root"),
+        pytest.raises(RuntimeError, match="Checkpoint root is already active"),
+    ):
+        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+    assert not run_dir.exists()
+    assert not checkpoint_root.exists()
+
+    assert run(cfg, config_path=str(config_src), resume="none", dry_run=False) == run_dir
+    marker = json.loads((checkpoint_root / ".chomp-owner.json").read_text())
+    assert marker == {"schema_version": 1, "run_dir": str(run_dir.resolve())}
+    assert run(cfg, config_path=str(config_src), resume="latest", dry_run=False) == run_dir
+
+    other_cfg, _ = make_small_run_cfg(tmp_path, run_subdir="other-run", decay_steps=1)
+    other_cfg = replace(
+        other_cfg,
+        checkpoint=replace(other_cfg.checkpoint, root_dir=str(checkpoint_root)),
+    )
+    with pytest.raises(RuntimeError, match="belongs to run"):
+        run(other_cfg, config_path=str(config_src), resume="none", dry_run=False)
+    assert not Path(other_cfg.logging.run_dir or "").exists()
+
+
 def test_run_closes_manager_and_preflights_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

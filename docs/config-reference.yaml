@@ -1173,8 +1173,9 @@ checkpoint:
   # Required: no; used only when checkpoint.enabled is true.
   # Valid: null or a nonempty filesystem path string. Relative paths resolve under the final run
   # directory; absolute paths are used as written.
-  # Use: separates checkpoint storage from other artifacts when needed. Resume must resolve the same
-  # location from the run configuration.
+  # Use: separates checkpoint storage from other artifacts when needed. An absolute root outside the
+  # run directory is locked for the run and receives a .chomp-owner.json marker binding it to that
+  # run; fresh runs require an empty root, and resume requires the matching marker.
   root_dir: null
 
   # Key: checkpoint.save_every

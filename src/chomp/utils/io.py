@@ -43,15 +43,17 @@ def resolve_run_dir(cfg: Config, *, config_path: str | Path | None) -> Path:
 
 
 class RunDirectoryLock:
-    """Nonblocking process lock for all writes associated with one run directory."""
+    """Nonblocking process lock for a run or its external storage root."""
 
-    def __init__(self, run_dir: str | Path) -> None:
+    def __init__(self, run_dir: str | Path, *, resource_name: str = "Run directory") -> None:
         """Initialize a stable sibling lock path.
 
         :param run_dir: Resolved run directory, which need not exist yet.
+        :param str resource_name: Human-readable resource name for failures.
         """
         run_path = Path(run_dir)
         self.path = run_path.parent / f".{run_path.name}.lock"
+        self.resource_name = resource_name
         self._handle: Any | None = None
 
     def acquire(self) -> None:
@@ -60,7 +62,7 @@ class RunDirectoryLock:
         :raises RuntimeError: If another process already owns the run.
         """
         if self._handle is not None:
-            raise RuntimeError(f"Run-directory lock is already held: {self.path}")
+            raise RuntimeError(f"{self.resource_name} lock is already held: {self.path}")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle = self.path.open("a+", encoding="utf-8")
         try:
@@ -70,8 +72,8 @@ class RunDirectoryLock:
             owner = handle.read().strip() or "owner metadata unavailable"
             handle.close()
             raise RuntimeError(
-                f"Run directory is already active (lock {self.path}; {owner}). "
-                "Use a different logging.run_dir or wait for that process to exit."
+                f"{self.resource_name} is already active (lock {self.path}; {owner}). "
+                "Use a different path or wait for that process to exit."
             ) from exc
         owner = {
             "hostname": socket.gethostname(),

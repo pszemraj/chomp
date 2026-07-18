@@ -49,6 +49,7 @@ from tqdm import tqdm
 from chomp.ckpt import (
     build_meta,
     check_resume_compat,
+    claim_external_checkpoint_root,
     make_manager,
     refresh_runtime_identity,
     resolve_ckpt_root,
@@ -1348,7 +1349,23 @@ def run(
     # sibling lock before create_run_dir or artifact setup can write anything.
     run_dir = resolve_run_dir(cfg, config_path=config_path)
     cfg = dc_replace(cfg, logging=dc_replace(cfg.logging, run_dir=str(run_dir)))
-    with _StopSignalState() as stop_request, RunDirectoryLock(run_dir):
+    checkpoint_lock: contextlib.AbstractContextManager[Any]
+    checkpoint_root = resolve_ckpt_root(cfg, run_dir).resolve()
+    external_checkpoint_root = cfg.checkpoint.enabled and not checkpoint_root.is_relative_to(
+        run_dir.resolve()
+    )
+    if external_checkpoint_root:
+        checkpoint_lock = RunDirectoryLock(checkpoint_root, resource_name="Checkpoint root")
+    else:
+        checkpoint_lock = contextlib.nullcontext()
+
+    with _StopSignalState() as stop_request, RunDirectoryLock(run_dir), checkpoint_lock:
+        if external_checkpoint_root:
+            claim_external_checkpoint_root(
+                checkpoint_root,
+                run_dir=run_dir,
+                resume=resume != "none",
+            )
         return _run_impl(
             cfg,
             config_path=config_path,
