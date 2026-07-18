@@ -1,49 +1,37 @@
-# Minimal offline smoke test config (local_text backend).
-# Keeps everything small and CPU-friendly for quick validation.
+# Offline CPU smoke test for config, packing, training, and checkpoint plumbing.
 
 model:
   backend: dummy
-  vocab_size: 256
-  d_model: 128
-  dropout: 0.0
 
 data:
   backend: local_text
-  repeat: true
+  local_text: |
+    Hello from chomp. This local stream exercises tokenization and packing
+    without downloading a dataset or tokenizer.
   packing_mode: bin
   packing_buffer_docs: 32
-  mask_boundary_loss: true
-  train_on_eos: true
-  local_text: |
-    Hello from chomp. This is a local_text debug stream.
-    It exists so tests and smoke runs don't depend on network.
+  window_shuffle_tokens: 0
+  max_eval_samples: 0
   tokenizer:
     kind: byte
-    byte_offset: 0
-    add_bos: false
-    add_eos: false
 
 train:
-  seed: 0
   steps: 10
   batch_size: 2
   seq_len: 128
   grad_accum: 2
-  jit: true
   deterministic: true
   allow_cpu: true
   log_every: 1
   eval_every: 0
+  generate_every: 0
 
 optim:
-  lr: 3.0e-4
   warmup_steps: 2
 
 checkpoint:
-  enabled: true
   save_every: 5
   async_save: false
 
 debug:
-  nan_check: true
   check_device_every: 1
