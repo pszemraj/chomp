@@ -26,9 +26,8 @@ from chomp.config import (
 )
 from chomp.data.grain import (
     _batch_segment_stats,
-    _make_grain_iter_classes,
     _packer_stats_from_chain,
-    effective_window_shuffle_seed,
+    _TrainSequenceIterDataset,
 )
 from chomp.data.hf import HFRowValidationError, HFStreamingTextStream, HFStreamSpec
 from chomp.data.pack import FFDPacker, FFDPackerState, TokenPacker, _DocumentStats
@@ -38,6 +37,7 @@ from chomp.data.pipeline import (
     _eval_tokens_sha256,
     build_eval_iterator,
     build_train_iterator,
+    effective_window_shuffle_seed,
     save_tokenizer_snapshot,
     tokenizer_snapshot_hash,
 )
@@ -1390,11 +1390,8 @@ def test_packer_alignment_after_restore() -> None:
 
 def test_grain_shuffle_source_does_not_buffer_position_ids() -> None:
     """Packed shuffle rows should hold only tokens and segment IDs."""
-    import grain.python as grain
-
     cfg = make_pipeline_cfg(window_shuffle_tokens=64)
-    train_dataset_type, _, _ = _make_grain_iter_classes(grain)
-    dataset = train_dataset_type(cfg=cfg, tokenizer=ByteTokenizer(byte_offset=4))
+    dataset = _TrainSequenceIterDataset(cfg=cfg, tokenizer=ByteTokenizer(byte_offset=4))
 
     window = next(iter(dataset))
 

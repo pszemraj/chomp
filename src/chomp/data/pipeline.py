@@ -39,7 +39,6 @@ from chomp.config import Config, resolve_window_shuffle_rows, validate_config
 from chomp.types import IGNORE_INDEX, Batch
 from chomp.utils.xla import deterministic_gpu_ops_setting
 
-from .grain import effective_window_shuffle_seed
 from .hf import (
     CONTENT_HOLDOUT_SCHEMA_VERSION,
     ContentPartition,
@@ -50,6 +49,17 @@ from .hf import (
 from .pack import FFDPacker, TokenPacker
 
 DATA_PIPELINE_SCHEMA_VERSION = 12
+_WINDOW_SHUFFLE_SEED_OFFSET = 104_729
+_UINT32_MODULUS = 2**32
+
+
+def effective_window_shuffle_seed(cfg: Config) -> int:
+    """Return the deterministic seed consumed by packed-window shuffling.
+
+    :param Config cfg: Training configuration.
+    :return int: Effective Grain window-shuffle seed.
+    """
+    return (int(cfg.data.seed) + _WINDOW_SHUFFLE_SEED_OFFSET) % _UINT32_MODULUS
 
 
 class Tokenizer(Protocol):
