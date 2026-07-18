@@ -259,7 +259,6 @@ def _build_hf_stream(
     *,
     split: str,
     repeat: bool,
-    seed_offset: int = 0,
     content_partition: ContentPartition = "all",
 ) -> HFStreamingTextStream:
     """Build an HF streaming text stream from config.
@@ -267,7 +266,6 @@ def _build_hf_stream(
     :param Config cfg: Training configuration.
     :param str split: Dataset split name.
     :param bool repeat: Whether to repeat the stream when exhausted.
-    :param int seed_offset: Optional seed offset for independent streams.
     :param ContentPartition content_partition: All, training, or held-out documents.
     :return HFStreamingTextStream: Streaming text stream wrapper.
     """
@@ -284,7 +282,7 @@ def _build_hf_stream(
         shuffle=cfg.data.shuffle and content_partition != "eval",
         shuffle_buffer_size=cfg.data.shuffle_buffer_size,
         shuffle_buffer_bytes=cfg.data.shuffle_buffer_bytes,
-        seed=int(cfg.data.seed) + int(seed_offset),
+        seed=int(cfg.data.seed),
         repeat=repeat,
         content_partition=content_partition,
         eval_holdout_fraction=cfg.data.hf_eval_holdout_fraction,
@@ -748,12 +746,10 @@ def load_or_create_eval_tokens(
     return tokens
 
 
-def _build_backend_text_stream(cfg: Config, *, seed_offset: int = 0) -> TextStream:
+def _build_backend_text_stream(cfg: Config) -> TextStream:
     """Build the configured backend's text stream over the training split.
 
     :param Config cfg: Training configuration.
-    :param int seed_offset: Offset added to the HF shuffle seed (keeps
-        auxiliary streams independent from the training iterator).
     :return TextStream: Streaming text iterator.
     :raises ValueError: If data.backend is unknown.
     """
@@ -763,7 +759,6 @@ def _build_backend_text_stream(cfg: Config, *, seed_offset: int = 0) -> TextStre
             cfg,
             split=cfg.data.hf_split,
             repeat=cfg.data.repeat,
-            seed_offset=seed_offset,
             content_partition=content_partition,
         )
     if cfg.data.backend == "local_text":

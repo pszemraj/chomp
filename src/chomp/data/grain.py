@@ -87,7 +87,6 @@ class GrainTrainBatchIterator:
         :param str packing_mode: Packing mode name for metrics.
         :param bool enable_stats: Whether to compute packing stats on each batch.
         """
-        self._ds = ds
         self._it: _IteratorProtocol = iter(ds)
         self._packing_mode = str(packing_mode)
         self._enable_stats = bool(enable_stats)
@@ -102,10 +101,9 @@ class GrainTrainBatchIterator:
         envelope = next(self._it)
         batch = envelope.batch
         self._last_loss_tokens = int(envelope.loss_tokens_host)
-        if not self._enable_stats or not self._collect_next_stats:
-            self._last_stats = dict(envelope.pipeline_stats)
-            return batch
         self._last_stats = dict(envelope.pipeline_stats)
+        if not self._enable_stats or not self._collect_next_stats:
+            return batch
         self._last_stats.update(_batch_segment_stats(batch.segment_ids))
         self._last_stats.update(
             {

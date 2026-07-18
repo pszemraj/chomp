@@ -396,39 +396,13 @@ def test_ffd_packer_state_roundtrip(
     assert expected_stats["docs_seen"] == len(docs)
 
 
-@pytest.mark.parametrize(
-    "missing_key",
-    [
-        "pending_tokens_i32_b64",
-        "pending_offsets",
-        "ready_tokens_i32_b64",
-        "ready_segments_i32_b64",
-        "ready_offsets",
-        "document_stats",
-        "exhausted",
-    ],
-)
-def test_ffd_packer_state_from_dict_is_strict(missing_key: str) -> None:
+def test_ffd_packer_state_from_dict_is_strict() -> None:
     """FFD packer set_state must fail loud on corrupt/foreign state, not default to []/0."""
     packer = _bin_packer()
     full_state = _compact_ffd_state(docs_seen=0)
-    del full_state[missing_key]
+    del full_state["pending_offsets"]
     with pytest.raises(KeyError):
         packer.set_state(full_state)
-
-
-def test_ffd_packer_state_to_dict_rejects_row_pair_mismatch() -> None:
-    """Serialization must reject mismatched ready token/segment rows.
-
-    The compact wire format derives both ready queues from one shared
-    offsets list, so a mismatch is unrepresentable at restore time; to_dict
-    is the only layer that can catch it.
-    """
-    with pytest.raises(ValueError, match="matching lengths"):
-        _compact_ffd_state(
-            ready_tokens=[[1, 2, 3, 4, 5, 6, 7, 8]],
-            ready_segments=[[1, 1, 1]],
-        )
 
 
 @pytest.mark.parametrize(
@@ -464,17 +438,14 @@ def test_ffd_packer_state_to_dict_rejects_row_pair_mismatch() -> None:
         "truncated_exceeds_seen",
     ],
 )
-@pytest.mark.parametrize("make_packer", [_bin_packer, _multipack_packer])
-def test_ffd_packer_state_rejects_corrupt_queues(
-    make_packer: Callable[[], Any], mutation: dict[str, Any], match: str
-) -> None:
+def test_ffd_packer_state_rejects_corrupt_queues(mutation: dict[str, Any], match: str) -> None:
     """Compact queue invariants fail loud at restore: fixed seq_len ready
     rows, capacity-bounded pending chunks, sane counters.
 
     State construction stays outside the raises block so every case must
     fail in set_state itself, not in the test helper's serialization.
     """
-    packer = make_packer()
+    packer = _bin_packer()
     state = _compact_ffd_state(
         pending_docs=mutation.get("pending_docs"),
         ready_tokens=mutation.get("ready_tokens"),

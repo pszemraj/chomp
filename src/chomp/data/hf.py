@@ -155,10 +155,9 @@ class HFStreamingTextStream:
         self._replayed_window_bytes = 0
         self._build()
 
-    def _load_ds_for_epoch(self, epoch: int) -> datasets.IterableDataset:
-        """Load and configure the dataset for a given epoch.
+    def _load_dataset(self) -> datasets.IterableDataset:
+        """Load and configure the source dataset.
 
-        :param int epoch: Epoch number (used to seed shuffle).
         :return datasets.IterableDataset: Configured streaming dataset.
         """
         import datasets
@@ -179,7 +178,7 @@ class HFStreamingTextStream:
     def _build(self) -> None:
         """Build or rebuild the dataset iterator for the current epoch."""
         self._close_source_iterator()
-        self._ds = self._load_ds_for_epoch(self._epoch)
+        self._ds = self._load_dataset()
         self._it = iter(self._ds)
         self._closed = False
         self._source_started = False
@@ -486,7 +485,7 @@ class HFStreamingTextStream:
         self._close_source_iterator()
         epoch = int(state["epoch"])
         self._epoch = epoch
-        self._ds = self._load_ds_for_epoch(self._epoch)
+        self._ds = self._load_dataset()
 
         if not self._spec.shuffle:
             hf_state = state.get("hf_state")

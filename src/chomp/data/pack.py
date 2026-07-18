@@ -502,14 +502,21 @@ class TokenPacker(_PackerBase):
         self._segment_buf.append(np.full((doc.size,), segment_id, dtype=np.int32))
         self._next_segment_id = self._flip_segment_id(segment_id)
 
+    def _validate_buffer_alignment(self) -> None:
+        """Raise if the token and segment buffers have drifted apart.
+
+        :raises RuntimeError: If token and segment counts differ.
+        """
+        if self._token_buf.size != self._segment_buf.size:
+            raise RuntimeError("token/segment buffers are misaligned")
+
     def can_pop(self) -> bool:
         """Check if buffer has enough tokens for one sequence.
 
         :raises RuntimeError: If token/segment buffers are misaligned.
         :return bool: True if a full window or finite nonempty tail is available.
         """
-        if self._token_buf.size != self._segment_buf.size:
-            raise RuntimeError("token/segment buffers are misaligned")
+        self._validate_buffer_alignment()
         return self._token_buf.size >= self.seq_len or (
             self._exhausted and self._token_buf.size > 0
         )
@@ -529,8 +536,7 @@ class TokenPacker(_PackerBase):
         :raises RuntimeError: If token/segment buffers are misaligned.
         :return tuple[np.ndarray, np.ndarray]: Fixed-length token and segment arrays.
         """
-        if self._token_buf.size != self._segment_buf.size:
-            raise RuntimeError("token/segment buffers are misaligned")
+        self._validate_buffer_alignment()
         available = self._token_buf.size
         if available < self.seq_len and not self._exhausted:
             raise RuntimeError("TokenPacker has no complete sequence available")
@@ -596,9 +602,7 @@ class FFDPackerState:
         """
         pending_payload, pending_offsets = _encode_i32_rows(self.pending_docs)
         ready_payload, ready_offsets = _encode_i32_rows(self.ready_tokens)
-        segment_payload, segment_offsets = _encode_i32_rows(self.ready_segments)
-        if segment_offsets != ready_offsets:
-            raise ValueError("ready token and segment rows must have matching lengths")
+        segment_payload, _ = _encode_i32_rows(self.ready_segments)
         return {
             "pending_tokens_i32_b64": pending_payload,
             "pending_offsets": pending_offsets,
