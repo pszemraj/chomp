@@ -16,6 +16,7 @@ model:
   bos_token_id: 1
   eos_token_id: 2
   init_mode: he
+  share_emb: true
   use_checkpoint: true
   param_dtype: float32
   compute_dtype: bfloat16

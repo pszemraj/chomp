@@ -211,14 +211,15 @@ model:
 
   # Key: model.share_emb
   # Type: boolean
-  # Default: false.
+  # Default: true.
   # Required: no.
   # Valid: true | false.
   # Use: true ties the language-model output projection to the input embedding matrix, reducing
-  # parameters. false creates a separate output matrix even when output_size equals vocab_size.
+  # parameters and preserving Chomp's pre-0.2.1 model topology. false creates a separate output
+  # matrix even when output_size equals vocab_size.
   # Interaction: true requires model.output_size to be -1 or equal model.vocab_size. Changing this
   # changes parameter topology and is checkpoint-incompatible.
-  share_emb: false
+  share_emb: true
 
   # Key: model.norm_affine
   # Type: boolean

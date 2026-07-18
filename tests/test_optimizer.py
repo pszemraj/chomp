@@ -56,6 +56,7 @@ def megalodon_parts() -> tuple[Config, Any, Any]:
             cema_ndim=4,
             chunk_size=16,
             norm_num_groups=4,
+            share_emb=False,
         )
     )
     params, static = build_model(cfg, key=jax.random.PRNGKey(0))
@@ -167,7 +168,7 @@ def test_parameter_contract_fails_closed_on_unknown_array() -> None:
     [
         pytest.param({"swiglu": True}, id="swiglu"),
         pytest.param({"norm_affine": False}, id="no-norm-affine"),
-        pytest.param({"output_size": 96}, id="custom-output"),
+        pytest.param({"share_emb": False, "output_size": 96}, id="custom-output"),
         pytest.param({"share_emb": True}, id="tied-embedding"),
     ],
 )
@@ -187,6 +188,7 @@ def test_parameter_contract_covers_supported_model_variants(
         cema_ndim=4,
         chunk_size=16,
         norm_num_groups=4,
+        share_emb=False,
     )
     cfg = Config(model=replace(base, **model_updates))
     params, static = build_model(cfg, key=jax.random.PRNGKey(1))

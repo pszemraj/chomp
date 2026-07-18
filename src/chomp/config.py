@@ -126,7 +126,9 @@ class ModelConfig:
     swiglu: bool = False
     rescale_nffn: bool = False
     scale_emb: bool = False
-    share_emb: bool = False
+    # Chomp historically tied the LM head when output_size=-1. Upstream 0.2.1
+    # made tying explicit, so keep Chomp's established topology as the default.
+    share_emb: bool = True
     norm_affine: bool = True
     attention_dropout: float = 0.0
     attention_dropout_mode: Literal["post_softmax", "dropkey"] = "post_softmax"
