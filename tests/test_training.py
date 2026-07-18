@@ -16,6 +16,7 @@ from typing import Any, ClassVar
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
@@ -69,7 +70,6 @@ from chomp.train import (
 from chomp.types import Batch, TrainState
 from chomp.utils.io import RunDirectoryLock
 from chomp.utils.tree import abstractify_tree
-from tests.helpers.assertions import tree_allclose
 from tests.helpers.config_factories import make_small_run_cfg
 from tests.helpers.io import read_jsonl
 
@@ -225,8 +225,8 @@ def test_async_checkpoint_roundtrip(
         mgr, step=1, abstract_train_state=abstract_state, data_iter=data_it_restore
     )
     assert step == 1
-    assert tree_allclose(restored.params, state.params, rtol=0.0, atol=0.0)
-    assert tree_allclose(restored.opt_state, state.opt_state, rtol=0.0, atol=0.0)
+    assert eqx.tree_equal(restored.params, state.params)
+    assert eqx.tree_equal(restored.opt_state, state.opt_state)
 
 
 def test_checkpoint_step_consistency_rejects_all_mismatches(tmp_path: Path) -> None:
@@ -275,7 +275,7 @@ def test_restore_params_only(
     )
 
     params = restore_params_only(ckpt_dir / "1", abstractify_tree(state.params))
-    assert tree_allclose(params, state.params, rtol=0.0, atol=0.0)
+    assert eqx.tree_equal(params, state.params)
 
     with pytest.raises(FileNotFoundError, match="train_state"):
         restore_params_only(ckpt_dir / "999", abstractify_tree(state.params))
@@ -340,7 +340,7 @@ def test_checkpoint_data_state_roundtrip(
     )
     assert step == 2
     restored_batch = next(data_it_restore)
-    assert tree_allclose(expected, restored_batch, rtol=0.0, atol=0.0)
+    assert eqx.tree_equal(expected, restored_batch)
 
 
 def test_latest_step_ignores_incomplete(
@@ -804,8 +804,8 @@ def test_crash_between_fetch_and_step_skips_final_checkpoint(
         states.append(state)
 
     assert int(jax.device_get(states[0].step)) == 5
-    assert tree_allclose(states[0].params, states[1].params, rtol=0.0, atol=0.0)
-    assert tree_allclose(states[0].opt_state, states[1].opt_state, rtol=0.0, atol=0.0)
+    assert eqx.tree_equal(states[0].params, states[1].params)
+    assert eqx.tree_equal(states[0].opt_state, states[1].opt_state)
 
 
 def test_finite_partial_batch_trains_and_saves_aligned_checkpoint(tmp_path: Path) -> None:
@@ -910,7 +910,7 @@ def test_zero_loss_batch_does_not_mutate_training_state(
         run(cfg, config_path=None, resume="none")
 
     assert train_step_calls == 0
-    assert tree_allclose(captured["state"], captured["snapshot"], rtol=0.0, atol=0.0)
+    assert eqx.tree_equal(captured["state"], captured["snapshot"])
     ckpt_dir = default_ckpt_dir(run_dir)
     saved_steps = (
         {path.name for path in ckpt_dir.iterdir() if path.is_dir() and path.name.isdigit()}
@@ -997,8 +997,8 @@ def test_resume_bit_exact_with_prefetch_and_window_shuffle(
             data_iter=build_train_iterator(cfg_ref, tokenizer=tokenizer),
         )
         states.append(state)
-    assert tree_allclose(states[0].params, states[1].params, rtol=0.0, atol=0.0)
-    assert tree_allclose(states[0].opt_state, states[1].opt_state, rtol=0.0, atol=0.0)
+    assert eqx.tree_equal(states[0].params, states[1].params)
+    assert eqx.tree_equal(states[0].opt_state, states[1].opt_state)
 
 
 def test_resume_bit_exact_through_exhaustion_flush(
@@ -1076,8 +1076,8 @@ def test_resume_bit_exact_through_exhaustion_flush(
             data_iter=build_train_iterator(cfg_ref, tokenizer=tokenizer),
         )
         states.append(state)
-    assert tree_allclose(states[0].params, states[1].params, rtol=0.0, atol=0.0)
-    assert tree_allclose(states[0].opt_state, states[1].opt_state, rtol=0.0, atol=0.0)
+    assert eqx.tree_equal(states[0].params, states[1].params)
+    assert eqx.tree_equal(states[0].opt_state, states[1].opt_state)
 
 
 def test_grain_data_state_capture_is_synchronous() -> None:
@@ -2075,8 +2075,6 @@ def test_supports_packed_segments_requires_capability_flag() -> None:
     flag (legacy megalodon-jax: attention-only isolation, CEMA/TimestepNorm
     state leaking across packed boundaries) must be rejected.
     """
-    import equinox as eqx
-
     cfg = Config(model=ModelConfig(backend="dummy", vocab_size=64, d_model=16, dropout=0.0))
     params, static = build_model(cfg, key=jax.random.PRNGKey(0))
     assert supports_packed_segments(params, static)
@@ -2125,8 +2123,6 @@ def test_strict_packed_segments_covers_multi_document_modes(tmp_path: Path) -> N
 
 def test_training_loss_passes_segments_iff_packed() -> None:
     """Strict packing passes segments and lets the backend derive positions."""
-    import equinox as eqx
-
     calls: dict[str, Any] = {}
 
     class _SpyLM(eqx.Module):

@@ -31,7 +31,6 @@ from chomp.train import (
 )
 from chomp.types import Batch
 from chomp.utils.tree import path_to_str
-from tests.helpers.assertions import tree_allclose
 
 
 @pytest.fixture(scope="module")
@@ -481,8 +480,8 @@ def test_grad_accum_equivalence_dummy_local_text() -> None:
     else:
         rtol, atol = 1e-5, 1e-5
 
-    assert tree_allclose(state1.params, params_ref, rtol=rtol, atol=atol)
-    assert tree_allclose(state1.opt_state, opt_state_ref, rtol=rtol, atol=atol)
+    assert eqx.tree_equal(state1.params, params_ref, rtol=rtol, atol=atol)
+    assert eqx.tree_equal(state1.opt_state, opt_state_ref, rtol=rtol, atol=atol)
     assert jnp.allclose(metrics["loss"], loss_ref)
 
 

@@ -47,8 +47,6 @@ Tests are organized by source module (not by micro-feature):
 
 - [`tests/test_config.py`](../tests/test_config.py): config validation, variables, tokenizer-derived updates,
   and generate-time config loading
-- [`tests/test_config_reference.py`](../tests/test_config_reference.py): annotated config key, default,
-  type, and inline-contract drift checks
 - [`tests/test_data_pipeline.py`](../tests/test_data_pipeline.py): packing, segment IDs, HF streaming/state,
   tokenizer decode, and tokenizer snapshot behavior
 - [`tests/test_training.py`](../tests/test_training.py): training loop behavior, crash handling, dry-run,
@@ -63,8 +61,6 @@ Tests are organized by source module (not by micro-feature):
 
 Shared helper modules:
 
-- [`tests/helpers/assertions.py`](../tests/helpers/assertions.py): structured JAX
-  equality checks
 - [`tests/helpers/config_factories.py`](../tests/helpers/config_factories.py): reusable tiny
   train/checkpoint configs
 - [`tests/helpers/hf_fakes.py`](../tests/helpers/hf_fakes.py): reusable fake HF streaming iterables
@@ -72,10 +68,7 @@ Shared helper modules:
   resume continuation worker
 - [`tests/helpers/io.py`](../tests/helpers/io.py): test artifact readers
 
-High-risk invariants remain isolated for visibility:
-
-- [`tests/test_compile_stability.py`](../tests/test_compile_stability.py)
-- [`tests/test_gpu_smoke.py`](../tests/test_gpu_smoke.py)
+GPU invariants remain isolated in [`tests/test_gpu_smoke.py`](../tests/test_gpu_smoke.py).
 
 ## Tracked follow-ups
 
