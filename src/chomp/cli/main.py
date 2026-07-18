@@ -22,11 +22,6 @@ Repo:    https://github.com/pszemraj/chomp
 """.strip("\n")
 
 
-def print_banner() -> None:
-    """Print the chomp banner."""
-    click.echo(BANNER)
-
-
 def parse_resume(raw: str) -> str | int:
     """Parse the resume CLI argument.
 

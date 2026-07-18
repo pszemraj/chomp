@@ -17,7 +17,7 @@ import pytest
 from click.testing import CliRunner
 
 from chomp.cli import cli
-from chomp.cli.main import BANNER, parse_resume, print_banner
+from chomp.cli.main import parse_resume
 from chomp.config import Config
 from chomp.data import build_tokenizer, save_tokenizer_snapshot
 from chomp.model import build_model
@@ -29,15 +29,6 @@ def test_cli_import_does_not_initialize_jax() -> None:
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
 
     assert result.returncode == 0, result.stderr
-
-
-def test_print_banner_outputs_expected_text(capsys: object) -> None:
-    """print_banner emits the banner once with a trailing newline."""
-    print_banner()
-    captured = capsys.readouterr()
-
-    assert captured.out.endswith("\n")
-    assert captured.out.rstrip("\n") == BANNER
 
 
 @pytest.mark.parametrize(

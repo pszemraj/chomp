@@ -41,20 +41,6 @@ Run a single module-focused test file:
 conda run --name mega-jax pytest -q tests/test_training.py
 ```
 
-Slow tests are marked with `@pytest.mark.slow`.
-
-Run slow tests only:
-
-```bash
-conda run --name mega-jax pytest -q -m slow
-```
-
-Skip slow tests explicitly:
-
-```bash
-conda run --name mega-jax pytest -q -m "not slow"
-```
-
 ## Test layout
 
 Tests are organized by source module (not by micro-feature):
@@ -71,7 +57,7 @@ Tests are organized by source module (not by micro-feature):
   equivalence
 - [`tests/test_utils.py`](../tests/test_utils.py): device placement, init sanity,
   parameter counting, finite-metric checks, and XLA environment helpers
-- [`tests/test_cli.py`](../tests/test_cli.py): CLI banner and generate command behavior
+- [`tests/test_cli.py`](../tests/test_cli.py): CLI parsing and generate command behavior
 - [`tests/test_eval.py`](../tests/test_eval.py): eval logging and eval text selection
 - [`tests/test_ckpt_paths.py`](../tests/test_ckpt_paths.py): checkpoint path/config resolution
 
