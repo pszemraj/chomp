@@ -156,10 +156,9 @@ class DummyLM(eqx.Module):
 # ------------------------------ Builders -----------------------------------
 
 # Repo-wide floor, enforced for every megalodon model build (train and
-# generate) regardless of packing mode. Older versions lack full segment
-# isolation (supports_segment_reset). pyproject pins a verified implementation
-# commit; this runtime floor also protects editable/stale environments.
-_MIN_MEGALODON_JAX = "0.1.2"
+# generate) regardless of packing mode. This runtime floor also protects
+# editable or otherwise stale environments from bypassing package resolution.
+_MIN_MEGALODON_JAX = "0.2.1"
 _PARAMETER_MANIFEST_SCHEMA_VERSION = 1
 
 
@@ -192,7 +191,7 @@ def _optimizer_group(
     if (
         muon.allow_all_2d
         or classification.family == "projection"
-        or (muon.allow_tied_embed and classification.family == "embedding")
+        or (muon.allow_tied_embed and cfg.model.share_emb and classification.family == "embedding")
     ):
         return "muon"
     return "adam"
@@ -201,7 +200,7 @@ def _optimizer_group(
 def classify_model_array(cfg: Config, path: str) -> ModelArrayClassification:
     """Classify one backend array as a parameter or fixed buffer.
 
-    This is a fail-closed adapter for the pinned Megalodon-JAX model layout.
+    This is a fail-closed adapter for the supported Megalodon-JAX model layout.
     A dependency update that introduces an unknown array must be reviewed and
     classified before training can start; silently treating every float array
     as learned previously caused RoPE inverse frequencies to enter AdamW.
@@ -217,8 +216,6 @@ def classify_model_array(cfg: Config, path: str) -> ModelArrayClassification:
         if path.endswith("proj.weight"):
             return ModelArrayClassification(True, "projection", True)
     elif cfg.model.backend == "megalodon":
-        if path.endswith(".attn.inner.rotary.inv_freq"):
-            return ModelArrayClassification(False, "fixed_rope", False)
         if path.endswith("embed.weight"):
             return ModelArrayClassification(True, "embedding", True)
         if path.endswith("lm_head.weight"):
@@ -396,13 +393,11 @@ def write_parameter_manifest(run_dir: Path, manifest: dict[str, Any]) -> Path:
 def _require_megalodon_jax_version() -> None:
     """Fail fast when the installed megalodon-jax predates the required floor.
 
-    Package metadata is deliberately the *only* version source: megalodon_jax
-    exposes no ``__version__`` attribute (as of 0.1.2), so a module-attribute
-    fallback would be dead code, and pip editable installs do produce
-    metadata. Missing metadata means a sys.path-injected source tree — an
-    unsupported setup whose actual version cannot be verified, so it errors
-    rather than guesses. Strict packed mode is independently guarded by the
-    ``supports_segment_reset`` capability flag on the built model instance.
+    Package metadata is deliberately the *only* version source because wheel
+    and editable installs both provide it. Missing metadata means an unsupported
+    sys.path-injected source tree whose actual version cannot be verified, so
+    this errors rather than guessing. Strict packed mode is independently
+    guarded by the ``supports_segment_reset`` capability flag on the model.
 
     :raises RuntimeError: If megalodon-jax is older than _MIN_MEGALODON_JAX
         or its version metadata cannot be read.
@@ -417,15 +412,14 @@ def _require_megalodon_jax_version() -> None:
         raise RuntimeError(
             "Cannot verify the installed megalodon-jax version (no package "
             f"metadata); chomp requires megalodon-jax >= {_MIN_MEGALODON_JAX}. "
-            "Reinstall chomp's pinned dependencies from the project checkout: "
+            "Reinstall chomp's supported dependencies from the project checkout: "
             "pip install -U ."
         ) from exc
     if Version(found) < Version(_MIN_MEGALODON_JAX):
         raise RuntimeError(
             f"chomp requires megalodon-jax >= {_MIN_MEGALODON_JAX}, found {found}. "
-            "Older versions only isolate attention across packed documents, "
-            "leaking ComplexEMA/TimestepNorm state. Reinstall chomp's pinned "
-            "dependencies from the project checkout: pip install -U ."
+            "Reinstall chomp's supported dependencies from the project checkout: "
+            "pip install -U ."
         )
 
 
@@ -433,8 +427,8 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
     """Build model and return (params, static).
 
     We always partition immediately using the backend's explicit parameter
-    contract. Ordinary arrays are not assumed trainable: derived RoPE
-    frequencies remain in the static partition.
+    contract. Ordinary arrays are not assumed trainable, while derived RoPE
+    frequencies do not appear in the model array tree at all.
 
     Why?
     - We never want to stash full Modules in TrainState
@@ -477,17 +471,18 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
             ffn_hidden_dim=cfg.model.ffn_hidden_dim,
             cema_ndim=cfg.model.cema_ndim,
             chunk_size=cfg.model.chunk_size,
-            max_cache_len=cfg.model.max_cache_len,
-            cache_unbounded=cfg.model.cache_unbounded,
+            attention_window=cfg.model.attention_window,
             norm_num_groups=cfg.model.norm_num_groups,
             norm_eps=cfg.model.norm_eps,
             rope_base=cfg.model.rope_base,
             swiglu=cfg.model.swiglu,
             rescale_nffn=cfg.model.rescale_nffn,
             scale_emb=cfg.model.scale_emb,
+            share_emb=cfg.model.share_emb,
             norm_affine=cfg.model.norm_affine,
             dropout=cfg.model.dropout,
             attention_dropout=cfg.model.attention_dropout,
+            attention_dropout_mode=cfg.model.attention_dropout_mode,
             hidden_dropout=cfg.model.hidden_dropout,
             pad_token_id=cfg.model.pad_token_id,
             bos_token_id=cfg.model.bos_token_id,
@@ -499,8 +494,8 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
             param_dtype=dtype_from_str(cfg.model.param_dtype),
             compute_dtype=dtype_from_str(cfg.model.compute_dtype),
             accum_dtype=dtype_from_str(cfg.model.accum_dtype),
-            softmax_dtype=dtype_from_str(cfg.model.softmax_dtype),
-            gemm_backend=cfg.model.gemm_backend,
+            attention_softmax_dtype=dtype_from_str(cfg.model.attention_softmax_dtype),
+            loss_softmax_dtype=dtype_from_str(cfg.model.loss_softmax_dtype),
         )
 
         model = MegalodonForCausalLM(mcfg, key=key)
@@ -614,11 +609,9 @@ def generate_tokens(
 def supports_packed_segments(params: Any, static: Any) -> bool:
     """Return True if the model backend supports full packed-segment isolation.
 
-    Checks the ``supports_segment_reset`` capability flag introduced in
-    megalodon-jax 0.1.2. Signature introspection of ``compute_loss`` is not
-    sufficient: older versions accepted segment_ids/position_ids but only
-    isolated attention, leaking ComplexEMA and TimestepNorm state across
-    packed document boundaries.
+    Checks the ``supports_segment_reset`` capability flag. Signature
+    introspection of ``compute_loss`` is insufficient because older versions
+    accepted packed metadata without isolating every recurrent state path.
 
     :param Any params: Model parameters.
     :param Any static: Static model components.

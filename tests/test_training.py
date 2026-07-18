@@ -1813,7 +1813,7 @@ def test_supports_packed_segments_requires_capability_flag() -> None:
     """Capability check keys on supports_segment_reset, not compute_loss signature.
 
     A backend that accepts segment_ids/position_ids but does not advertise the
-    flag (megalodon-jax < 0.1.2: attention-only isolation, CEMA/TimestepNorm
+    flag (legacy megalodon-jax: attention-only isolation, CEMA/TimestepNorm
     state leaking across packed boundaries) must be rejected.
     """
     import equinox as eqx
@@ -1823,7 +1823,7 @@ def test_supports_packed_segments_requires_capability_flag() -> None:
     assert supports_packed_segments(params, static)
 
     class _LegacyLM(eqx.Module):
-        """Pre-0.1.2 shape: packed kwargs in the signature, no capability flag."""
+        """Legacy shape: packed kwargs in the signature, no capability flag."""
 
         w: jax.Array
 
@@ -1912,11 +1912,7 @@ def test_training_loss_passes_segments_iff_packed() -> None:
 
 
 def test_megalodon_version_floor_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Any megalodon model build must reject megalodon-jax < 0.1.2 outright.
-
-    The pyproject git URL cannot carry a version specifier, so a stale
-    environment is only caught here — for every mode, not just strict packing.
-    """
+    """Any Megalodon model build must reject releases older than 0.2.1."""
     import importlib.metadata as real_metadata
 
     pytest.importorskip("megalodon_jax")
@@ -1941,11 +1937,11 @@ def test_megalodon_version_floor_enforced(monkeypatch: pytest.MonkeyPatch) -> No
 
     def _stale_version(name: str) -> str:
         if name == "megalodon-jax":
-            return "0.1.1"
+            return "0.2.0"
         return real_version(name)
 
     monkeypatch.setattr("importlib.metadata.version", _stale_version)
-    with pytest.raises(RuntimeError, match="requires megalodon-jax >= 0.1.2"):
+    with pytest.raises(RuntimeError, match="requires megalodon-jax >= 0.2.1"):
         build_model(cfg, key=jax.random.PRNGKey(0))
 
     def _missing_version(name: str) -> str:

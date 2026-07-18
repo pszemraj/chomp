@@ -16,11 +16,7 @@ All project commands should run inside the `mega-jax` conda environment.
 conda run --name mega-jax <command>
 ```
 
-Runtime and development dependencies are exactly pinned in
-[`pyproject.toml`](../pyproject.toml), including the Megalodon and Optax source
-commits. Upgrade them deliberately with the full resume/checkpoint suite, not
-as unconstrained installs. JAX accelerator plugins must match the pinned
-`jax==jaxlib==0.8.2` core.
+Stateful data/checkpoint dependencies and development tools are exactly pinned in [`pyproject.toml`](../pyproject.toml). The model stack uses bounded compatible release lines starting at JAX/JAXLIB 0.10.2, Equinox 0.13.8, Optax 0.2.8, and Megalodon-JAX 0.2.1. Upgrade a bound only with the full resume/checkpoint and escalated GPU suites. JAX accelerator plugins must resolve to the same release as the selected JAX core; the `cuda13` extra handles the pip-managed CUDA 13 stack.
 
 ## Lint and format
 
@@ -122,12 +118,3 @@ High-risk invariants remain isolated for visibility:
   guard, exact loss-token envelope, eval behavior, and strict/non-strict
   segment semantics. Benchmark host-to-device bytes and step time at 2K, 8K,
   and 32K contexts before keeping the added device-side logic.
-
-- **TODO(megalodon-rope): move fixed rotary frequencies into the model's static
-  contract.** The pinned Megalodon-JAX release exposes `rotary.inv_freq` as an
-  ordinary floating array, so Chomp currently classifies that exact path as a
-  fixed buffer and hard-gates the parameter-manifest hash. Update the dependency
-  to derive frequencies from static dimension/base values in the forward path
-  (or expose an upstream trainable-leaf API), then delete the path exception.
-  Acceptance requires the fixed-buffer optimizer-state/update regression and
-  all real-model parameter-manifest variants to remain green.

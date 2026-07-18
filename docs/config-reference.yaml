@@ -75,7 +75,7 @@ model:
   # Type: number
   # Default: 0.0.
   # Required: no.
-  # Valid: 0.0 through 1.0 inclusive.
+  # Valid: >= 0.0 and < 1.0.
   # Use: dropout for either backend. A nonzero value makes train.deterministic resolve to false when
   # train.deterministic is null. Use 0.0 for dropout-free replay tests.
   dropout: 0.0
@@ -108,7 +108,7 @@ model:
   # Type: integer
   # Default: 64.
   # Required: no.
-  # Valid: > 0 and divisible by model.num_heads.
+  # Valid: > 0, divisible by model.num_heads, and z_dim / num_heads must be even for RoPE.
   # Use: Megalodon query/key projection width.
   z_dim: 64
 
@@ -144,31 +144,25 @@ model:
   # Use: Megalodon attention chunk length. Larger chunks expose more local context and use more memory.
   chunk_size: 128
 
-  # Key: model.max_cache_len
+  # Key: model.attention_window
   # Type: integer | null
-  # Default: null, computed as model.chunk_size.
+  # Default: null, which uses released chunk-local attention with a cache capacity of
+  # model.chunk_size.
   # Required: no.
-  # Valid: null or an integer >= model.chunk_size.
-  # Use: inference/generation KV-cache capacity; training does not use the cache. A value above
-  # chunk_size creates a sliding window across chunks.
-  # Warning: cache_unbounded does not make this buffer unlimited; JIT requires a fixed capacity.
-  max_cache_len: null
-
-  # Key: model.cache_unbounded
-  # Type: boolean
-  # Default: false.
-  # Required: no.
-  # Valid: true | false.
-  # Use: during inference/generation, true disables cache resets at chunk boundaries but retains the
-  # fixed max_cache_len window. Training does not use the cache. Leave false unless cross-chunk
-  # attention is an intentional architecture choice.
-  cache_unbounded: false
+  # Valid: null or an integer > 0.
+  # Lifecycle: experimental architecture extension.
+  # Use: a positive value replaces chunk-local attention with a causal sliding window of this width
+  # in training and generation; it also becomes the fixed inference cache capacity. Keep null for
+  # released Megalodon semantics. Changing it is checkpoint-incompatible.
+  attention_window: null
 
   # Key: model.norm_num_groups
   # Type: integer
   # Default: 32.
   # Required: no.
-  # Valid: > 0 and must divide model.model_dim.
+  # Valid: > 0, smaller than model.model_dim, and must divide model.model_dim. A featurewise value
+  # equal to model_dim is unsupported because this training model does not configure the learned
+  # TimestepNorm prior it requires.
   # Use: Megalodon TimestepNorm group count. The default is a good starting point when divisible.
   norm_num_groups: 32
 
@@ -186,7 +180,7 @@ model:
   # Required: no.
   # Valid: null or > 0.
   # Use: RoPE frequency base. Change it only as part of a deliberate long-context scaling strategy.
-  # Derived inverse-frequency arrays are fixed buffers and never optimized.
+  # Frequencies are derived per model call and never serialized or exposed to the optimizer.
   rope_base: null
 
   # Key: model.swiglu
@@ -215,27 +209,48 @@ model:
   # Warning: changing this changes model semantics and is checkpoint-incompatible.
   scale_emb: false
 
+  # Key: model.share_emb
+  # Type: boolean
+  # Default: false.
+  # Required: no.
+  # Valid: true | false.
+  # Use: true ties the language-model output projection to the input embedding matrix, reducing
+  # parameters. false creates a separate output matrix even when output_size equals vocab_size.
+  # Interaction: true requires model.output_size to be -1 or equal model.vocab_size. Changing this
+  # changes parameter topology and is checkpoint-incompatible.
+  share_emb: false
+
   # Key: model.norm_affine
   # Type: boolean
   # Default: true.
   # Required: no.
   # Valid: true | false.
-  # Use: enables learned affine parameters in Megalodon normalization layers.
+  # Use: enables learned affine parameters in RMSNorm and FFN LayerNorm. TimestepNorm remains affine.
   norm_affine: true
 
   # Key: model.attention_dropout
   # Type: number
   # Default: 0.0.
   # Required: no.
-  # Valid: 0.0 through 1.0 inclusive.
+  # Valid: >= 0.0 and < 1.0.
   # Use: Megalodon attention dropout. Nonzero makes the computed deterministic default false.
   attention_dropout: 0.0
+
+  # Key: model.attention_dropout_mode
+  # Type: enum string
+  # Default: post_softmax.
+  # Required: no.
+  # Valid: post_softmax | dropkey.
+  # Use: selects whether model.attention_dropout masks attention probabilities after softmax or
+  # masks attention scores before softmax. Only affects training when attention_dropout > 0;
+  # post_softmax is the recommended default.
+  attention_dropout_mode: post_softmax
 
   # Key: model.hidden_dropout
   # Type: number
   # Default: 0.0.
   # Required: no.
-  # Valid: 0.0 through 1.0 inclusive.
+  # Valid: >= 0.0 and < 1.0.
   # Use: Megalodon hidden-state dropout. Nonzero makes the computed deterministic default false.
   hidden_dropout: 0.0
 
@@ -244,18 +259,17 @@ model:
   # Default: 0.
   # Required: no.
   # Valid: an integer in [0, effective model.vocab_size).
-  # Use: padding token ID. HF auto-special-token setup may replace it. Megalodon zeros embeddings at
-  # every matching input position, so this must not collide with an ordinary content token.
-  # Warning: sharing it with eos_token_id warns because EOS may be treated as padding. With the
-  # default byte tokenizer and byte_offset 0, raw NUL also maps to pad ID 0.
+  # Use: padding filler ID and tokenizer metadata. HF auto-special-token setup may replace it;
+  # attention/segment masks, not token value, determine which positions are padding.
+  # Warning: sharing it with eos_token_id warns because external tooling may infer padding from IDs.
   pad_token_id: 0
 
   # Key: model.bos_token_id
   # Type: integer
   # Default: 1.
   # Required: no.
-  # Valid: in [0, effective vocab_size) when add_bos is true; byte mode additionally requires it
-  # below data.tokenizer.byte_offset.
+  # Valid: in [0, effective model.vocab_size); byte mode additionally requires it below
+  # data.tokenizer.byte_offset when add_bos is true.
   # Use: beginning-of-sequence token ID. HF auto-special-token setup may replace it. Periodic and
   # standalone generation consume this ID even when add_bos is false.
   bos_token_id: 1
@@ -264,8 +278,8 @@ model:
   # Type: integer
   # Default: 2.
   # Required: no.
-  # Valid: in [0, effective vocab_size) when add_eos is true; byte mode additionally requires it
-  # below data.tokenizer.byte_offset.
+  # Valid: in [0, effective model.vocab_size); byte mode additionally requires it below
+  # data.tokenizer.byte_offset when add_eos is true.
   # Use: end-of-sequence token ID. HF auto-special-token setup may replace it. Periodic and
   # standalone generation consume it even when add_eos is false; an out-of-vocabulary ID cannot
   # terminate generation.
@@ -275,9 +289,8 @@ model:
   # Type: enum string
   # Default: he.
   # Required: no.
-  # Valid: gaussian | xavier | he | bert | none.
-  # Use: Megalodon parameter initializer. he is recommended. none retains Equinox constructor
-  # initialization and only skips Megalodon's custom reinitialization.
+  # Valid: gaussian | xavier | he | bert.
+  # Use: Megalodon parameter initializer. he is recommended for fresh training.
   init_mode: he
 
   # Key: model.use_checkpoint
@@ -294,10 +307,10 @@ model:
   # Default: -1, computed as the effective vocabulary size.
   # Required: no.
   # Valid: -1 or > 0.
-  # Use: Megalodon output width. -1 resolves to effective vocab_size and ties the LM head to token
-  # embeddings; an explicit value equal to vocab_size also ties it, while another positive value
-  # creates an untied head. Language-model labels must remain below the resolved output size, so keep
-  # -1 unless a custom head is deliberate.
+  # Use: Megalodon output width. -1 resolves to effective model.vocab_size. Tying is controlled only
+  # by model.share_emb; when share_emb is false, the output matrix remains separate at every width.
+  # Interaction: share_emb=true requires -1 or model.vocab_size. Labels must remain below the
+  # resolved output size, so keep -1 unless a custom head is deliberate.
   output_size: -1
 
   # Key: model.use_associative_segment_scan
@@ -333,27 +346,28 @@ model:
   # Type: enum string
   # Default: float32.
   # Required: no.
-  # Valid: float32 | bfloat16; cannot be less precise than model.compute_dtype.
+  # Valid: float32 only.
   # Use: Megalodon GEMM preferred accumulation plus attention score/value matmul accumulation dtype,
-  # unrelated to train.grad_accum. It does not configure CEMA state. Recommend float32 for stability.
+  # unrelated to train.grad_accum. Megalodon requires FP32 for numerical stability.
   accum_dtype: float32
 
-  # Key: model.softmax_dtype
+  # Key: model.attention_softmax_dtype
   # Type: enum string
   # Default: float32.
   # Required: no.
   # Valid: float32 | bfloat16.
-  # Use: causal-LM loss log-softmax and loss-reduction dtype, not attention softmax. Recommend
-  # float32 for numerical stability.
-  softmax_dtype: float32
+  # Use: attention softmax dtype, independent of the language-model loss. FP32 is recommended;
+  # BF16 is an opt-in direct lower-precision reduction and is not released-source parity.
+  attention_softmax_dtype: float32
 
-  # Key: model.gemm_backend
+  # Key: model.loss_softmax_dtype
   # Type: enum string
-  # Default: default.
+  # Default: float32.
   # Required: no.
-  # Valid: default only.
-  # Use: Megalodon GEMM implementation selector; no alternate backend is currently supported.
-  gemm_backend: default
+  # Valid: float32 | bfloat16.
+  # Use: causal-LM log-softmax and loss-reduction dtype, independent of attention. FP32 is
+  # recommended for stable long-run training.
+  loss_softmax_dtype: float32
 
 # Key: data
 # Type: mapping
@@ -1076,8 +1090,8 @@ optim:
     # Required: no; used only when optim.name is muon.
     # Valid: true | false.
     # Lifecycle: experimental eligibility override.
-    # Use: when allow_all_2d is false, true adds only paths ending embed.weight to the conservative
-    # Muon whitelist; it does not verify actual weight tying or enable other 2D tensors.
+    # Use: when allow_all_2d is false and model.share_emb is true, adds only embed.weight to the
+    # conservative Muon whitelist. It has no effect on an untied embedding or other 2D tensors.
     allow_tied_embed: false
 
   # Key: optim.adam

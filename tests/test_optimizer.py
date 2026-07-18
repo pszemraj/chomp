@@ -93,26 +93,14 @@ def _leaf_map(tree: Any) -> dict[str, Any]:
     return {path_to_str(path): leaf for path, leaf in flat}
 
 
-def test_parameter_contract_keeps_rope_fixed(
+def test_parameter_contract_excludes_derived_rope_arrays(
     megalodon_parts: tuple[Config, Any, Any],
 ) -> None:
-    """RoPE frequencies stay outside optimizer state and unchanged after an update."""
+    """Derived RoPE state stays outside the array tree and optimizer state."""
     cfg, params, static = megalodon_parts
-    param_paths = _leaf_map(params)
-    assert "model.layers.[0].attn.inner.rotary.inv_freq" not in param_paths
-
     manifest = build_parameter_manifest(cfg, params, static)
-    entries = {entry["path"]: entry for entry in manifest["arrays"]}
-    rope_path = "model.layers.[0].attn.inner.rotary.inv_freq"
-    assert entries[rope_path] == {
-        "path": rope_path,
-        "shape": [8],
-        "dtype": "float32",
-        "trainable": False,
-        "family": "fixed_rope",
-        "optimizer_group": "fixed",
-        "decay": False,
-    }
+    assert not any("rotary" in entry["path"] for entry in manifest["arrays"])
+    assert all(entry["trainable"] for entry in manifest["arrays"])
 
     cfg = replace(cfg, optim=replace(cfg.optim, lr=1e-3, weight_decay=0.1, warmup_steps=0))
     tx, _ = build_optimizer(cfg, params)
@@ -120,10 +108,16 @@ def test_parameter_contract_keeps_rope_fixed(
     zeros = jax.tree_util.tree_map(jnp.zeros_like, params)
     updates, _ = tx.update(zeros, opt_state, params)
     updated = optax.apply_updates(params, updates)
-    before = _leaf_map(eqx.combine(params, static))
-    after = _leaf_map(eqx.combine(updated, static))
-    assert jnp.array_equal(before[rope_path], after[rope_path])
-    assert not jnp.array_equal(before["model.embed.weight"], after["model.embed.weight"])
+    before = eqx.combine(params, static)
+    after = eqx.combine(updated, static)
+    assert (
+        before.model.layers[0].attn.inner.rotary.dim == after.model.layers[0].attn.inner.rotary.dim
+    )
+    assert (
+        before.model.layers[0].attn.inner.rotary.base
+        == after.model.layers[0].attn.inner.rotary.base
+    )
+    assert not jnp.array_equal(before.model.embed.weight, after.model.embed.weight)
 
 
 def test_parameter_decay_policy_is_model_aware(
@@ -151,7 +145,8 @@ def test_parameter_contract_fails_closed_on_unknown_array() -> None:
     [
         pytest.param({"swiglu": True}, id="swiglu"),
         pytest.param({"norm_affine": False}, id="no-norm-affine"),
-        pytest.param({"output_size": 96}, id="untied-head"),
+        pytest.param({"output_size": 96}, id="custom-output"),
+        pytest.param({"share_emb": True}, id="tied-embedding"),
     ],
 )
 def test_parameter_contract_covers_supported_model_variants(
@@ -174,12 +169,13 @@ def test_parameter_contract_covers_supported_model_variants(
     cfg = Config(model=replace(base, **model_updates))
     params, static = build_model(cfg, key=jax.random.PRNGKey(1))
     manifest = build_parameter_manifest(cfg, params, static)
-    fixed = [entry for entry in manifest["arrays"] if not entry["trainable"]]
-    assert [entry["family"] for entry in fixed] == ["fixed_rope"]
+    assert all(entry["trainable"] for entry in manifest["arrays"])
     if model_updates.get("swiglu"):
         assert any(entry["path"].endswith("ffn.fc3.weight") for entry in manifest["arrays"])
     if model_updates.get("output_size"):
         assert any(entry["path"] == "lm_head.weight" for entry in manifest["arrays"])
+    if model_updates.get("share_emb"):
+        assert not any(entry["path"] == "lm_head.weight" for entry in manifest["arrays"])
 
 
 def test_muon_param_labels_whitelist_excludes_embed(
@@ -209,12 +205,16 @@ def test_muon_param_labels_allow_all_2d(megalodon_parts: tuple[Config, Any, Any]
 
 
 def test_muon_param_labels_allow_tied_embed(megalodon_parts: tuple[Config, Any, Any]) -> None:
-    """allow_embed should include the tied embedding matrix."""
+    """allow_tied_embed should affect only an actually tied embedding matrix."""
     cfg, params, _ = megalodon_parts
     muon = replace(cfg.optim.muon, allow_tied_embed=True)
     cfg = replace(cfg, optim=replace(cfg.optim, name="muon", muon=muon))
     mapping = _leaf_map(parameter_optimizer_groups(cfg, params))
+    assert mapping["model.embed.weight"] == "adam"
 
+    cfg = replace(cfg, model=replace(cfg.model, share_emb=True))
+    params, _ = build_model(cfg, key=jax.random.PRNGKey(2))
+    mapping = _leaf_map(parameter_optimizer_groups(cfg, params))
     assert mapping["model.embed.weight"] == "muon"
 
 
@@ -428,8 +428,7 @@ def test_grad_accum_equivalence_dummy_local_text() -> None:
     assert jnp.allclose(metrics["loss"], loss_ref)
 
 
-@pytest.mark.parametrize("model_accum_dtype", ["float32", "bfloat16"])
-def test_bf16_params_accumulate_grads_in_fp32(model_accum_dtype: str) -> None:
+def test_bf16_params_accumulate_grads_in_fp32() -> None:
     """Gradient accumulation must always run in fp32.
 
     With bf16 params, zeros_like-initialized accumulators would sum
@@ -445,7 +444,7 @@ def test_bf16_params_accumulate_grads_in_fp32(model_accum_dtype: str) -> None:
             vocab_size=256,
             d_model=32,
             dropout=0.0,
-            accum_dtype=model_accum_dtype,
+            accum_dtype="float32",
         ),
         data=DataConfig(
             backend="local_text",

@@ -20,7 +20,8 @@ model:
   param_dtype: float32
   compute_dtype: bfloat16
   accum_dtype: float32
-  softmax_dtype: float32
+  attention_softmax_dtype: float32
+  loss_softmax_dtype: float32
 
 data:
   backend: hf

@@ -71,7 +71,7 @@ enable strict packed semantics. Both modes place multiple unrelated documents
 in one sequence, and for a recurrent-state architecture cross-document bleed
 means CEMA/TimestepNorm contamination, not just attention leakage, so
 isolation is required by default wherever documents are packed. With
-megalodon-jax >= 0.1.2 this is **full state isolation**: each packed document
+megalodon-jax >= 0.2.1 this is **full state isolation**: each packed document
 computes as if it were run alone:
 
 - segment-isolated attention (masked by contiguous segment *runs*, so a reused
@@ -85,7 +85,7 @@ computes as if it were run alone:
 chomp gates this path on the backend's `supports_segment_reset` capability
 flag and fails fast at startup if the installed megalodon-jax predates it
 (older versions accepted the same kwargs but only isolated attention).
-Independently of packing mode, chomp requires **megalodon-jax >= 0.1.2 across
+Independently of packing mode, chomp requires **megalodon-jax >= 0.2.1 across
 the board**: every megalodon model build (train and generate) enforces the
 version floor, so a stale environment fails immediately rather than running
 degraded semantics anywhere.

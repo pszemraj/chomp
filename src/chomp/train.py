@@ -668,7 +668,7 @@ def _validate_packing_capabilities(cfg: Config, *, params: Any, static: Any) -> 
         f"Strict segment isolation (packing_mode={cfg.data.packing_mode!r}) was "
         "requested but the model backend does not "
         "advertise full segment isolation (supports_segment_reset capability flag, "
-        "megalodon-jax >= 0.1.2: attention + ComplexEMA + TimestepNorm reset at "
+        "megalodon-jax >= 0.2.1: attention + ComplexEMA + TimestepNorm reset at "
         "packed document boundaries). Set data.packing_strict_segments=false to "
         "run in non-strict mode or upgrade megalodon-jax."
     )
@@ -1118,9 +1118,11 @@ def make_train_step(
         # low-order bits across the scan.
         loss0 = jnp.zeros((), dtype=jnp.float32)
         grad0 = jax.tree_util.tree_map(
-            lambda x: jnp.zeros(x.shape, dtype=grad_accum_dtype)
-            if jnp.issubdtype(x.dtype, jnp.floating)
-            else jnp.zeros_like(x),
+            lambda x: (
+                jnp.zeros(x.shape, dtype=grad_accum_dtype)
+                if jnp.issubdtype(x.dtype, jnp.floating)
+                else jnp.zeros_like(x)
+            ),
             state.params,
         )
         token0 = jnp.zeros((), dtype=jnp.int32)

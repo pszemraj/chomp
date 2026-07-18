@@ -4,17 +4,14 @@ A minimal, single-GPU JAX/Equinox pretraining harness for [Megalodon-JAX](https:
 
 ## Install
 
-The project pins the runtime versions covered by its checkpoint/resume suite.
-For NVIDIA CUDA 13, install the matching JAX plugin first; CPU users can skip
-the first command. Then install Chomp without changing the pinned core versions:
+For NVIDIA GPUs with pip-managed CUDA 13 libraries, install Chomp with its CUDA extra:
 
 ```bash
-pip install "jax[cuda13]==0.8.2"
 git clone https://github.com/pszemraj/chomp.git && cd chomp
-pip install -e .
+pip install -e ".[cuda13]"
 ```
 
-Other accelerators need the JAX 0.8.2 plugin for that platform.
+For a system CUDA 13 installation, install `jax[cuda13-local]>=0.10.2,<0.11` first and then `pip install -e .`. CPU users need only `pip install -e .`. Chomp supports the JAX 0.10.x and Megalodon-JAX 0.2.x release lines from the minimum versions declared in `pyproject.toml`; checkpoint metadata records the exact resolved runtime and rejects version drift on resume.
 
 ## Quick start
 

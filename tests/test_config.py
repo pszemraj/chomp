@@ -70,23 +70,38 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
             lambda cfg: replace(cfg, model=replace(cfg.model, model_dim=130, num_heads=8)),
             "model_dim",
         ),
-        (lambda cfg: replace(cfg, model=replace(cfg.model, dropout=1.1)), "model.dropout"),
+        (lambda cfg: replace(cfg, model=replace(cfg.model, dropout=1.0)), "model.dropout"),
         (lambda cfg: replace(cfg, model=replace(cfg.model, z_dim=65)), "model.z_dim"),
+        (
+            lambda cfg: replace(cfg, model=replace(cfg.model, z_dim=72, num_heads=8)),
+            "even for RoPE",
+        ),
         (lambda cfg: replace(cfg, model=replace(cfg.model, value_dim=130)), "model.value_dim"),
         (
             lambda cfg: replace(cfg, model=replace(cfg.model, norm_num_groups=30)),
             "norm_num_groups",
         ),
+        (
+            lambda cfg: replace(cfg, model=replace(cfg.model, norm_num_groups=128)),
+            "smaller than model.model_dim",
+        ),
         (lambda cfg: replace(cfg, model=replace(cfg.model, norm_eps=0.0)), "norm_eps"),
-        (lambda cfg: replace(cfg, model=replace(cfg.model, max_cache_len=8)), "max_cache_len"),
+        (
+            lambda cfg: replace(cfg, model=replace(cfg.model, attention_window=0)),
+            "attention_window",
+        ),
         (lambda cfg: replace(cfg, model=replace(cfg.model, rope_base=0.0)), "rope_base"),
         (
             lambda cfg: replace(cfg, model=replace(cfg.model, attention_dropout=-0.1)),
             "attention_dropout",
         ),
         (
-            lambda cfg: replace(cfg, model=replace(cfg.model, hidden_dropout=1.1)),
+            lambda cfg: replace(cfg, model=replace(cfg.model, hidden_dropout=1.0)),
             "hidden_dropout",
+        ),
+        (
+            lambda cfg: replace(cfg, model=replace(cfg.model, attention_dropout_mode="other")),
+            "attention_dropout_mode",
         ),
         (lambda cfg: replace(cfg, model=replace(cfg.model, init_mode="invalid")), "init_mode"),
         (
@@ -105,15 +120,23 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
             "accum_dtype",
         ),
         (
-            lambda cfg: replace(cfg, model=replace(cfg.model, softmax_dtype="float16")),
-            "softmax_dtype",
+            lambda cfg: replace(cfg, model=replace(cfg.model, attention_softmax_dtype="float16")),
+            "attention_softmax_dtype",
         ),
         (
-            lambda cfg: replace(cfg, model=replace(cfg.model, gemm_backend="triton")),
-            "gemm_backend",
+            lambda cfg: replace(cfg, model=replace(cfg.model, loss_softmax_dtype="float16")),
+            "loss_softmax_dtype",
         ),
         (lambda cfg: replace(cfg, model=replace(cfg.model, output_size=0)), "output_size"),
+        (
+            lambda cfg: replace(cfg, model=replace(cfg.model, share_emb=True, output_size=128)),
+            "share_emb",
+        ),
         (lambda cfg: replace(cfg, model=replace(cfg.model, pad_token_id=-1)), "pad_token_id"),
+        (
+            lambda cfg: replace(cfg, model=replace(cfg.model, eos_token_id=cfg.model.vocab_size)),
+            "eos_token_id",
+        ),
         (lambda cfg: replace(cfg, train=replace(cfg.train, seed=-1)), "train.seed"),
         (lambda cfg: replace(cfg, train=replace(cfg.train, eval_every=-1)), "eval_every"),
         (lambda cfg: replace(cfg, train=replace(cfg.train, generate_every=-1)), "generate_every"),
@@ -459,7 +482,7 @@ def test_strict_packed_rejects_disabled_boundary_masking(mode: str) -> None:
     """Strict packing with mask_boundary_loss=false must fail validation.
 
     The backend excludes cross-segment label pairs whenever segment_ids are
-    passed (megalodon-jax >= 0.1.2), so disabling chomp's pre-masking desyncs
+    passed (megalodon-jax >= 0.2.1), so disabling chomp's pre-masking desyncs
     host-side token counts from the model's loss denominator — a silent change
     to gradient normalization, not a preference.
     """

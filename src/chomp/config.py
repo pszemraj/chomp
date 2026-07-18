@@ -110,7 +110,7 @@ class ModelConfig:
     d_model: int = 128
     dropout: float = 0.0
 
-    # Megalodon fields (subset; add as needed)
+    # Megalodon architecture fields
     model_dim: int = 128
     num_layers: int = 2
     num_heads: int = 1
@@ -119,25 +119,26 @@ class ModelConfig:
     ffn_hidden_dim: int = 256
     cema_ndim: int = 16
     chunk_size: int = 128
-    max_cache_len: int | None = None
-    cache_unbounded: bool = False
+    attention_window: int | None = None
     norm_num_groups: int = 32
     norm_eps: float = 1e-5
     rope_base: float | None = None
     swiglu: bool = False
     rescale_nffn: bool = False
     scale_emb: bool = False
+    share_emb: bool = False
     norm_affine: bool = True
     attention_dropout: float = 0.0
+    attention_dropout_mode: Literal["post_softmax", "dropkey"] = "post_softmax"
     hidden_dropout: float = 0.0
     pad_token_id: int = 0
     bos_token_id: int = 1
     eos_token_id: int = 2
-    init_mode: Literal["gaussian", "xavier", "he", "bert", "none"] = "he"
+    init_mode: Literal["gaussian", "xavier", "he", "bert"] = "he"
     use_checkpoint: bool = False
     output_size: int = -1
     # Segmented CEMA path selection for strict packed training (megalodon-jax
-    # >= 0.1.2). True = parallel associative scan (fast, higher peak memory);
+    # >= 0.2.1). True = parallel associative scan (fast, higher peak memory);
     # False = sequential lax.scan fallback (O(1) memory). Ignored unless
     # segment_ids reach the model (bin/multipack + packing_strict_segments).
     use_associative_segment_scan: bool = True
@@ -150,13 +151,10 @@ class ModelConfig:
     param_dtype: Literal["float32"] = "float32"
     compute_dtype: Literal["float32", "bfloat16"] = "bfloat16"
     # Model-internal accumulation only (attention/CEMA reductions inside
-    # megalodon-jax). Harness gradient accumulation/clipping is always fp32
-    # and deliberately ignores this knob (see make_train_step).
-    accum_dtype: Literal["float32", "bfloat16"] = "float32"
-    softmax_dtype: Literal["float32", "bfloat16"] = "float32"
-
-    # Megalodon-jax currently only supports "default"
-    gemm_backend: Literal["default"] = "default"
+    # megalodon-jax); both it and harness gradient accumulation stay fp32.
+    accum_dtype: Literal["float32"] = "float32"
+    attention_softmax_dtype: Literal["float32", "bfloat16"] = "float32"
+    loss_softmax_dtype: Literal["float32", "bfloat16"] = "float32"
 
 
 @dataclass(frozen=True)
@@ -908,10 +906,15 @@ def _validate_model(cfg: Config) -> None:
     """Validate model-related config fields."""
     if cfg.model.vocab_size <= 0:
         _vfail(f"model.vocab_size must be positive, got {cfg.model.vocab_size}")
-    if cfg.model.pad_token_id < 0:
-        _vfail(f"model.pad_token_id must be >= 0, got {cfg.model.pad_token_id}")
-    if not 0 <= cfg.model.dropout <= 1:
-        _vfail(f"model.dropout must be in [0, 1], got {cfg.model.dropout}")
+    for name, token_id in (
+        ("pad_token_id", cfg.model.pad_token_id),
+        ("bos_token_id", cfg.model.bos_token_id),
+        ("eos_token_id", cfg.model.eos_token_id),
+    ):
+        if not 0 <= token_id < cfg.model.vocab_size:
+            _vfail(f"model.{name} must be in [0, {cfg.model.vocab_size}), got {token_id}")
+    if not 0 <= cfg.model.dropout < 1:
+        _vfail(f"model.dropout must be in [0, 1), got {cfg.model.dropout}")
     if cfg.model.param_dtype != "float32":
         _vfail(
             f"model.param_dtype must be 'float32', got {cfg.model.param_dtype!r}: "
@@ -958,6 +961,12 @@ def _validate_model(cfg: Config) -> None:
                 f"model.model_dim ({cfg.model.model_dim}) must be divisible by "
                 f"model.norm_num_groups ({cfg.model.norm_num_groups})"
             )
+        if cfg.model.norm_num_groups == cfg.model.model_dim:
+            _vfail(
+                "model.norm_num_groups must be smaller than model.model_dim: "
+                "Megalodon featurewise TimestepNorm requires a learned prior that "
+                "the training model does not configure"
+            )
         if cfg.model.chunk_size <= 0:
             _vfail(f"model.chunk_size must be positive, got {cfg.model.chunk_size}")
         if cfg.model.chunk_size > cfg.train.seq_len:
@@ -969,26 +978,24 @@ def _validate_model(cfg: Config) -> None:
                 f"train.seq_len ({cfg.train.seq_len}) must be divisible by "
                 f"model.chunk_size ({cfg.model.chunk_size})"
             )
-        if cfg.model.max_cache_len is not None:
-            if cfg.model.max_cache_len <= 0:
-                _vfail(
-                    f"model.max_cache_len must be positive when set, got {cfg.model.max_cache_len}"
-                )
-            if cfg.model.max_cache_len < cfg.model.chunk_size:
-                _vfail(
-                    f"model.max_cache_len ({cfg.model.max_cache_len}) must be >= "
-                    f"model.chunk_size ({cfg.model.chunk_size})"
-                )
+        if cfg.model.attention_window is not None and cfg.model.attention_window <= 0:
+            _vfail(
+                "model.attention_window must be positive when set, got "
+                f"{cfg.model.attention_window}"
+            )
         if cfg.model.rope_base is not None and cfg.model.rope_base <= 0:
             _vfail(f"model.rope_base must be positive when set, got {cfg.model.rope_base}")
-        if not 0 <= cfg.model.attention_dropout <= 1:
-            _vfail(f"model.attention_dropout must be in [0, 1], got {cfg.model.attention_dropout}")
-        if not 0 <= cfg.model.hidden_dropout <= 1:
-            _vfail(f"model.hidden_dropout must be in [0, 1], got {cfg.model.hidden_dropout}")
-    if cfg.model.compute_dtype == "float32" and cfg.model.accum_dtype != "float32":
-        _vfail("model.accum_dtype must be at least as precise as model.compute_dtype")
+        head_dim = cfg.model.z_dim // cfg.model.num_heads
+        if head_dim % 2 != 0:
+            _vfail(f"model.z_dim / model.num_heads must be even for RoPE, got {head_dim}")
+        if not 0 <= cfg.model.attention_dropout < 1:
+            _vfail(f"model.attention_dropout must be in [0, 1), got {cfg.model.attention_dropout}")
+        if not 0 <= cfg.model.hidden_dropout < 1:
+            _vfail(f"model.hidden_dropout must be in [0, 1), got {cfg.model.hidden_dropout}")
     if cfg.model.output_size != -1 and cfg.model.output_size <= 0:
         _vfail(f"model.output_size must be -1 or positive, got {cfg.model.output_size}")
+    if cfg.model.share_emb and cfg.model.output_size not in (-1, cfg.model.vocab_size):
+        _vfail("model.share_emb=true requires model.output_size to be -1 or equal model.vocab_size")
 
     if cfg.model.pad_token_id == cfg.model.eos_token_id:
         warnings.warn(
@@ -1082,7 +1089,7 @@ def _validate_data(cfg: Config) -> None:
         _vfail(
             "data.mask_boundary_loss=false is incompatible with strict segment "
             "isolation: the backend excludes cross-segment label pairs from the "
-            "loss whenever segment_ids are passed (megalodon-jax >= 0.1.2), "
+            "loss whenever segment_ids are passed (megalodon-jax >= 0.2.1), "
             "while host-side token counts would still include them — silently "
             "changing token-weighted grad accumulation and loss_tokens. Keep "
             "mask_boundary_loss=true, or set data.packing_strict_segments=false "

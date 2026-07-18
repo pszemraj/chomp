@@ -20,11 +20,7 @@ a dependency update from silently changing the trained model. The resulting
 `parameter-manifest.json` records each path, shape, dtype, family, optimizer
 group, and weight-decay status. Its hash is a hard checkpoint-resume input.
 
-Megalodon's `rotary.inv_freq` arrays are derived RoPE constants. They remain in
-the fixed model partition, never enter optimizer state, and remain bit-identical
-through training. Trainable CEMA coefficients remain parameters. Moving this
-derived constant into the upstream model's static contract is tracked in
-[Development Guide: tracked follow-ups](dev.md#tracked-follow-ups).
+Megalodon-JAX 0.2.1 derives RoPE frequencies from static dimension/base values during the model call, so no rotary array appears in the model tree, parameter manifest, optimizer state, or checkpoint. Trainable CEMA coefficients remain parameters.
 
 For `optim.name=muon`, the harness uses explicit parameter partitioning:
 
@@ -37,9 +33,7 @@ AdamW decay is also path-aware. It applies to token embeddings and dense
 projection weights. Biases, norm/scale parameters, attention affine offsets,
 and all CEMA coefficients receive no decoupled weight decay.
 
-By default, the projection whitelist excludes embeddings and other non-matmul
-matrices. `optim.muon.allow_tied_embed` adds the token embedding, while
-`optim.muon.allow_all_2d` replaces the whitelist with every 2D tensor.
+By default, the projection whitelist excludes embeddings and other non-matmul matrices. `optim.muon.allow_tied_embed` adds the token embedding only when `model.share_emb=true`; it has no effect on an untied model. `optim.muon.allow_all_2d` replaces the whitelist with every 2D tensor.
 
 ## Why Muon needs special handling
 

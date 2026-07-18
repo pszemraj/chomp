@@ -20,17 +20,17 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-# NOTE: exact runtime pins define the environment covered by the resume and
-# checkpoint suite. JAX CUDA plugins remain platform-specific; see README.
+# Stateful data/checkpoint dependencies stay exact. The model stack follows
+# compatible release lines; checkpoints record and hard-gate resolved versions.
 dependencies = [
-  "jax==0.8.2",
-  "jaxlib==0.8.2",
-  "equinox==0.13.2",
-  # Commit pin includes megalodon-jax 0.1.2 supports_segment_reset support.
+  "jax>=0.10.2,<0.11",
+  "jaxlib>=0.10.2,<0.11",
+  "equinox>=0.13.8,<0.14",
+  # 0.2.1 is the first published release with the model/config contract used here.
   # The runtime version check remains a clear failure for editable installs.
-  "megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git@c0612735a1861dd5d72ef40937cd91b96dd8ac0d",
+  "megalodon-jax>=0.2.1,<0.3",
   "packaging==25.0",
-  "optax @ git+https://github.com/google-deepmind/optax.git@141c8d5e3746540163da8c7edf5a0072369a27c8",
+  "optax>=0.2.8,<0.3",
   "orbax-checkpoint==0.11.31",
   "PyYAML==6.0.3",
   "tqdm==4.67.1",
@@ -53,6 +53,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cuda13 = ["jax[cuda13]>=0.10.2,<0.11"]
 dev = ["pytest==9.0.1", "ruff==0.14.11"]
 
 [project.scripts]
