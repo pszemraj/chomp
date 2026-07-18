@@ -484,7 +484,7 @@ def test_external_checkpoint_root_is_locked_owned_and_resumable(
 ) -> None:
     """One external Orbax tree must belong to exactly one inactive or active run."""
     checkpoint_root = tmp_path / "external-checkpoints"
-    cfg, config_src = make_small_run_cfg(tmp_path, run_subdir="owner-run", decay_steps=1)
+    cfg = make_small_run_cfg(tmp_path, run_subdir="owner-run", decay_steps=1)
     cfg = replace(
         cfg,
         checkpoint=replace(cfg.checkpoint, root_dir=str(checkpoint_root)),
@@ -495,22 +495,22 @@ def test_external_checkpoint_root_is_locked_owned_and_resumable(
         RunDirectoryLock(checkpoint_root, resource_name="Checkpoint root"),
         pytest.raises(RuntimeError, match="Checkpoint root is already active"),
     ):
-        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+        run(cfg, config_path=None, resume="none", dry_run=False)
     assert not run_dir.exists()
     assert not checkpoint_root.exists()
 
-    assert run(cfg, config_path=str(config_src), resume="none", dry_run=False) == run_dir
+    assert run(cfg, config_path=None, resume="none", dry_run=False) == run_dir
     marker = json.loads((checkpoint_root / ".chomp-owner.json").read_text())
     assert marker == {"schema_version": 1, "run_dir": str(run_dir.resolve())}
-    assert run(cfg, config_path=str(config_src), resume="latest", dry_run=False) == run_dir
+    assert run(cfg, config_path=None, resume="latest", dry_run=False) == run_dir
 
-    other_cfg, _ = make_small_run_cfg(tmp_path, run_subdir="other-run", decay_steps=1)
+    other_cfg = make_small_run_cfg(tmp_path, run_subdir="other-run", decay_steps=1)
     other_cfg = replace(
         other_cfg,
         checkpoint=replace(other_cfg.checkpoint, root_dir=str(checkpoint_root)),
     )
     with pytest.raises(RuntimeError, match="belongs to run"):
-        run(other_cfg, config_path=str(config_src), resume="none", dry_run=False)
+        run(other_cfg, config_path=None, resume="none", dry_run=False)
     assert not Path(other_cfg.logging.run_dir or "").exists()
 
 
@@ -529,8 +529,8 @@ def test_run_closes_manager_and_preflights_metadata(
         real_close(manager)
 
     monkeypatch.setattr(ocp.CheckpointManager, "close", _tracked_close)
-    cfg, config_src = make_small_run_cfg(tmp_path, decay_steps=1)
-    run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+    cfg = make_small_run_cfg(tmp_path, decay_steps=1)
+    run(cfg, config_path=None, resume="none", dry_run=False)
     assert len(close_calls) == 1
 
     restore_calls = 0
@@ -546,7 +546,7 @@ def test_run_closes_manager_and_preflights_metadata(
     close_calls.clear()
 
     with pytest.raises(RuntimeError, match="local_text_hash"):
-        run(incompatible, config_path=str(config_src), resume="latest", dry_run=False)
+        run(incompatible, config_path=None, resume="latest", dry_run=False)
 
     assert restore_calls == 0
     assert len(close_calls) == 1
@@ -554,15 +554,15 @@ def test_run_closes_manager_and_preflights_metadata(
 
 def test_resume_requires_existing_tokenizer_snapshot(tmp_path: Path) -> None:
     """A missing tokenizer snapshot must fail before mutating the run directory."""
-    cfg, config_src = make_small_run_cfg(tmp_path, decay_steps=1)
-    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+    cfg = make_small_run_cfg(tmp_path, decay_steps=1)
+    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
     tokenizer_dir = run_dir / "tokenizer"
     shutil.rmtree(tokenizer_dir)
     resume_record = run_dir / "config_resume.json"
     assert not resume_record.exists()
 
     with pytest.raises(FileNotFoundError, match="tokenizer snapshot is missing"):
-        run(cfg, config_path=str(config_src), resume="latest", dry_run=False)
+        run(cfg, config_path=None, resume="latest", dry_run=False)
 
     assert not tokenizer_dir.exists()
     assert not resume_record.exists()
@@ -570,11 +570,11 @@ def test_resume_requires_existing_tokenizer_snapshot(tmp_path: Path) -> None:
 
 def test_checkpoint_saves_final_step(tmp_path: Path) -> None:
     """Final step should be checkpointed even if save_every does not divide steps."""
-    cfg, config_src = make_small_run_cfg(tmp_path, decay_steps=2)
+    cfg = make_small_run_cfg(tmp_path, decay_steps=2)
     cfg = replace(cfg, train=replace(cfg.train, steps=3))
     cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=2))
 
-    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
     ckpt_dir = default_ckpt_dir(run_dir)
 
     assert (ckpt_dir / "2").exists(), "expected checkpoint at save interval"
@@ -583,13 +583,13 @@ def test_checkpoint_saves_final_step(tmp_path: Path) -> None:
 
 def test_explicit_resume_rejects_older_retained_step(tmp_path: Path) -> None:
     """In-place rollback must not collide with newer finalized checkpoints."""
-    cfg, config_src = make_small_run_cfg(tmp_path, decay_steps=4)
+    cfg = make_small_run_cfg(tmp_path, decay_steps=4)
     cfg = replace(cfg, train=replace(cfg.train, steps=4))
     cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, max_to_keep=4))
-    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
 
     with pytest.raises(RuntimeError, match="newer step 4 already exists"):
-        run(cfg, config_path=str(config_src), resume=3, dry_run=False)
+        run(cfg, config_path=None, resume=3, dry_run=False)
 
     assert _checkpoint_steps(run_dir) == {1, 2, 3, 4}
 
@@ -635,7 +635,7 @@ def test_preemption_finishes_one_step_and_writes_aligned_checkpoint(
     """A cooperative stop after train_step should save that exact completed step."""
     import chomp.train as train_mod
 
-    cfg, config_src = make_small_run_cfg(tmp_path, decay_steps=5)
+    cfg = make_small_run_cfg(tmp_path, decay_steps=5)
     cfg = replace(cfg, train=replace(cfg.train, steps=5))
     cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=100))
 
@@ -656,7 +656,7 @@ def test_preemption_finishes_one_step_and_writes_aligned_checkpoint(
     monkeypatch.setattr(train_mod, "make_train_step", _make_stopping_step)
 
     with pytest.raises(TrainingPreempted) as exc_info:
-        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+        run(cfg, config_path=None, resume="none", dry_run=False)
     assert exc_info.value.signal_name == "SIGTERM"
     assert exc_info.value.exit_code == 143
     run_dir = exc_info.value.run_dir
@@ -677,7 +677,7 @@ def test_preemption_during_final_logging_tail_is_not_lost(
     """A signal after the last post-update poll must still report preemption."""
     import chomp.train as train_mod
 
-    cfg, config_src = make_small_run_cfg(tmp_path, decay_steps=3)
+    cfg = make_small_run_cfg(tmp_path, decay_steps=3)
     cfg = replace(cfg, train=replace(cfg.train, steps=3, log_every=1))
     cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=100))
 
@@ -693,7 +693,7 @@ def test_preemption_during_final_logging_tail_is_not_lost(
     monkeypatch.setattr(train_mod.MetricsWriter, "write", _write_and_signal)
 
     with pytest.raises(TrainingPreempted) as exc_info:
-        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+        run(cfg, config_path=None, resume="none", dry_run=False)
 
     assert exc_info.value.signal_name == "SIGTERM"
     rows = read_jsonl(exc_info.value.run_dir / cfg.logging.metrics_file)
@@ -705,7 +705,7 @@ def test_run_enforces_device_before_artifact_setup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The public Python API must enforce the GPU policy before writing a run."""
-    cfg, config_src = make_small_run_cfg(tmp_path)
+    cfg = make_small_run_cfg(tmp_path)
     cfg = replace(cfg, train=replace(cfg.train, allow_cpu=False))
     run_dir = Path(cfg.logging.run_dir or "")
     calls: list[bool] = []
@@ -717,7 +717,7 @@ def test_run_enforces_device_before_artifact_setup(
     monkeypatch.setattr("chomp.train.validate_default_device", _reject_device)
 
     with pytest.raises(RuntimeError, match="injected non-CUDA backend"):
-        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+        run(cfg, config_path=None, resume="none", dry_run=False)
 
     assert calls == [False]
     assert not run_dir.exists()
@@ -725,11 +725,11 @@ def test_run_enforces_device_before_artifact_setup(
 
 def test_run_lock_fails_before_fresh_artifact_setup(tmp_path: Path) -> None:
     """A competing owner must prevent even fresh config/tokenizer artifact writes."""
-    cfg, config_src = make_small_run_cfg(tmp_path)
+    cfg = make_small_run_cfg(tmp_path)
     run_dir = Path(cfg.logging.run_dir or "")
 
     with RunDirectoryLock(run_dir), pytest.raises(RuntimeError, match="already active"):
-        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+        run(cfg, config_path=None, resume="none", dry_run=False)
 
     assert not run_dir.exists()
 
@@ -739,7 +739,7 @@ def test_exact_eof_after_batch_boundary_saves_final_checkpoint(
     tmp_path: Path, grain_prefetch: int
 ) -> None:
     """Exact EOF after a completed batch should still save the final checkpoint."""
-    cfg, config_src = make_small_run_cfg(tmp_path, local_text="x" * 48, decay_steps=10)
+    cfg = make_small_run_cfg(tmp_path, local_text="x" * 48, decay_steps=10)
     cfg = replace(cfg, train=replace(cfg.train, steps=10, grad_accum=1))
     cfg = replace(
         cfg,
@@ -752,7 +752,7 @@ def test_exact_eof_after_batch_boundary_saves_final_checkpoint(
     )
     cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=2))
 
-    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
 
     metrics_path = run_dir / cfg.logging.metrics_file
     rows = read_jsonl(metrics_path)
@@ -782,15 +782,15 @@ def test_crash_between_fetch_and_step_skips_final_checkpoint(
         return replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=2))
 
     # Continuous reference: 5 steps, periodic saves at 2 and 4, final at 5.
-    cfg_cont, config_src = make_small_run_cfg(tmp_path, run_subdir="run_cont", decay_steps=5)
+    cfg_cont = make_small_run_cfg(tmp_path, run_subdir="run_cont", decay_steps=5)
     cfg_cont = _finish_cfg(cfg_cont)
-    run_dir_cont = run(cfg_cont, config_path=str(config_src), resume="none", dry_run=False)
+    run_dir_cont = run(cfg_cont, config_path=None, resume="none", dry_run=False)
 
     # Crashing run: identical data/seed; the placement check runs once per
     # loop iteration (after fetch, before train_step) — blow up on exactly
     # the 4th call, i.e. mid-step 4 with state at step 3 and the last
     # periodic save at step 2.
-    cfg_crash, _ = make_small_run_cfg(tmp_path, run_subdir="run_crash", decay_steps=5)
+    cfg_crash = make_small_run_cfg(tmp_path, run_subdir="run_crash", decay_steps=5)
     cfg_crash = _finish_cfg(cfg_crash)
     cfg_crash = replace(cfg_crash, debug=replace(cfg_crash.debug, check_device_every=1))
 
@@ -804,7 +804,7 @@ def test_crash_between_fetch_and_step_skips_final_checkpoint(
 
     monkeypatch.setattr("chomp.train.assert_batch_on_device", _exploding_assert)
     with pytest.raises(RuntimeError, match="injected crash"):
-        run(cfg_crash, config_path=str(config_src), resume="none", dry_run=False)
+        run(cfg_crash, config_path=None, resume="none", dry_run=False)
 
     steps_on_disk = _checkpoint_steps(Path(cfg_crash.logging.run_dir))
     assert steps_on_disk == {2}, (
@@ -812,7 +812,7 @@ def test_crash_between_fetch_and_step_skips_final_checkpoint(
     )
 
     # Resume from the periodic checkpoint and finish; batches 3-5 replay.
-    run(cfg_crash, config_path=str(config_src), resume="latest", dry_run=False)
+    run(cfg_crash, config_path=None, resume="latest", dry_run=False)
 
     # Bit-exact resume contract: both step-5 train states identical.
     states = _restore_run_states(
@@ -834,7 +834,7 @@ def test_finite_partial_batch_trains_and_saves_aligned_checkpoint(tmp_path: Path
     # so windows differ): seven full seq_len=16 rows plus one padded four-token
     # row. grad_accum=2 therefore produces four optimizer batches.
     text = "".join(chr(97 + (i * 7) % 26) for i in range(116))
-    cfg, config_src = make_small_run_cfg(tmp_path, local_text=text, decay_steps=10)
+    cfg = make_small_run_cfg(tmp_path, local_text=text, decay_steps=10)
     cfg = replace(cfg, train=replace(cfg.train, steps=10, grad_accum=2))
     cfg = replace(
         cfg,
@@ -845,7 +845,7 @@ def test_finite_partial_batch_trains_and_saves_aligned_checkpoint(tmp_path: Path
     )
     cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=2))
 
-    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
 
     metrics_path = run_dir / cfg.logging.metrics_file
     rows = read_jsonl(metrics_path)
@@ -856,7 +856,7 @@ def test_finite_partial_batch_trains_and_saves_aligned_checkpoint(tmp_path: Path
 
     # Resume sees exact EOF at the saved aligned iterator state; it performs no
     # additional optimizer step and retains the final checkpoint.
-    run(cfg, config_path=str(config_src), resume="latest", dry_run=False)
+    run(cfg, config_path=None, resume="latest", dry_run=False)
     rows = read_jsonl(metrics_path)
     assert len([row for row in rows if row.get("step") == 4 and "loss" in row]) == 1
     assert _checkpoint_steps(run_dir) == {2, 4}
@@ -949,8 +949,8 @@ def test_resume_bit_exact_with_prefetch_and_window_shuffle(
     # every 101 windows — far beyond the 12 this test consumes.
     text = "".join(chr(97 + (i * 7) % 26) for i in range(101))
 
-    def _make_cfg(subdir: str, steps: int) -> tuple[Config, Path]:
-        cfg, config_src = make_small_run_cfg(tmp_path, run_subdir=subdir, decay_steps=6)
+    def _make_cfg(subdir: str, steps: int) -> Config:
+        cfg = make_small_run_cfg(tmp_path, run_subdir=subdir, decay_steps=6)
         cfg = replace(cfg, train=replace(cfg.train, steps=steps, grad_accum=2))
         cfg = replace(
             cfg,
@@ -964,15 +964,15 @@ def test_resume_bit_exact_with_prefetch_and_window_shuffle(
         # save_every > steps: the interrupted run's step-3 checkpoint is the
         # finally-block final save, taken while prefetch is ahead and 6
         # windows into shuffle block 0 (blocks span 8 windows; 2 per step).
-        return replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=4)), config_src
+        return replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=4))
 
-    cfg_cont, config_src = _make_cfg("run_pf_cont", steps=6)
-    run_dir_cont = run(cfg_cont, config_path=str(config_src), resume="none", dry_run=False)
+    cfg_cont = _make_cfg("run_pf_cont", steps=6)
+    run_dir_cont = run(cfg_cont, config_path=None, resume="none", dry_run=False)
 
-    cfg_int, _ = _make_cfg("run_pf_int", steps=3)
-    run_dir_int = run(cfg_int, config_path=str(config_src), resume="none", dry_run=False)
-    cfg_resume, _ = _make_cfg("run_pf_int", steps=6)
-    resumed_run_dir = run(cfg_resume, config_path=str(config_src), resume="latest", dry_run=False)
+    cfg_int = _make_cfg("run_pf_int", steps=3)
+    run_dir_int = run(cfg_int, config_path=None, resume="none", dry_run=False)
+    cfg_resume = _make_cfg("run_pf_int", steps=6)
+    resumed_run_dir = run(cfg_resume, config_path=None, resume="latest", dry_run=False)
     assert resumed_run_dir == run_dir_int
 
     # Per-step losses agree exactly across the resume boundary (steps 4-6 ran
@@ -1017,8 +1017,8 @@ def test_resume_bit_exact_through_exhaustion_flush(
     # step 2 and the step-set assertion below fails.
     text = "".join(chr(97 + (i * 7) % 26) for i in range(84))
 
-    def _make_cfg(subdir: str, steps: int) -> tuple[Config, Path]:
-        cfg, config_src = make_small_run_cfg(tmp_path, run_subdir=subdir, decay_steps=3)
+    def _make_cfg(subdir: str, steps: int) -> Config:
+        cfg = make_small_run_cfg(tmp_path, run_subdir=subdir, decay_steps=3)
         cfg = replace(cfg, train=replace(cfg.train, steps=steps, grad_accum=2))
         cfg = replace(
             cfg,
@@ -1033,15 +1033,15 @@ def test_resume_bit_exact_through_exhaustion_flush(
         )
         # save_every > steps: only the finally-block final save runs, so the
         # interrupted run checkpoints exactly at step 2.
-        return replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=4)), config_src
+        return replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=4))
 
-    cfg_cont, config_src = _make_cfg("run_flush_cont", steps=3)
-    run_dir_cont = run(cfg_cont, config_path=str(config_src), resume="none", dry_run=False)
+    cfg_cont = _make_cfg("run_flush_cont", steps=3)
+    run_dir_cont = run(cfg_cont, config_path=None, resume="none", dry_run=False)
 
-    cfg_int, _ = _make_cfg("run_flush_int", steps=2)
-    run_dir_int = run(cfg_int, config_path=str(config_src), resume="none", dry_run=False)
-    cfg_resume, _ = _make_cfg("run_flush_int", steps=3)
-    run(cfg_resume, config_path=str(config_src), resume="latest", dry_run=False)
+    cfg_int = _make_cfg("run_flush_int", steps=2)
+    run_dir_int = run(cfg_int, config_path=None, resume="none", dry_run=False)
+    cfg_resume = _make_cfg("run_flush_int", steps=3)
+    run(cfg_resume, config_path=None, resume="latest", dry_run=False)
 
     losses_cont = _losses_by_step(run_dir_cont)
     losses_int = _losses_by_step(run_dir_int)
@@ -1069,7 +1069,7 @@ def test_final_checkpoint_failure_fails_the_run(
     And when training itself crashed, the checkpoint failure is logged as
     secondary without masking the original exception.
     """
-    cfg, config_src = make_small_run_cfg(tmp_path, run_subdir="run_ckpt_fail", decay_steps=3)
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_ckpt_fail", decay_steps=3)
     cfg = replace(cfg, train=replace(cfg.train, steps=3))
     # save_every > steps: no periodic save, only the finally-block final save.
     cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=5))
@@ -1083,14 +1083,14 @@ def test_final_checkpoint_failure_fails_the_run(
     monkeypatch.setattr("chomp.train.save", _failing_save)
     monkeypatch.setattr("chomp.train._maybe_init_wandb", lambda *a, **k: dummy_wandb)
     with pytest.raises(RuntimeError, match="run finalization failed"):
-        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+        run(cfg, config_path=None, resume="none", dry_run=False)
     assert dummy_wandb.finish_calls == [1], (
         f"W&B must record the checkpoint finalization failure, got {dummy_wandb.finish_calls}"
     )
     monkeypatch.setattr("chomp.train._maybe_init_wandb", lambda *a, **k: None)
 
     # Crash path: the original exception wins; the save failure is logged.
-    cfg2, _ = make_small_run_cfg(tmp_path, run_subdir="run_ckpt_fail2", decay_steps=3)
+    cfg2 = make_small_run_cfg(tmp_path, run_subdir="run_ckpt_fail2", decay_steps=3)
     cfg2 = replace(cfg2, train=replace(cfg2.train, steps=3))
     cfg2 = replace(cfg2, checkpoint=replace(cfg2.checkpoint, save_every=5))
 
@@ -1106,7 +1106,7 @@ def test_final_checkpoint_failure_fails_the_run(
         caplog.at_level(logging.ERROR, logger="chomp.train"),
         pytest.raises(RuntimeError, match="injected nan"),
     ):
-        run(cfg2, config_path=str(config_src), resume="none", dry_run=False)
+        run(cfg2, config_path=None, resume="none", dry_run=False)
     assert any("Final checkpoint save failed" in rec.message for rec in caplog.records)
 
 
@@ -1184,7 +1184,7 @@ def test_periodic_save_step_forces_finite_check(
     check before writing: without the forced sync, a NaN step landing on the
     save cadence would be persisted as a resume point.
     """
-    cfg, config_src = make_small_run_cfg(tmp_path, run_subdir="run_nan_save", decay_steps=5)
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_nan_save", decay_steps=5)
     # log_every=1000: step 3 is a save step but not a logging step.
     cfg = replace(cfg, train=replace(cfg.train, steps=5, log_every=1000))
     cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=3))
@@ -1194,7 +1194,7 @@ def test_periodic_save_step_forces_finite_check(
         caplog.at_level(logging.ERROR, logger="chomp.train"),
         pytest.raises(RuntimeError, match="Non-finite loss at step 3"),
     ):
-        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+        run(cfg, config_path=None, resume="none", dry_run=False)
 
     steps_on_disk = _checkpoint_steps(Path(cfg.logging.run_dir))
     assert steps_on_disk == set(), f"NaN step must never reach disk, found {steps_on_disk}"
@@ -1209,7 +1209,7 @@ def test_final_checkpoint_refuses_nonfinite_state(
     the final-save validation must skip the write, keep the last good
     periodic checkpoint as latest, and fail the run loudly.
     """
-    cfg, config_src = make_small_run_cfg(tmp_path, run_subdir="run_nan_final", decay_steps=5)
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_nan_final", decay_steps=5)
     # Step 5 (the last step) neither logs nor saves, so the in-loop finite
     # check never sees it; only the finally-block validation can.
     cfg = replace(cfg, train=replace(cfg.train, steps=5, log_every=1000))
@@ -1220,7 +1220,7 @@ def test_final_checkpoint_refuses_nonfinite_state(
         caplog.at_level(logging.ERROR, logger="chomp.train"),
         pytest.raises(RuntimeError, match="run finalization failed: Non-finite loss at step 5"),
     ):
-        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+        run(cfg, config_path=None, resume="none", dry_run=False)
 
     steps_on_disk = _checkpoint_steps(Path(cfg.logging.run_dir))
     assert steps_on_disk == {2, 4}, f"latest must stay the last good save, found {steps_on_disk}"
@@ -1253,7 +1253,7 @@ def test_checkpoint_refuses_nonfinite_post_update_state(
     :param set[int] expected_steps: Last known-good checkpoints expected on disk.
     :param str match: Expected validation failure text.
     """
-    cfg, config_src = make_small_run_cfg(
+    cfg = make_small_run_cfg(
         tmp_path,
         run_subdir=f"run_nonfinite_{field}",
         decay_steps=5,
@@ -1263,7 +1263,7 @@ def test_checkpoint_refuses_nonfinite_post_update_state(
     _poison_state_at_step(monkeypatch, poison_step=poison_step, field=field)
 
     with pytest.raises(RuntimeError, match=match):
-        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+        run(cfg, config_path=None, resume="none", dry_run=False)
 
     steps_on_disk = _checkpoint_steps(Path(cfg.logging.run_dir))
     assert steps_on_disk == expected_steps
@@ -1273,7 +1273,7 @@ def test_checkpoint_disabled_run_rejects_nonfinite_final_metrics(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Final metric validity remains a run invariant without checkpointing."""
-    cfg, config_src = make_small_run_cfg(
+    cfg = make_small_run_cfg(
         tmp_path,
         run_subdir="run_nonfinite_no_checkpoint",
         decay_steps=2,
@@ -1283,7 +1283,7 @@ def test_checkpoint_disabled_run_rejects_nonfinite_final_metrics(
     _poison_loss_at_step(monkeypatch, poison_step=2)
 
     with pytest.raises(RuntimeError, match="Non-finite loss at step 2"):
-        run(cfg, config_path=str(config_src), resume="none", dry_run=False)
+        run(cfg, config_path=None, resume="none", dry_run=False)
 
 
 def test_resume_rejects_seq_len_mismatch(tmp_path: Path) -> None:

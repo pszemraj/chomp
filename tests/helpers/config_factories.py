@@ -13,7 +13,6 @@ from chomp.config import (
     OptimConfig,
     TokenizerConfig,
     TrainConfig,
-    load_config,
 )
 
 DEFAULT_SMALL_RUN_TEXT = "hello from chomp"
@@ -93,17 +92,24 @@ def make_small_run_cfg(
     run_subdir: str = "run",
     local_text: str = DEFAULT_SMALL_RUN_TEXT,
     decay_steps: int | None = None,
-) -> tuple[Config, Path]:
+) -> Config:
     """Build a tiny local-text config for fast train/checkpoint tests.
 
     :param Path tmp_path: Temporary directory provided by pytest.
     :param str run_subdir: Name of the run subdirectory under tmp_path.
     :param str local_text: Local text corpus for the dataset backend.
     :param int | None decay_steps: Optional optimizer decay horizon override.
-    :return tuple[Config, Path]: (cfg, config_path) for smoke-sized training runs.
+    :return Config: Smoke-sized training configuration.
     """
-    config_src = Path(__file__).resolve().parents[2] / "configs" / "debug_smoke.yaml"
-    cfg = load_config(str(config_src))
+    cfg = make_pipeline_cfg(
+        seq_len=16,
+        vocab_size=256,
+        packing_mode="sequential",
+        packing_buffer_docs=4,
+        grain_prefetch=0,
+        local_text=local_text,
+        tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+    )
 
     optim = replace(cfg.optim, warmup_steps=0)
     if decay_steps is not None:
@@ -124,15 +130,6 @@ def make_small_run_cfg(
             eval_every=0,
             generate_every=0,
         ),
-        data=replace(
-            cfg.data,
-            backend="local_text",
-            repeat=True,
-            packing_mode="sequential",
-            packing_buffer_docs=4,
-            grain_prefetch=0,
-            local_text=local_text,
-        ),
         checkpoint=replace(
             cfg.checkpoint,
             enabled=True,
@@ -152,4 +149,4 @@ def make_small_run_cfg(
             check_device_every=0,
         ),
     )
-    return cfg, config_src
+    return cfg
