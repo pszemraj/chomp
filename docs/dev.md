@@ -63,6 +63,7 @@ Shared helper modules:
 
 - [`tests/helpers/config_factories.py`](../tests/helpers/config_factories.py): reusable tiny
   train/checkpoint configs
+- [`tests/helpers/gpu.py`](../tests/helpers/gpu.py): NVIDIA discovery and GPU subprocess workers
 - [`tests/helpers/hf_fakes.py`](../tests/helpers/hf_fakes.py): reusable fake HF streaming iterables
 - [`tests/helpers/hf_resume_worker.py`](../tests/helpers/hf_resume_worker.py): fresh-process real-HF
   resume continuation worker

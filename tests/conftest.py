@@ -9,12 +9,13 @@ from typing import Any
 import pytest
 
 from chomp.utils import xla
+from tests.helpers.gpu import query_nvidia_gpu_names
 from tests.helpers.hf_fakes import FakeHFIterable
 
 
 def _pin_deterministic_gpu_ops() -> None:
     """Pin deterministic GPU kernels for bit-exact resume assertions."""
-    if not xla._query_nvidia_gpu_names() or xla.deterministic_gpu_ops_setting() is not None:
+    if not query_nvidia_gpu_names() or xla.deterministic_gpu_ops_setting() is not None:
         return
     flag = "--xla_gpu_deterministic_ops=true"
     os.environ["XLA_FLAGS"] = f"{os.environ.get('XLA_FLAGS', '')} {flag}".strip()
