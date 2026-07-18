@@ -831,7 +831,7 @@ def _console_row(
         f"tok/s {float(tokens_per_sec):.0f}",
     ]
     if cfg.optim.name == "muon":
-        parts.append(f"muon_lr {float(_muon_lr_from_adam(lr_adam, cfg)):.2e}")
+        parts.append(f"muon_lr {lr_adam * cfg.optim.muon.lr_scale:.2e}")
     if eval_loss is not None:
         parts.append(f"eval {float(eval_loss):.4f}")
     if data_stats and "packing_utilization" in data_stats:
@@ -889,16 +889,6 @@ def _muon_weight_dim_numbers(params: Any) -> Any:
         muon_dims if hasattr(leaf, "ndim") and leaf.ndim == 2 else None for _path, leaf in flat
     ]
     return treedef.unflatten(dim_nums)
-
-
-def _muon_lr_from_adam(lr_adam: jax.Array, cfg: Config) -> jax.Array:
-    """Return the Muon learning rate derived from the AdamW schedule.
-
-    :param jax.Array lr_adam: AdamW learning rate for the current step.
-    :param Config cfg: Training configuration.
-    :return jax.Array: Muon learning rate (scaled).
-    """
-    return lr_adam * cfg.optim.muon.lr_scale
 
 
 def build_optimizer(
@@ -971,7 +961,7 @@ def build_optimizer(
             :param jax.Array step: Training step.
             :return jax.Array: Muon learning rate at step.
             """
-            return _muon_lr_from_adam(schedule(step), cfg)
+            return schedule(step) * cfg.optim.muon.lr_scale
 
         muon_weight_decay = cfg.optim.weight_decay * muon_cfg.weight_decay_mult
 
@@ -1827,7 +1817,7 @@ def _run_impl(
                             "wall_time_s": time.perf_counter() - t0,
                         }
                         if cfg.optim.name == "muon":
-                            row["lr_muon"] = float(_muon_lr_from_adam(lr_adam, cfg))
+                            row["lr_muon"] = lr_adam * cfg.optim.muon.lr_scale
                         if data_stats:
                             row.update(data_stats)
                         if eval_row:
