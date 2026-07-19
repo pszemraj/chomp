@@ -1169,6 +1169,8 @@ def make_train_step(
             ),
         )
 
+        # Every train/eval batch comes through _assemble_batch, which rejects
+        # zero valid loss tokens before this compiled step is called.
         token_denom = token_sum.astype(jnp.float32)
         loss = loss_sum / token_denom
         grads = jax.tree_util.tree_map(lambda g: g / token_denom, grad_sum)
@@ -1676,10 +1678,15 @@ def _run_impl(
                         break
                     # Fetch batch (host) and (optionally) device_put
                     step_i = int(host_step) + 1
-                    collect_data_stats = (step_i % cfg.train.log_every) == 0 or (
+                    should_eval = (
                         eval_step is not None and eval_every > 0 and (step_i % eval_every) == 0
                     )
-                    data_it.set_collect_stats(collect_data_stats)
+                    should_log = (
+                        step_i == (start_step + 1)
+                        or (step_i % cfg.train.log_every) == 0
+                        or should_eval
+                    )
+                    data_it.set_collect_stats(should_log)
                     data_state_aligned = False
                     t_fetch = time.perf_counter()
                     try:
@@ -1731,10 +1738,6 @@ def _run_impl(
                     if _record_stop_if_requested(mw):
                         break
 
-                    should_eval = (
-                        eval_step is not None and eval_every > 0 and (step_i % eval_every) == 0
-                    )
-                    should_log = (step_i % cfg.train.log_every) == 0 or should_eval
                     save_every = int(cfg.checkpoint.save_every)
                     save_interval = (
                         manager is not None and save_every > 0 and (step_i % save_every == 0)

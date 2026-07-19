@@ -1681,10 +1681,18 @@ def test_tokens_seen_matches_host_counts_between_sync_points(tmp_path: Path) -> 
     metrics_path = Path(cfg.logging.run_dir) / cfg.logging.metrics_file
     rows = read_jsonl(metrics_path)
     train_rows = [row for row in rows if "loss_tokens" in row]
-    assert len(train_rows) == 1
-    assert train_rows[0]["packing_utilization"] > 0
-    assert int(train_rows[0]["loss_tokens"]) == expected_counts[-1]
-    assert int(train_rows[0]["tokens_seen"]) == sum(expected_counts)
+    assert [int(row["step"]) for row in train_rows] == [1, 4]
+    assert float(train_rows[0]["first_step_compile_time_s"]) >= 0.0
+    assert "first_step_compile_time_s" not in train_rows[1]
+    assert all(row["packing_utilization"] > 0 for row in train_rows)
+    assert [int(row["loss_tokens"]) for row in train_rows] == [
+        expected_counts[0],
+        expected_counts[-1],
+    ]
+    assert [int(row["tokens_seen"]) for row in train_rows] == [
+        expected_counts[0],
+        sum(expected_counts),
+    ]
 
 
 @pytest.mark.parametrize("mode", ["bin", "multipack"])

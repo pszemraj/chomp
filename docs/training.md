@@ -66,7 +66,7 @@ Use `chomp train <config.yaml> --dry-run` to validate config, build the tokenize
 
 ## Metrics
 
-Metrics are written to `logging.metrics_file` every `train.log_every` steps (and on eval steps) and include:
+Metrics are written to `logging.metrics_file` on the first process-local training step, every `train.log_every` steps, and on eval steps. They include:
 
 - `loss`
 - `grad_norm`
