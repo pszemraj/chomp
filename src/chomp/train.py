@@ -1454,6 +1454,7 @@ def _run_impl(
             step_i = int(jax.device_get(state.step))
             if cfg.debug.nan_check:
                 _check_finite_metrics(metrics_host, step=step_i)
+                _check_finite_train_state(state, step=step_i)
 
             token_sum = float(metrics_host.get("token_sum", 0.0))
             tokens_per_sec = token_sum / step_time_s if step_time_s > 0 else 0.0

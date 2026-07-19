@@ -1389,6 +1389,34 @@ def test_dry_run_compiles_single_step(tmp_path: Path, monkeypatch: pytest.Monkey
     assert len(close_calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("field", "match"),
+    [
+        ("params", "Non-finite parameters at step 1"),
+        ("opt_state", "Non-finite optimizer state at step 1"),
+    ],
+)
+def test_dry_run_rejects_nonfinite_post_update_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    match: str,
+) -> None:
+    """Dry-run success requires finite parameters and optimizer state.
+
+    :param Path tmp_path: Temporary directory for run artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to poison the train step.
+    :param str field: TrainState field to poison after the update.
+    :param str match: Expected validation failure text.
+    """
+    cfg = make_small_run_cfg(tmp_path, run_subdir=f"dry_run_nonfinite_{field}")
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, enabled=False))
+    _poison_state_at_step(monkeypatch, poison_step=1, field=field)
+
+    with pytest.raises(RuntimeError, match=match):
+        run(cfg, config_path=None, resume="none", dry_run=True)
+
+
 def test_deterministic_checkpointing_warns(tmp_path: Path, caplog: LogCaptureFixture) -> None:
     """Deterministic mode should warn when use_checkpoint is enabled.
 

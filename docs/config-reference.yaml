@@ -426,7 +426,7 @@ logging:
 
 # debug -- mapping | null; default: {}. Runtime correctness checks; keep defaults for real training.
 debug:
-  # debug.nan_check -- bool; default: true. Validates synchronized metrics and pre-save/final parameters plus optimizer state. False permits non-finite state to be checkpointed; keep true.
+  # debug.nan_check -- bool; default: true. Validates synchronized metrics and dry-run/pre-save/final parameters plus optimizer state. False permits non-finite state to be checkpointed; keep true.
   nan_check: "<bool>"
 
   # debug.check_device_every -- int; default: 100; >= 0; zero disables periodic batch assertions. Checks the first batch and then after every N completed steps; it does not disable the initial GPU requirement from train.allow_cpu=false.
