@@ -696,6 +696,42 @@ def test_preemption_during_final_logging_tail_is_not_lost(
     assert (default_ckpt_dir(exc_info.value.run_dir) / "3").exists()
 
 
+def test_preemption_during_finalization_is_not_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A signal during teardown must replace the pending success return.
+
+    :param Path tmp_path: Temporary directory for run artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to inject the stop request.
+    """
+    import chomp.train as train_mod
+
+    cfg = make_small_run_cfg(tmp_path, decay_steps=1)
+    cfg = replace(cfg, train=replace(cfg.train, steps=1))
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=100))
+    stop = _FakeStopSignal()
+    monkeypatch.setattr(train_mod, "_StopSignalState", lambda: stop)
+    real_finish = train_mod._finish_run_telemetry
+
+    def _finish_and_signal(*args: Any, **kwargs: Any) -> None:
+        """Request preemption after telemetry teardown completes.
+
+        :param Any args: Positional telemetry finalization arguments.
+        :param Any kwargs: Keyword telemetry finalization arguments.
+        """
+        real_finish(*args, **kwargs)
+        stop.requested = True
+
+    monkeypatch.setattr(train_mod, "_finish_run_telemetry", _finish_and_signal)
+
+    with pytest.raises(TrainingPreempted) as exc_info:
+        run(cfg, config_path=None, resume="none", dry_run=False)
+
+    assert exc_info.value.signal_name == "SIGTERM"
+    assert exc_info.value.exit_code == 143
+    assert (default_ckpt_dir(exc_info.value.run_dir) / "1").exists()
+
+
 def test_run_enforces_device_before_artifact_setup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

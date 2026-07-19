@@ -1981,6 +1981,8 @@ def _run_impl(
                 f"run finalization failed: {finalization_errors[0]}"
             ) from finalization_errors[0]
 
+    if preemption_reason is None and stop_request.requested:
+        preemption_reason = stop_request.reason
     if preemption_reason is not None:
         raise TrainingPreempted(
             run_dir=run_dir,
