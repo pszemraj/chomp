@@ -1216,19 +1216,25 @@ def test_hf_retry_keeps_last_good_state_when_new_capture_fails(
 def test_hf_retry_fails_closed_when_reconstruction_fails(
     patch_hf_load_dataset: Callable[..., dict[str, int]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Recovery failure propagates instead of retrying a partially mutated iterator."""
+    """Recovery waits before rebuilding and propagates if reconstruction fails."""
     record: dict[str, Any] = {"fail_consumed": False}
     patch_hf_load_dataset([{"text": "alpha"}, {"text": "bravo"}], fail_at=1, record=record)
-    stream = HFStreamingTextStream(_hf_stream_spec(max_retries=1, state_update_interval=10))
+    stream = HFStreamingTextStream(
+        _hf_stream_spec(max_retries=1, retry_delay_sec=0.25, state_update_interval=10)
+    )
     assert next(stream) == "alpha"
+    events: list[str] = []
+    monkeypatch.setattr("chomp.data.hf.time.sleep", lambda delay: events.append(f"sleep:{delay}"))
 
     def _restore_failure(_state: dict[str, Any]) -> None:
         """Simulate a source reconstruction failure."""
+        events.append("restore")
         raise RuntimeError("restore failed")
 
     monkeypatch.setattr(stream, "set_state", _restore_failure)
     with pytest.raises(RuntimeError, match="could not reconstruct"):
         next(stream)
+    assert events == ["sleep:0.25", "restore"]
 
 
 def test_hf_shuffled_retry_reconstructs_failed_window_exactly(

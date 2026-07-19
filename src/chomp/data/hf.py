@@ -451,11 +451,10 @@ class HFStreamingTextStream:
                     delay,
                     exc_info=True,
                 )
+                time.sleep(delay)
                 # Exact recovery: rebuild and discard precisely the records
                 # already yielded since the last compact state.
                 self._recover_iterator()
-
-                time.sleep(delay)
                 attempt += 1
 
     def get_state(self) -> dict[str, Any]:

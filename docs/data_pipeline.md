@@ -83,7 +83,7 @@ Hugging Face's streaming shuffle omits the contents of its read-ahead buffer fro
 
 ### Transient stream recovery
 
-In-run recovery from transient HF streaming errors preserves exact document order. The stream retains a last-known-good compact state and the exact number of documents yielded since it. On failure, it rebuilds from that state, discards precisely those already-yielded documents, and retries with backoff. The initial source state covers failures before the first document, and a failed periodic state capture retains the preceding good state.
+In-run recovery from transient HF streaming errors preserves exact document order. The stream retains a last-known-good compact state and the exact number of documents yielded since it. On failure, it waits for the configured backoff before rebuilding from that state, discarding precisely those already-yielded documents, and retrying the read. The initial source state covers failures before the first document, and a failed periodic state capture retains the preceding good state.
 
 `data.state_update_interval` (default 2000) controls reconstruction work, not data duplication: a recovery may reread and discard up to that many documents. If state restore or fast-forward cannot reproduce the prior position, training fails and must resume from the last Chomp checkpoint rather than continuing from a partially reconstructed stream. Errors that survive `data.max_retries` also propagate and fail the run.
 
