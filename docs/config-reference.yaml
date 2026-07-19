@@ -167,10 +167,10 @@ data:
   # data.repeat -- bool; default: true. Repeats training sources for step-based runs; false trains a padded usable tail and stops early at finite exhaustion.
   repeat: "<bool>"
 
-  # data.max_retries -- int; default: 3; >= 0; HF-only; zero disables transient read retries. Deterministic row/schema failures always fail immediately.
+  # data.max_retries -- int; default: 3; >= 0; HF-only; zero disables transient read/recovery retries. Deterministic row/schema failures always fail immediately.
   max_retries: "<int>"
 
-  # data.retry_delay_sec -- float; default: 1.0; >= 0; HF-only. Exponential retry delay is value * 2**attempt seconds.
+  # data.retry_delay_sec -- float; default: 1.0; >= 0; HF-only. Full-jitter exponential delay uses a ceiling of min(value * 2**attempt, 60) seconds.
   retry_delay_sec: "<float>"
 
   # data.state_update_interval -- int; default: 2000; > 0; HF-only. Documents between compact in-run retry states; lower values reduce recovery rereads and increase capture overhead, independently of checkpoints.

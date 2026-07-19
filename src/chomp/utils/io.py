@@ -256,6 +256,7 @@ class MetricsWriter:
         """
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Text-mode line buffering flushes every newline-terminated JSONL row.
         self._f = self.path.open("a", buffering=1)
 
     def write(self, row: dict[str, Any]) -> None:

@@ -1225,6 +1225,7 @@ def test_hf_retry_fails_closed_when_reconstruction_fails(
     assert next(stream) == "alpha"
     events: list[str] = []
     monkeypatch.setattr("chomp.data.hf.time.sleep", lambda delay: events.append(f"sleep:{delay}"))
+    monkeypatch.setattr("chomp.data.hf.random.uniform", lambda _low, high: high)
 
     def _restore_failure(_state: dict[str, Any]) -> None:
         """Simulate a source reconstruction failure."""
@@ -1232,9 +1233,64 @@ def test_hf_retry_fails_closed_when_reconstruction_fails(
         raise RuntimeError("restore failed")
 
     monkeypatch.setattr(stream, "set_state", _restore_failure)
-    with pytest.raises(RuntimeError, match="could not reconstruct"):
+    with pytest.raises(RuntimeError, match="exhausted data.max_retries"):
         next(stream)
     assert events == ["sleep:0.25", "restore"]
+
+
+def test_hf_recovery_failure_uses_remaining_retry_budget_without_replay(
+    patch_hf_load_dataset: Callable[..., dict[str, int]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retry a transient reconstruction failure from the same logical state.
+
+    :param Callable[..., dict[str, int]] patch_hf_load_dataset: In-memory HF loader fixture.
+    :param pytest.MonkeyPatch monkeypatch: Pytest monkeypatch fixture.
+    """
+    record: dict[str, Any] = {"fail_consumed": False}
+    patch_hf_load_dataset(
+        [{"text": "alpha"}, {"text": "bravo"}, {"text": "charlie"}],
+        fail_at=1,
+        record=record,
+    )
+    stream = HFStreamingTextStream(
+        _hf_stream_spec(max_retries=2, retry_delay_sec=40.0, state_update_interval=10)
+    )
+    assert next(stream) == "alpha"
+
+    real_set_state = stream.set_state
+    restored_states: list[dict[str, Any]] = []
+
+    def _fail_after_first_restore(state: dict[str, Any]) -> None:
+        """Fail once after restore has reset the stream's replay distance."""
+        restored_states.append(state)
+        real_set_state(state)
+        if len(restored_states) == 1:
+            raise RuntimeError("transient reconnect failure")
+
+    jitter_bounds: list[tuple[float, float]] = []
+
+    def _midpoint_jitter(low: float, high: float) -> float:
+        """Record the capped backoff window and choose its midpoint.
+
+        :param float low: Lower jitter bound.
+        :param float high: Upper jitter bound.
+        :return float: Midpoint of the supplied bounds.
+        """
+        jitter_bounds.append((low, high))
+        return (low + high) / 2
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(stream, "set_state", _fail_after_first_restore)
+    monkeypatch.setattr("chomp.data.hf.random.uniform", _midpoint_jitter)
+    monkeypatch.setattr("chomp.data.hf.time.sleep", sleeps.append)
+
+    assert next(stream) == "bravo"
+    assert restored_states == [
+        {"epoch": 0, "hf_state": {"index": 0}},
+        {"epoch": 0, "hf_state": {"index": 0}},
+    ]
+    assert jitter_bounds == [(0.0, 40.0), (0.0, 60.0)]
+    assert sleeps == [20.0, 30.0]
 
 
 def test_hf_shuffled_retry_reconstructs_failed_window_exactly(

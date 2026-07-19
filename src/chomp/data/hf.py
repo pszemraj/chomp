@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import random
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_MAX_RETRY_DELAY_SEC = 60.0
 _UINT64_MASK = 2**64 - 1
 _SPLITMIX_INCREMENT = 0x9E3779B97F4A7C15
 CONTENT_HOLDOUT_SCHEMA_VERSION = 1
@@ -266,14 +268,16 @@ class HFStreamingTextStream:
                 else:
                     self._read_text()
             # Promote the reconstructed current position to the next
-            # known-good recovery point. A failure here must terminate rather
-            # than retry from partially reconstructed state.
+            # known-good recovery point.
             self._last_state = self.get_state()
             self._n_since_state = 0
         except Exception as exc:
+            # Every retry must restart from the same logical position even if
+            # set_state() reset these counters before reconstruction failed.
+            self._last_state = state
+            self._n_since_state = yielded_since_state
             raise RuntimeError(
-                "HF stream could not reconstruct its exact pre-failure position; "
-                "stop and resume from the last Chomp checkpoint."
+                "HF stream could not reconstruct its exact pre-failure position."
             ) from exc
         logger.info(
             "HF stream rebuilt and fast-forwarded %d document(s) after failure.",
@@ -414,9 +418,14 @@ class HFStreamingTextStream:
         # outside transient-failure accounting so max_retries=0 can still
         # repeat and the first read of every epoch gets the full retry budget.
         attempt = 0
+        delay_ceiling = min(self._spec.retry_delay_sec, _MAX_RETRY_DELAY_SEC)
+        recovering = False
         rolled_epoch = False
         while True:
             try:
+                if recovering:
+                    self._recover_iterator()
+                    recovering = False
                 return self._next_item()
 
             except StopIteration:
@@ -430,6 +439,7 @@ class HFStreamingTextStream:
                 self._epoch += 1
                 self._build()
                 attempt = 0
+                delay_ceiling = min(self._spec.retry_delay_sec, _MAX_RETRY_DELAY_SEC)
                 rolled_epoch = True
                 continue
 
@@ -439,23 +449,33 @@ class HFStreamingTextStream:
                 # as transient only wastes retries before the same failure.
                 raise
 
-            except Exception:
+            except Exception as exc:
                 if attempt >= self._spec.max_retries:
+                    if recovering:
+                        raise RuntimeError(
+                            "HF stream exhausted data.max_retries while reconstructing its "
+                            "exact position; stop and resume from the last Chomp checkpoint."
+                        ) from exc
                     raise
 
-                delay = self._spec.retry_delay_sec * (2**attempt)
+                delay = random.uniform(0.0, delay_ceiling)
+                operation = "recovery" if recovering else "next()"
                 logger.warning(
-                    "HF stream next() failed (attempt %d/%d); retrying in %.1fs.",
+                    "HF stream %s failed (retry %d/%d); retrying in %.1fs.",
+                    operation,
                     attempt + 1,
                     self._spec.max_retries,
                     delay,
                     exc_info=True,
                 )
                 time.sleep(delay)
-                # Exact recovery: rebuild and discard precisely the records
-                # already yielded since the last compact state.
-                self._recover_iterator()
                 attempt += 1
+                delay_ceiling = min(delay_ceiling * 2, _MAX_RETRY_DELAY_SEC)
+                # Exact recovery: rebuild and discard precisely the records
+                # already yielded since the last compact state. Keeping this
+                # inside the loop makes reconstruction failures consume the
+                # same bounded retry budget as source reads.
+                recovering = True
 
     def get_state(self) -> dict[str, Any]:
         """Capture stream state for checkpointing.
