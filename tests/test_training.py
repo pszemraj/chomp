@@ -1805,14 +1805,21 @@ def _git(repo: Path, *args: str) -> None:
     )
 
 
-def test_source_revision_flags_untracked_and_tracked_changes(tmp_path: Path) -> None:
-    """Source identity must flag untracked, unstaged, and staged src/ changes.
+def test_source_revision_flags_untracked_and_tracked_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Source identity must flag checkout and editable-dependency changes.
 
     `git diff` alone misses a brand-new uncommitted module, letting the strict
     runtime-identity resume gate pass on exactly the source drift it exists to
     catch.
+
+    :param Path tmp_path: Temporary source repository.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to provide editable metadata.
     """
-    from chomp.ckpt import _source_revision_for
+    import importlib.metadata as importlib_metadata
+
+    from chomp.ckpt import _editable_package_identity, _source_revision_for
 
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
@@ -1847,21 +1854,49 @@ def test_source_revision_flags_untracked_and_tracked_changes(tmp_path: Path) -> 
     _git(repo, "checkout", "--quiet", "--", "src")
     assert _source_revision_for(repo) == clean
 
+    class _EditableDistribution:
+        """Minimal editable distribution metadata backed by the test repository."""
 
+        version = "0.2.1"
+
+        def read_text(self, filename: str) -> str:
+            """Return PEP 610 provenance for the test repository."""
+            assert filename == "direct_url.json"
+            return json.dumps({"dir_info": {"editable": True}, "url": repo.as_uri()})
+
+    monkeypatch.setattr(
+        importlib_metadata,
+        "distribution",
+        lambda _pkg: _EditableDistribution(),
+    )
+    assert _editable_package_identity("megalodon-jax") == f"0.2.1@{clean}"
+    tracked.write_text("x = 3\n")
+    assert _editable_package_identity("megalodon-jax") != f"0.2.1@{clean}"
+
+
+@pytest.mark.parametrize(
+    "module_relpath",
+    [
+        Path(".venv/lib/python3.12/site-packages/chomp/ckpt.py"),
+        Path("nested/src/chomp/ckpt.py"),
+    ],
+    ids=["installed-package", "nested-source-tree"],
+)
 def test_source_revision_ignores_enclosing_host_checkout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    module_relpath: Path,
 ) -> None:
-    """A non-editable install must not inherit an enclosing repository revision.
+    """Only an owning checkout may supply the Chomp source revision.
 
     :param Path tmp_path: Temporary directory used to build the host checkout.
     :param pytest.MonkeyPatch monkeypatch: Fixture used to point at the installed module.
+    :param Path module_relpath: Installed or nested-source module layout to test.
     """
     import chomp.ckpt as ckpt_mod
 
     host_repo = tmp_path / "host"
-    installed_module = (
-        host_repo / ".venv" / "lib" / "python3.12" / "site-packages" / "chomp" / "ckpt.py"
-    )
+    installed_module = host_repo / module_relpath
     installed_module.parent.mkdir(parents=True)
     installed_module.write_text("# installed Chomp module\n")
     (host_repo / ".gitignore").write_text(".venv/\n")
@@ -1890,6 +1925,66 @@ def test_resume_compat_hard_gates_runtime_identity(tmp_path: Path) -> None:
     del meta["runtime"]
     with pytest.raises(RuntimeError, match="runtime identity"):
         check_resume_compat(cfg, meta)
+
+
+@pytest.mark.parametrize(
+    ("optimizer_name", "section", "blocks"),
+    [
+        ("adamw", "adam", True),
+        ("adamw", "muon", False),
+        ("muon", "adam", True),
+        ("muon", "muon", True),
+    ],
+)
+def test_resume_compat_tracks_consumed_optimizer_config(
+    tmp_path: Path, optimizer_name: str, section: str, blocks: bool
+) -> None:
+    """Resume must gate every optimizer section consumed by the active transform.
+
+    Muon remains a hybrid: non-Muon leaves use AdamW, so ``optim.adam`` is
+    active in both modes. Only ``optim.muon`` under plain AdamW is inert.
+
+    :param Path tmp_path: Temporary run directory root.
+    :param str optimizer_name: Active optimizer mode.
+    :param str section: Nested optimizer section to change.
+    :param bool blocks: Whether the changed section is consumed in this mode.
+    """
+    cfg = _base_cfg(tmp_path / f"run_{optimizer_name}_{section}")
+    cfg = replace(cfg, optim=replace(cfg.optim, name=optimizer_name))
+    meta = _checkpoint_record(cfg).to_dict()
+
+    if section == "adam":
+        drifted = replace(
+            cfg,
+            optim=replace(cfg.optim, adam=replace(cfg.optim.adam, b1=0.8)),
+        )
+    else:
+        drifted = replace(
+            cfg,
+            optim=replace(cfg.optim, muon=replace(cfg.optim.muon, momentum=0.9)),
+        )
+
+    if blocks:
+        with pytest.raises(RuntimeError, match=f"optim.{section}"):
+            check_resume_compat(drifted, meta)
+    else:
+        check_resume_compat(drifted, meta)
+
+
+def test_resume_compat_ignores_inert_dummy_model_config(tmp_path: Path) -> None:
+    """Megalodon-only model fields must not block a DummyLM smoke resume.
+
+    :param Path tmp_path: Temporary run directory root.
+    """
+    cfg = _base_cfg(tmp_path / "run_inert_dummy_model")
+    meta = _checkpoint_record(cfg).to_dict()
+
+    inert_drift = replace(cfg, model=replace(cfg.model, model_dim=cfg.model.model_dim + 1))
+    check_resume_compat(inert_drift, meta)
+
+    active_drift = replace(cfg, model=replace(cfg.model, d_model=cfg.model.d_model + 1))
+    with pytest.raises(RuntimeError, match="model.d_model"):
+        check_resume_compat(active_drift, meta)
 
 
 def test_resume_compat_ignores_inert_packing_knobs(tmp_path: Path) -> None:

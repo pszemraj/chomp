@@ -32,6 +32,7 @@ from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote, urlparse
 
 if TYPE_CHECKING:
     import orbax.checkpoint as ocp
@@ -90,7 +91,7 @@ def _safe_version(pkg: str) -> str | None:
         return None
 
 
-def _source_revision_for(repo_root: Path) -> str:
+def _source_revision_for(repo_root: Path, *, package_version: str = _chomp_version) -> str:
     """Return the repository commit plus content-addressed dirty source state.
 
     Dirty covers unstaged, staged, and untracked (non-ignored) files under
@@ -101,9 +102,20 @@ def _source_revision_for(repo_root: Path) -> str:
     remains a stable fallback identity.
 
     :param Path repo_root: Repository root to inspect.
+    :param str package_version: Version used when repository identity is unavailable.
     :return str: Git commit, optionally suffixed by a dirty-tree digest, or package version.
     """
+    repo_root = repo_root.resolve()
     try:
+        top_level = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if Path(top_level).resolve() != repo_root:
+            return f"package:{package_version}"
         commit = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=repo_root,
@@ -127,7 +139,7 @@ def _source_revision_for(repo_root: Path) -> str:
             text=True,
         ).stdout
     except Exception:
-        return f"package:{_chomp_version}"
+        return f"package:{package_version}"
 
     if not status.strip():
         return commit
@@ -171,6 +183,39 @@ def _source_revision_for(repo_root: Path) -> str:
     except Exception as exc:
         raise RuntimeError(f"Could not fingerprint dirty source tree at {repo_root}") from exc
     return f"{commit}+dirty.{digest.hexdigest()}"
+
+
+def _editable_package_identity(pkg: str) -> str | None:
+    """Return a package version augmented by source identity for editable installs.
+
+    :param str pkg: Distribution name to inspect.
+    :return str | None: Version, optionally suffixed by its editable source identity.
+    """
+    try:
+        import importlib.metadata as im
+
+        distribution = im.distribution(pkg)
+    except Exception:
+        return None
+
+    version = distribution.version
+    direct_url_text = distribution.read_text("direct_url.json")
+    if direct_url_text is None:
+        return version
+    direct_url = json.loads(direct_url_text)
+    if not direct_url.get("dir_info", {}).get("editable"):
+        return version
+
+    source_url = urlparse(direct_url["url"])
+    if source_url.scheme != "file":
+        return version
+    revision = _source_revision_for(
+        Path(unquote(source_url.path)),
+        package_version=version,
+    )
+    if revision == f"package:{version}":
+        return version
+    return f"{version}@{revision}"
 
 
 @lru_cache(maxsize=1)
@@ -220,13 +265,16 @@ def runtime_identity() -> dict[str, Any]:
     except Exception as exc:
         backend = {"error": f"{type(exc).__name__}: {exc}"}
 
+    package_identities = {name: _safe_version(name) for name in packages}
+    package_identities["megalodon-jax"] = _editable_package_identity("megalodon-jax")
+
     return {
         "python": platform.python_version(),
         "system": platform.system(),
         "machine": platform.machine(),
         "chomp": _chomp_version,
         "source_revision": _source_revision(),
-        "packages": {name: _safe_version(name) for name in packages},
+        "packages": package_identities,
         "backend": backend,
     }
 
@@ -563,6 +611,9 @@ def restore_params_only(step_dir: Path, abstract_params: Any) -> Any:
             f"train_state directory not found in {step_dir}. Is this a valid chomp checkpoint?"
         )
 
+    # The caller's abstract params are the deliberate inference contract:
+    # training resumes use check_resume_compat, while generate may supply an
+    # explicit config override and incompatible parameter trees fail restore.
     # transforms={} drops saved subtrees absent from item (opt_state/rng/step)
     # without needing their structure; partial_restore=True cannot do that on
     # this orbax version (0.11.31 chokes on the pruned tree metadata).
@@ -760,7 +811,20 @@ def check_resume_compat(
     )
     model_prev = meta_cfg.get("model") or {}
     model_cur = cur_cfg.get("model") or {}
-    _cmp_mapping("model", model_cur, model_prev)
+    model_keys: set[str] | None = None
+    if model_prev.get("backend") == "dummy" and model_cur.get("backend") == "dummy":
+        # DummyLM consumes only its topology/dropout fields. Token IDs remain
+        # active here because the harness uses them while assembling batches.
+        model_keys = {
+            "backend",
+            "vocab_size",
+            "d_model",
+            "dropout",
+            "pad_token_id",
+            "bos_token_id",
+            "eos_token_id",
+        }
+    _cmp_mapping("model", model_cur, model_prev, keys=model_keys)
 
     optim_prev = meta_cfg.get("optim") or {}
     optim_cur = cur_cfg.get("optim") or {}
@@ -771,6 +835,8 @@ def check_resume_compat(
             continue
         if key == "muon" and optim_name_prev != "muon" and optim_name_cur != "muon":
             continue
+        # Deliberately no mirror skip for Adam: Muon is a hybrid optimizer and
+        # routes every non-Muon parameter through this AdamW configuration.
         _cmp(f"optim.{key}", optim_cur.get(key), optim_prev.get(key), severity="error")
 
     decay_prev = decay_horizon_from_values(

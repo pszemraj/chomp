@@ -61,11 +61,11 @@ On resume, chomp compares the checkpoint metadata against the current config. Mi
 - packing mode, packing buffer sizes, and strict-segment settings
 - objective knobs (`mask_boundary_loss`, `train_on_eos`) and eval knobs
 - batch shape invariants (`seq_len`, `batch_size`, `grad_accum`)
-- model and optimizer config, `train.deterministic`
+- active model and optimizer config, `train.deterministic`
 - the complete parameter, optimizer-group, and decay assignment through the parameter-manifest hash
-- Python/platform, accelerator backend and device, Chomp source revision, and exact JAX/JAXlib/Equinox/Optax/Orbax/Grain/Datasets/Transformers/tokenizers/Megalodon-JAX versions
+- Python/platform, accelerator backend and device, Chomp source revision, and exact JAX/JAXlib/Equinox/Optax/Orbax/Grain/Datasets/Transformers/tokenizers/Megalodon-JAX identities (version plus source revision for editable Megalodon-JAX)
 
-The packing, model, and optimizer sections are compared over the union of keys recorded on either side, so a knob present in only one version's fingerprint is a hard mismatch and is never silently skipped.
+Resume comparisons ignore backend- or mode-specific settings only when execution cannot consume them, such as Megalodon fields under DummyLM or Muon settings under AdamW. Muon remains a hybrid optimizer whose non-Muon leaves use AdamW, so `optim.adam` is active in both optimizer modes. Active fingerprint sections are compared over the union of keys recorded on either side, so a newly recorded data or packing knob is never silently skipped.
 
 `data.device_put` drift is a warning (it changes where the host-to-device transfer happens, not sample order), except when `grain_prefetch > 0` on either side, where it hardens to an error because it changes the prefetch mechanics around the serialized iterator state.
 
@@ -73,7 +73,7 @@ The effective `xla_gpu_deterministic_ops` setting (parsed from `XLA_FLAGS`, reco
 
 Remaining warnings are logged so you can make an informed decision, but anything that changes what data the resumed run sees or what it optimizes is an error, not a warning.
 
-Source identity is the Git commit for a clean checkout. For a dirty checkout it also contains a SHA-256 digest of every tracked or untracked, non-ignored file under `src/` plus `pyproject.toml`, including deletions. A non-editable installation that is not loaded from an owning Chomp checkout uses `package:<version>` instead, even when its environment is nested inside an unrelated Git worktree. The identity is captured once at the public `run()` boundary and reused for every checkpoint in that process, so distinct uncommitted code cannot share a resume identity and mid-run filesystem edits cannot change it.
+Source identity is the Git commit for a clean checkout. For a dirty checkout it also contains a SHA-256 digest of every tracked or untracked, non-ignored file under `src/` plus `pyproject.toml`, including deletions. A non-editable installation that is not loaded from an owning Chomp checkout uses `package:<version>` instead, even when its environment is nested inside an unrelated Git worktree. Editable Megalodon-JAX installs use the same owning-checkout identity in addition to their package version. The identity is captured once at the public `run()` boundary and reused for every checkpoint in that process, so distinct uncommitted code cannot share a resume identity and mid-run filesystem edits cannot change it.
 
 ## Typical usage
 
