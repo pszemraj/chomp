@@ -35,7 +35,7 @@ When `debug.nan_check` is enabled, save steps force a metrics sync and validate 
 
 ## Run ownership and preemption
 
-Each resolved run directory has a nonblocking sibling lock held from before artifact setup until checkpoint-manager shutdown. A second fresh or resumed process targeting that run fails before it can write config, tokenizer, eval, metrics, manifest, or checkpoint artifacts. Lock files persist so every process contends on the same inode; the operating-system lock, not file existence, determines ownership.
+Each resolved run directory has a nonblocking sibling lock held from before artifact setup until checkpoint-manager shutdown. The path is canonicalized before deriving the lock, so a symlink alias and its target contend on the same inode. A second fresh or resumed process targeting that run fails before it can write config, tokenizer, eval, metrics, manifest, or checkpoint artifacts. Lock files persist; the operating-system lock, not file existence, determines ownership.
 
 A `checkpoint.root_dir` that resolves outside the run directory has its own lock held over the same lifetime. Chomp stores `.chomp-owner.json` inside that root with the canonical run-directory path. A fresh run accepts only an empty unowned root (or an empty root already marked for the same interrupted setup); resume requires the existing marker to match. This prevents different run directories from mixing steps in one Orbax tree, both concurrently and sequentially.
 

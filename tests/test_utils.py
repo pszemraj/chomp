@@ -67,6 +67,20 @@ def test_run_directory_lock_rejects_concurrent_owner_and_releases(tmp_path: Path
         assert second.path.exists()
 
 
+def test_run_directory_lock_canonicalizes_symlinked_run(tmp_path: Path) -> None:
+    """A symlink alias and its target must contend on the same run lock."""
+    run_dir = tmp_path / "runs" / "job-1"
+    run_dir.mkdir(parents=True)
+    alias = run_dir.parent / "latest"
+    alias.symlink_to(run_dir, target_is_directory=True)
+    direct = RunDirectoryLock(run_dir)
+    via_alias = RunDirectoryLock(alias)
+
+    assert direct.path == via_alias.path
+    with direct, pytest.raises(RuntimeError, match="already active"):
+        via_alias.acquire()
+
+
 def test_device_platform_detects_array() -> None:
     """device_platform should detect platform from JAX array."""
     arr = jax.numpy.zeros((1,))

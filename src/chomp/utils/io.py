@@ -51,7 +51,7 @@ class RunDirectoryLock:
         :param run_dir: Resolved run directory, which need not exist yet.
         :param str resource_name: Human-readable resource name for failures.
         """
-        run_path = Path(run_dir)
+        run_path = Path(run_dir).resolve()
         self.path = run_path.parent / f".{run_path.name}.lock"
         self.resource_name = resource_name
         self._handle: Any | None = None
