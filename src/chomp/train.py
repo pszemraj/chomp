@@ -1881,12 +1881,11 @@ def _run_impl(
                 _flush_loggers()
                 raise
     finally:
-        # Final checkpoint: save if we did any training and the last step
-        # wasn't already saved — but only when `state` and `data_it` are
-        # aligned. In the fetched-but-unfinished window (Ctrl-C mid
-        # train_step, device failure, placement check) the iterator is one
-        # batch ahead of state.step; a checkpoint written there would
-        # silently skip that batch on resume.
+        # Final checkpoint: save if training advanced beyond the resume point,
+        # or a fresh run was preempted at aligned step zero. In the
+        # fetched-but-unfinished window (Ctrl-C mid train_step, device failure,
+        # placement check) the iterator is one batch ahead of state.step; a
+        # checkpoint written there would silently skip that batch on resume.
         # Checkpoint failures must never be silent: on a clean exit they are
         # re-raised (training must not exit successfully with an unwritten
         # checkpoint); on the crash path the original exception keeps
@@ -1901,6 +1900,12 @@ def _run_impl(
             logger.exception("Could not read state.step during run finalization")
             finalization_errors.append(exc)
 
+        save_step_zero = (
+            resume == "none"
+            and preemption_reason is not None
+            and start_step == 0
+            and final_step == 0
+        )
         final_state_valid = True
         if (
             final_step is not None
@@ -1937,7 +1942,7 @@ def _run_impl(
             manager is not None
             and data_state_aligned
             and final_step is not None
-            and final_step > start_step
+            and (final_step > start_step or save_step_zero)
             and final_step != last_saved_step
             and final_state_valid
         ):

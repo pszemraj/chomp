@@ -666,6 +666,28 @@ def test_preemption_finishes_one_step_and_writes_aligned_checkpoint(
     assert _checkpoint_steps(run_dir) == {1}
 
 
+def test_preemption_before_first_batch_writes_resumable_step_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh pre-first-batch stop must leave a resumable checkpoint."""
+    import chomp.train as train_mod
+
+    cfg = make_small_run_cfg(tmp_path)
+    stop = _FakeStopSignal()
+    stop.requested = True
+    monkeypatch.setattr(train_mod, "_StopSignalState", lambda: stop)
+
+    with pytest.raises(TrainingPreempted) as exc_info:
+        run(cfg, config_path=None, resume="none", dry_run=False)
+
+    run_dir = exc_info.value.run_dir
+    assert _checkpoint_steps(run_dir) == {0}
+
+    stop.requested = False
+    assert run(cfg, config_path=None, resume="latest", dry_run=False) == run_dir
+    assert _checkpoint_steps(run_dir) == {1, 2}
+
+
 def test_preemption_during_final_logging_tail_is_not_lost(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
