@@ -73,7 +73,7 @@ The effective `xla_gpu_deterministic_ops` setting (parsed from `XLA_FLAGS`, reco
 
 Remaining warnings are logged so you can make an informed decision, but anything that changes what data the resumed run sees or what it optimizes is an error, not a warning.
 
-Source identity is the Git commit for a clean checkout. For a dirty checkout it also contains a SHA-256 digest of every tracked or untracked, non-ignored file under `src/` plus `pyproject.toml`, including deletions. The identity is captured once at the public `run()` boundary and reused for every checkpoint in that process, so distinct uncommitted code cannot share a resume identity and mid-run filesystem edits cannot change it.
+Source identity is the Git commit for a clean checkout. For a dirty checkout it also contains a SHA-256 digest of every tracked or untracked, non-ignored file under `src/` plus `pyproject.toml`, including deletions. A non-editable installation that is not loaded from an owning Chomp checkout uses `package:<version>` instead, even when its environment is nested inside an unrelated Git worktree. The identity is captured once at the public `run()` boundary and reused for every checkpoint in that process, so distinct uncommitted code cannot share a resume identity and mid-run filesystem edits cannot change it.
 
 ## Typical usage
 

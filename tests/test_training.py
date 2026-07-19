@@ -1818,6 +1818,36 @@ def test_source_revision_flags_untracked_and_tracked_changes(tmp_path: Path) -> 
     assert _source_revision_for(repo) == clean
 
 
+def test_source_revision_ignores_enclosing_host_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-editable install must not inherit an enclosing repository revision.
+
+    :param Path tmp_path: Temporary directory used to build the host checkout.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to point at the installed module.
+    """
+    import chomp.ckpt as ckpt_mod
+
+    host_repo = tmp_path / "host"
+    installed_module = (
+        host_repo / ".venv" / "lib" / "python3.12" / "site-packages" / "chomp" / "ckpt.py"
+    )
+    installed_module.parent.mkdir(parents=True)
+    installed_module.write_text("# installed Chomp module\n")
+    (host_repo / ".gitignore").write_text(".venv/\n")
+    (host_repo / "host.py").write_text("host = True\n")
+    _git(host_repo, "init", "--quiet")
+    _git(host_repo, "add", "-A")
+    _git(host_repo, "commit", "--quiet", "-m", "host")
+
+    monkeypatch.setattr(ckpt_mod, "__file__", str(installed_module))
+    ckpt_mod._source_revision.cache_clear()
+    try:
+        assert ckpt_mod._source_revision() == f"package:{ckpt_mod._chomp_version}"
+    finally:
+        ckpt_mod._source_revision.cache_clear()
+
+
 def test_resume_compat_hard_gates_runtime_identity(tmp_path: Path) -> None:
     """Dependency, source, platform, and accelerator drift must reject resume."""
     cfg = _base_cfg(tmp_path / "run_runtime_compat")

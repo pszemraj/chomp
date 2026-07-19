@@ -175,11 +175,15 @@ def _source_revision_for(repo_root: Path) -> str:
 
 @lru_cache(maxsize=1)
 def _source_revision() -> str:
-    """Return the cached source revision for this chomp checkout.
+    """Return the cached source revision for this Chomp installation.
 
     :return str: Git commit, optionally suffixed by a dirty-tree digest, or package version.
     """
-    return _source_revision_for(Path(__file__).resolve().parents[2])
+    module_path = Path(__file__).resolve()
+    repo_root = module_path.parents[2]
+    if module_path != repo_root / "src" / "chomp" / "ckpt.py":
+        return f"package:{_chomp_version}"
+    return _source_revision_for(repo_root)
 
 
 @lru_cache(maxsize=1)
