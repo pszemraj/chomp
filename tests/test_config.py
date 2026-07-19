@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 
 import pytest
@@ -18,6 +18,7 @@ from chomp.config import (
     TrainConfig,
     build_config,
     load_config,
+    read_config_mapping,
     resolve_window_shuffle_rows,
     validate_config,
 )
@@ -185,6 +186,19 @@ def test_build_config_rejects_unknown_top_level_sections() -> None:
         build_config(data)
 
 
+@pytest.mark.parametrize(
+    ("data", "path"),
+    [
+        ({"data": {"pacing_buffer_docs": 10}}, "data.pacing_buffer_docs"),
+        ({"optim": {"adam": {"epsilon": 1e-8}}}, "optim.adam.epsilon"),
+    ],
+)
+def test_build_config_rejects_unknown_nested_keys(data: dict[str, object], path: str) -> None:
+    """Nested config typos should fail with a clean dotted-path error."""
+    with pytest.raises(ValueError, match=re.escape(path)):
+        build_config(data)
+
+
 def test_build_config_allows_resolved_derived_section() -> None:
     """config_resolved.json includes derived metadata that is not schema input."""
     data = _base_cfg().to_dict()
@@ -206,6 +220,39 @@ def test_config_files_reject_duplicate_keys(tmp_path: Path, suffix: str) -> None
 
     with pytest.raises(ValueError, match="[Dd]uplicate|duplicate key"):
         load_config(path)
+
+
+def test_config_yaml_merge_allows_explicit_overrides(tmp_path: Path) -> None:
+    """Explicit keys should override values inherited through a YAML merge."""
+    path = tmp_path / "merge.yaml"
+    path.write_text("variables: &defaults\n  steps: 20\ntrain:\n  <<: *defaults\n  steps: 30\n")
+
+    cfg = load_config(path)
+
+    assert cfg.train.steps == 30
+
+
+def test_config_reference_matches_config_fields() -> None:
+    """The config reference should contain every config field and no stale fields."""
+    reference = read_config_mapping(Path(__file__).parents[1] / "docs/config-reference.yaml")
+    assert set(reference) == {field.name for field in fields(Config)} | {"variables", "derived"}
+
+    reference = {
+        key: value for key, value in reference.items() if key not in {"variables", "derived"}
+    }
+
+    def _assert_matching_keys(
+        documented: dict[str, object], defaults: dict[str, object], path: str = ""
+    ) -> None:
+        """Assert that one documented config mapping matches its dataclass mapping."""
+        assert set(documented) == set(defaults), path or "config"
+        for key, default in defaults.items():
+            if isinstance(default, dict):
+                child = documented[key]
+                assert isinstance(child, dict), f"{path}{key}"
+                _assert_matching_keys(child, default, f"{path}{key}.")
+
+    _assert_matching_keys(reference, Config().to_dict())
 
 
 @pytest.mark.parametrize("section", ["variables", "derived"])

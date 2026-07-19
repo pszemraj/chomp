@@ -27,10 +27,9 @@ import warnings
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, fields, is_dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Union, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, Union, get_args, get_origin, get_type_hints
 
 import yaml
-from yaml.resolver import BaseResolver
 
 if TYPE_CHECKING:
     import jax.numpy as jnp
@@ -45,34 +44,42 @@ LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 class _UniqueKeyLoader(yaml.SafeLoader):
     """Safe YAML loader that rejects duplicate mapping keys."""
 
+    def __init__(self, stream: Any) -> None:
+        """Initialize the loader and its per-document mapping-node state.
 
-def _construct_unique_mapping(
-    loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False
-) -> dict[Any, Any]:
-    """Construct a YAML mapping while rejecting duplicate keys.
+        :param Any stream: YAML input stream.
+        """
+        super().__init__(stream)
+        self._checked_mapping_nodes: set[int] = set()
 
-    :param _UniqueKeyLoader loader: Active YAML loader.
-    :param yaml.MappingNode node: Mapping node to construct.
-    :param bool deep: Whether to construct nested objects eagerly.
-    :raises yaml.constructor.ConstructorError: If a key occurs more than once.
-    :return dict[Any, Any]: Constructed mapping.
-    """
-    loader.flatten_mapping(node)
-    mapping: dict[Any, Any] = {}
-    for key_node, value_node in node.value:
-        key = loader.construct_object(key_node, deep=deep)
-        if key in mapping:
-            raise yaml.constructor.ConstructorError(
-                "while constructing a mapping",
-                node.start_mark,
-                f"found duplicate key {key!r}",
-                key_node.start_mark,
-            )
-        mapping[key] = loader.construct_object(value_node, deep=deep)
-    return mapping
+    def flatten_mapping(self, node: yaml.MappingNode) -> None:
+        """Flatten YAML merges after rejecting duplicate literal keys.
 
+        :param yaml.MappingNode node: Mapping node to flatten.
+        :raises yaml.constructor.ConstructorError: If a literal key occurs more than once.
+        """
+        node_id = id(node)
+        literal_key_nodes: list[yaml.Node] = []
+        if node_id not in self._checked_mapping_nodes:
+            self._checked_mapping_nodes.add(node_id)
+            literal_key_nodes = [
+                key_node for key_node, _ in node.value if key_node.tag != "tag:yaml.org,2002:merge"
+            ]
 
-_UniqueKeyLoader.add_constructor(BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping)
+        # PyYAML prepends inherited entries, then applies explicit entries.
+        # Only literal peers are duplicates; explicit keys may override merges.
+        super().flatten_mapping(node)
+        seen: dict[Any, None] = {}
+        for key_node in literal_key_nodes:
+            key = self.construct_object(key_node)
+            if key in seen:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    f"found duplicate key {key!r}",
+                    key_node.start_mark,
+                )
+            seen[key] = None
 
 
 def _construct_unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -674,6 +681,28 @@ def _resolve_variables(data: dict[str, Any]) -> dict[str, Any]:
     return resolved_data
 
 
+_ConfigSectionT = TypeVar("_ConfigSectionT")
+
+
+def _build_config_section(
+    section_type: type[_ConfigSectionT], data: dict[str, Any], path: str
+) -> _ConfigSectionT:
+    """Build one config section after rejecting unknown keys.
+
+    :param type[_ConfigSectionT] section_type: Dataclass type for the section.
+    :param dict[str, Any] data: Raw section mapping.
+    :param str path: Dotted section path for validation errors.
+    :raises ValueError: If the mapping contains unknown keys.
+    :return _ConfigSectionT: Constructed config section.
+    """
+    allowed = {field.name for field in fields(section_type)}
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        keys = ", ".join(f"{path}.{key}" for key in unknown)
+        _vfail(f"unknown config key(s): {keys}")
+    return section_type(**data)
+
+
 def _from_nested_dict(data: dict[str, Any]) -> Config:
     """Convert nested dict into Config dataclasses.
 
@@ -688,15 +717,19 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
     if "derived" in data and not isinstance(data["derived"], dict):
         _vfail("derived must be a mapping when provided")
 
-    model = ModelConfig(**(data.get("model") or {}))
-    train = TrainConfig(**(data.get("train") or {}))
+    model = _build_config_section(ModelConfig, data.get("model") or {}, "model")
+    train = _build_config_section(TrainConfig, data.get("train") or {}, "train")
     optim_d = data.get("optim") or {}
     muon_d = optim_d.get("muon") or {}
     adam_d = optim_d.get("adam") or {}
-    muon = MuonOptimConfig(**muon_d)
-    adam = AdamOptimConfig(**adam_d)
+    muon = _build_config_section(MuonOptimConfig, muon_d, "optim.muon")
+    adam = _build_config_section(AdamOptimConfig, adam_d, "optim.adam")
     optim_d = {k: v for k, v in optim_d.items() if k not in {"muon", "adam"}}
-    optim = OptimConfig(muon=muon, adam=adam, **optim_d)
+    optim = _build_config_section(
+        OptimConfig,
+        {"muon": muon, "adam": adam, **optim_d},
+        "optim",
+    )
     logging_d = data.get("logging") or {}
     wandb_d = dict(logging_d.get("wandb") or {})
     if "tags" in wandb_d:
@@ -704,19 +737,31 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
         if not isinstance(tags, (list, tuple)):
             _vfail("logging.wandb.tags must be a YAML/JSON list of strings")
         wandb_d["tags"] = tuple(tags)
-    wandb = WandbConfig(**wandb_d)
+    wandb = _build_config_section(WandbConfig, wandb_d, "logging.wandb")
     logging_d = {k: v for k, v in logging_d.items() if k != "wandb"}
-    logging = LoggingConfig(wandb=wandb, **logging_d)
-    debug = DebugConfig(**(data.get("debug") or {}))
-    checkpoint = CheckpointConfig(**(data.get("checkpoint") or {}))
+    logging = _build_config_section(
+        LoggingConfig,
+        {"wandb": wandb, **logging_d},
+        "logging",
+    )
+    debug = _build_config_section(DebugConfig, data.get("debug") or {}, "debug")
+    checkpoint = _build_config_section(
+        CheckpointConfig,
+        data.get("checkpoint") or {},
+        "checkpoint",
+    )
 
     # Data + nested tokenizer
     data_d = data.get("data") or {}
     tok_d = data_d.get("tokenizer") or {}
-    tok = TokenizerConfig(**tok_d)
+    tok = _build_config_section(TokenizerConfig, tok_d, "data.tokenizer")
     # remove tokenizer from dict before constructing
     data_d = {k: v for k, v in data_d.items() if k != "tokenizer"}
-    data_cfg = DataConfig(tokenizer=tok, **data_d)
+    data_cfg = _build_config_section(
+        DataConfig,
+        {"tokenizer": tok, **data_d},
+        "data",
+    )
 
     return Config(
         model=model,

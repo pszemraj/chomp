@@ -20,8 +20,9 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-# Stateful data/checkpoint dependencies stay exact. The model stack follows
-# compatible release lines; checkpoints record and hard-gate resolved versions.
+# Stateful data/checkpoint dependencies and the supporting runtime stay at the
+# reviewed dedicated-environment versions. The model stack follows compatible
+# release lines; checkpoints record and hard-gate resolved versions.
 dependencies = [
   # Chomp is a Linux/NVIDIA training harness. JAX's CUDA extra installs the
   # matching jaxlib, CUDA plugin, and pip-managed CUDA 13 runtime libraries.
