@@ -2,7 +2,7 @@
 #
 # Reference only: the typed placeholders below intentionally make this invalid as a chomp config. Runnable scenario configs live under configs/.
 # Every section and key is optional to author unless its comment says otherwise. Omission applies the literal or computed default stated on that key.
-# Duplicate keys, unknown sections or fields, non-finite numbers, and invalid field values or interactions fail before training. YAML integers are accepted for float fields; booleans are not integers.
+# Unknown top-level sections, unsupported choices, and invalid field values or interactions fail before training.
 
 # variables -- mapping[str, value]; default: {}. Values may be nested. A full `$variables.path` reference preserves type; `{$variables.path}` and `${variables.path}` interpolate into strings. Missing or circular references fail.
 variables: "<mapping[str, value]>"

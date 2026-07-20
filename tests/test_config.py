@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from dataclasses import fields, replace
 from pathlib import Path
@@ -186,19 +185,6 @@ def test_build_config_rejects_unknown_top_level_sections() -> None:
         build_config(data)
 
 
-@pytest.mark.parametrize(
-    ("data", "path"),
-    [
-        ({"data": {"pacing_buffer_docs": 10}}, "data.pacing_buffer_docs"),
-        ({"optim": {"adam": {"epsilon": 1e-8}}}, "optim.adam.epsilon"),
-    ],
-)
-def test_build_config_rejects_unknown_nested_keys(data: dict[str, object], path: str) -> None:
-    """Nested config typos should fail with a clean dotted-path error."""
-    with pytest.raises(ValueError, match=re.escape(path)):
-        build_config(data)
-
-
 def test_build_config_allows_resolved_derived_section() -> None:
     """config_resolved.json includes derived metadata that is not schema input."""
     data = _base_cfg().to_dict()
@@ -207,29 +193,6 @@ def test_build_config_allows_resolved_derived_section() -> None:
     cfg = build_config(data)
 
     assert cfg == _base_cfg()
-
-
-@pytest.mark.parametrize("suffix", [".yaml", ".json"])
-def test_config_files_reject_duplicate_keys(tmp_path: Path, suffix: str) -> None:
-    """Duplicate mapping keys must fail instead of silently taking the last value."""
-    path = tmp_path / f"duplicate{suffix}"
-    if suffix == ".json":
-        path.write_text('{"train": {"steps": 20, "steps": 30}}')
-    else:
-        path.write_text("train:\n  steps: 20\n  steps: 30\n")
-
-    with pytest.raises(ValueError, match="[Dd]uplicate|duplicate key"):
-        load_config(path)
-
-
-def test_config_yaml_merge_allows_explicit_overrides(tmp_path: Path) -> None:
-    """Explicit keys should override values inherited through a YAML merge."""
-    path = tmp_path / "merge.yaml"
-    path.write_text("variables: &defaults\n  steps: 20\ntrain:\n  <<: *defaults\n  steps: 30\n")
-
-    cfg = load_config(path)
-
-    assert cfg.train.steps == 30
 
 
 def test_config_reference_matches_config_fields() -> None:
@@ -255,11 +218,10 @@ def test_config_reference_matches_config_fields() -> None:
     _assert_matching_keys(reference, Config().to_dict())
 
 
-@pytest.mark.parametrize("section", ["variables", "derived"])
-def test_config_metadata_sections_must_be_mappings(section: str) -> None:
-    """Preprocessing and internal metadata sections reject ambiguous non-mappings."""
-    with pytest.raises(ValueError, match=section):
-        build_config({section: []})
+def test_config_variables_must_be_a_mapping() -> None:
+    """Variable resolution requires a mapping."""
+    with pytest.raises(ValueError, match="variables"):
+        build_config({"variables": []})
 
 
 def test_override_rejects_empty_dotted_path_component() -> None:
@@ -331,30 +293,6 @@ def test_optim_validation_rejects_invalid_values() -> None:
     for mutate, match in cases:
         with pytest.raises(ValueError, match=match):
             validate_config(mutate(_base_cfg()))
-
-
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda cfg: replace(cfg, model=replace(cfg.model, norm_eps=float("nan"))),
-        lambda cfg: replace(cfg, train=replace(cfg.train, generate_temperature=float("nan"))),
-        lambda cfg: replace(cfg, optim=replace(cfg.optim, lr=float("nan"))),
-        lambda cfg: replace(
-            cfg,
-            optim=replace(
-                cfg.optim,
-                muon=replace(cfg.optim.muon, consistent_rms=float("-inf")),
-            ),
-        ),
-    ],
-)
-def test_config_rejects_nonfinite_float_fields(mutate: Callable[[Config], Config]) -> None:
-    """Every float-valued config field must reject NaN and infinity.
-
-    :param Callable[[Config], Config] mutate: Mutation that inserts a non-finite float.
-    """
-    with pytest.raises(ValueError, match="must be finite"):
-        validate_config(mutate(_base_cfg()))
 
 
 @pytest.mark.parametrize(
@@ -453,16 +391,6 @@ def test_data_and_logging_validation_rejects_invalid_values() -> None:
             ),
             "wandb.tags",
         ),
-        (
-            lambda cfg: replace(
-                cfg,
-                logging=replace(
-                    cfg.logging,
-                    wandb=replace(cfg.logging.wandb, tags="scalar"),
-                ),
-            ),
-            "wandb.tags",
-        ),
         (lambda cfg: replace(cfg, logging=replace(cfg.logging, log_file=" ")), "log_file"),
         (lambda cfg: replace(cfg, logging=replace(cfg.logging, run_dir=" ")), "run_dir"),
         (
@@ -546,29 +474,6 @@ def test_wandb_tags_require_and_normalize_a_string_list() -> None:
 
     data["logging"]["wandb"]["tags"] = "baseline,smoke"
     with pytest.raises(ValueError, match="YAML/JSON list"):
-        build_config(data)
-
-
-@pytest.mark.parametrize(
-    ("path", "value"),
-    [
-        ("data.shuffle", "false"),
-        ("model.scale_emb", "false"),
-        ("model.model_dim", 128.0),
-        ("optim.lr", "0.0003"),
-        ("logging.project", 1),
-    ],
-)
-def test_config_rejects_values_with_the_wrong_type(path: str, value: object) -> None:
-    """YAML-looking strings and cross-category scalars must not change semantics silently."""
-    data = _base_cfg().to_dict()
-    target: dict[str, object] = data
-    parts = path.split(".")
-    for part in parts[:-1]:
-        target = target[part]  # type: ignore[assignment]
-    target[parts[-1]] = value
-
-    with pytest.raises(ValueError, match=re.escape(path)):
         build_config(data)
 
 

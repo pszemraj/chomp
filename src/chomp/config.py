@@ -20,14 +20,12 @@ Design stance (hard-earned):
 from __future__ import annotations
 
 import json
-import math
 import re
-import types
 import warnings
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass, fields, is_dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, Union, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
 
@@ -39,62 +37,6 @@ DatasetBackend = Literal["hf", "local_text"]
 TokenizerKind = Literal["byte", "hf"]
 PackingMode = Literal["sequential", "bin", "multipack"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
-
-
-class _UniqueKeyLoader(yaml.SafeLoader):
-    """Safe YAML loader that rejects duplicate mapping keys."""
-
-    def __init__(self, stream: Any) -> None:
-        """Initialize the loader and its per-document mapping-node state.
-
-        :param Any stream: YAML input stream.
-        """
-        super().__init__(stream)
-        self._checked_mapping_nodes: set[int] = set()
-
-    def flatten_mapping(self, node: yaml.MappingNode) -> None:
-        """Flatten YAML merges after rejecting duplicate literal keys.
-
-        :param yaml.MappingNode node: Mapping node to flatten.
-        :raises yaml.constructor.ConstructorError: If a literal key occurs more than once.
-        """
-        node_id = id(node)
-        literal_key_nodes: list[yaml.Node] = []
-        if node_id not in self._checked_mapping_nodes:
-            self._checked_mapping_nodes.add(node_id)
-            literal_key_nodes = [
-                key_node for key_node, _ in node.value if key_node.tag != "tag:yaml.org,2002:merge"
-            ]
-
-        # PyYAML prepends inherited entries, then applies explicit entries.
-        # Only literal peers are duplicates; explicit keys may override merges.
-        super().flatten_mapping(node)
-        seen: dict[Any, None] = {}
-        for key_node in literal_key_nodes:
-            key = self.construct_object(key_node)
-            if key in seen:
-                raise yaml.constructor.ConstructorError(
-                    "while constructing a mapping",
-                    node.start_mark,
-                    f"found duplicate key {key!r}",
-                    key_node.start_mark,
-                )
-            seen[key] = None
-
-
-def _construct_unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    """Construct a JSON object while rejecting duplicate keys.
-
-    :param list[tuple[str, Any]] pairs: Decoded object key/value pairs.
-    :raises ValueError: If a key occurs more than once.
-    :return dict[str, Any]: Constructed JSON object.
-    """
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"Duplicate JSON key: {key!r}")
-        result[key] = value
-    return result
 
 
 @dataclass(frozen=True)
@@ -520,9 +462,9 @@ def read_config_mapping(path: str | Path) -> dict[str, Any]:
     try:
         with path.open() as f:
             if path.suffix == ".json":
-                data = json.load(f, object_pairs_hook=_construct_unique_json_object) or {}
+                data = json.load(f) or {}
             else:
-                data = yaml.load(f, Loader=_UniqueKeyLoader) or {}
+                data = yaml.safe_load(f) or {}
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid JSON in {path}: {exc}") from exc
     except yaml.YAMLError as exc:
@@ -662,28 +604,6 @@ def _resolve_variables(data: dict[str, Any]) -> dict[str, Any]:
     return resolved_data
 
 
-_ConfigSectionT = TypeVar("_ConfigSectionT")
-
-
-def _build_config_section(
-    section_type: type[_ConfigSectionT], data: dict[str, Any], path: str
-) -> _ConfigSectionT:
-    """Build one config section after rejecting unknown keys.
-
-    :param type[_ConfigSectionT] section_type: Dataclass type for the section.
-    :param dict[str, Any] data: Raw section mapping.
-    :param str path: Dotted section path for validation errors.
-    :raises ValueError: If the mapping contains unknown keys.
-    :return _ConfigSectionT: Constructed config section.
-    """
-    allowed = {field.name for field in fields(section_type)}
-    unknown = sorted(set(data) - allowed)
-    if unknown:
-        keys = ", ".join(f"{path}.{key}" for key in unknown)
-        _vfail(f"unknown config key(s): {keys}")
-    return section_type(**data)
-
-
 def _from_nested_dict(data: dict[str, Any]) -> Config:
     """Convert nested dict into Config dataclasses.
 
@@ -695,22 +615,16 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
     unknown = sorted(set(data) - allowed)
     if unknown:
         _vfail(f"unknown top-level config section(s): {', '.join(unknown)}")
-    if "derived" in data and not isinstance(data["derived"], dict):
-        _vfail("derived must be a mapping when provided")
 
-    model = _build_config_section(ModelConfig, data.get("model") or {}, "model")
-    train = _build_config_section(TrainConfig, data.get("train") or {}, "train")
+    model = ModelConfig(**(data.get("model") or {}))
+    train = TrainConfig(**(data.get("train") or {}))
     optim_d = data.get("optim") or {}
     muon_d = optim_d.get("muon") or {}
     adam_d = optim_d.get("adam") or {}
-    muon = _build_config_section(MuonOptimConfig, muon_d, "optim.muon")
-    adam = _build_config_section(AdamOptimConfig, adam_d, "optim.adam")
+    muon = MuonOptimConfig(**muon_d)
+    adam = AdamOptimConfig(**adam_d)
     optim_d = {k: v for k, v in optim_d.items() if k not in {"muon", "adam"}}
-    optim = _build_config_section(
-        OptimConfig,
-        {"muon": muon, "adam": adam, **optim_d},
-        "optim",
-    )
+    optim = OptimConfig(muon=muon, adam=adam, **optim_d)
     logging_d = data.get("logging") or {}
     wandb_d = dict(logging_d.get("wandb") or {})
     if "tags" in wandb_d:
@@ -718,31 +632,19 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
         if not isinstance(tags, (list, tuple)):
             _vfail("logging.wandb.tags must be a YAML/JSON list of strings")
         wandb_d["tags"] = tuple(tags)
-    wandb = _build_config_section(WandbConfig, wandb_d, "logging.wandb")
+    wandb = WandbConfig(**wandb_d)
     logging_d = {k: v for k, v in logging_d.items() if k != "wandb"}
-    logging = _build_config_section(
-        LoggingConfig,
-        {"wandb": wandb, **logging_d},
-        "logging",
-    )
-    debug = _build_config_section(DebugConfig, data.get("debug") or {}, "debug")
-    checkpoint = _build_config_section(
-        CheckpointConfig,
-        data.get("checkpoint") or {},
-        "checkpoint",
-    )
+    logging = LoggingConfig(wandb=wandb, **logging_d)
+    debug = DebugConfig(**(data.get("debug") or {}))
+    checkpoint = CheckpointConfig(**(data.get("checkpoint") or {}))
 
     # Data + nested tokenizer
     data_d = data.get("data") or {}
     tok_d = data_d.get("tokenizer") or {}
-    tok = _build_config_section(TokenizerConfig, tok_d, "data.tokenizer")
+    tok = TokenizerConfig(**tok_d)
     # remove tokenizer from dict before constructing
     data_d = {k: v for k, v in data_d.items() if k != "tokenizer"}
-    data_cfg = _build_config_section(
-        DataConfig,
-        {"tokenizer": tok, **data_d},
-        "data",
-    )
+    data_cfg = DataConfig(tokenizer=tok, **data_d)
 
     return Config(
         model=model,
@@ -765,74 +667,6 @@ def _vfail(msg: str) -> None:
     :raises ValueError: Always raised with formatted message.
     """
     raise ValueError(f"Config validation failed: {msg}")
-
-
-def _matches_config_type(value: Any, type_hint: Any) -> bool:
-    """Return whether a parsed value satisfies a config field annotation.
-
-    Floats accept YAML integers because both are numeric configuration values;
-    booleans remain distinct from integers despite Python's bool subclassing.
-
-    :param Any value: Parsed configuration value.
-    :param Any type_hint: Resolved field annotation.
-    :return bool: True when the value satisfies the annotation.
-    """
-    origin = get_origin(type_hint)
-    if origin in (Union, types.UnionType):
-        return any(_matches_config_type(value, option) for option in get_args(type_hint))
-    if origin is Literal:
-        return any(
-            type(value) is type(option) and value == option for option in get_args(type_hint)
-        )
-    if origin is tuple:
-        if not isinstance(value, tuple):
-            return False
-        item_types = get_args(type_hint)
-        if len(item_types) == 2 and item_types[1] is Ellipsis:
-            return all(_matches_config_type(item, item_types[0]) for item in value)
-        return len(value) == len(item_types) and all(
-            _matches_config_type(item, item_type)
-            for item, item_type in zip(value, item_types, strict=True)
-        )
-    if type_hint is Any:
-        return True
-    if type_hint is bool:
-        return type(value) is bool
-    if type_hint is int:
-        return type(value) is int
-    if type_hint is float:
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
-    if type_hint is str:
-        return type(value) is str
-    if type_hint is type(None):
-        return value is None
-    return isinstance(value, type_hint)
-
-
-def _validate_config_types(value: Any, prefix: str = "") -> None:
-    """Validate every dataclass field against its resolved annotation.
-
-    :param Any value: Config dataclass or nested config dataclass.
-    :param str prefix: Dotted parent path used in validation errors.
-    :raises ValueError: If a field contains a value of the wrong type.
-    """
-    if not is_dataclass(value):
-        raise TypeError(f"Expected config dataclass, got {type(value).__name__}")
-    hints = get_type_hints(type(value))
-    for field in fields(value):
-        field_value = getattr(value, field.name)
-        path = f"{prefix}.{field.name}" if prefix else field.name
-        type_hint = hints[field.name]
-        if isinstance(field_value, float) and not math.isfinite(field_value):
-            _vfail(f"{path} must be finite, got {field_value}")
-        if isinstance(type_hint, type) and is_dataclass(type_hint):
-            if type(field_value) is not type_hint:
-                _vfail(
-                    f"{path} has type {type(field_value).__name__}; expected {type_hint.__name__}"
-                )
-            _validate_config_types(field_value, path)
-        elif not _matches_config_type(field_value, type_hint):
-            _vfail(f"{path} has type {type(field_value).__name__}; expected {type_hint!s}")
 
 
 def _validate_train(cfg: Config) -> None:
@@ -886,6 +720,8 @@ def _validate_train(cfg: Config) -> None:
 
 def _validate_optim(cfg: Config) -> None:
     """Validate optimizer-related config fields."""
+    if cfg.optim.name not in ("adamw", "muon"):
+        _vfail(f"optim.name must be 'adamw' or 'muon', got {cfg.optim.name!r}")
     if cfg.optim.lr <= 0:
         _vfail(f"optim.lr must be positive, got {cfg.optim.lr}")
     if cfg.optim.weight_decay < 0:
@@ -933,6 +769,27 @@ def _validate_checkpoint(cfg: Config) -> None:
 
 def _validate_model(cfg: Config) -> None:
     """Validate model-related config fields."""
+    if cfg.model.backend not in ("dummy", "megalodon"):
+        _vfail(f"model.backend must be 'dummy' or 'megalodon', got {cfg.model.backend!r}")
+    if cfg.model.attention_dropout_mode not in ("post_softmax", "dropkey"):
+        _vfail(
+            "model.attention_dropout_mode must be 'post_softmax' or 'dropkey', got "
+            f"{cfg.model.attention_dropout_mode!r}"
+        )
+    if cfg.model.init_mode not in ("gaussian", "xavier", "he", "bert"):
+        _vfail(f"model.init_mode is unsupported: {cfg.model.init_mode!r}")
+    if cfg.model.param_dtype != "float32":
+        _vfail("model.param_dtype must be 'float32'")
+    if cfg.model.compute_dtype not in ("float32", "bfloat16"):
+        _vfail(f"model.compute_dtype is unsupported: {cfg.model.compute_dtype!r}")
+    if cfg.model.accum_dtype != "float32":
+        _vfail("model.accum_dtype must be 'float32'")
+    if cfg.model.attention_softmax_dtype not in ("float32", "bfloat16"):
+        _vfail(
+            f"model.attention_softmax_dtype is unsupported: {cfg.model.attention_softmax_dtype!r}"
+        )
+    if cfg.model.loss_softmax_dtype not in ("float32", "bfloat16"):
+        _vfail(f"model.loss_softmax_dtype is unsupported: {cfg.model.loss_softmax_dtype!r}")
     if cfg.model.vocab_size <= 0:
         _vfail(f"model.vocab_size must be positive, got {cfg.model.vocab_size}")
     for name, token_id in (
@@ -1038,6 +895,10 @@ def _validate_data(cfg: Config) -> None:
         if cfg.data.hf_revision is not None and not cfg.data.hf_revision.strip():
             _vfail("data.hf_revision must be null or a non-empty revision when data.backend='hf'")
         if cfg.data.hf_eval_split is not None:
+            if not isinstance(cfg.data.hf_eval_split, str):
+                _vfail(
+                    "data.hf_eval_split must be null or a non-empty string when data.backend='hf'"
+                )
             if not cfg.data.hf_eval_split.strip():
                 _vfail(
                     "data.hf_eval_split must be null or a non-empty string when data.backend='hf'"
@@ -1064,9 +925,16 @@ def _validate_data(cfg: Config) -> None:
                 "data.shuffle_buffer_bytes must be positive when data.shuffle=true, "
                 f"got {cfg.data.shuffle_buffer_bytes}"
             )
-    else:
+    elif cfg.data.backend == "local_text":
         if not cfg.data.local_text:
             _vfail("data.local_text must be non-empty when data.backend='local_text'")
+    else:
+        _vfail(f"data.backend must be 'hf' or 'local_text', got {cfg.data.backend!r}")
+    if cfg.data.packing_mode not in ("sequential", "bin", "multipack"):
+        _vfail(
+            "data.packing_mode must be 'sequential', 'bin', or 'multipack', got "
+            f"{cfg.data.packing_mode!r}"
+        )
     if (
         cfg.data.packing_mode in ("bin", "multipack")
         and cfg.data.packing_max_docs_per_bin is not None
@@ -1136,6 +1004,8 @@ def _validate_data(cfg: Config) -> None:
 
 def _validate_logging(cfg: Config) -> None:
     """Validate logging-related config fields."""
+    if cfg.logging.level not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+        _vfail(f"logging.level is unsupported: {cfg.logging.level!r}")
     if not str(cfg.logging.project).strip():
         _vfail("logging.project must be a non-empty string")
     if cfg.logging.run_dir is not None and not cfg.logging.run_dir.strip():
@@ -1148,6 +1018,8 @@ def _validate_logging(cfg: Config) -> None:
         value = getattr(cfg.logging.wandb, name)
         if value is not None and not value.strip():
             _vfail(f"logging.wandb.{name} must be a non-empty string or null")
+    if cfg.logging.wandb.mode not in ("online", "offline"):
+        _vfail(f"logging.wandb.mode must be 'online' or 'offline', got {cfg.logging.wandb.mode!r}")
     if any(not tag.strip() for tag in cfg.logging.wandb.tags):
         _vfail("logging.wandb.tags entries must be non-empty strings")
 
@@ -1158,7 +1030,7 @@ def _validate_tokenizer(cfg: Config) -> None:
     if tok.kind == "hf":
         if not tok.hf_name_or_path:
             _vfail("data.tokenizer.hf_name_or_path must be set when tokenizer.kind='hf'")
-    else:
+    elif tok.kind == "byte":
         if tok.byte_offset < 0:
             _vfail(f"data.tokenizer.byte_offset must be >=0, got {tok.byte_offset}")
         min_vocab = tok.byte_offset + 256
@@ -1183,6 +1055,8 @@ def _validate_tokenizer(cfg: Config) -> None:
                     "model.eos_token_id must be within [0, byte_offset) when using byte tokenizer "
                     "with add_eos=true"
                 )
+    else:
+        _vfail(f"data.tokenizer.kind must be 'byte' or 'hf', got {tok.kind!r}")
     if tok.vocab_size_multiple <= 0:
         _vfail(
             f"data.tokenizer.vocab_size_multiple must be positive, got {tok.vocab_size_multiple}"
@@ -1201,13 +1075,8 @@ def _validate_tokenizer(cfg: Config) -> None:
         _vfail("model.eos_token_id must be within [0, vocab_size) when add_eos=true")
 
 
-def _validate_debug(cfg: Config) -> None:
-    """Validate runtime debug-check configuration."""
-
-
 def validate_config(cfg: Config) -> None:
     """Validate config with actionable error messages."""
-    _validate_config_types(cfg)
     _validate_train(cfg)
     _validate_optim(cfg)
     _validate_checkpoint(cfg)
@@ -1215,7 +1084,6 @@ def validate_config(cfg: Config) -> None:
     _validate_data(cfg)
     _validate_logging(cfg)
     _validate_tokenizer(cfg)
-    _validate_debug(cfg)
 
 
 def derived_deterministic(cfg: Config) -> bool:
