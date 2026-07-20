@@ -9,8 +9,7 @@ We use:
 - YAML files for readability
 - dot-path overrides for quick experiment changes
 
-The loader is intentionally strict: mis-typed keys or invalid values should fail
-fast with error messages that tell you exactly what to fix.
+The loader applies semantic validation for unsupported choices and invalid value combinations.
 
 Design stance (hard-earned):
 - Training must run on *real data* (HF streaming). Debug sources can exist,

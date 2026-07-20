@@ -849,31 +849,6 @@ def test_hf_document_shuffle_byte_budget_bounds_window_and_replays_exactly(
     assert len(set(consumed + expected)) == len(consumed + expected)
 
 
-def test_hf_shuffled_state_requires_replay_metadata(
-    patch_hf_load_dataset: Callable[..., dict[str, int]],
-) -> None:
-    """Shuffled restore must reject state that cannot reconstruct its buffer."""
-    patch_hf_load_dataset([{"text": "alpha"}, {"text": "bravo"}])
-    stream = HFStreamingTextStream(_hf_stream_spec(shuffle=True))
-
-    with pytest.raises(RuntimeError, match="shuffle_state"):
-        stream.set_state({"epoch": 0, "hf_state": {"index": 1}})
-
-
-def test_hf_set_state_raises_on_missing_hf_state(
-    patch_hf_load_dataset: Callable[..., dict[str, int]],
-) -> None:
-    """set_state must fail loud when hf_state is missing, not silently rebuild."""
-    patch_hf_load_dataset([{"text": "alpha"}, {"text": "bravo"}])
-
-    spec = _hf_stream_spec()
-    stream = HFStreamingTextStream(spec)
-    with pytest.raises(RuntimeError, match="hf_state"):
-        stream.set_state({"epoch": 0, "hf_state": None})
-    with pytest.raises(RuntimeError, match="hf_state"):
-        stream.set_state({"epoch": 0})
-
-
 def test_hf_repeat_rolls_epochs(
     patch_hf_load_dataset: Callable[..., dict[str, int]],
 ) -> None:

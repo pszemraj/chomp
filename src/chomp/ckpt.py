@@ -129,17 +129,6 @@ def make_manager(
     return mgr
 
 
-def _checkpoint_target(data_iter: Any) -> Any:
-    """Return the iterator object to pass to Grain's checkpoint handler.
-
-    :param Any data_iter: Training data iterator.
-    :return Any: Iterator object compatible with Grain checkpointing.
-    """
-    if hasattr(data_iter, "checkpoint_target"):
-        return data_iter.checkpoint_target()
-    return data_iter
-
-
 def _train_state_step(train_state: Any) -> int:
     """Read an integer step from a restored or live train state.
 
@@ -219,7 +208,7 @@ def save(
         int(step),
         args=ocp.args.Composite(
             train_state=ocp.args.StandardSave(train_state),
-            data_state=gcp.CheckpointSave(_checkpoint_target(data_iter)),
+            data_state=gcp.CheckpointSave(data_iter.checkpoint_target()),
             meta=ocp.args.JsonSave(meta.to_dict()),
         ),
         force=force,
@@ -254,7 +243,7 @@ def restore_at_step(
         step,
         args=ocp.args.Composite(
             train_state=ocp.args.StandardRestore(abstract_train_state),
-            data_state=gcp.CheckpointRestore(_checkpoint_target(data_iter)),
+            data_state=gcp.CheckpointRestore(data_iter.checkpoint_target()),
             meta=ocp.args.JsonRestore(),
         ),
     )

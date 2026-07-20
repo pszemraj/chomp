@@ -258,13 +258,6 @@ class _ResumeSafeWindowShuffleIterDataset(grain.experimental.WindowShuffleIterDa
 
     def __iter__(self) -> Any:
         it = super().__iter__()
-        if not hasattr(it, "_init"):
-            raise RuntimeError(
-                "grain's _WindowShuffleDatasetIterator no longer has an _init "
-                "attribute; the resume-exactness workaround in "
-                "_ResumeSafeWindowShuffleIterDataset must be re-verified against "
-                "this grain version (see chomp docs/packing.md, window shuffling)."
-            )
         original_set_state = it.set_state
 
         def _set_state(state: dict[str, Any]) -> None:

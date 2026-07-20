@@ -438,18 +438,12 @@ def save_tokenizer_snapshot(
     :param Path run_dir: Run directory path.
     :param Config cfg: Training configuration.
     :param Tokenizer tok: Tokenizer instance to save.
-    :param bool allow_existing: If True, skip if snapshot already exists.
-    :raises RuntimeError: If snapshot exists and allow_existing=False.
+    :param bool allow_existing: Whether this is an existing run.
     """
-    if cfg.data.tokenizer.kind != "hf":
+    if cfg.data.tokenizer.kind != "hf" or allow_existing:
         return
 
     tok_dir = Path(run_dir) / "tokenizer"
-    if tok_dir.exists():
-        if allow_existing:
-            return
-        raise RuntimeError(f"Tokenizer snapshot already exists: {tok_dir}")
-
     tok_dir.mkdir()
     tok.save_pretrained(tok_dir)  # type: ignore[attr-defined]
 
@@ -460,12 +454,8 @@ def load_tokenizer_snapshot(run_dir: Path, cfg: Config) -> Tokenizer:
     :param Path run_dir: Run directory containing tokenizer snapshot.
     :param Config cfg: Training configuration.
     :return Tokenizer: Restored Hugging Face tokenizer instance.
-    :raises FileNotFoundError: If tokenizer snapshot is missing.
     """
     tok_dir = Path(run_dir) / "tokenizer"
-    if not tok_dir.exists():
-        raise FileNotFoundError(f"Tokenizer snapshot not found at {tok_dir}")
-
     return HFTokenizer(
         str(tok_dir),
         use_fast=cfg.data.tokenizer.hf_use_fast,

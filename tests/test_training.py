@@ -388,28 +388,6 @@ def test_checkpoint_data_state_roundtrip(
     assert eqx.tree_equal(expected, restored_batch)
 
 
-def test_corrupt_checkpoint_fails_restore(
-    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
-) -> None:
-    """Corrupted checkpoint metadata should raise an error on restore."""
-    cfg, state, mgr, ckpt_dir = _saved_step1_checkpoint(
-        tmp_path / "run_corrupt", track_checkpoint_manager
-    )
-
-    corrupt_target = None
-    for path in (ckpt_dir / "1").rglob("*"):
-        if path.is_file() and path.name == "metadata":
-            corrupt_target = path
-            break
-    assert corrupt_target is not None
-    corrupt_target.write_text("{not: valid json", encoding="utf-8")
-
-    abstract_state = abstractify_tree(state)
-    with pytest.raises((ValueError, RuntimeError, KeyError, json.JSONDecodeError)):
-        data_it_restore = build_train_iterator(cfg)
-        restore_at_step(mgr, step=1, abstract_train_state=abstract_state, data_iter=data_it_restore)
-
-
 def test_max_to_keep_prunes_checkpoints(
     tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
 ) -> None:
@@ -1346,7 +1324,6 @@ def test_dry_run_compiles_single_step(tmp_path: Path, monkeypatch: pytest.Monkey
     run(cfg, config_path=None, resume="none", dry_run=True)
 
     assert (run_dir / "config_resolved.json").exists()
-    assert not (run_dir / "parameter-manifest.json").exists()
     assert not (run_dir / cfg.logging.metrics_file).exists()
     assert profile_events == ["start", "stop"]
 

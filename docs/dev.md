@@ -60,11 +60,3 @@ Shared helper modules:
 - [`tests/helpers/io.py`](../tests/helpers/io.py): test artifact readers
 
 GPU invariants remain isolated in [`tests/test_gpu_smoke.py`](../tests/test_gpu_smoke.py).
-
-## Tracked follow-ups
-
-- **TODO(provenance): carry original-document and source identity through the host pipeline.** Replace the text-only source item with a compact record, retain document identity across long-document chunks and FFD rows, and keep per-row segment-to-document/source mappings beside (not inside) device batches. Log unique original documents, dominant-document token fraction, maximum rows from one document, source counts, and source entropy per logged optimizer batch. This belongs with multi-source mixing because source fields and stable IDs are dataset-schema decisions. Acceptance requires exact interrupted/resumed provenance metrics, bounded host memory, and no dense document-ID device array.
-
-- **TODO(grain-shuffle): replace the pinned private Grain workaround with an owned packed-window iterator.** The verified runtime pins `grain==0.2.15` and fails fast if `_WindowShuffleDatasetIterator._init` changes. An owned transform should store only parent state at the window boundary, window index, and permutation cursor, then remove the private attribute patch. Acceptance requires the full continuous-versus-resumed suite with prefetch, mid-window restore, and a deliberate Grain upgrade before changing the pin.
-
-- **TODO(batch-labels): evaluate deriving labels on-device.** Labels are a function of tokens, segment boundaries, EOS policy, and padding. Remove the transferred label array only if the design preserves the host zero-objective guard, exact loss-token envelope, eval behavior, and strict/non-strict segment semantics. Benchmark host-to-device bytes and step time at 2K, 8K, and 32K contexts before keeping the added device-side logic.

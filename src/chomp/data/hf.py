@@ -209,16 +209,9 @@ class HFStreamingTextStream:
     def _source_state(self) -> dict[str, Any]:
         """Capture the unshuffled HF source state.
 
-        :raises RuntimeError: If the source cannot produce checkpoint state.
         :return dict[str, Any]: Source iterator state.
         """
-        try:
-            return self._ds.state_dict()  # type: ignore[attr-defined]
-        except Exception as exc:
-            raise RuntimeError(
-                "HF streaming dataset failed to produce state_dict(); refusing "
-                "to write a checkpoint whose data stream cannot resume exactly."
-            ) from exc
+        return self._ds.state_dict()  # type: ignore[attr-defined]
 
     def _read_text(self) -> str:
         """Read and validate one document from the HF source.
@@ -364,9 +357,6 @@ class HFStreamingTextStream:
         """Restore stream state from a checkpoint.
 
         :param dict[str, Any] state: State dict from get_state().
-        :raises RuntimeError: If required source or shuffle replay state is
-            missing or invalid.
-        :raises Exception: If load_state_dict fails (better to crash than silently reset).
         """
         self._close_source_iterator()
         epoch = int(state["epoch"])
@@ -374,13 +364,7 @@ class HFStreamingTextStream:
         self._ds = self._load_dataset()
 
         if not self._spec.shuffle:
-            hf_state = state.get("hf_state")
-            if hf_state is None:
-                raise RuntimeError(
-                    "Checkpoint is missing hf_state for the HF streaming dataset; "
-                    "refusing to approximate resume by rebuilding from epoch/seed."
-                )
-            self._ds.load_state_dict(hf_state)  # type: ignore[attr-defined]
+            self._ds.load_state_dict(state["hf_state"])  # type: ignore[attr-defined]
             self._it = iter(self._ds)
             self._closed = False
             self._source_started = False
@@ -390,21 +374,10 @@ class HFStreamingTextStream:
             self._window_parent_state = None
             self._window_bytes = 0
         else:
-            shuffle_state = state.get("shuffle_state")
-            if not isinstance(shuffle_state, dict):
-                raise RuntimeError(
-                    "Checkpoint is missing shuffle_state for the resume-safe HF "
-                    "document shuffle; exact resume is impossible."
-                )
-            parent_state = shuffle_state.get("parent_state")
-            if not isinstance(parent_state, dict):
-                raise RuntimeError("HF shuffle_state is missing its parent_state.")
-            window_index = int(shuffle_state.get("window_index", -1))
-            cursor = int(shuffle_state.get("cursor", -1))
-            if window_index < 0 or cursor < 0:
-                raise RuntimeError(
-                    "HF shuffle_state has a negative window_index or cursor; checkpoint is corrupt."
-                )
+            shuffle_state = state["shuffle_state"]
+            parent_state = shuffle_state["parent_state"]
+            window_index = int(shuffle_state["window_index"])
+            cursor = int(shuffle_state["cursor"])
             self._ds.load_state_dict(parent_state)  # type: ignore[attr-defined]
             self._it = iter(self._ds)
             self._closed = False
