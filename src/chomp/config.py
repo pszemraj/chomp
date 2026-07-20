@@ -284,9 +284,12 @@ class DataConfig:
     mask_boundary_loss: bool = True
     train_on_eos: bool = True
 
-    # Packed-token budget for window shuffling before batch assembly. Derived
-    # rows are aligned down to batch_size * grad_accum; 0 disables.
+    # Raw packed-token payload budget for window shuffling before batch
+    # assembly. Derived rows are aligned down to batch_size * grad_accum; 0
+    # disables.
     window_shuffle_tokens: int = 8_388_608
+    # Hard cap on packed row objects Grain materializes before yielding each window.
+    window_shuffle_max_rows: int = 4_096
 
     # Grain pipeline settings.
     grain_prefetch: int = 0
@@ -1138,13 +1141,22 @@ def _validate_data(cfg: Config) -> None:
 
     if cfg.data.window_shuffle_tokens < 0:
         _vfail(f"data.window_shuffle_tokens must be >=0, got {cfg.data.window_shuffle_tokens}")
-    rows_per_batch = cfg.train.batch_size * cfg.train.grad_accum
-    min_shuffle_tokens = cfg.train.seq_len * rows_per_batch
+    if cfg.data.window_shuffle_max_rows <= 0:
+        _vfail(
+            f"data.window_shuffle_max_rows must be positive, got {cfg.data.window_shuffle_max_rows}"
+        )
+    rows_per_step = cfg.train.batch_size * cfg.train.grad_accum
+    min_shuffle_tokens = cfg.train.seq_len * rows_per_step
     if 0 < cfg.data.window_shuffle_tokens < min_shuffle_tokens:
         _vfail(
             "data.window_shuffle_tokens must be 0 or large enough for one complete batch "
             f"({min_shuffle_tokens} tokens at the configured shape), got "
             f"{cfg.data.window_shuffle_tokens}"
+        )
+    if cfg.data.window_shuffle_tokens > 0 and cfg.data.window_shuffle_max_rows < rows_per_step:
+        _vfail(
+            "data.window_shuffle_max_rows must fit at least one complete optimizer batch "
+            f"({rows_per_step} rows), got {cfg.data.window_shuffle_max_rows}"
         )
 
     if cfg.data.grain_prefetch < 0:
@@ -1270,7 +1282,7 @@ def derived_deterministic(cfg: Config) -> bool:
 
 
 def resolve_window_shuffle_rows(cfg: Config) -> int:
-    """Resolve a packed-token shuffle budget to batch-aligned rows.
+    """Resolve a token- and row-bounded shuffle window to batch-aligned rows.
 
     :param Config cfg: Training configuration.
     :return int: Window rows, or zero when shuffling is disabled.
@@ -1278,9 +1290,12 @@ def resolve_window_shuffle_rows(cfg: Config) -> int:
     budget = int(cfg.data.window_shuffle_tokens)
     if budget <= 0:
         return 0
-    rows_per_batch = int(cfg.train.batch_size) * int(cfg.train.grad_accum)
-    raw_rows = budget // int(cfg.train.seq_len)
-    return (raw_rows // rows_per_batch) * rows_per_batch
+    rows_per_step = int(cfg.train.batch_size) * int(cfg.train.grad_accum)
+    rows_by_tokens = budget // int(cfg.train.seq_len)
+    # Grain materializes each complete Python row window before yielding from
+    # it. The token limit alone does not bound object count or refill work.
+    bounded_rows = min(rows_by_tokens, int(cfg.data.window_shuffle_max_rows))
+    return (bounded_rows // rows_per_step) * rows_per_step
 
 
 def strict_packed_segments(cfg: Config) -> bool:

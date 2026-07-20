@@ -56,7 +56,7 @@ On resume, chomp compares the checkpoint metadata against the current config. Mi
 
 - data source identity (`hf_dataset`, `hf_name`, `split`, `hf_revision`, `text_key`)
 - data-pipeline implementation schema version
-- effective stream-order and termination semantics (`shuffle`, its active buffer limits and seed, `repeat`, derived packed-window shuffle rows/effective seed, and `grain_prefetch`); inert raw budgets do not block resume
+- effective stream-order and termination semantics (`shuffle`, its active buffer limits and seed, `repeat`, derived token- and row-bounded packed-window shuffle rows/effective seed, and `grain_prefetch`); inert raw limits do not block resume
 - tokenizer settings and vocab rounding
 - packing mode, packing buffer sizes, and strict-segment settings
 - objective knobs (`mask_boundary_loss`, `train_on_eos`) and eval knobs

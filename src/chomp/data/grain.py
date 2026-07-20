@@ -366,7 +366,7 @@ def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchItera
 
     Pipeline: sequence producer -> optional packed-window shuffle -> batch
     assembly -> optional thread prefetch. The window shuffle decorrelates
-    batches from raw packer-output order within a token memory budget.
+    batches from raw packer-output order within token and row bounds.
 
     :param Config cfg: Training configuration.
     :param tokenizer: Tokenizer instance for encoding text.
@@ -376,6 +376,14 @@ def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchItera
 
     window_rows = resolve_window_shuffle_rows(cfg)
     if window_rows > 0:
+        window_tokens = window_rows * int(cfg.train.seq_len)
+        logger.info(
+            "Packed-window shuffle: %d rows / %d tokens (token budget=%d, max rows=%d)",
+            window_rows,
+            window_tokens,
+            cfg.data.window_shuffle_tokens,
+            cfg.data.window_shuffle_max_rows,
+        )
         ds = _ResumeSafeWindowShuffleIterDataset(
             ds,
             window_size=window_rows,

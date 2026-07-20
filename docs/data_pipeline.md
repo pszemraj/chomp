@@ -51,7 +51,7 @@ chomp saves a tokenizer snapshot under `run_dir/tokenizer`. Resume requires that
 
 The pipeline supports `sequential`, `bin`, and `multipack` packing modes and always emits fixed windows of length `seq_len` before batching. Packing trade-offs and boundary-masking behavior are documented in [Packing and Boundary Semantics](packing.md).
 
-Between the packer and batch assembly, packed windows pass through a seeded window shuffle (`data.window_shuffle_tokens`, train iterator only) so batches are decorrelated from raw stream order; see [Window shuffling](packing.md#window-shuffling-batch-decorrelation).
+Between the packer and batch assembly, packed windows pass through a seeded, token- and row-bounded window shuffle (`data.window_shuffle_tokens` and `data.window_shuffle_max_rows`, train iterator only) so batches are decorrelated from raw stream order; see [Window shuffling](packing.md#window-shuffling-batch-decorrelation).
 
 The HF document shuffle ends each window at the first of `data.shuffle_buffer_size` documents or `data.shuffle_buffer_bytes` UTF-8 payload bytes. Runtime packing metrics expose current and peak document-window counts/bytes plus replay totals. The byte limit may be exceeded by one oversized document because reading ahead and carrying that document outside the compact checkpoint state would break exact replay.
 

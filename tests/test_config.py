@@ -416,6 +416,14 @@ def test_data_and_logging_validation_rejects_invalid_values() -> None:
             "window_shuffle_tokens",
         ),
         (
+            lambda cfg: replace(cfg, data=replace(cfg.data, window_shuffle_max_rows=0)),
+            "window_shuffle_max_rows",
+        ),
+        (
+            lambda cfg: replace(cfg, data=replace(cfg.data, window_shuffle_max_rows=1)),
+            "window_shuffle_max_rows",
+        ),
+        (
             lambda cfg: replace(
                 cfg,
                 data=replace(_hf_data(), shuffle=True, shuffle_buffer_bytes=0),
@@ -488,26 +496,42 @@ def test_data_and_logging_validation_rejects_invalid_values() -> None:
 
 
 @pytest.mark.parametrize(
-    ("token_budget", "seq_len", "batch_size", "grad_accum", "expected_rows"),
+    (
+        "token_budget",
+        "max_rows",
+        "seq_len",
+        "batch_size",
+        "grad_accum",
+        "expected_rows",
+    ),
     [
-        (0, 16, 2, 1, 0),
-        (8_388_608, 2_048, 2, 1, 4_096),
-        (8_388_608, 32_768, 2, 1, 256),
-        (1_000, 16, 3, 2, 60),
+        (0, None, 16, 2, 1, 0),
+        (8_388_608, None, 8, 1, 1, 4_096),
+        (8_388_608, None, 16, 1, 1, 4_096),
+        (8_388_608, None, 128, 1, 1, 4_096),
+        (8_388_608, None, 2_048, 1, 1, 4_096),
+        (8_388_608, None, 32_768, 1, 1, 256),
+        (1_000, None, 16, 3, 2, 60),
+        (1_000, 50, 16, 3, 2, 48),
     ],
 )
 def test_window_shuffle_budget_resolves_to_batch_aligned_rows(
     token_budget: int,
+    max_rows: int | None,
     seq_len: int,
     batch_size: int,
     grad_accum: int,
     expected_rows: int,
 ) -> None:
-    """Packed-row shuffle size should stay within budget and preserve batch geometry."""
+    """Packed-row shuffle should honor both bounds and preserve batch geometry."""
     cfg = _base_cfg()
+    data = replace(cfg.data, window_shuffle_tokens=token_budget)
+    if max_rows is not None:
+        data = replace(data, window_shuffle_max_rows=max_rows)
     cfg = replace(
         cfg,
-        data=replace(cfg.data, window_shuffle_tokens=token_budget),
+        data=data,
+        model=replace(cfg.model, chunk_size=min(cfg.model.chunk_size, seq_len)),
         train=replace(
             cfg.train,
             seq_len=seq_len,

@@ -200,9 +200,12 @@ data:
   # data.train_on_eos -- bool; default: true. False masks every label numerically equal to the effective EOS ID, including natural token-ID collisions; an all-masked batch fails before any optimizer/state change.
   train_on_eos: "<bool>"
 
-  # data.window_shuffle_tokens -- int; default: 8388608; zero disables, otherwise >= train.seq_len * train.batch_size * train.grad_accum. The budget becomes batch-aligned packed rows; two int32 buffers use about 8 bytes per token.
+  # data.window_shuffle_tokens -- int; default: 8388608; zero disables, otherwise >= train.seq_len * train.batch_size * train.grad_accum. Bounds the raw payload of the two int32 arrays; the effective window is also limited by window_shuffle_max_rows.
   # Keep enabled for domain-ordered or long-document corpora. Smoke configs disable it to avoid filling a large window before their first step.
   window_shuffle_tokens: "<int>"
+
+  # data.window_shuffle_max_rows -- int; default: 4096; > 0 and, when window shuffling is enabled, >= train.batch_size * train.grad_accum. Bounds Python row objects and packed rows requested for each Grain window fill; effective rows are aligned down to a complete optimizer batch.
+  window_shuffle_max_rows: "<int>"
 
   # data.grain_prefetch -- int; default: 0; >= 0; zero disables. Counts assembled batches; raise only after measuring input stalls because it consumes memory and can interact poorly with device_put=true.
   grain_prefetch: "<int>"

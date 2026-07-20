@@ -65,6 +65,8 @@ def make_pipeline_cfg(
         "backend": "local_text",
         "repeat": True,
         "local_text": "hi",
+        # Tiny tests opt into packed-window shuffling only when they exercise it.
+        "window_shuffle_tokens": 0,
         "tokenizer": TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True),
     }
     data.update(data_kwargs)

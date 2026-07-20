@@ -2159,9 +2159,14 @@ def test_resume_compat_rejects_hf_source_drift(
 def test_resume_compat_ignores_inert_shuffle_values(tmp_path: Path) -> None:
     """Only effective shuffle behavior belongs in the resume identity."""
     cfg = _base_cfg(tmp_path / "run_inert_shuffle")
+    cfg = replace(cfg, data=replace(cfg.data, window_shuffle_tokens=64))
     raw_drift = replace(
         cfg,
-        data=replace(cfg.data, window_shuffle_tokens=cfg.data.window_shuffle_tokens + 1),
+        data=replace(
+            cfg.data,
+            window_shuffle_tokens=cfg.data.window_shuffle_tokens + 1,
+            window_shuffle_max_rows=cfg.data.window_shuffle_max_rows + 1,
+        ),
     )
     assert resolve_window_shuffle_rows(raw_drift) == resolve_window_shuffle_rows(cfg)
     check_resume_compat(raw_drift, _checkpoint_record(cfg).to_dict())
@@ -2203,6 +2208,7 @@ def test_resume_compat_rejects_pipeline_schema_drift(tmp_path: Path) -> None:
 def test_resume_compat_rejects_local_window_shuffle_seed_drift(tmp_path: Path) -> None:
     """Local window-shuffle replay must reject a changed data seed."""
     cfg = _base_cfg(tmp_path / "run_window_seed")
+    cfg = replace(cfg, data=replace(cfg.data, window_shuffle_tokens=64))
     assert cfg.data.backend == "local_text"
     assert cfg.data.window_shuffle_tokens > 0
     meta = _checkpoint_record(cfg).to_dict()

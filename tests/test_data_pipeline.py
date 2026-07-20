@@ -23,6 +23,7 @@ from chomp.config import (
     OptimConfig,
     TokenizerConfig,
     TrainConfig,
+    resolve_window_shuffle_rows,
 )
 from chomp.data.grain import (
     _batch_segment_stats,
@@ -35,6 +36,7 @@ from chomp.data.pipeline import (
     ByteTokenizer,
     ZeroLossTokensError,
     _eval_tokens_sha256,
+    _SequenceProducer,
     build_eval_iterator,
     build_train_iterator,
     effective_window_shuffle_seed,
@@ -581,6 +583,37 @@ def test_grain_iterator_state_roundtrip() -> None:
     np.testing.assert_array_equal(next_a.segment_ids, next_b.segment_ids)
 
 
+def test_default_small_context_window_caps_pre_first_yield_work(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A small-context default should request no more than the packed-row cap."""
+    cfg = make_pipeline_cfg(window_shuffle_tokens=DataConfig().window_shuffle_tokens)
+    calls = 0
+
+    def _counted_next_window(_producer: Any) -> tuple[np.ndarray, np.ndarray]:
+        """Return one valid row while counting Grain's source requests."""
+        nonlocal calls
+        calls += 1
+        return (
+            np.full(cfg.train.seq_len, 7, dtype=np.int32),
+            np.ones(cfg.train.seq_len, dtype=np.int32),
+        )
+
+    monkeypatch.setattr(_SequenceProducer, "next_window", _counted_next_window)
+    with caplog.at_level(logging.INFO, logger="chomp.data.grain"):
+        it = build_train_iterator(cfg)
+
+    assert calls == 0
+    assert any("4096 rows / 32768 tokens" in record.getMessage() for record in caplog.records)
+    try:
+        _ = next(it)
+    finally:
+        it.close()
+
+    assert calls == cfg.data.window_shuffle_max_rows
+
+
 def _window_shuffle_cfg(*, window: int, repeat: bool = False) -> Config:
     """Build an HF-backed config for window-shuffle tests.
 
@@ -670,8 +703,12 @@ def test_window_shuffle_state_roundtrip(
     items = _distinct_docs(60)
     patch_hf_load_dataset(items)
 
-    cfg = _window_shuffle_cfg(window=8)
-    cfg = replace(cfg, data=replace(cfg.data, grain_prefetch=2))
+    cfg = _window_shuffle_cfg(window=16)
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, window_shuffle_max_rows=8, grain_prefetch=2),
+    )
+    assert resolve_window_shuffle_rows(cfg) == 8
 
     it = build_train_iterator(cfg)
     for _ in range(3):
