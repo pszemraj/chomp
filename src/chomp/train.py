@@ -82,7 +82,7 @@ from chomp.model import (
     training_loss,
 )
 from chomp.types import IGNORE_INDEX, Batch, TrainState
-from chomp.utils.devices import assert_batch_on_device, validate_default_device
+from chomp.utils.devices import validate_default_device
 from chomp.utils.io import (
     MetricsWriter,
     RunDirectoryLock,
@@ -1392,10 +1392,7 @@ def _run_impl(
             except StopIteration as exc:
                 raise RuntimeError("dry_run: data iterator exhausted before first batch") from exc
             data_stats = data_it.get_stats()
-            if not cfg.data.device_put:
-                batch = jax.device_put(batch)
-            if cfg.debug.check_device_every > 0:
-                assert_batch_on_device(batch, allow_cpu=cfg.train.allow_cpu)
+            batch = jax.device_put(batch)
 
             t1 = time.perf_counter()
             state, metrics = train_step(state, batch)
@@ -1503,15 +1500,12 @@ def _run_impl(
         """
         if eval_step is None or not eval_tokens:
             return {}
-        # Eval batches are deterministic (cached tokens, never shuffled), so
+        # Eval batches are deterministic (collected tokens, never shuffled), so
         # assemble them once and reuse across evals instead of re-running
-        # tokenize/pack every eval_every steps. The iterator is built with
-        # device_put disabled so the cache stays host-side regardless of
-        # data.device_put; each eval transfers per batch, so device memory is
-        # never held between evals.
+        # tokenize/pack every eval_every steps. Batches stay host-side until
+        # each eval transfer, so device memory is never held between evals.
         if not eval_batches_cache:
-            host_cfg = dc_replace(cfg, data=dc_replace(cfg.data, device_put=False))
-            eval_batches_cache.extend(build_eval_iterator(host_cfg, tokens=eval_tokens))
+            eval_batches_cache.extend(build_eval_iterator(cfg, tokens=eval_tokens))
         total_loss = jnp.zeros((), dtype=jnp.float32)
         total_tokens = jnp.zeros((), dtype=jnp.int32)
         batch_count = 0
@@ -1626,7 +1620,7 @@ def _run_impl(
                 for _ in tqdm(range(start_step, target_steps), desc="train", dynamic_ncols=True):
                     if _record_stop_if_requested(mw):
                         break
-                    # Fetch batch (host) and (optionally) device_put
+                    # Fetch the host batch and transfer it to the default device.
                     step_i = int(host_step) + 1
                     should_eval = (
                         eval_step is not None and eval_every > 0 and (step_i % eval_every) == 0
@@ -1661,17 +1655,10 @@ def _run_impl(
                         break
                     step_loss_tokens = data_it.get_loss_tokens()
                     data_stats = data_it.get_stats()
-                    if not cfg.data.device_put:
-                        batch = jax.device_put(batch)
+                    batch = jax.device_put(batch)
                     # Host-side input-pipeline time for this step: fetch (incl.
-                    # tokenize/pack/shuffle backpressure) + stats + device_put.
+                    # tokenize/pack/shuffle backpressure) + stats + device transfer.
                     data_wait_s = time.perf_counter() - t_fetch
-
-                    # Batch placement validation (real check)
-                    if cfg.debug.check_device_every > 0 and (
-                        host_step % cfg.debug.check_device_every == 0
-                    ):
-                        assert_batch_on_device(batch, allow_cpu=cfg.train.allow_cpu)
 
                     # Step (compile happens on first call)
                     with step_annotation("train_step"):

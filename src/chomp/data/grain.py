@@ -73,16 +73,14 @@ class _IteratorProtocol(Protocol):
 class GrainTrainBatchIterator:
     """Iterator wrapper that runs the pipeline through Grain."""
 
-    def __init__(self, *, ds: Any, packing_mode: str, enable_stats: bool) -> None:
+    def __init__(self, *, ds: Any, packing_mode: str) -> None:
         """Initialize the Grain-backed iterator.
 
         :param ds: Grain IterDataset yielding Batch objects.
         :param str packing_mode: Packing mode name for metrics.
-        :param bool enable_stats: Whether to compute packing stats on each batch.
         """
         self._it: _IteratorProtocol = iter(ds)
         self._packing_mode = str(packing_mode)
-        self._enable_stats = bool(enable_stats)
         self._last_stats: dict[str, float | int | str] = {}
         self._last_loss_tokens: int | None = None
         self._collect_next_stats = True
@@ -95,7 +93,7 @@ class GrainTrainBatchIterator:
         batch = envelope.batch
         self._last_loss_tokens = int(envelope.loss_tokens_host)
         self._last_stats = dict(envelope.pipeline_stats)
-        if not self._enable_stats or not self._collect_next_stats:
+        if not self._collect_next_stats:
             return batch
         self._last_stats.update(_batch_segment_stats(batch.segment_ids))
         self._last_stats.update(
@@ -166,8 +164,6 @@ class GrainTrainBatchIterator:
 
         :return dict[str, float | int | str]: Utilization stats for the last batch.
         """
-        if not self._enable_stats:
-            return {}
         return dict(self._last_stats)
 
 
@@ -304,25 +300,18 @@ class _ResumeSafeWindowShuffleIterDataset(grain.experimental.WindowShuffleIterDa
 class _BatchAssembleDatasetIterator(grain.DatasetIterator):
     """Assemble fixed batches and forward parent checkpoint state."""
 
-    def __init__(self, parent: Any, *, cfg: Config, enable_stats: bool) -> None:
+    def __init__(self, parent: Any, *, cfg: Config) -> None:
         """Initialize the batch assembler.
 
         :param parent: Parent iterator yielding packed windows.
         :param Config cfg: Training configuration.
-        :param bool enable_stats: Whether to compute per-batch packer stats.
         """
         super().__init__(parent)
         self._spec = _BatchAssemblySpec.from_config(cfg)
-        self._device_put = bool(cfg.data.device_put)
-        self._enable_stats = bool(enable_stats)
 
     def __next__(self) -> _BatchEnvelope:
         batch, loss_tokens_host = _assemble_batch(lambda: next(self._parent), self._spec)
-        stats = _packer_stats_from_chain(self._parent) if self._enable_stats else {}
-        if self._device_put:
-            import jax
-
-            batch = jax.device_put(batch)
+        stats = _packer_stats_from_chain(self._parent)
         return _BatchEnvelope(
             batch=batch,
             loss_tokens_host=loss_tokens_host,
@@ -344,21 +333,17 @@ class _BatchAssembleDatasetIterator(grain.DatasetIterator):
 class _BatchAssembleIterDataset(grain.IterDataset):
     """Dataset yielding fixed chomp batches."""
 
-    def __init__(self, parent: Any, *, cfg: Config, enable_stats: bool) -> None:
+    def __init__(self, parent: Any, *, cfg: Config) -> None:
         """Initialize the dataset.
 
         :param parent: Parent dataset yielding packed windows.
         :param Config cfg: Training configuration.
-        :param bool enable_stats: Whether iterators compute per-batch packer stats.
         """
         super().__init__(parent)
         self._cfg = cfg
-        self._enable_stats = bool(enable_stats)
 
     def __iter__(self) -> grain.DatasetIterator:
-        return _BatchAssembleDatasetIterator(
-            self._parent.__iter__(), cfg=self._cfg, enable_stats=self._enable_stats
-        )
+        return _BatchAssembleDatasetIterator(self._parent.__iter__(), cfg=self._cfg)
 
 
 def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchIterator:
@@ -390,18 +375,7 @@ def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchItera
             seed=effective_window_shuffle_seed(cfg),
         )
 
-    # Single source of the stats-gating rule: device_put moves batches to
-    # device inside the iterator, and stats are disabled with it (see
-    # GrainTrainBatchIterator.get_stats). The batch assembler receives the
-    # same flag so it skips the per-batch chain walks nothing would read.
-    enable_stats = not cfg.data.device_put
-    ds = _BatchAssembleIterDataset(ds, cfg=cfg, enable_stats=enable_stats)
-
-    if cfg.data.device_put and cfg.data.grain_prefetch > 0:
-        logger.warning(
-            "data.device_put=True with grain_prefetch>0 may place device transfers on "
-            "background threads; consider setting data.device_put=false."
-        )
+    ds = _BatchAssembleIterDataset(ds, cfg=cfg)
 
     if cfg.data.grain_prefetch > 0:
         ds = grain.experimental.ThreadPrefetchIterDataset(
@@ -411,5 +385,4 @@ def build_grain_iterator(cfg: Config, *, tokenizer: Any) -> GrainTrainBatchItera
     return GrainTrainBatchIterator(
         ds=ds,
         packing_mode=cfg.data.packing_mode,
-        enable_stats=enable_stats,
     )

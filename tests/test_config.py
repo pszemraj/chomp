@@ -483,10 +483,6 @@ def test_data_and_logging_validation_rejects_invalid_values() -> None:
             lambda cfg: replace(cfg, train=replace(cfg.train, profile_dir=" ")),
             "train.profile_dir",
         ),
-        (
-            lambda cfg: replace(cfg, debug=replace(cfg.debug, check_device_every=-1)),
-            "check_device_every",
-        ),
     ]
 
     for mutate, match in cases:
@@ -561,7 +557,6 @@ def test_wandb_tags_require_and_normalize_a_string_list() -> None:
     ("path", "value"),
     [
         ("data.shuffle", "false"),
-        ("data.device_put", "false"),
         ("model.scale_emb", "false"),
         ("model.model_dim", 128.0),
         ("optim.lr", "0.0003"),

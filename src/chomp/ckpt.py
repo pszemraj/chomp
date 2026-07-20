@@ -515,23 +515,15 @@ def check_resume_compat(
     # knobs change data order (mode, buffer_docs, group_docs, packed-window
     # shuffle budget/rows), the training objective (strict_segments,
     # mask_boundary_loss, train_on_eos), or the iterator-state shape a
-    # restore must line up against (grain_prefetch). The one exception is
-    # device_put: it does not change sample order, so a mismatch is normally
-    # a warning — but under prefetch it moves device transfers into the
-    # prefetch thread, changing iterator mechanics around that same state, so
-    # it hardens to an error there.
+    # restore must line up against (grain_prefetch).
     pack_prev = meta_fp.get("packing") or {}
     pack_cur = cur_fp.get("packing") or {}
     # Knobs whose DataConfig field carries the packing_ prefix; the rest are
     # top-level data.* fields recorded in the fingerprint's packing section.
     packing_prefixed = {"mode", "buffer_docs", "max_docs_per_bin", "group_docs", "strict_segments"}
-    prefetch_active = bool(pack_cur.get("grain_prefetch") or pack_prev.get("grain_prefetch"))
     for key in sorted(set(pack_prev) | set(pack_cur)):
-        severity = "error"
-        if key == "device_put" and not prefetch_active:
-            severity = "warning"
         label = f"data.packing_{key}" if key in packing_prefixed else f"data.{key}"
-        _cmp(label, pack_cur.get(key), pack_prev.get(key), severity=severity)
+        _cmp(label, pack_cur.get(key), pack_prev.get(key), severity="error")
 
     # Eval knobs stay hard errors on purpose: eval texts are cached per run
     # and eval-loss continuity is a first-class diagnostic here — silently
@@ -551,16 +543,6 @@ def check_resume_compat(
         train_cur.get("deterministic"),
         train_prev.get("deterministic"),
         severity="error",
-    )
-    # Kernel determinism is opt-in (fast nondeterministic kernels are the
-    # default). Drift across the resume boundary changes low-order step
-    # numerics only — never the data or the objective — so it warns rather
-    # than blocking the resume (value parsed from XLA_FLAGS on both sides).
-    _cmp(
-        "xla_gpu_deterministic_ops",
-        cur_fp.get("xla_gpu_deterministic_ops"),
-        meta_fp.get("xla_gpu_deterministic_ops"),
-        severity="warning",
     )
     model_prev = meta_cfg.get("model") or {}
     model_cur = cur_cfg.get("model") or {}

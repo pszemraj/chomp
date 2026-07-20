@@ -63,10 +63,6 @@ On resume, chomp compares the checkpoint metadata against the current config. Mi
 
 Resume comparisons ignore backend- or mode-specific settings only when execution cannot consume them, such as Megalodon fields under DummyLM or Muon settings under AdamW. Muon remains a hybrid optimizer whose non-Muon leaves use AdamW, so `optim.adam` is active in both optimizer modes. Active fingerprint sections are compared over the union of keys recorded on either side, so a newly recorded data or packing knob is never silently skipped.
 
-`data.device_put` drift is a warning (it changes where the host-to-device transfer happens, not sample order), except when `grain_prefetch > 0` on either side, where it hardens to an error because it changes the prefetch mechanics around the serialized iterator state.
-
-The effective `xla_gpu_deterministic_ops` setting (parsed from `XLA_FLAGS`, recorded at save time) is also compared and warns on drift: kernel determinism is opt-in and only affects low-order step numerics; see [Scope of exactness](#scope-of-exactness).
-
 Remaining warnings are logged so you can make an informed decision, but anything that changes what data the resumed run sees or what it optimizes is an error, not a warning.
 
 ## Typical usage
@@ -87,4 +83,4 @@ The exact-resume contract covers checkpoint save and restore.
 
 What resume guarantees is exact **state and data replay**: parameters, optimizer state, RNG, and the data iterator position restore exactly, so the resumed run optimizes the same objective over the same batches in the same order as the continuous run.
 
-GPU step arithmetic is bit-identical only with the opt-in setting described in [Training: GPU environment notes](training.md#gpu-environment-notes). The effective setting is recorded in checkpoint metadata, and resume warns if it changes.
+GPU step arithmetic is bit-identical only with the opt-in setting described in [Training: GPU environment notes](training.md#gpu-environment-notes).

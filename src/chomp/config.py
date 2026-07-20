@@ -292,10 +292,6 @@ class DataConfig:
     # Tokenizer
     tokenizer: TokenizerConfig = TokenizerConfig()
 
-    # Simple performance toggle: if True, device_put batches in the iterator.
-    # For now, leave False and device_put in the training loop.
-    device_put: bool = False
-
 
 @dataclass(frozen=True)
 class TrainConfig:
@@ -407,10 +403,9 @@ class LoggingConfig:
 
 @dataclass(frozen=True)
 class DebugConfig:
-    """Debug configuration for NaN checks and device assertions."""
+    """Debug configuration for NaN checks."""
 
     nan_check: bool = True
-    check_device_every: int = 100
 
 
 @dataclass(frozen=True)
@@ -1219,8 +1214,6 @@ def _validate_tokenizer(cfg: Config) -> None:
 
 def _validate_debug(cfg: Config) -> None:
     """Validate runtime debug-check configuration."""
-    if cfg.debug.check_device_every < 0:
-        _vfail(f"debug.check_device_every must be >= 0, got {cfg.debug.check_device_every}")
 
 
 def validate_config(cfg: Config) -> None:

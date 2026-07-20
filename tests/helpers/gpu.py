@@ -23,22 +23,11 @@ def query_nvidia_gpu_names() -> list[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
-def assert_device_platform_is_gpu() -> None:
-    """Assert that a newly placed JAX array reports the GPU platform."""
-    import jax
-
-    from chomp.utils.devices import device_platform
-
-    array = jax.device_put(jax.numpy.zeros((1,)))
-    assert device_platform(array) == "gpu", device_platform(array)
-
-
-def run_training_smoke(run_dir: str, *, backend: str, device_put: bool = False) -> None:
+def run_training_smoke(run_dir: str, *, backend: str) -> None:
     """Run one real training step for a GPU smoke-test backend.
 
     :param str run_dir: Fresh run directory.
     :param str backend: ``dummy`` or ``megalodon``.
-    :param bool device_put: Whether the data iterator places batches on device.
     :raises ValueError: If backend is unsupported.
     """
     from chomp.config import Config
@@ -55,7 +44,6 @@ def run_training_smoke(run_dir: str, *, backend: str, device_put: bool = False) 
             repeat=True,
             max_eval_samples=4,
             packing_mode="sequential",
-            device_put=device_put,
         )
         jit = False
         deterministic = True
@@ -107,7 +95,6 @@ def run_training_smoke(run_dir: str, *, backend: str, device_put: bool = False) 
             run_dir=run_dir,
             wandb=replace(cfg.logging.wandb, enabled=False),
         ),
-        debug=replace(cfg.debug, check_device_every=1),
     )
     output_dir = run(cfg)
     metrics_path = output_dir / cfg.logging.metrics_file

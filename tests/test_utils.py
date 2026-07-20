@@ -13,9 +13,7 @@ import pytest
 from chomp.config import Config, ModelConfig, TrainConfig
 from chomp.model import build_model
 from chomp.train import _check_finite_metrics
-from chomp.types import Batch
-from chomp.utils import devices, xla
-from chomp.utils.devices import device_platform, validate_default_device
+from chomp.utils.devices import validate_default_device
 from chomp.utils.io import RunDirectoryLock, create_run_dir
 from chomp.utils.tree import param_count
 
@@ -81,41 +79,6 @@ def test_run_directory_lock_canonicalizes_symlinked_run(tmp_path: Path) -> None:
         via_alias.acquire()
 
 
-def test_device_platform_detects_array() -> None:
-    """device_platform should detect platform from JAX array."""
-    arr = jax.numpy.zeros((1,))
-    plat = device_platform(arr)
-    assert isinstance(plat, str) and plat
-
-
-def test_device_platform_handles_supported_object_shapes() -> None:
-    """device_platform reads .device.platform and returns None for unknown objects."""
-    for arr, expected in [
-        (SimpleNamespace(device=SimpleNamespace(platform="gpu")), "gpu"),
-        (object(), None),
-    ]:
-        assert device_platform(arr) == expected  # type: ignore[arg-type]
-
-
-def test_assert_batch_on_device_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """assert_batch_on_device should enforce platform checks across key combinations."""
-    arr = jax.numpy.zeros((1, 1, 1), dtype=jax.numpy.int32)
-    batch = Batch(input_ids=arr, labels=arr, segment_ids=arr)
-    for platform, allow_cpu, should_raise in [
-        ("gpu", False, False),
-        ("cpu", False, True),
-        ("tpu", False, True),
-        (None, True, False),
-        (None, False, True),
-    ]:
-        monkeypatch.setattr(devices, "device_platform", lambda _, p=platform: p)
-        if should_raise:
-            with pytest.raises(RuntimeError):
-                devices.assert_batch_on_device(batch, allow_cpu=allow_cpu)
-        else:
-            devices.assert_batch_on_device(batch, allow_cpu=allow_cpu)
-
-
 def test_dummy_init_stats_are_sane() -> None:
     """Model parameters should be finite with positive variance."""
     cfg = Config(model=ModelConfig(backend="dummy", vocab_size=128, d_model=32, dropout=0.0))
@@ -160,26 +123,3 @@ def test_finite_check_rejects_nonfinite_metrics(metrics: dict[str, float], match
     """Non-finite metrics should raise RuntimeError with the metric name."""
     with pytest.raises(RuntimeError, match=match):
         _check_finite_metrics(metrics, step=3)
-
-
-@pytest.mark.parametrize(
-    ("flags", "expected"),
-    [
-        ("", None),
-        ("--foo=bar", None),
-        ("--xla_gpu_deterministic_ops=true", True),
-        ("--xla_gpu_deterministic_ops=false", False),
-        ("--xla_gpu_deterministic_ops=false --xla_gpu_deterministic_ops=true", True),
-    ],
-)
-def test_deterministic_gpu_ops_setting_parses_flags(
-    monkeypatch: pytest.MonkeyPatch, flags: str, expected: bool | None
-) -> None:
-    """Effective setting parses from XLA_FLAGS; last occurrence wins.
-
-    :param pytest.MonkeyPatch monkeypatch: Pytest monkeypatch fixture.
-    :param str flags: XLA_FLAGS value to parse.
-    :param bool | None expected: Expected parsed setting.
-    """
-    monkeypatch.setenv("XLA_FLAGS", flags)
-    assert xla.deterministic_gpu_ops_setting() is expected

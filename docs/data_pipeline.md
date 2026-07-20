@@ -67,7 +67,7 @@ The training pipeline is composed as: unshuffled HF source -> optional chomp-own
 
 The packing iterator itself remains a small, explicit Python object; Grain only wraps it for performance and checkpoint integration.
 
-When stats are enabled (`data.device_put: false`), the iterator exposes packing utilization, exact host loss-token counts, and boundary/segment summaries. Their logged field names and meanings are listed under [Training metrics](training.md#metrics).
+The iterator exposes packing utilization, exact host loss-token counts, and boundary/segment summaries. Their logged field names and meanings are listed under [Training metrics](training.md#metrics).
 
 Original-document/source batch composition and the owned Grain shuffle replacement are tracked in [Development Guide: tracked follow-ups](dev.md#tracked-follow-ups).
 

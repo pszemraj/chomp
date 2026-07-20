@@ -35,6 +35,3 @@ optim:
 
 checkpoint:
   enabled: false
-
-debug:
-  check_device_every: 1

@@ -705,33 +705,6 @@ def test_window_shuffle_state_roundtrip(
         np.testing.assert_array_equal(a.segment_ids, b.segment_ids)
 
 
-def test_disabled_stats_skip_per_batch_chain_walks(monkeypatch: pytest.MonkeyPatch) -> None:
-    """data.device_put=true disables stats; batch assembly must then skip the
-    per-batch iterator-chain walks entirely — nothing ever reads the snapshot."""
-    import chomp.data.grain as grain_mod
-
-    calls = {"n": 0}
-    real = grain_mod._packer_stats_from_chain
-
-    def _counting(it: Any) -> dict[str, Any]:
-        """Count chain walks while delegating to the real implementation.
-
-        :param it: Outermost Grain DatasetIterator.
-        :return dict[str, Any]: Packer stats from the real walk.
-        """
-        calls["n"] += 1
-        return real(it)
-
-    monkeypatch.setattr(grain_mod, "_packer_stats_from_chain", _counting)
-
-    cfg = make_pipeline_cfg(packing_mode="bin", packing_buffer_docs=4, device_put=True)
-    it = build_train_iterator(cfg)
-    for _ in range(2):
-        _ = next(it)
-        assert it.get_stats() == {}
-    assert calls["n"] == 0
-
-
 def test_eval_iterator_never_shuffles() -> None:
     """Eval batches must come out in strict document order regardless of W."""
     cfg = _window_shuffle_cfg(window=4096)
@@ -892,9 +865,9 @@ def test_batch_segment_stats_use_literal_segment_geometry() -> None:
     }
 
 
-def test_loss_token_count_stays_paired_through_device_prefetch() -> None:
-    """Exact host accounting travels with its batch through prefetch/device transfer."""
-    cfg = make_pipeline_cfg(grain_prefetch=2, device_put=True)
+def test_loss_token_count_stays_paired_through_prefetch() -> None:
+    """Exact host accounting travels with its batch through prefetch."""
+    cfg = make_pipeline_cfg(grain_prefetch=2)
     iterator = build_train_iterator(cfg)
     batch = next(iterator)
     labels = np.asarray(batch.labels)
@@ -902,7 +875,6 @@ def test_loss_token_count_stays_paired_through_device_prefetch() -> None:
     expected = int(np.count_nonzero((labels[..., 1:] != -100) & attention[..., 1:]))
 
     assert iterator.get_loss_tokens() == expected
-    assert iterator.get_stats() == {}
 
 
 def test_packing_array_diagnostics_can_skip_without_losing_token_count() -> None:

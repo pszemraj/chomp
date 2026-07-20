@@ -148,7 +148,6 @@ def make_small_run_cfg(
         debug=replace(
             cfg.debug,
             nan_check=True,
-            check_device_every=0,
         ),
     )
     return cfg

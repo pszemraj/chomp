@@ -81,7 +81,7 @@ def _eval_cfg(
         ),
         optim=replace(cfg.optim, lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0),
         checkpoint=checkpoint or CheckpointConfig(enabled=False),
-        debug=replace(cfg.debug, nan_check=True, check_device_every=0),
+        debug=replace(cfg.debug, nan_check=True),
         logging=replace(cfg.logging, run_dir=None if run_dir is None else str(run_dir)),
     )
 

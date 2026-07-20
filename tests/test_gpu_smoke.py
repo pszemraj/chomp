@@ -47,24 +47,12 @@ def _run_on_gpu(code: str, cwd: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_device_platform_reports_gpu(tmp_path: Path) -> None:
-    """device_platform should report 'gpu' for arrays on a GPU backend."""
-    code = "from tests.helpers.gpu import assert_device_platform_is_gpu; assert_device_platform_is_gpu()"
-    p = _run_on_gpu(code, cwd=tmp_path)
-    assert p.returncode == 0, f"stdout:\n{p.stdout}\nstderr:\n{p.stderr}"
-
-
-@pytest.mark.parametrize("device_put", [False, True])
-def test_gpu_train_smoke(tmp_path: Path, device_put: bool) -> None:
-    """Single training step should succeed on GPU with device placement asserted.
-
-    :param Path tmp_path: Temporary directory for run output.
-    :param bool device_put: Whether iterator device_put is enabled.
-    """
-    run_dir = tmp_path / f"run_{int(device_put)}"
+def test_gpu_train_smoke(tmp_path: Path) -> None:
+    """Single dummy-model training step should succeed on GPU."""
+    run_dir = tmp_path / "run"
     code = (
         "from tests.helpers.gpu import run_training_smoke; "
-        f"run_training_smoke({str(run_dir)!r}, backend='dummy', device_put={device_put!r})"
+        f"run_training_smoke({str(run_dir)!r}, backend='dummy')"
     )
     p = _run_on_gpu(code, cwd=tmp_path)
     assert p.returncode == 0, f"stdout:\n{p.stdout}\nstderr:\n{p.stderr}"

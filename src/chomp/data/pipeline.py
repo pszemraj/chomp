@@ -33,7 +33,6 @@ import numpy as np
 
 from chomp.config import Config, resolve_window_shuffle_rows, validate_config
 from chomp.types import IGNORE_INDEX, Batch
-from chomp.utils.xla import deterministic_gpu_ops_setting
 
 from .hf import (
     CONTENT_HOLDOUT_SCHEMA_VERSION,
@@ -697,11 +696,6 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
         "train_on_eos": d.train_on_eos,
         "grain_prefetch": d.grain_prefetch,
         "window_shuffle_rows": window_shuffle_rows,
-        # device_put does not change sample order, but it moves the
-        # host->device transfer into the iterator and disables iterator
-        # stats — recorded so resume can warn (or error under prefetch,
-        # where iterator mechanics already differ).
-        "device_put": d.device_put,
     }
     if window_shuffle_rows > 0:
         # The shuffle reconstructs current and future windows from this seed
@@ -733,10 +727,6 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
         "seq_len": cfg.train.seq_len,
         "batch_size": cfg.train.batch_size,
         "grad_accum": cfg.train.grad_accum,
-        # Not a data knob: recorded so resume can warn when opt-in XLA kernel
-        # determinism drifted across the resume boundary
-        # (docs/checkpointing.md, "Scope of exactness").
-        "xla_gpu_deterministic_ops": deterministic_gpu_ops_setting(),
     }
 
 

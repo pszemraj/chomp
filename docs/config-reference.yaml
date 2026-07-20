@@ -198,7 +198,7 @@ data:
   # data.window_shuffle_max_rows -- int; default: 4096; > 0 and, when window shuffling is enabled, >= train.batch_size * train.grad_accum. Bounds Python row objects and packed rows requested for each Grain window fill; effective rows are aligned down to a complete optimizer batch.
   window_shuffle_max_rows: "<int>"
 
-  # data.grain_prefetch -- int; default: 0; >= 0; zero disables. Counts assembled batches; raise only after measuring input stalls because it consumes memory and can interact poorly with device_put=true.
+  # data.grain_prefetch -- int; default: 0; >= 0; zero disables. Counts assembled batches; raise only after measuring input stalls because it consumes memory.
   grain_prefetch: "<int>"
 
   # data.max_eval_samples -- int; default: 1000; >= 0; zero disables eval data. Positive values collect up to this many documents when a run starts; local_text produces repeated copies of the same text.
@@ -235,9 +235,6 @@ data:
 
     # data.tokenizer.max_doc_tokens -- int | null; default: null (no truncation); otherwise > 0. Applied after full tokenization and before inserted specials, so it discards document tails without reducing tokenizer peak work; leave null unless intentional.
     max_doc_tokens: "<int | null>"
-
-  # data.device_put -- bool; default: false. True transfers training batches inside the iterator, disables pipeline diagnostics, and warns with threaded prefetch; keep false unless profiling proves a benefit. Resume drift warns without prefetch and fails when either side uses prefetch. [Experimental]
-  device_put: "<bool>"
 
 # train -- mapping | null; default: {}. Shape fields define one compiled optimizer step and are hard resume invariants.
 train:
@@ -415,10 +412,7 @@ logging:
     # logging.wandb.tags -- list[string]; default: []; every entry nonempty. Set in YAML; scalar CLI overrides do not support lists.
     tags: "<list[nonempty string]>"
 
-# debug -- mapping | null; default: {}. Runtime correctness checks; keep defaults for real training.
+# debug -- mapping | null; default: {}. Runtime correctness checks.
 debug:
   # debug.nan_check -- bool; default: true. Validates synchronized metrics and dry-run/pre-save/final parameters plus optimizer state. False permits non-finite state to be checkpointed; keep true.
   nan_check: "<bool>"
-
-  # debug.check_device_every -- int; default: 100; >= 0; zero disables periodic batch assertions. Checks the first batch and then after every N completed steps; it does not disable the initial GPU requirement from train.allow_cpu=false.
-  check_device_every: "<int>"

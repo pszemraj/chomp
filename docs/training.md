@@ -34,7 +34,7 @@ Deterministic runs are recommended for resume and regression tests. Note that in
 
 The supported JAX 0.10.x CUDA 13 stack runs RTX 50xx GPUs with its default kernel selection; Chomp does not rewrite `XLA_FLAGS`. Set `XLA_PYTHON_CLIENT_PREALLOCATE=false` when sharing a GPU or when allocator preallocation interferes with another process.
 
-XLA kernel selection on GPU is nondeterministic by default. This is the fast path used for production training. For debugging runs that need bit-exact GPU numerics (e.g. comparing an interrupted+resumed run against a continuous one at atol=0), opt in with `XLA_FLAGS=--xla_gpu_deterministic_ops=true`. This is a different knob from `train.deterministic` above (dropout/RNG vs kernel selection), and it is expensive: measured ~25-35% slower steps on a 100M-param Megalodon smoke benchmark (RTX 5090, seq_len 2048, bf16). The effective setting is recorded in checkpoint meta, and resume warns if it drifted across the boundary; see [Checkpointing: scope of exactness](checkpointing.md#scope-of-exactness).
+XLA kernel selection on GPU is nondeterministic by default. This is the fast path used for production training. For debugging runs that need bit-exact GPU numerics (e.g. comparing an interrupted+resumed run against a continuous one at atol=0), opt in with `XLA_FLAGS=--xla_gpu_deterministic_ops=true`. This is a different knob from `train.deterministic` above (dropout/RNG vs kernel selection), and it is expensive: measured ~25-35% slower steps on a 100M-param Megalodon smoke benchmark (RTX 5090, seq_len 2048, bf16).
 
 ## Evaluation
 

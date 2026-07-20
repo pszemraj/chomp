@@ -816,7 +816,7 @@ def test_crash_between_fetch_and_step_skips_final_checkpoint(
 
     Interrupted at the worst moment + resumed must match continuous exactly.
     """
-    from chomp.utils.devices import assert_batch_on_device as real_assert
+    from chomp.train import make_train_step as real_make_train_step
 
     def _finish_cfg(cfg: Config) -> Config:
         cfg = replace(cfg, train=replace(cfg.train, steps=5))
@@ -827,23 +827,26 @@ def test_crash_between_fetch_and_step_skips_final_checkpoint(
     cfg_cont = _finish_cfg(cfg_cont)
     run_dir_cont = run(cfg_cont, config_path=None, resume="none", dry_run=False)
 
-    # Crashing run: identical data/seed; the placement check runs once per
-    # loop iteration (after fetch, before train_step) — blow up on exactly
-    # the 4th call, i.e. mid-step 4 with state at step 3 and the last
-    # periodic save at step 2.
+    # Crashing run: identical data/seed; blow up on the 4th step call, after
+    # its batch has been fetched but before the optimizer update, with state
+    # at step 3 and the last periodic save at step 2.
     cfg_crash = make_small_run_cfg(tmp_path, run_subdir="run_crash", decay_steps=5)
     cfg_crash = _finish_cfg(cfg_crash)
-    cfg_crash = replace(cfg_crash, debug=replace(cfg_crash.debug, check_device_every=1))
 
     calls = {"n": 0}
 
-    def _exploding_assert(batch: Batch, *, allow_cpu: bool) -> None:
-        calls["n"] += 1
-        if calls["n"] == 4:
-            raise RuntimeError("injected crash between batch fetch and train step")
-        real_assert(batch, allow_cpu=allow_cpu)
+    def _make_exploding_train_step(*args: Any, **kwargs: Any) -> Any:
+        step = real_make_train_step(*args, **kwargs)
 
-    monkeypatch.setattr("chomp.train.assert_batch_on_device", _exploding_assert)
+        def _step(state: TrainState, batch: Batch) -> Any:
+            calls["n"] += 1
+            if calls["n"] == 4:
+                raise RuntimeError("injected crash between batch fetch and train step")
+            return step(state, batch)
+
+        return _step
+
+    monkeypatch.setattr("chomp.train.make_train_step", _make_exploding_train_step)
     with pytest.raises(RuntimeError, match="injected crash"):
         run(cfg_crash, config_path=None, resume="none", dry_run=False)
 
@@ -933,7 +936,7 @@ def test_zero_loss_batch_does_not_mutate_training_state(
         optim=OptimConfig(warmup_steps=0),
         checkpoint=CheckpointConfig(enabled=True, save_every=1, async_save=False),
         logging=LoggingConfig(run_dir=str(run_dir)),
-        debug=DebugConfig(check_device_every=0),
+        debug=DebugConfig(),
     )
 
     captured: dict[str, Any] = {}
@@ -1350,7 +1353,7 @@ def test_resume_rejects_seq_len_mismatch(tmp_path: Path) -> None:
         ),
         optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
         checkpoint=CheckpointConfig(enabled=True, save_every=1, max_to_keep=2, async_save=False),
-        debug=DebugConfig(nan_check=True, check_device_every=0),
+        debug=DebugConfig(nan_check=True),
         logging=LoggingConfig(
             project="chomp", run_dir=None, metrics_file="metrics.jsonl", level="INFO"
         ),
@@ -1608,7 +1611,7 @@ def test_training_crash_marks_wandb_failed_and_logs(
             run_dir=str(run_dir),
             wandb=replace(WandbConfig(), enabled=True),
         ),
-        debug=DebugConfig(nan_check=False, check_device_every=0),
+        debug=DebugConfig(nan_check=False),
     )
 
     with pytest.raises(RuntimeError, match="kaboom"):
@@ -1651,7 +1654,7 @@ def test_tokens_seen_matches_host_counts_between_sync_points(tmp_path: Path) -> 
         ),
         optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
         checkpoint=CheckpointConfig(enabled=False),
-        debug=DebugConfig(nan_check=True, check_device_every=0),
+        debug=DebugConfig(nan_check=True),
         logging=LoggingConfig(project="chomp", run_dir=str(tmp_path / "run")),
     )
 
@@ -1713,7 +1716,7 @@ def test_strict_packed_guard_raises_when_backend_unsupported(
         ),
         optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=0.0, warmup_steps=0),
         checkpoint=CheckpointConfig(enabled=False),
-        debug=DebugConfig(nan_check=True, check_device_every=0),
+        debug=DebugConfig(nan_check=True),
         logging=LoggingConfig(project="chomp", run_dir=str(tmp_path / "run_guard")),
     )
 
@@ -1875,29 +1878,6 @@ def test_resume_compat_requires_valid_token_count(tmp_path: Path, tokens_seen: A
         check_resume_compat(cfg, meta)
 
 
-def test_resume_compat_warns_on_gpu_determinism_drift(
-    tmp_path: Path, caplog: LogCaptureFixture
-) -> None:
-    """Kernel-determinism drift across a resume boundary warns, not blocks.
-
-    Deterministic kernels are opt-in (they cost throughput); drift changes
-    low-order step numerics only, never the data or the objective. But it is
-    the one resume-relevant setting living in XLA_FLAGS instead of config,
-    so the fingerprint comparison is the only place a user learns about it.
-    """
-    cfg = _base_cfg(tmp_path / "run_det_ops")
-    meta = _checkpoint_record(cfg).to_dict()
-    # Whatever this process's effective setting is (True on GPU hosts via
-    # conftest, None on CPU-only), record something else in the checkpoint.
-    meta["data_fingerprint"]["xla_gpu_deterministic_ops"] = not bool(
-        meta["data_fingerprint"]["xla_gpu_deterministic_ops"]
-    )
-
-    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
-        check_resume_compat(cfg, meta)  # must not raise
-    assert any("xla_gpu_deterministic_ops" in rec.message for rec in caplog.records)
-
-
 @pytest.mark.parametrize(
     ("mutate", "match"),
     [
@@ -1935,25 +1915,6 @@ def test_resume_compat_rejects_stream_and_objective_drift(
     meta = _checkpoint_record(cfg).to_dict()
     with pytest.raises(RuntimeError, match=match):
         check_resume_compat(mutate(cfg), meta)
-
-
-def test_resume_compat_device_put_drift(tmp_path: Path, caplog: LogCaptureFixture) -> None:
-    """device_put does not change sample order, so plain drift only warns —
-    but with prefetch active it moves device transfers into the prefetch
-    thread whose serialized state a restore must line up against, so the
-    mismatch hardens to an error."""
-    cfg = _base_cfg(tmp_path / "run_dput")
-    meta = _checkpoint_record(cfg).to_dict()
-    drifted = replace(cfg, data=replace(cfg.data, device_put=not cfg.data.device_put))
-    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
-        check_resume_compat(drifted, meta)  # must not raise
-    assert any("device_put" in rec.message for rec in caplog.records)
-
-    pf = replace(cfg, data=replace(cfg.data, grain_prefetch=2))
-    pf_meta = _checkpoint_record(pf).to_dict()
-    pf_drifted = replace(pf, data=replace(pf.data, device_put=not pf.data.device_put))
-    with pytest.raises(RuntimeError, match="device_put"):
-        check_resume_compat(pf_drifted, pf_meta)
 
 
 @pytest.mark.parametrize(
