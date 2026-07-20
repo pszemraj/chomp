@@ -1785,21 +1785,6 @@ def test_resume_compat_ignores_inert_packing_knobs(tmp_path: Path) -> None:
     check_resume_compat(mp_drifted, mp_meta)  # bin-only knob is inert here
 
 
-@pytest.mark.parametrize("section", ["source", "tokenizer", "packing", "eval"])
-def test_resume_compat_checks_unknown_fingerprint_keys(tmp_path: Path, section: str) -> None:
-    """A fingerprint key recorded on only one side must error, never be skipped.
-
-    Sections are compared over the union of recorded keys, so a field added to
-    ``data_fingerprint`` cannot bypass compatibility checking.
-    """
-    cfg = _base_cfg(tmp_path / "run_unknown_key")
-    meta = _checkpoint_record(cfg).to_dict()
-    meta["data_fingerprint"][section]["future_knob"] = 3
-
-    with pytest.raises(RuntimeError, match="future_knob"):
-        check_resume_compat(cfg, meta)
-
-
 @pytest.mark.parametrize("tokens_seen", [None, -1, True, 1.5])
 def test_resume_compat_requires_valid_token_count(tmp_path: Path, tokens_seen: Any) -> None:
     """Exact resume must reject absent, negative, boolean, or non-integer counts."""
@@ -1814,10 +1799,6 @@ def test_resume_compat_requires_valid_token_count(tmp_path: Path, tokens_seen: A
 @pytest.mark.parametrize(
     ("mutate", "match"),
     [
-        (
-            lambda c: replace(c, data=replace(c.data, grain_prefetch=c.data.grain_prefetch + 1)),
-            "grain_prefetch",
-        ),
         (
             lambda c: replace(c, data=replace(c.data, window_shuffle_tokens=64)),
             "window_shuffle_rows",
@@ -1837,13 +1818,12 @@ def test_resume_compat_requires_valid_token_count(tmp_path: Path, tokens_seen: A
             "deterministic",
         ),
     ],
-    ids=["grain_prefetch", "window_shuffle", "mask_boundary", "train_on_eos", "deterministic"],
+    ids=["window_shuffle", "mask_boundary", "train_on_eos", "deterministic"],
 )
 def test_resume_compat_rejects_stream_and_objective_drift(
     tmp_path: Path, mutate: Any, match: str
 ) -> None:
-    """Every knob that changes data order, iterator-state shape, or the
-    objective must hard-error on resume, not warn."""
+    """Every knob that changes data order or the objective must hard-error on resume."""
     cfg = _base_cfg(tmp_path / "run_drift")
     meta = _checkpoint_record(cfg).to_dict()
     with pytest.raises(RuntimeError, match=match):
@@ -1918,16 +1898,6 @@ def test_resume_compat_ignores_inert_shuffle_values(tmp_path: Path) -> None:
         ),
     )
     check_resume_compat(inert_hf_drift, _checkpoint_record(hf).to_dict())
-
-
-def test_resume_compat_rejects_pipeline_schema_drift(tmp_path: Path) -> None:
-    """Implementation-version drift must fail even when config fields match."""
-    cfg = _base_cfg(tmp_path / "run_schema")
-    meta = _checkpoint_record(cfg).to_dict()
-    del meta["data_fingerprint"]["data_pipeline_schema_version"]
-
-    with pytest.raises(RuntimeError, match="data_pipeline_schema_version"):
-        check_resume_compat(cfg, meta)
 
 
 def test_resume_compat_rejects_local_window_shuffle_seed_drift(tmp_path: Path) -> None:

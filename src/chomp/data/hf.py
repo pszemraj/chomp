@@ -27,12 +27,7 @@ logger = logging.getLogger(__name__)
 
 _UINT64_MASK = 2**64 - 1
 _SPLITMIX_INCREMENT = 0x9E3779B97F4A7C15
-CONTENT_HOLDOUT_SCHEMA_VERSION = 1
-# The blake2b domain separator embeds the schema version so that bumping the
-# version constant necessarily changes the hash function (and therefore the
-# train/eval partition); the two cannot drift apart. blake2b caps person at
-# 16 bytes.
-_CONTENT_HOLDOUT_PERSON = f"chomp-eval-v{CONTENT_HOLDOUT_SCHEMA_VERSION}".encode("ascii")
+_CONTENT_HOLDOUT_PERSON = b"chomp-eval"
 ContentPartition = Literal["all", "train", "eval"]
 
 

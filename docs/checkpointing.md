@@ -49,15 +49,14 @@ A final save that fails on an otherwise clean exit fails the run; training never
 On resume, chomp compares the checkpoint metadata against the current config. Missing or invalid `tokens_seen` metadata is also rejected so cumulative token accounting resumes exactly. Hard failures include:
 
 - data source identity (`hf_dataset`, `hf_name`, `split`, `hf_revision`, `text_key`)
-- data-pipeline implementation schema version
-- effective stream-order and termination semantics (`shuffle`, its active buffer limits and seed, `repeat`, derived token- and row-bounded packed-window shuffle rows/effective seed, and `grain_prefetch`); inert raw limits do not block resume
+- effective stream-order and termination semantics (`shuffle`, its active buffer limits and seed, `repeat`, and derived token- and row-bounded packed-window shuffle rows/effective seed); inert raw limits do not block resume
 - tokenizer settings and vocab rounding
 - packing mode, packing buffer sizes, and strict-segment settings
-- objective knobs (`mask_boundary_loss`, `train_on_eos`) and eval knobs
+- objective knobs (`mask_boundary_loss`, `train_on_eos`)
 - batch shape invariants (`seq_len`, `batch_size`, `grad_accum`)
 - active model and optimizer config, `train.deterministic`
 
-Resume comparisons ignore backend- or mode-specific settings only when execution cannot consume them, such as Megalodon fields under DummyLM or Muon settings under AdamW. Muon remains a hybrid optimizer whose non-Muon leaves use AdamW, so `optim.adam` is active in both optimizer modes. Active fingerprint sections are compared over the union of keys recorded on either side, so a newly recorded data or packing knob is never silently skipped.
+Resume comparisons ignore backend- or mode-specific settings when execution cannot consume them, such as Megalodon fields under DummyLM or Muon settings under AdamW. Muon remains a hybrid optimizer whose non-Muon leaves use AdamW, so `optim.adam` is active in both optimizer modes.
 
 Remaining warnings are logged so you can make an informed decision, but anything that changes what data the resumed run sees or what it optimizes is an error, not a warning.
 

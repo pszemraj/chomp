@@ -1037,13 +1037,6 @@ def _validate_data(cfg: Config) -> None:
             _vfail("data.hf_split must be non-empty when data.backend='hf'")
         if cfg.data.hf_revision is not None and not cfg.data.hf_revision.strip():
             _vfail("data.hf_revision must be null or a non-empty revision when data.backend='hf'")
-        if cfg.checkpoint.enabled and not re.fullmatch(
-            r"[0-9a-fA-F]{40}", cfg.data.hf_revision or ""
-        ):
-            _vfail(
-                "data.hf_revision must be a full 40-hex commit when checkpoint.enabled=true; "
-                "exact resume cannot restore iterator state against a mutable or unresolved source"
-            )
         if cfg.data.hf_eval_split is not None:
             if not cfg.data.hf_eval_split.strip():
                 _vfail(

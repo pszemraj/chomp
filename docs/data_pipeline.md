@@ -79,7 +79,7 @@ Bin and multipack queue rows are checkpointed as flat int32 payloads with row of
 
 This is checkpointed alongside the model so resume does not rely on `.skip()` or re-streaming.
 
-Hugging Face's streaming shuffle omits the contents of its read-ahead buffer from `state_dict()`, so chomp never calls it in the checkpointed path. Chomp instead permutes disjoint document windows. State stores the unshuffled source position at the current window's start, its index, and the output cursor; a restore reconstructs the window deterministically without inflating the checkpoint with document text. Set `data.hf_revision` to an immutable commit for production runs, because exact iterator replay cannot compensate for an upstream repository changing beneath the same name. Chomp enforces a full 40-hex commit whenever `checkpoint.enabled: true`; mutable revisions remain available only for explicitly non-checkpointed exploration.
+Hugging Face's streaming shuffle omits the contents of its read-ahead buffer from `state_dict()`, so chomp never calls it in the checkpointed path. Chomp instead permutes disjoint document windows. State stores the unshuffled source position at the current window's start, its index, and the output cursor; a restore reconstructs the window deterministically without inflating the checkpoint with document text. Pin `data.hf_revision` when exact source replay matters, because iterator state cannot compensate for an upstream repository changing beneath the same name.
 
 The configured `data.text_key` must exist in every selected row and contain a string. Missing fields and non-string values are deterministic schema failures: Chomp does not stringify them or retry them.
 

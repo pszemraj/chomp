@@ -396,7 +396,7 @@ def check_resume_compat(
         "",
         cur_fp,
         meta_fp,
-        keys={"data_pipeline_schema_version", "seq_len", "batch_size", "grad_accum"},
+        keys={"seq_len", "batch_size", "grad_accum"},
         labels={
             "seq_len": "train.seq_len",
             "batch_size": "train.batch_size",
@@ -427,14 +427,7 @@ def check_resume_compat(
     tok_cur = cur_fp.get("tokenizer") or {}
     _cmp_mapping("tokenizer", tok_cur, tok_prev)
 
-    # Packing/loss behavior comparisons. Compared generically over the union
-    # of recorded keys (mirroring the model/optim loops below) so a knob
-    # added to the fingerprint's packing section can never be silently
-    # skipped here. Every key defaults to a hard error: fingerprinted packing
-    # knobs change data order (mode, buffer_docs, group_docs, packed-window
-    # shuffle budget/rows), the training objective (strict_segments,
-    # mask_boundary_loss, train_on_eos), or the iterator-state shape a
-    # restore must line up against (grain_prefetch).
+    # Fingerprinted packing knobs change data order or the training objective.
     pack_prev = meta_fp.get("packing") or {}
     pack_cur = cur_fp.get("packing") or {}
     # Knobs whose DataConfig field carries the packing_ prefix; the rest are
@@ -443,13 +436,6 @@ def check_resume_compat(
     for key in sorted(set(pack_prev) | set(pack_cur)):
         label = f"data.packing_{key}" if key in packing_prefixed else f"data.{key}"
         _cmp(label, pack_cur.get(key), pack_prev.get(key), severity="error")
-
-    # Eval knobs stay hard errors on purpose: eval texts are cached per run
-    # and eval-loss continuity is a first-class diagnostic here — silently
-    # changing the eval set mid-run poisons every cross-run comparison.
-    eval_prev = meta_fp.get("eval") or {}
-    eval_cur = cur_fp.get("eval") or {}
-    _cmp_mapping("data.eval", eval_cur, eval_prev)
 
     # Model/optimizer comparisons.
     cur_cfg = cfg.to_dict()

@@ -138,8 +138,8 @@ data:
   # data.hf_split -- string; default: train; nonempty when backend=hf; ignored by local_text. Training split and source for a null-split content holdout.
   hf_split: "<nonempty string>"
 
-  # data.hf_revision -- string | null; default: bc389cd62969a275b2e3c3e11db826ba1918411a. With backend=hf and checkpoint.enabled=true this is required to be a full 40-hex commit; otherwise null, branch, tag, or commit is accepted.
-  # This value belongs to hf_dataset: always replace both together. It pins source contents and shard layout for resume.
+  # data.hf_revision -- string | null; default: bc389cd62969a275b2e3c3e11db826ba1918411a. Any revision accepted by Hugging Face datasets is valid; null uses the repository default.
+  # This value belongs to hf_dataset: replace both together when changing sources. Pin a commit when exact source replay matters.
   hf_revision: "<revision string | null>"
 
   # data.hf_eval_split -- string | null; default: null. Null creates a content-hash holdout from hf_split and excludes it from training; an explicit nonempty split must differ from hf_split when evaluation is enabled.
@@ -357,7 +357,7 @@ optim:
 
 # checkpoint -- mapping | null; default: {}. Controls Orbax save/resume behavior.
 checkpoint:
-  # checkpoint.enabled -- bool; default: true. False disables saves/resume and makes positive save/retention constraints inactive; with data.backend=hf, true requires data.hf_revision to be a full 40-hex commit. Keep true for real runs.
+  # checkpoint.enabled -- bool; default: true. False disables saves/resume and makes positive save/retention constraints inactive. Keep true for real runs.
   enabled: "<bool>"
 
   # checkpoint.save_every -- int; default: 5000; > 0 when enabled. Periodic optimizer-step cadence; aligned final save is separate. Maintained 100k recipes use 2500 to limit lost work.

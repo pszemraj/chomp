@@ -34,16 +34,9 @@ import numpy as np
 from chomp.config import Config, resolve_window_shuffle_rows, validate_config
 from chomp.types import IGNORE_INDEX, Batch
 
-from .hf import (
-    CONTENT_HOLDOUT_SCHEMA_VERSION,
-    ContentPartition,
-    HFStreamingTextStream,
-    HFStreamSpec,
-    LocalTextStream,
-)
+from .hf import ContentPartition, HFStreamingTextStream, HFStreamSpec, LocalTextStream
 from .pack import FFDPacker, TokenPacker
 
-DATA_PIPELINE_SCHEMA_VERSION = 12
 _WINDOW_SHUFFLE_SEED_OFFSET = 104_729
 _UINT32_MODULUS = 2**32
 
@@ -300,8 +293,6 @@ def _hf_source_identity(fields: dict[str, Any]) -> dict[str, Any]:
             identity.pop(key)
     if identity["content_partition"] == "all":
         identity.pop("eval_holdout_fraction")
-    else:
-        identity["content_holdout_schema_version"] = CONTENT_HOLDOUT_SCHEMA_VERSION
     return identity
 
 
@@ -694,7 +685,6 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
         "mode": d.packing_mode,
         "mask_boundary_loss": d.mask_boundary_loss,
         "train_on_eos": d.train_on_eos,
-        "grain_prefetch": d.grain_prefetch,
         "window_shuffle_rows": window_shuffle_rows,
     }
     if window_shuffle_rows > 0:
@@ -710,20 +700,10 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
         packing["buffer_docs"] = d.packing_buffer_docs
     if d.packing_mode == "multipack":
         packing["group_docs"] = d.packing_group_docs
-    eval_cfg = {
-        "max_eval_samples": d.max_eval_samples,
-        "hf_eval_split": d.hf_eval_split,
-    }
-    if _content_holdout_enabled(cfg):
-        eval_cfg["content_holdout_schema_version"] = CONTENT_HOLDOUT_SCHEMA_VERSION
-        eval_cfg["hf_eval_holdout_fraction"] = d.hf_eval_holdout_fraction
-
     return {
-        "data_pipeline_schema_version": DATA_PIPELINE_SCHEMA_VERSION,
         "source": src,
         "tokenizer": tok,
         "packing": packing,
-        "eval": eval_cfg,
         "seq_len": cfg.train.seq_len,
         "batch_size": cfg.train.batch_size,
         "grad_accum": cfg.train.grad_accum,
