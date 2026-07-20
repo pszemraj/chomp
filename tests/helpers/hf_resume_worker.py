@@ -47,9 +47,6 @@ def _spec() -> HFStreamSpec:
         repeat=False,
         content_partition="all",
         eval_holdout_fraction=0.01,
-        max_retries=0,
-        retry_delay_sec=0.0,
-        state_update_interval=5,
     )
 
 

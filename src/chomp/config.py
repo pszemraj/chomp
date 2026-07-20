@@ -253,14 +253,6 @@ class DataConfig:
     seed: int = 0
     repeat: bool = True
 
-    # Network resilience with exact state restore + fast-forward recovery.
-    max_retries: int = 3
-    retry_delay_sec: float = 1.0
-
-    # For retry: cache a last-known-good HF state dict every N examples.
-    # Smaller => less reconstruction work, but more state-capture overhead.
-    state_update_interval: int = 2_000
-
     # Debug-only local text source (exercises tokenize+pack path, not synthetic ids)
     local_text: str = "Hello from chomp.\n"
 
@@ -1156,14 +1148,6 @@ def _validate_data(cfg: Config) -> None:
         _vfail(f"data.grain_prefetch must be >=0, got {cfg.data.grain_prefetch}")
     if cfg.data.max_eval_samples < 0:
         _vfail(f"data.max_eval_samples must be >=0, got {cfg.data.max_eval_samples}")
-
-    # HF streaming robustness knobs
-    if cfg.data.max_retries < 0:
-        _vfail(f"data.max_retries must be >=0, got {cfg.data.max_retries}")
-    if cfg.data.retry_delay_sec < 0:
-        _vfail(f"data.retry_delay_sec must be >=0, got {cfg.data.retry_delay_sec}")
-    if cfg.data.state_update_interval <= 0:
-        _vfail(f"data.state_update_interval must be >0, got {cfg.data.state_update_interval}")
 
 
 def _validate_logging(cfg: Config) -> None:

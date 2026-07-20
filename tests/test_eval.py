@@ -267,8 +267,7 @@ def test_eval_collection_always_closes_hf_stream(
         fail_at=fail_at,
         record=record,
     )
-    base = _eval_cfg(backend="hf")
-    cfg = replace(base, data=replace(base.data, max_retries=0)) if fail_at is not None else base
+    cfg = _eval_cfg(backend="hf")
 
     if fail_at is not None:
         with pytest.raises(RuntimeError, match="Failed to collect evaluation documents"):

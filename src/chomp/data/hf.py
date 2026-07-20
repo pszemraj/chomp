@@ -3,7 +3,6 @@
 This module adds the state that pretraining needs around HF streaming:
 - deterministic, resume-safe fixed-window document shuffling
 - resumability via the source dataset's `state_dict()` / `load_state_dict()`
-- network hiccup resistance (retry + rebuild-from-last-state)
 
 We start with Zyphra/Zyda-2's `sample-100BT` config because it has a common schema
 (`nemo_id`, `text`) and is pre-weighted.
@@ -16,7 +15,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import random
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -27,7 +25,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_MAX_RETRY_DELAY_SEC = 60.0
 _UINT64_MASK = 2**64 - 1
 _SPLITMIX_INCREMENT = 0x9E3779B97F4A7C15
 CONTENT_HOLDOUT_SCHEMA_VERSION = 1
@@ -37,10 +34,6 @@ CONTENT_HOLDOUT_SCHEMA_VERSION = 1
 # 16 bytes.
 _CONTENT_HOLDOUT_PERSON = f"chomp-eval-v{CONTENT_HOLDOUT_SCHEMA_VERSION}".encode("ascii")
 ContentPartition = Literal["all", "train", "eval"]
-
-
-class HFRowValidationError(ValueError):
-    """An HF row violates the configured document-text schema."""
 
 
 def is_eval_holdout(text: str, *, fraction: float) -> bool:
@@ -106,10 +99,6 @@ class HFStreamSpec:
     content_partition: ContentPartition
     eval_holdout_fraction: float
 
-    max_retries: int
-    retry_delay_sec: float
-    state_update_interval: int
-
 
 class HFStreamingTextStream:
     """Resumable streaming text stream from Hugging Face `datasets`.
@@ -144,8 +133,6 @@ class HFStreamingTextStream:
         self._ds: datasets.IterableDataset
         self._it: Iterator[dict[str, Any]]
         self._source_started = False
-        self._n_since_state = 0
-        self._last_state: dict[str, Any] | None = None
         self._window: list[str] = []
         self._window_cursor = 0
         self._window_index = 0
@@ -184,15 +171,11 @@ class HFStreamingTextStream:
         self._it = iter(self._ds)
         self._closed = False
         self._source_started = False
-        self._n_since_state = 0
-        self._last_state = None
         self._window = []
         self._window_cursor = 0
         self._window_index = 0
         self._window_parent_state = None
         self._window_bytes = 0
-        # Retry recovery starts exact even when the first source read fails.
-        self._last_state = self.get_state()
 
     def _close_source_iterator(self) -> None:
         """Close the active Hugging Face generator when one exists."""
@@ -228,62 +211,6 @@ class HFStreamingTextStream:
     def __iter__(self) -> HFStreamingTextStream:
         return self
 
-    def _record_state(self) -> None:
-        """Cache compact stream state periodically for retry recovery."""
-        self._n_since_state += 1
-        if self._n_since_state < self._spec.state_update_interval:
-            return
-        try:
-            state = self.get_state()
-        except Exception:
-            logger.warning(
-                "HF stream state_dict() failed during periodic caching; "
-                "retry recovery will restart from the last good state (if any).",
-                exc_info=True,
-            )
-            # Keep both the last known-good state and the exact number of
-            # documents yielded since it. Discarding either makes recovery
-            # silently replay or skip records.
-            return
-        self._last_state = state
-        self._n_since_state = 0
-
-    def _recover_iterator(self) -> None:
-        """Rebuild and fast-forward exactly from the last cached state.
-
-        :raises RuntimeError: If no known-good state exists or reconstruction
-            cannot reach the exact pre-failure logical position.
-        """
-        if self._last_state is None:
-            raise RuntimeError(
-                "HF retry recovery has no known-good iterator state; refusing an inexact retry."
-            )
-        state = self._last_state
-        yielded_since_state = int(self._n_since_state)
-        try:
-            self.set_state(state)
-            for _ in range(yielded_since_state):
-                if self._spec.shuffle:
-                    self._next_shuffled_text()
-                else:
-                    self._read_text()
-            # Promote the reconstructed current position to the next
-            # known-good recovery point.
-            self._last_state = self.get_state()
-            self._n_since_state = 0
-        except Exception as exc:
-            # Every retry must restart from the same logical position even if
-            # set_state() reset these counters before reconstruction failed.
-            self._last_state = state
-            self._n_since_state = yielded_since_state
-            raise RuntimeError(
-                "HF stream could not reconstruct its exact pre-failure position."
-            ) from exc
-        logger.info(
-            "HF stream rebuilt and fast-forwarded %d document(s) after failure.",
-            yielded_since_state,
-        )
-
     def _source_state(self) -> dict[str, Any]:
         """Capture the unshuffled HF source state.
 
@@ -301,21 +228,21 @@ class HFStreamingTextStream:
     def _read_text(self) -> str:
         """Read and validate one document from the HF source.
 
-        :raises HFRowValidationError: If the configured field is missing or not a string.
+        :raises ValueError: If the configured field is missing or not a string.
         :return str: Text payload from the dataset item.
         """
         while True:
             self._source_started = True
             item = next(self._it)
             if self._spec.text_key not in item:
-                raise HFRowValidationError(
+                raise ValueError(
                     f"HF dataset {self._spec.dataset!r} split {self._spec.split!r} produced "
                     f"a row without text key {self._spec.text_key!r}; available keys: "
                     f"{sorted(item.keys())}"
                 )
             value = item[self._spec.text_key]
             if not isinstance(value, str):
-                raise HFRowValidationError(
+                raise ValueError(
                     f"HF dataset {self._spec.dataset!r} split {self._spec.split!r} field "
                     f"{self._spec.text_key!r} must contain strings, got "
                     f"{type(value).__name__}."
@@ -356,12 +283,6 @@ class HFStreamingTextStream:
         self._window = []
         self._window_cursor = 0
         self._window_bytes = 0
-
-        # A network failure can occur only while the source window is being
-        # filled. Cache its start unconditionally so retry reconstruction
-        # cannot lose a partially read buffer or replay emitted documents.
-        self._last_state = self._shuffle_checkpoint(parent_state=parent_state)
-        self._n_since_state = 0
 
         for _ in range(int(self._spec.shuffle_buffer_size)):
             try:
@@ -407,27 +328,15 @@ class HFStreamingTextStream:
 
         :return str: Text payload from the dataset item.
         """
-        text = self._next_shuffled_text() if self._spec.shuffle else self._read_text()
-        self._record_state()
-        return text
+        return self._next_shuffled_text() if self._spec.shuffle else self._read_text()
 
     def __next__(self) -> str:
         if self._closed:
             raise ValueError("Attempting to use a closed HF streaming iterator.")
-        # Epoch rollover is ordinary stream control flow, not a retry. Keep it
-        # outside transient-failure accounting so max_retries=0 can still
-        # repeat and the first read of every epoch gets the full retry budget.
-        attempt = 0
-        delay_ceiling = min(self._spec.retry_delay_sec, _MAX_RETRY_DELAY_SEC)
-        recovering = False
         rolled_epoch = False
         while True:
             try:
-                if recovering:
-                    self._recover_iterator()
-                    recovering = False
                 return self._next_item()
-
             except StopIteration:
                 if not self._spec.repeat:
                     raise
@@ -438,44 +347,7 @@ class HFStreamingTextStream:
                     ) from None
                 self._epoch += 1
                 self._build()
-                attempt = 0
-                delay_ceiling = min(self._spec.retry_delay_sec, _MAX_RETRY_DELAY_SEC)
                 rolled_epoch = True
-                continue
-
-            except HFRowValidationError:
-                # Schema violations are deterministic source defects. Rebuild
-                # and backoff cannot repair the offending row, and treating it
-                # as transient only wastes retries before the same failure.
-                raise
-
-            except Exception as exc:
-                if attempt >= self._spec.max_retries:
-                    if recovering:
-                        raise RuntimeError(
-                            "HF stream exhausted data.max_retries while reconstructing its "
-                            "exact position; stop and resume from the last Chomp checkpoint."
-                        ) from exc
-                    raise
-
-                delay = random.uniform(0.0, delay_ceiling)
-                operation = "recovery" if recovering else "next()"
-                logger.warning(
-                    "HF stream %s failed (retry %d/%d); retrying in %.1fs.",
-                    operation,
-                    attempt + 1,
-                    self._spec.max_retries,
-                    delay,
-                    exc_info=True,
-                )
-                time.sleep(delay)
-                attempt += 1
-                delay_ceiling = min(delay_ceiling * 2, _MAX_RETRY_DELAY_SEC)
-                # Exact recovery: rebuild and discard precisely the records
-                # already yielded since the last compact state. Keeping this
-                # inside the loop makes reconstruction failures consume the
-                # same bounded retry budget as source reads.
-                recovering = True
 
     def get_state(self) -> dict[str, Any]:
         """Capture stream state for checkpointing.
@@ -553,9 +425,6 @@ class HFStreamingTextStream:
                     f"({cursor} > {len(self._window)}); checkpoint or source is incompatible."
                 )
             self._window_cursor = cursor
-
-        self._n_since_state = 0
-        self._last_state = self.get_state()
 
     def get_stats(self) -> dict[str, int]:
         """Return owned document-shuffle memory and replay diagnostics.

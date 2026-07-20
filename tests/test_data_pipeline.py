@@ -30,7 +30,7 @@ from chomp.data.grain import (
     _packer_stats_from_chain,
     _TrainSequenceIterDataset,
 )
-from chomp.data.hf import HFRowValidationError, HFStreamingTextStream, HFStreamSpec
+from chomp.data.hf import HFStreamingTextStream, HFStreamSpec
 from chomp.data.pack import FFDPacker, FFDPackerState, TokenPacker, _DocumentStats
 from chomp.data.pipeline import (
     ByteTokenizer,
@@ -42,7 +42,6 @@ from chomp.data.pipeline import (
 )
 from chomp.train import run
 from tests.helpers.config_factories import make_pipeline_cfg
-from tests.helpers.hf_fakes import FakeHFIterable
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -82,9 +81,6 @@ def _hf_stream_spec(**overrides: Any) -> HFStreamSpec:
         "repeat": False,
         "content_partition": "all",
         "eval_holdout_fraction": 0.01,
-        "max_retries": 0,
-        "retry_delay_sec": 0.0,
-        "state_update_interval": 2,
     }
     params.update(overrides)
     return HFStreamSpec(**params)
@@ -999,23 +995,17 @@ def test_hf_state_roundtrip(patch_hf_load_dataset: Callable[..., dict[str, int]]
         ({"body": "wrong column"}, "without text key 'text'"),
     ],
 )
-def test_hf_schema_errors_fail_without_retry(
+def test_hf_schema_errors_fail(
     patch_hf_load_dataset: Callable[..., dict[str, int]],
-    monkeypatch: pytest.MonkeyPatch,
     item: dict[str, Any],
     match: str,
 ) -> None:
-    """Deterministic row-schema failures must not rebuild or consume retry budget."""
-    calls = patch_hf_load_dataset([item])
-    sleeps: list[float] = []
-    monkeypatch.setattr("chomp.data.hf.time.sleep", sleeps.append)
-    stream = HFStreamingTextStream(_hf_stream_spec(max_retries=3, retry_delay_sec=1.0))
+    """Rows must contain a string at the configured text key."""
+    patch_hf_load_dataset([item])
+    stream = HFStreamingTextStream(_hf_stream_spec())
 
-    with pytest.raises(HFRowValidationError, match=match):
+    with pytest.raises(ValueError, match=match):
         next(stream)
-
-    assert calls["builds"] == 1
-    assert sleeps == []
 
 
 def test_hf_close_honors_remote_parquet_shutdown_grace(
@@ -1118,75 +1108,14 @@ def test_hf_set_state_raises_on_missing_hf_state(
         stream.set_state({"epoch": 0})
 
 
-def test_hf_retry_rebuild_roundtrip(patch_hf_load_dataset: Callable[..., dict[str, int]]) -> None:
-    """Unshuffled recovery fast-forwards without replaying yielded documents."""
-    items = [{"text": f"document-{index}"} for index in range(10)]
-    record: dict[str, Any] = {"fail_consumed": False}
-    calls = patch_hf_load_dataset(items, fail_at=5, record=record)
-
-    spec = _hf_stream_spec(max_retries=1, state_update_interval=3)
-    stream = HFStreamingTextStream(spec)
-    assert [next(stream) for _ in range(8)] == [f"document-{index}" for index in range(8)]
-
-    assert calls["builds"] >= 2
-    assert record.get("load_calls", 0) >= 1
-    assert record.get("last_loaded") == {"index": 3}
-
-
-def test_hf_retry_recovers_failure_before_first_document(
+def test_hf_repeat_rolls_epochs(
     patch_hf_load_dataset: Callable[..., dict[str, int]],
 ) -> None:
-    """The initial source state makes a first-read transient failure exact."""
-    record: dict[str, Any] = {"fail_consumed": False}
-    patch_hf_load_dataset([{"text": "alpha"}, {"text": "bravo"}], fail_at=0, record=record)
-
-    stream = HFStreamingTextStream(_hf_stream_spec(max_retries=1))
-    assert next(stream) == "alpha"
-    assert record.get("last_loaded") == {"index": 0}
-
-
-def test_hf_repeat_does_not_consume_retry_budget(
-    patch_hf_load_dataset: Callable[..., dict[str, int]],
-) -> None:
-    """Epoch rollover remains available when transient retries are disabled."""
+    """A repeating stream rebuilds after ordinary source exhaustion."""
     patch_hf_load_dataset([{"text": "alpha"}])
-    stream = HFStreamingTextStream(_hf_stream_spec(repeat=True, max_retries=0))
+    stream = HFStreamingTextStream(_hf_stream_spec(repeat=True))
 
     assert [next(stream) for _ in range(3)] == ["alpha", "alpha", "alpha"]
-
-
-def test_hf_first_read_after_rollover_gets_full_retry_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A normal EOF must not spend the next epoch's transient retry allowance."""
-    import datasets
-
-    record: dict[str, Any] = {"fail_consumed": False}
-    builds = 0
-
-    def _load_dataset(
-        dataset: str,
-        *,
-        name: str,
-        split: str,
-        streaming: bool,
-        revision: str | None,
-    ) -> FakeHFIterable:
-        nonlocal builds
-        _ = (dataset, name, split, streaming, revision)
-        builds += 1
-        return FakeHFIterable(
-            items=[{"text": "alpha"}],
-            fail_at=0 if builds >= 2 else None,
-            record=record,
-        )
-
-    monkeypatch.setattr(datasets, "load_dataset", _load_dataset)
-    stream = HFStreamingTextStream(_hf_stream_spec(repeat=True, max_retries=1))
-
-    assert next(stream) == "alpha"
-    assert next(stream) == "alpha"
-    assert builds >= 3
 
 
 def test_hf_repeat_rejects_logically_empty_epoch(
@@ -1204,139 +1133,6 @@ def test_hf_repeat_rejects_logically_empty_epoch(
 
     with pytest.raises(RuntimeError, match="no documents in a complete epoch"):
         next(stream)
-
-
-def test_hf_retry_keeps_last_good_state_when_new_capture_fails(
-    patch_hf_load_dataset: Callable[..., dict[str, int]], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A failed periodic snapshot retains its predecessor and exact replay distance."""
-    items = [{"text": f"document-{index}"} for index in range(6)]
-    record: dict[str, Any] = {"fail_consumed": False}
-    patch_hf_load_dataset(items, fail_at=2, record=record)
-    stream = HFStreamingTextStream(_hf_stream_spec(max_retries=1, state_update_interval=2))
-    initial_state = stream.get_state
-
-    assert next(stream) == "document-0"
-
-    def _capture_failure() -> dict[str, Any]:
-        """Simulate a transient source state_dict failure."""
-        raise RuntimeError("state capture failed")
-
-    monkeypatch.setattr(stream, "get_state", _capture_failure)
-    assert next(stream) == "document-1"
-    assert stream._last_state == {"epoch": 0, "hf_state": {"index": 0}}
-    assert stream._n_since_state == 2
-
-    monkeypatch.setattr(stream, "get_state", initial_state)
-    assert next(stream) == "document-2"
-    assert record.get("last_loaded") == {"index": 0}
-
-
-def test_hf_retry_fails_closed_when_reconstruction_fails(
-    patch_hf_load_dataset: Callable[..., dict[str, int]], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Recovery waits before rebuilding and propagates if reconstruction fails."""
-    record: dict[str, Any] = {"fail_consumed": False}
-    patch_hf_load_dataset([{"text": "alpha"}, {"text": "bravo"}], fail_at=1, record=record)
-    stream = HFStreamingTextStream(
-        _hf_stream_spec(max_retries=1, retry_delay_sec=0.25, state_update_interval=10)
-    )
-    assert next(stream) == "alpha"
-    events: list[str] = []
-    monkeypatch.setattr("chomp.data.hf.time.sleep", lambda delay: events.append(f"sleep:{delay}"))
-    monkeypatch.setattr("chomp.data.hf.random.uniform", lambda _low, high: high)
-
-    def _restore_failure(_state: dict[str, Any]) -> None:
-        """Simulate a source reconstruction failure."""
-        events.append("restore")
-        raise RuntimeError("restore failed")
-
-    monkeypatch.setattr(stream, "set_state", _restore_failure)
-    with pytest.raises(RuntimeError, match="exhausted data.max_retries"):
-        next(stream)
-    assert events == ["sleep:0.25", "restore"]
-
-
-def test_hf_recovery_failure_uses_remaining_retry_budget_without_replay(
-    patch_hf_load_dataset: Callable[..., dict[str, int]], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Retry a transient reconstruction failure from the same logical state.
-
-    :param Callable[..., dict[str, int]] patch_hf_load_dataset: In-memory HF loader fixture.
-    :param pytest.MonkeyPatch monkeypatch: Pytest monkeypatch fixture.
-    """
-    record: dict[str, Any] = {"fail_consumed": False}
-    patch_hf_load_dataset(
-        [{"text": "alpha"}, {"text": "bravo"}, {"text": "charlie"}],
-        fail_at=1,
-        record=record,
-    )
-    stream = HFStreamingTextStream(
-        _hf_stream_spec(max_retries=2, retry_delay_sec=40.0, state_update_interval=10)
-    )
-    assert next(stream) == "alpha"
-
-    real_set_state = stream.set_state
-    restored_states: list[dict[str, Any]] = []
-
-    def _fail_after_first_restore(state: dict[str, Any]) -> None:
-        """Fail once after restore has reset the stream's replay distance."""
-        restored_states.append(state)
-        real_set_state(state)
-        if len(restored_states) == 1:
-            raise RuntimeError("transient reconnect failure")
-
-    jitter_bounds: list[tuple[float, float]] = []
-
-    def _midpoint_jitter(low: float, high: float) -> float:
-        """Record the capped backoff window and choose its midpoint.
-
-        :param float low: Lower jitter bound.
-        :param float high: Upper jitter bound.
-        :return float: Midpoint of the supplied bounds.
-        """
-        jitter_bounds.append((low, high))
-        return (low + high) / 2
-
-    sleeps: list[float] = []
-    monkeypatch.setattr(stream, "set_state", _fail_after_first_restore)
-    monkeypatch.setattr("chomp.data.hf.random.uniform", _midpoint_jitter)
-    monkeypatch.setattr("chomp.data.hf.time.sleep", sleeps.append)
-
-    assert next(stream) == "bravo"
-    assert restored_states == [
-        {"epoch": 0, "hf_state": {"index": 0}},
-        {"epoch": 0, "hf_state": {"index": 0}},
-    ]
-    assert jitter_bounds == [(0.0, 40.0), (0.0, 60.0)]
-    assert sleeps == [20.0, 30.0]
-
-
-def test_hf_shuffled_retry_reconstructs_failed_window_exactly(
-    patch_hf_load_dataset: Callable[..., dict[str, int]],
-) -> None:
-    """A transient refill failure must neither skip nor replay shuffled documents."""
-    items = [{"text": f"document-{index:03d}"} for index in range(40)]
-    spec = _hf_stream_spec(
-        shuffle=True,
-        shuffle_buffer_size=8,
-        seed=17,
-        max_retries=1,
-        state_update_interval=1000,
-    )
-
-    patch_hf_load_dataset(items)
-    expected_stream = HFStreamingTextStream(spec)
-    expected = [next(expected_stream) for _ in range(24)]
-
-    record: dict[str, Any] = {"fail_consumed": False}
-    calls = patch_hf_load_dataset(items, fail_at=10, record=record)
-    recovered_stream = HFStreamingTextStream(spec)
-    actual = [next(recovered_stream) for _ in range(24)]
-
-    assert actual == expected
-    assert calls["builds"] >= 2
-    assert record.get("last_loaded") == {"index": 8}
 
 
 def test_hf_content_holdout_is_disjoint_complete_and_resumable(

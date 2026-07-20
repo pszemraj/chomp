@@ -83,7 +83,7 @@ If a mismatch is detected, resume fails fast with a detailed error.
 
 ## Scope of exactness
 
-The exact-resume contract covers checkpoint save/restore and the [in-run HF retry reconstruction](data_pipeline.md#transient-stream-recovery).
+The exact-resume contract covers checkpoint save and restore.
 
 What resume guarantees is exact **state and data replay**: parameters, optimizer state, RNG, and the data iterator position restore exactly, so the resumed run optimizes the same objective over the same batches in the same order as the continuous run.
 

@@ -327,10 +327,7 @@ def _build_hf_stream(
             split=split,
             repeat=repeat,
             content_partition=content_partition,
-        ),
-        max_retries=cfg.data.max_retries,
-        retry_delay_sec=cfg.data.retry_delay_sec,
-        state_update_interval=cfg.data.state_update_interval,
+        )
     )
     return HFStreamingTextStream(spec)
 

@@ -81,12 +81,6 @@ This is checkpointed alongside the model so resume does not rely on `.skip()` or
 
 Hugging Face's streaming shuffle omits the contents of its read-ahead buffer from `state_dict()`, so chomp never calls it in the checkpointed path. Chomp instead permutes disjoint document windows. State stores the unshuffled source position at the current window's start, its index, and the output cursor; a restore reconstructs the window deterministically without inflating the checkpoint with document text. Set `data.hf_revision` to an immutable commit for production runs, because exact iterator replay cannot compensate for an upstream repository changing beneath the same name. Chomp enforces a full 40-hex commit whenever `checkpoint.enabled: true`; mutable revisions remain available only for explicitly non-checkpointed exploration.
 
-### Transient stream recovery
-
-In-run recovery from transient HF streaming errors preserves exact document order. The stream retains a last-known-good compact state and the exact number of documents yielded since it. On failure, it waits with capped full-jitter exponential backoff before rebuilding from that state, discarding precisely those already-yielded documents, and retrying the read. Read and reconstruction failures share the configured retry budget; every reconstruction attempt starts from the same logical state. The initial source state covers failures before the first document, and a failed periodic state capture retains the preceding good state.
-
-`data.state_update_interval` (default 2000) controls reconstruction work, not data duplication: a recovery may reread and discard up to that many documents. If state restore or fast-forward cannot reproduce the prior position, training fails and must resume from the last Chomp checkpoint rather than continuing from a partially reconstructed stream. Errors that survive `data.max_retries` also propagate and fail the run.
-
 The configured `data.text_key` must exist in every selected row and contain a string. Missing fields and non-string values are deterministic schema failures: Chomp does not stringify them or retry them.
 
 ## Validation set

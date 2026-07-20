@@ -337,7 +337,6 @@ def test_optim_validation_rejects_invalid_values() -> None:
     "mutate",
     [
         lambda cfg: replace(cfg, model=replace(cfg.model, norm_eps=float("nan"))),
-        lambda cfg: replace(cfg, data=replace(cfg.data, retry_delay_sec=float("inf"))),
         lambda cfg: replace(cfg, train=replace(cfg.train, generate_temperature=float("nan"))),
         lambda cfg: replace(cfg, optim=replace(cfg.optim, lr=float("nan"))),
         lambda cfg: replace(
