@@ -22,7 +22,6 @@ This pipeline keeps debug sources (local_text) but *still* exercises tokenize+pa
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
@@ -434,7 +433,7 @@ def prepare_tokenizer_and_config(
 def save_tokenizer_snapshot(
     run_dir: Path, cfg: Config, tok: Tokenizer, *, allow_existing: bool
 ) -> None:
-    """Persist the tokenizer to disk for reproducible resumes.
+    """Persist a Hugging Face tokenizer with the run.
 
     :param Path run_dir: Run directory path.
     :param Config cfg: Training configuration.
@@ -442,6 +441,8 @@ def save_tokenizer_snapshot(
     :param bool allow_existing: If True, skip if snapshot already exists.
     :raises RuntimeError: If snapshot exists and allow_existing=False.
     """
+    if cfg.data.tokenizer.kind != "hf":
+        return
 
     tok_dir = Path(run_dir) / "tokenizer"
     if tok_dir.exists():
@@ -450,62 +451,26 @@ def save_tokenizer_snapshot(
         raise RuntimeError(f"Tokenizer snapshot already exists: {tok_dir}")
 
     tok_dir.mkdir()
-    if hasattr(tok, "save_pretrained"):
-        tok.save_pretrained(tok_dir)  # type: ignore[call-arg]
-    else:
-        record = {
-            "kind": cfg.data.tokenizer.kind,
-            "byte_offset": cfg.data.tokenizer.byte_offset,
-        }
-        (tok_dir / "tokenizer.json").write_text(
-            json.dumps(record, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-
-
-def _load_tokenizer_dir(tok_dir: Path, cfg: Config) -> Tokenizer:
-    """Validate and load a tokenizer from an exact snapshot directory.
-
-    :param Path tok_dir: Snapshot directory.
-    :param Config cfg: Training configuration.
-    :raises RuntimeError: If the snapshot is incomplete or incompatible.
-    :return Tokenizer: Loaded tokenizer.
-    """
-    tok_cfg = cfg.data.tokenizer
-    if tok_cfg.kind == "byte":
-        record_path = tok_dir / "tokenizer.json"
-        if not record_path.exists():
-            raise RuntimeError(f"Byte tokenizer snapshot missing {record_path}")
-        record = json.loads(record_path.read_text(encoding="utf-8") or "{}")
-        kind = record.get("kind")
-        if kind != "byte":
-            raise RuntimeError(f"Tokenizer snapshot kind mismatch: expected 'byte', found {kind!r}")
-        return ByteTokenizer(byte_offset=int(record["byte_offset"]))
-
-    if tok_cfg.kind == "hf":
-        return HFTokenizer(
-            str(tok_dir),
-            use_fast=tok_cfg.hf_use_fast,
-            trust_remote_code=tok_cfg.hf_trust_remote_code,
-        )
-
-    raise ValueError(f"Unknown tokenizer.kind: {tok_cfg.kind!r}")
+    tok.save_pretrained(tok_dir)  # type: ignore[attr-defined]
 
 
 def load_tokenizer_snapshot(run_dir: Path, cfg: Config) -> Tokenizer:
     """Load a tokenizer snapshot from a run directory.
 
     :param Path run_dir: Run directory containing tokenizer snapshot.
-    :param Config cfg: Training configuration (used to pick tokenizer kind).
-    :return Tokenizer: Restored tokenizer instance.
+    :param Config cfg: Training configuration.
+    :return Tokenizer: Restored Hugging Face tokenizer instance.
     :raises FileNotFoundError: If tokenizer snapshot is missing.
-    :raises RuntimeError: If snapshot is invalid or incompatible.
     """
     tok_dir = Path(run_dir) / "tokenizer"
     if not tok_dir.exists():
         raise FileNotFoundError(f"Tokenizer snapshot not found at {tok_dir}")
 
-    return _load_tokenizer_dir(tok_dir, cfg)
+    return HFTokenizer(
+        str(tok_dir),
+        use_fast=cfg.data.tokenizer.hf_use_fast,
+        trust_remote_code=cfg.data.tokenizer.hf_trust_remote_code,
+    )
 
 
 def _collect_texts(stream: TextStream, max_samples: int) -> list[str]:

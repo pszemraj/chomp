@@ -43,7 +43,7 @@ conda run --name mega-jax pytest -q tests/test_training.py
 Tests are organized by source module (not by micro-feature):
 
 - [`tests/test_config.py`](../tests/test_config.py): config validation, variables, tokenizer-derived updates, and generate-time config loading
-- [`tests/test_data_pipeline.py`](../tests/test_data_pipeline.py): packing, segment IDs, HF streaming/state, tokenizer decode, and tokenizer snapshot behavior
+- [`tests/test_data_pipeline.py`](../tests/test_data_pipeline.py): packing, segment IDs, HF streaming/state, and tokenizer behavior
 - [`tests/test_training.py`](../tests/test_training.py): training loop behavior, crash handling, dry-run, checkpointing, and resume behavior
 - [`tests/test_optimizer.py`](../tests/test_optimizer.py): Muon optimizer labeling and grad accumulation equivalence
 - [`tests/test_utils.py`](../tests/test_utils.py): device placement, init sanity, parameter counting, finite-metric checks, and XLA environment helpers

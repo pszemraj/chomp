@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
 import signal
 import threading
 from collections.abc import Callable, Iterator
@@ -480,19 +479,6 @@ def test_run_closes_manager_and_preflights_metadata(
 
     assert restore_calls == 0
     assert len(close_calls) == 1
-
-
-def test_resume_requires_existing_tokenizer_snapshot(tmp_path: Path) -> None:
-    """A missing tokenizer snapshot must fail before mutating the run directory."""
-    cfg = make_small_run_cfg(tmp_path, decay_steps=1)
-    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
-    tokenizer_dir = run_dir / "tokenizer"
-    shutil.rmtree(tokenizer_dir)
-
-    with pytest.raises(FileNotFoundError, match="tokenizer snapshot is missing"):
-        run(cfg, config_path=None, resume="latest", dry_run=False)
-
-    assert not tokenizer_dir.exists()
 
 
 def test_checkpoint_saves_final_step(tmp_path: Path) -> None:

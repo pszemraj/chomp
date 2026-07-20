@@ -15,14 +15,9 @@ import numpy as np
 import pytest
 
 from chomp.config import (
-    CheckpointConfig,
     Config,
     DataConfig,
-    LoggingConfig,
-    ModelConfig,
-    OptimConfig,
     TokenizerConfig,
-    TrainConfig,
     resolve_window_shuffle_rows,
 )
 from chomp.data.grain import (
@@ -39,7 +34,6 @@ from chomp.data.pipeline import (
     build_train_iterator,
     effective_window_shuffle_seed,
 )
-from chomp.train import run
 from tests.helpers.config_factories import make_pipeline_cfg
 
 if TYPE_CHECKING:
@@ -1008,42 +1002,3 @@ def test_byte_tokenizer_skips_special_tokens() -> None:
     tok = ByteTokenizer(byte_offset=4)
     ids = [0, 1] + tok.encode("hi")
     assert tok.decode(ids) == "hi"
-
-
-def test_tokenizer_snapshot_saved(tmp_path: Path) -> None:
-    """Training should save tokenizer.json with kind metadata."""
-    base = Config(
-        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
-        data=DataConfig(
-            backend="local_text",
-            repeat=True,
-            local_text="Tokenizer snapshot test.\n",
-            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
-        ),
-        train=TrainConfig(
-            seed=0,
-            steps=1,
-            batch_size=1,
-            seq_len=16,
-            grad_accum=1,
-            jit=False,
-            deterministic=True,
-            allow_cpu=True,
-            log_every=1000,
-        ),
-        optim=OptimConfig(warmup_steps=0),
-        checkpoint=CheckpointConfig(enabled=False),
-        logging=LoggingConfig(
-            project="chomp", run_dir=None, metrics_file="metrics.jsonl", level="INFO"
-        ),
-    )
-
-    run_dir = tmp_path / "run"
-    cfg = replace(base, logging=replace(base.logging, run_dir=str(run_dir)))
-    run(cfg, config_path=None, resume="none")
-
-    tok_file = run_dir / "tokenizer" / "tokenizer.json"
-    assert tok_file.exists()
-
-    data = json.loads(tok_file.read_text(encoding="utf-8"))
-    assert data["kind"] == "byte"

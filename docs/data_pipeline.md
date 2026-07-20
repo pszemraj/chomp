@@ -43,7 +43,7 @@ Inside the compiled train step, the batch is sliced along the microbatch axis to
 
 When using `hf`, chomp resolves tokenizer-dependent model settings (`model.vocab_size`, special token IDs) before training starts. Tokenizer knobs are defined in [Config Reference](config-reference.yaml) under `data.tokenizer.*`.
 
-chomp saves a tokenizer snapshot under `run_dir/tokenizer`. Resume requires that snapshot and fails before modifying the run directory when it is missing; it never rebuilds a replacement from a potentially changed repository or path.
+For Hugging Face tokenizers, chomp saves the tokenizer files under `run_dir/tokenizer` and loads them on resume. The built-in byte tokenizer has no external assets and is reconstructed from the resolved config.
 
 `data.tokenizer.max_doc_tokens: null` means no truncation. A positive cap is explicit data loss applied after tokenization and before BOS/EOS insertion; the iterator reports documents truncated, source tokens observed/retained/discarded, and discarded-token fraction. The cap does not reduce the tokenizer's peak work because the full document is encoded first.
 

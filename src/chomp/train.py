@@ -330,15 +330,8 @@ def _setup_run_dir_and_tokenizer(
         run_dir_hint = Path(cfg.logging.run_dir)
         if not run_dir_hint.exists():
             raise RuntimeError(f"Resume requested but run directory does not exist: {run_dir_hint}")
-        tok_dir = run_dir_hint / "tokenizer"
-        if not tok_dir.is_dir():
-            raise FileNotFoundError(
-                f"Resume requested but tokenizer snapshot is missing at {tok_dir}. "
-                "Refusing to rebuild it from a mutable tokenizer source or modify the run "
-                "directory before checkpoint compatibility is known. Recover the original "
-                "snapshot or start a new run."
-            )
-        tokenizer = load_tokenizer_snapshot(run_dir_hint, cfg)
+        if cfg.data.tokenizer.kind == "hf":
+            tokenizer = load_tokenizer_snapshot(run_dir_hint, cfg)
 
     cfg, tokenizer = prepare_tokenizer_and_config(cfg, tokenizer=tokenizer)
 

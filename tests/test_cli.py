@@ -19,7 +19,6 @@ from click.testing import CliRunner
 from chomp.cli import cli
 from chomp.cli.main import parse_resume
 from chomp.config import Config
-from chomp.data import build_tokenizer, save_tokenizer_snapshot
 from chomp.model import build_model
 from tests.helpers.config_factories import make_tiny_megalodon_model
 
@@ -141,13 +140,6 @@ def test_generate_cli_produces_output(tmp_path: Path) -> None:
 
     config_resolved = run_dir / "config_resolved.json"
     config_resolved.write_text(json.dumps(cfg.to_dict(), indent=2))
-    save_tokenizer_snapshot(
-        run_dir,
-        cfg,
-        build_tokenizer(cfg),
-        allow_existing=False,
-    )
-
     params, _static = build_model(cfg, key=jax.random.PRNGKey(0))
     ckpt_dir = run_dir / "checkpoints" / "1" / "train_state"
     ckpt_dir.parent.mkdir(parents=True, exist_ok=True)
