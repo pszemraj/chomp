@@ -626,15 +626,15 @@ def test_checkpointed_hf_source_requires_full_commit(revision: str | None) -> No
         validate_config(replace(cfg, data=replace(_hf_data(), hf_revision=revision)))
 
 
-def test_noncheckpointed_hf_source_allows_unpinned_revision() -> None:
-    """Explicitly non-resumable exploration may follow a mutable HF revision."""
+def test_noncheckpointed_hf_source_allows_null_revision_override() -> None:
+    """Explicitly non-resumable exploration may clear the default HF revision."""
     cfg = _base_cfg()
-    cfg = replace(
-        cfg,
-        data=replace(_hf_data(), hf_revision=None),
-        checkpoint=replace(cfg.checkpoint, enabled=False),
+    cfg = build_config(
+        replace(cfg, data=_hf_data()).to_dict(),
+        overrides=["checkpoint.enabled=false", "data.hf_revision=null"],
     )
-    validate_config(cfg)
+
+    assert cfg.data.hf_revision is None
 
 
 @pytest.mark.parametrize("bad_split", [False, 0, 1.5, [], {}])

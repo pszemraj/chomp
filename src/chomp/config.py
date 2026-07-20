@@ -503,6 +503,8 @@ def _cast_like(old: Any, raw: str) -> Any:
     :return Any: Value cast to the type of `old`.
     """
 
+    if raw.lower() in {"null", "none"}:
+        return None
     if isinstance(old, bool):
         if raw.lower() in {"true", "1", "yes", "y"}:
             return True
@@ -514,8 +516,6 @@ def _cast_like(old: Any, raw: str) -> Any:
     if isinstance(old, float):
         return float(raw)
     if old is None:
-        if raw.lower() in {"null", "none"}:
-            return None
         # When the default is None, parse YAML scalars to recover numeric/bool types.
         try:
             parsed = yaml.safe_load(raw)
