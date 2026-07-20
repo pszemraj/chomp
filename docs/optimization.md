@@ -11,7 +11,7 @@ Related: [Config Reference](config-reference.yaml) (`optim.*`), [Training Loop](
 - `adamw` (default): standard AdamW on all parameters.
 - `muon`: Muon on a safe whitelist of projection weight matrices, AdamW on the rest.
 
-At startup, the model adapter classifies every model array for optimizer routing and weight decay. Derived constants remain outside the trainable model array tree.
+The model adapter classifies known model arrays for optimizer routing and weight decay. Unrecognized arrays use AdamW without weight decay.
 
 Megalodon-JAX 0.2.1 derives RoPE frequencies from static dimension/base values during the model call, so no rotary array appears in the model tree, optimizer state, or checkpoint. Trainable CEMA coefficients remain parameters.
 

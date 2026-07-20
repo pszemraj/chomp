@@ -106,10 +106,14 @@ def test_parameter_decay_policy_is_model_aware(
     assert decay["model.layers.[0].attn.timenorm.weight"] is False
 
 
-def test_parameter_contract_fails_closed_on_unknown_array() -> None:
-    """A changed dependency layout must be classified before training proceeds."""
-    with pytest.raises(RuntimeError, match="Unclassified megalodon model array"):
-        classify_model_array(Config(), "model.layers.[0].future_array")
+def test_unknown_model_array_uses_adam_without_decay() -> None:
+    """Unrecognized model arrays should follow the ordinary conservative policy."""
+    cfg = Config()
+    cfg = replace(cfg, optim=replace(cfg.optim, name="muon"))
+    classification = classify_model_array(cfg, "model.layers.[0].future_array")
+
+    assert classification.family == "other"
+    assert classification.decay is False
 
 
 @pytest.mark.parametrize(
@@ -125,7 +129,7 @@ def test_parameter_contract_fails_closed_on_unknown_array() -> None:
 def test_parameter_contract_covers_supported_model_variants(
     model_updates: dict[str, Any],
 ) -> None:
-    """Every array in each supported Megalodon layout must classify explicitly."""
+    """Supported Megalodon variants should build with the expected parameter paths."""
     base = make_tiny_megalodon_model(chunk_size=16, share_emb=False)
     cfg = Config(model=replace(base, **model_updates))
     params, _ = build_model(cfg, key=jax.random.PRNGKey(1))

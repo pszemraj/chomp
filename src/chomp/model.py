@@ -188,14 +188,11 @@ def _optimizer_group(
 def classify_model_array(cfg: Config, path: str) -> ModelArrayClassification:
     """Classify one backend trainable array for optimizer assignment.
 
-    This is a fail-closed adapter for the supported Megalodon-JAX model layout.
-    A dependency update that introduces an unknown array must be reviewed and
-    classified before training can start. Derived constants such as RoPE
-    frequencies must remain outside the model array tree.
+    Known embeddings and projection weights receive weight decay, and known
+    projection matrices may use Muon. Other arrays stay on Adam without decay.
 
     :param Config cfg: Model/optimizer configuration.
     :param str path: Stable dotted array path.
-    :raises RuntimeError: If a backend array has no explicit classification.
     :return ModelArrayClassification: Training family and decay policy.
     """
     if cfg.model.backend == "dummy":
@@ -247,33 +244,7 @@ def classify_model_array(cfg: Config, path: str) -> ModelArrayClassification:
         if path.endswith(".ffn.alpha"):
             return ModelArrayClassification("ffn_residual_scale", False)
 
-    raise RuntimeError(
-        f"Unclassified {cfg.model.backend} model array {path!r}. Chomp fails closed when the "
-        "pinned model layout changes; classify this parameter before training."
-    )
-
-
-def _parameter_filter_spec(cfg: Config, model: Any) -> Any:
-    """Build the Equinox partition filter from explicit array classifications.
-
-    :param Config cfg: Model configuration.
-    :param Any model: Complete backend model.
-    :return Any: Boolean filter pytree accepted by :func:`equinox.partition`.
-    """
-
-    def classify(path: tuple[Any, ...], leaf: Any) -> bool:
-        """Validate and select one model-array leaf for training.
-
-        :param tuple[Any, ...] path: JAX pytree path.
-        :param Any leaf: Model leaf at the path.
-        :return bool: Whether the leaf belongs in the trainable partition.
-        """
-        if not eqx.is_array(leaf):
-            return False
-        classify_model_array(cfg, path_to_str(path))
-        return True
-
-    return jax.tree_util.tree_map_with_path(classify, model)
+    return ModelArrayClassification("other", False)
 
 
 def parameter_decay_mask(cfg: Config, params: Any) -> Any:
@@ -317,18 +288,12 @@ def parameter_optimizer_groups(cfg: Config, params: Any) -> Any:
 def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
     """Build model and return (params, static).
 
-    We always partition immediately using the backend's explicit parameter
-    contract. Every model array must be a classified parameter; derived RoPE
-    frequencies do not appear in the model array tree at all.
-
     Why?
     - We never want to stash full Modules in TrainState
     - It keeps checkpointing straightforward
-    - It makes optimizer assignment executable and fail-closed
 
     :param Config cfg: Model configuration.
     :param jax.Array key: PRNG key for model initialization.
-    :raises RuntimeError: If the installed megalodon-jax is older than the repo-wide floor.
     :raises ValueError: If model.backend is unknown.
     :return tuple: (params, static) pytrees from eqx.partition.
     """
@@ -385,7 +350,7 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
     else:  # pragma: no cover
         raise ValueError(f"Unknown model.backend: {cfg.model.backend!r}")
 
-    params, static = eqx.partition(model, _parameter_filter_spec(cfg, model))
+    params, static = eqx.partition(model, eqx.is_array)
     return params, static
 
 
