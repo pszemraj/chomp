@@ -405,14 +405,11 @@ def restore_params_only(step_dir: Path, abstract_params: Any) -> Any:
 def check_resume_compat(
     cfg: Config,
     meta: dict[str, Any] | None,
-    *,
-    tokenizer_snapshot_hash: str | None = None,
 ) -> None:
     """Validate checkpoint metadata against current config.
 
     :param Config cfg: Current training configuration.
     :param meta: Checkpoint metadata dict (or None if missing).
-    :param str | None tokenizer_snapshot_hash: Optional tokenizer snapshot hash for strict checks.
     :raises RuntimeError: If meta is missing or config mismatches are found.
     """
 
@@ -474,7 +471,7 @@ def check_resume_compat(
             path = (labels or {}).get(key, f"{prefix}.{key}" if prefix else key)
             _cmp(path, cur.get(key), prev.get(key), severity=severity)
 
-    cur_fp = data_fingerprint(cfg, tokenizer_snapshot_hash=tokenizer_snapshot_hash)
+    cur_fp = data_fingerprint(cfg)
 
     _cmp_mapping(
         "",

@@ -296,13 +296,6 @@ class DataConfig:
 
     # Validation set creation from the explicitly selected split/source.
     max_eval_samples: int = 1000
-    # One-shot operational override: allow a resume to recollect the pinned
-    # eval set when run_dir/eval_tokens.json.gz is missing. Off by default —
-    # a missing cache on resume is a hard error because a recollected set
-    # breaks eval-loss comparability across the resume boundary. Not part of
-    # the data fingerprint (it changes no training or eval semantics when the
-    # cache is present).
-    recreate_eval_cache: bool = False
 
     # Tokenizer
     tokenizer: TokenizerConfig = TokenizerConfig()

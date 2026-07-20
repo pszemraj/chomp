@@ -115,20 +115,13 @@ def _base_cfg(run_dir: Path) -> Config:
 def check_resume_compat(
     cfg: Config,
     meta: dict[str, Any] | None,
-    *,
-    tokenizer_snapshot_hash: str | None = None,
 ) -> None:
-    """Call resume validation with an optional tokenizer snapshot hash.
+    """Call resume validation for a test checkpoint.
 
     :param Config cfg: Current configuration.
     :param meta: Checkpoint metadata.
-    :param str | None tokenizer_snapshot_hash: Current tokenizer snapshot hash.
     """
-    _check_resume_compat(
-        cfg,
-        meta,
-        tokenizer_snapshot_hash=tokenizer_snapshot_hash,
-    )
+    _check_resume_compat(cfg, meta)
 
 
 def _checkpoint_record(cfg: Config, *, step: int = 0, tokens_seen: int = 0) -> CheckpointMeta:
@@ -535,7 +528,7 @@ def test_run_closes_manager_and_preflights_metadata(
     incompatible = replace(cfg, data=replace(cfg.data, local_text="different corpus"))
     close_calls.clear()
 
-    with pytest.raises(RuntimeError, match="local_text_hash"):
+    with pytest.raises(RuntimeError, match="local_text"):
         run(incompatible, config_path=None, resume="latest", dry_run=False)
 
     assert restore_calls == 0

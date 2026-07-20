@@ -71,7 +71,6 @@ from chomp.data import (
     load_tokenizer_snapshot,
     prepare_tokenizer_and_config,
     save_tokenizer_snapshot,
-    tokenizer_snapshot_hash,
 )
 from chomp.model import (
     build_model,
@@ -312,21 +311,21 @@ def _setup_run_dir_and_tokenizer(
     Any,
     Path,
     Path,
-    list[list[int]] | None,
+    list[list[int]],
     GenerationSettings | None,
     list[list[int]] | None,
     jax.Array | None,
     random.Random | None,
 ]:
-    """Prepare run artifacts, cached eval tokens, and generation prompts.
+    """Prepare run artifacts, eval tokens, and generation prompts.
 
     :param Config cfg: Training configuration.
     :param str | None config_path: Optional config path for run_dir bookkeeping.
     :param bool allow_existing: Whether to reuse an existing run directory.
     :param bool dry_run: If True, skip heavy data/generation setup.
-    :return tuple[Config, Any, Path, Path, list[list[int]] | None, GenerationSettings | None, list[list[int]] | None, jax.Array | None, random.Random | None]:
-        Updated config, tokenizer, run/metrics paths, optional deferred eval
-        tokens, generation settings, prompt pool, key, and RNG.
+    :return tuple[Config, Any, Path, Path, list[list[int]], GenerationSettings | None, list[list[int]] | None, jax.Array | None, random.Random | None]:
+        Updated config, tokenizer, run/metrics paths, eval tokens, generation
+        settings, prompt pool, key, and RNG.
     """
     tokenizer = None
     if allow_existing and cfg.logging.run_dir is not None:
@@ -351,19 +350,10 @@ def _setup_run_dir_and_tokenizer(
     metrics_path = run_dir / cfg.logging.metrics_file
     save_tokenizer_snapshot(run_dir, cfg, tokenizer, allow_existing=allow_existing)
 
-    # run_dir pins the eval set: created once, persisted, and reloaded on
-    # resume so evals stay comparable even if the upstream dataset drifts.
-    # The recreation override can write a missing artifact, so defer that
-    # entire operation until checkpoint compatibility accepts this resume.
-    # None is the explicit "deferred" sentinel; [] remains "eval disabled."
     if dry_run:
         eval_tokens = []
-    elif allow_existing and cfg.data.recreate_eval_cache:
-        eval_tokens = None
     else:
-        eval_tokens = load_or_create_eval_tokens(
-            cfg, tokenizer=tokenizer, run_dir=run_dir, resume=allow_existing
-        )
+        eval_tokens = load_or_create_eval_tokens(cfg, tokenizer=tokenizer)
 
     gen_settings: GenerationSettings | None = None
     gen_prompts = None
@@ -579,7 +569,6 @@ def _save_training_checkpoint(
     *,
     step: int,
     cfg: Config,
-    tokenizer_hash: str | None,
     tokens_seen: int,
     train_state: TrainState,
     data_iter: Any,
@@ -590,7 +579,6 @@ def _save_training_checkpoint(
     :param manager: Checkpoint manager.
     :param int step: Completed training step to save.
     :param Config cfg: Training configuration.
-    :param str | None tokenizer_hash: Hash of the run tokenizer snapshot.
     :param int tokens_seen: Cumulative exact loss-token count.
     :param TrainState train_state: Train state to checkpoint.
     :param data_iter: Data iterator to checkpoint.
@@ -599,7 +587,7 @@ def _save_training_checkpoint(
     meta = build_meta(
         step=step,
         config=cfg.to_dict(),
-        data_fingerprint=data_fingerprint(cfg, tokenizer_snapshot_hash=tokenizer_hash),
+        data_fingerprint=data_fingerprint(cfg),
         tokens_seen=int(tokens_seen),
     )
     save(
@@ -620,7 +608,6 @@ def _maybe_restore_state(
     abstract_state: Any,
     data_it: Any,
     cfg: Config,
-    tokenizer_hash: str | None,
 ) -> tuple[TrainState, dict[str, Any] | None]:
     """Restore state if requested, otherwise return the initial state.
 
@@ -630,7 +617,6 @@ def _maybe_restore_state(
     :param Any abstract_state: Abstract train state for restore shape.
     :param Any data_it: Data iterator to restore.
     :param Config cfg: Training configuration.
-    :param str | None tokenizer_hash: Optional tokenizer snapshot hash for resume checks.
     :return tuple: (TrainState, meta) where meta is checkpoint metadata if restored.
     """
     if resume == "none":
@@ -657,11 +643,7 @@ def _maybe_restore_state(
     # A pipeline schema or source mismatch must fail without reading up to a
     # full document/packed shuffle window from an incompatible source.
     meta = restore_meta_at_step(manager, step=step_r)
-    check_resume_compat(
-        cfg,
-        meta,
-        tokenizer_snapshot_hash=tokenizer_hash,
-    )
+    check_resume_compat(cfg, meta)
     _, state, restored_meta = restore_at_step(
         manager,
         step=step_r,
@@ -1365,8 +1347,6 @@ def _run_impl(
             "Set train.deterministic=false (and keep dropout at 0.0 for deterministic math) "
             "to enable checkpointing."
         )
-    tokenizer_hash = tokenizer_snapshot_hash(run_dir)
-
     params, static, tx, schedule, state0, abstract_state = _build_model_state(cfg)
     _validate_packing_capabilities(cfg, params=params, static=static)
 
@@ -1389,17 +1369,7 @@ def _run_impl(
             abstract_state=abstract_state,
             data_it=data_it,
             cfg=cfg,
-            tokenizer_hash=tokenizer_hash,
         )
-
-        if eval_tokens is None:
-            # Reaching here means check_resume_compat accepted the restored
-            # checkpoint. It is now safe for the explicit override to persist a
-            # replacement cache without a rejected configuration poisoning the
-            # run directory.
-            eval_tokens = load_or_create_eval_tokens(
-                cfg, tokenizer=tokenizer, run_dir=run_dir, resume=True
-            )
 
         train_step = make_train_step(cfg, static=static, tx=tx, lr_schedule=schedule)
         eval_every = int(cfg.train.eval_every)
@@ -1526,7 +1496,7 @@ def _run_impl(
         return True
 
     def _run_eval(params: Any) -> dict[str, Any]:
-        """Run a full eval pass over the cached eval texts.
+        """Run a full eval pass over the collected eval texts.
 
         :param Any params: Model parameters.
         :return dict[str, Any]: Eval metrics row with eval_loss and eval_tokens.
@@ -1763,7 +1733,6 @@ def _run_impl(
                             manager,
                             step=step_i,
                             cfg=cfg,
-                            tokenizer_hash=tokenizer_hash,
                             tokens_seen=int(tokens_seen_count),
                             train_state=state,
                             data_iter=data_it,
@@ -1933,7 +1902,6 @@ def _run_impl(
                     manager,
                     step=final_step,
                     cfg=cfg,
-                    tokenizer_hash=tokenizer_hash,
                     tokens_seen=int(tokens_seen_count),
                     train_state=state,
                     data_iter=data_it,

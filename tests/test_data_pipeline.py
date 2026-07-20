@@ -35,13 +35,10 @@ from chomp.data.pack import FFDPacker, FFDPackerState, TokenPacker, _DocumentSta
 from chomp.data.pipeline import (
     ByteTokenizer,
     ZeroLossTokensError,
-    _eval_tokens_sha256,
     _SequenceProducer,
     build_eval_iterator,
     build_train_iterator,
     effective_window_shuffle_seed,
-    save_tokenizer_snapshot,
-    tokenizer_snapshot_hash,
 )
 from chomp.train import run
 from tests.helpers.config_factories import make_pipeline_cfg
@@ -61,21 +58,6 @@ def _doc(token: int, length: int) -> list[int]:
     :return list[int]: Token list of length ``length``.
     """
     return [token] * length
-
-
-def test_artifact_hashes_frame_file_and_document_boundaries(tmp_path: Path) -> None:
-    """Distinct file/document boundaries must never concatenate to one identity."""
-    first = tmp_path / "first" / "tokenizer"
-    second = tmp_path / "second" / "tokenizer"
-    first.mkdir(parents=True)
-    second.mkdir(parents=True)
-    (first / "a").write_bytes(b"bc")
-    (second / "ab").write_bytes(b"c")
-
-    assert tokenizer_snapshot_hash(first.parent) != tokenizer_snapshot_hash(second.parent)
-    assert _eval_tokens_sha256([[1, 2], [3]]) != _eval_tokens_sha256([[1], [2, 3]])
-    with pytest.raises(FileNotFoundError, match="Tokenizer snapshot"):
-        tokenizer_snapshot_hash(tmp_path / "missing")
 
 
 def test_window_shuffle_seed_normalizes_to_uint32() -> None:
@@ -1497,27 +1479,3 @@ def test_tokenizer_snapshot_saved(tmp_path: Path) -> None:
 
     data = json.loads(tok_file.read_text(encoding="utf-8"))
     assert data["kind"] == "byte"
-    assert not list(run_dir.glob(".tokenizer-*"))
-
-
-def test_failed_tokenizer_snapshot_never_publishes_partial_directory(tmp_path: Path) -> None:
-    """An interrupted tokenizer save leaves neither final nor temporary artifacts."""
-
-    class _BrokenTokenizer:
-        """Tokenizer stub that writes one file and then fails."""
-
-        def save_pretrained(self, path: Path) -> None:
-            """Write a partial snapshot before simulating interruption."""
-            (path / "partial.json").write_text("{}")
-            raise RuntimeError("interrupted")
-
-    cfg = Config(data=DataConfig(backend="local_text"))
-    with pytest.raises(RuntimeError, match="atomically save"):
-        save_tokenizer_snapshot(
-            tmp_path,
-            cfg,
-            _BrokenTokenizer(),  # type: ignore[arg-type]
-            allow_existing=False,
-        )
-    assert not (tmp_path / "tokenizer").exists()
-    assert not list(tmp_path.glob(".tokenizer-*"))

@@ -87,7 +87,7 @@ In-run recovery from transient HF streaming errors preserves exact document orde
 
 `data.state_update_interval` (default 2000) controls reconstruction work, not data duplication: a recovery may reread and discard up to that many documents. If state restore or fast-forward cannot reproduce the prior position, training fails and must resume from the last Chomp checkpoint rather than continuing from a partially reconstructed stream. Errors that survive `data.max_retries` also propagate and fail the run.
 
-The configured `data.text_key` must exist in every selected row and contain a string. Missing fields and non-string values are deterministic schema failures: Chomp does not stringify them, retry them, or persist a partially collected eval cache.
+The configured `data.text_key` must exist in every selected row and contain a string. Missing fields and non-string values are deterministic schema failures: Chomp does not stringify them or retry them.
 
 ## Validation set
 
@@ -98,8 +98,6 @@ chomp builds a fixed validation set when the run is created:
 - With `data.hf_eval_split: null`, a stable BLAKE2 content hash reserves `data.hf_eval_holdout_fraction` of identities for eval and removes them from the training stream. Duplicate content always lands on the same side. The sparse hash selection does not also fill a document-shuffle window; doing so would multiply startup reads by roughly the inverse holdout fraction.
 - A positive `data.max_eval_samples` that yields no documents fails startup; use `0` to disable evaluation intentionally.
 
-The selected tokens are **persisted to `run_dir/eval_tokens.json.gz`** together with an identity manifest (eval knobs) and a content hash. Every later start, including resume, loads that exact set instead of re-collecting from the stream, so eval losses stay comparable even if the upstream dataset revision or split contents drift. A cache whose manifest or hash mismatches fails loudly; delete the run directory (not just the cache) to change eval identity.
-
-A **missing** cache on resume is also a hard error: silently recollecting would compare post-resume eval losses against a different token set than every earlier point on the curve. `data.recreate_eval_cache: true` is the explicit one-shot override; after checkpoint compatibility validation succeeds, it rebuilds the cache with a loud warning that eval curves across the boundary are not comparable. A rejected resume never persists its recollected tokens.
+The selected documents are tokenized once when a process starts, then the resulting eval batches are reused for every evaluation in that process.
 
 At end of stream the `bin`/`multipack` packers flush their remaining pending documents into padded windows, so an eval doc set below the pack threshold still emits windows. Eval uses `A=1` and pads missing final rows independently of `train.grad_accum`. If it yields no usable window or emits batches whose labels are entirely masked (zero valid loss tokens), the run fails instead of silently emitting a null eval loss.

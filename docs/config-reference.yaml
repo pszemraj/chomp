@@ -210,11 +210,8 @@ data:
   # data.grain_prefetch -- int; default: 0; >= 0; zero disables. Counts assembled batches; raise only after measuring input stalls because it consumes memory and can interact poorly with device_put=true.
   grain_prefetch: "<int>"
 
-  # data.max_eval_samples -- int; default: 1000; >= 0; zero disables eval data. Positive values collect/cache up to this many documents even when train.eval_every=0; local_text produces repeated copies of the same text.
+  # data.max_eval_samples -- int; default: 1000; >= 0; zero disables eval data. Positive values collect up to this many documents when a run starts; local_text produces repeated copies of the same text.
   max_eval_samples: "<int>"
-
-  # data.recreate_eval_cache -- bool; default: false. One-shot recovery used only when resuming with a missing pinned eval cache; true rebuilds after compatibility succeeds but breaks metric comparability across the boundary. [Operational recovery]
-  recreate_eval_cache: "<bool>"
 
   # data.tokenizer -- mapping | null; default: {}. Every raw tokenizer child is a hard resume invariant, including fields inactive under the selected tokenizer kind.
   tokenizer:
@@ -280,7 +277,7 @@ train:
   # train.log_every -- int; default: 25; > 0. Completed-step metric cadence; evaluation can force an off-cadence row, but training completion does not. Values above train.steps can leave a no-eval run with no metric rows; use 1 for smoke runs and 25 for full recipes.
   log_every: "<int>"
 
-  # train.eval_every -- int; default: 2500; >= 0; zero disables scheduled evaluation. Evaluation also requires data.max_eval_samples > 0 and a usable pinned eval set; cadence may change on resume.
+  # train.eval_every -- int; default: 2500; >= 0; zero disables scheduled evaluation. Evaluation also requires data.max_eval_samples > 0 and usable eval data; cadence may change on resume.
   eval_every: "<int>"
 
   # train.generate_every -- int; default: 5000; >= 0; zero disables. Periodic sampling runs only for non-dry Megalodon training; prompt/setup failures disable sampling, and generation RNGs restart on resume.

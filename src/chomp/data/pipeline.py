@@ -22,12 +22,8 @@ This pipeline keeps debug sources (local_text) but *still* exercises tokenize+pa
 
 from __future__ import annotations
 
-import gzip
-import hashlib
 import json
 import logging
-import shutil
-import tempfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -466,26 +462,18 @@ def save_tokenizer_snapshot(
             return
         raise RuntimeError(f"Tokenizer snapshot already exists: {tok_dir}")
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix=".tokenizer-", dir=Path(run_dir)))
-    try:
-        if hasattr(tok, "save_pretrained"):
-            tok.save_pretrained(tmp_dir)  # type: ignore[call-arg]
-        else:
-            record = {
-                "kind": cfg.data.tokenizer.kind,
-                "byte_offset": cfg.data.tokenizer.byte_offset,
-            }
-            (tmp_dir / "tokenizer.json").write_text(
-                json.dumps(record, indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
-        if not any(path.is_file() for path in tmp_dir.rglob("*")):
-            raise RuntimeError("tokenizer save produced no files")
-        _load_tokenizer_dir(tmp_dir, cfg)
-        tmp_dir.replace(tok_dir)
-    except Exception as exc:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise RuntimeError(f"Failed to atomically save tokenizer snapshot to {tok_dir}") from exc
+    tok_dir.mkdir()
+    if hasattr(tok, "save_pretrained"):
+        tok.save_pretrained(tok_dir)  # type: ignore[call-arg]
+    else:
+        record = {
+            "kind": cfg.data.tokenizer.kind,
+            "byte_offset": cfg.data.tokenizer.byte_offset,
+        }
+        (tok_dir / "tokenizer.json").write_text(
+            json.dumps(record, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
 
 
 def _load_tokenizer_dir(tok_dir: Path, cfg: Config) -> Tokenizer:
@@ -533,36 +521,6 @@ def load_tokenizer_snapshot(run_dir: Path, cfg: Config) -> Tokenizer:
     return _load_tokenizer_dir(tok_dir, cfg)
 
 
-def _update_framed_hash(digest: Any, data: bytes) -> None:
-    """Add one length-framed byte string to a digest.
-
-    :param Any digest: Hashlib-compatible digest object.
-    :param bytes data: Payload whose boundary must be unambiguous.
-    """
-    digest.update(len(data).to_bytes(8, byteorder="little", signed=False))
-    digest.update(data)
-
-
-def tokenizer_snapshot_hash(run_dir: Path) -> str:
-    """Compute a stable hash of the tokenizer snapshot directory.
-
-    :param Path run_dir: Run directory containing tokenizer snapshot.
-    :raises FileNotFoundError: If the tokenizer snapshot is missing.
-    :return str: SHA256 hash hex digest.
-    """
-    tok_dir = Path(run_dir) / "tokenizer"
-    if not tok_dir.exists():
-        raise FileNotFoundError(f"Tokenizer snapshot not found at {tok_dir}")
-
-    digest = hashlib.sha256()
-    files = [p for p in tok_dir.rglob("*") if p.is_file()]
-    for path in sorted(files, key=lambda p: p.relative_to(tok_dir).as_posix()):
-        rel = path.relative_to(tok_dir).as_posix()
-        _update_framed_hash(digest, rel.encode("utf-8"))
-        _update_framed_hash(digest, path.read_bytes())
-    return digest.hexdigest()
-
-
 def _collect_texts(stream: TextStream, max_samples: int) -> list[str]:
     """Collect up to max_samples texts from a stream.
 
@@ -580,9 +538,6 @@ def _collect_texts(stream: TextStream, max_samples: int) -> list[str]:
         return texts
     finally:
         stream.close()
-
-
-_EVAL_TOKENS_FILENAME = "eval_tokens.json.gz"
 
 
 def _content_holdout_enabled(cfg: Config) -> bool:
@@ -609,137 +564,16 @@ def _eval_source_split(cfg: Config) -> str:
     return cfg.data.hf_eval_split or cfg.data.hf_split
 
 
-def _eval_cache_manifest(cfg: Config) -> dict[str, Any]:
-    """Eval-set-defining config knobs pinned alongside the cached tokens.
-
-    :param Config cfg: Training configuration.
-    :return dict[str, Any]: Manifest of eval-identity config fields.
-    """
-    manifest: dict[str, Any] = {
-        "backend": cfg.data.backend,
-        "max_eval_samples": int(cfg.data.max_eval_samples),
-    }
-    if cfg.data.backend == "hf":
-        content_partition: ContentPartition = "eval" if _content_holdout_enabled(cfg) else "all"
-        fields = _hf_source_fields(
-            cfg,
-            split=_eval_source_split(cfg),
-            repeat=False,
-            content_partition=content_partition,
-        )
-        manifest["source"] = _hf_source_identity(fields)
-    else:
-        manifest["source"] = {"split": _eval_source_split(cfg)}
-    return manifest
-
-
-def _eval_tokens_sha256(tokens: list[list[int]]) -> str:
-    """Content hash of the eval token set (guards cache corruption).
-
-    :param list[list[int]] tokens: Tokenized eval documents.
-    :return str: Hex sha256 digest over all documents.
-    """
-    h = hashlib.sha256()
-    for doc in tokens:
-        encoded = np.asarray(doc, dtype="<i8").tobytes()
-        _update_framed_hash(h, encoded)
-    return h.hexdigest()
-
-
-def _read_eval_tokens_cache(path: Path, cfg: Config) -> list[list[int]]:
-    """Load and validate a persisted eval token cache.
-
-    :param Path path: Cache file path.
-    :param Config cfg: Current training configuration.
-    :raises RuntimeError: If the manifest or content hash does not match.
-    :return list[list[int]]: Tokenized eval documents.
-    """
-    with gzip.open(path, "rt", encoding="utf-8") as f:
-        payload = json.load(f)
-    manifest = payload.get("manifest") or {}
-    expected = _eval_cache_manifest(cfg)
-    if manifest != expected:
-        raise RuntimeError(
-            f"Eval token cache at {path} was created with different eval settings "
-            f"(cached={manifest!r}, current={expected!r}). The eval set is pinned "
-            "per run directory; use a fresh run_dir to change eval knobs."
-        )
-    tokens = [[int(t) for t in doc] for doc in payload["tokens"]]
-    if _eval_tokens_sha256(tokens) != payload.get("sha256"):
-        raise RuntimeError(f"Eval token cache at {path} is corrupt (content hash mismatch).")
-    return tokens
-
-
-def _write_eval_tokens_cache(path: Path, cfg: Config, tokens: list[list[int]]) -> None:
-    """Atomically persist the eval token set next to the run.
-
-    :param Path path: Cache file path.
-    :param Config cfg: Training configuration (for the identity manifest).
-    :param list[list[int]] tokens: Tokenized eval documents.
-    """
-    payload = {
-        "manifest": _eval_cache_manifest(cfg),
-        "sha256": _eval_tokens_sha256(tokens),
-        "tokens": tokens,
-    }
-    tmp = path.with_name(path.name + ".tmp")
-    with gzip.open(tmp, "wt", encoding="utf-8") as f:
-        json.dump(payload, f)
-    tmp.replace(path)
-
-
-def load_or_create_eval_tokens(
-    cfg: Config, *, tokenizer: Tokenizer, run_dir: Path | None = None, resume: bool = False
-) -> list[list[int]]:
-    """Build the evaluation token set, pinned to the run directory.
-
-    With ``run_dir`` set, tokens are persisted to ``run_dir/eval_tokens.json.gz``
-    on first creation and loaded from there on every later start. A resumed run
-    therefore evaluates on the exact same token set even if the upstream
-    streaming dataset, split contents, or local file changed since the run was
-    created — which is what makes the hard resume-compat errors on eval knobs
-    meaningful. Without ``run_dir`` the set is rebuilt from the stream each
-    call (unit tests / ad-hoc callers).
+def load_or_create_eval_tokens(cfg: Config, *, tokenizer: Tokenizer) -> list[list[int]]:
+    """Build the evaluation token set from the configured source.
 
     :param Config cfg: Training configuration.
     :param Tokenizer tokenizer: Tokenizer used to pre-tokenize eval texts.
-    :param run_dir: Run directory holding the persistent cache; None disables
-        persistence.
-    :param bool resume: True when resuming an existing run. A missing cache is
-        then a hard error (recollecting would silently change what eval losses
-        are measured on) unless ``data.recreate_eval_cache`` is set.
-    :raises RuntimeError: If a cached eval set exists but was written with
-        different eval settings or fails its content hash, or if the cache is
-        missing on resume without ``data.recreate_eval_cache``.
     :return list[list[int]]: Tokenized documents for evaluation.
     """
     max_samples = int(cfg.data.max_eval_samples)
     if max_samples <= 0:
         return []
-
-    cache_path = None if run_dir is None else Path(run_dir) / _EVAL_TOKENS_FILENAME
-    if cache_path is not None and cache_path.exists():
-        tokens = _read_eval_tokens_cache(cache_path, cfg)
-        logger.info("Loaded %d cached eval documents from %s", len(tokens), cache_path)
-        return tokens
-    if resume and cache_path is not None:
-        # The run was created with a pinned eval set (or predates one); a
-        # silent recollect here would compare post-resume eval losses against
-        # a different token set than every earlier point on the curve.
-        if not cfg.data.recreate_eval_cache:
-            raise RuntimeError(
-                f"Resume requested but the pinned eval set is missing at {cache_path}. "
-                "Recollecting it silently would break eval-loss comparability across "
-                "the resume boundary. Set data.recreate_eval_cache=true (one-shot "
-                "override, e.g. --override data.recreate_eval_cache=true) to rebuild "
-                "it, accepting that eval curves before and after this resume are not "
-                "comparable."
-            )
-        logger.warning(
-            "Recreating the missing eval set at %s (data.recreate_eval_cache=true): "
-            "eval losses before and after this resume boundary are not comparable.",
-            cache_path,
-        )
 
     if cfg.data.backend == "hf":
         split = _eval_source_split(cfg)
@@ -773,11 +607,7 @@ def load_or_create_eval_tokens(
             "disable evaluation; fix the source/split or set data.max_eval_samples=0 explicitly."
         )
 
-    tokens = [tokenizer.encode(text) for text in texts]
-    if cache_path is not None:
-        _write_eval_tokens_cache(cache_path, cfg, tokens)
-        logger.info("Persisted %d eval documents to %s", len(tokens), cache_path)
-    return tokens
+    return [tokenizer.encode(text) for text in texts]
 
 
 def _build_backend_text_stream(cfg: Config) -> TextStream:
@@ -824,11 +654,10 @@ def load_generation_prompt_tokens(
     return [tokenizer.encode(text) for text in texts]
 
 
-def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None) -> dict[str, Any]:
+def data_fingerprint(cfg: Config) -> dict[str, Any]:
     """A small, stable fingerprint that we store in checkpoint meta.
 
     :param Config cfg: Training configuration.
-    :param str | None tokenizer_snapshot_hash: Optional tokenizer snapshot hash for resume checks.
     :return dict[str, Any]: Fingerprint dict with source, tokenizer, and batch shape info.
     """
 
@@ -847,7 +676,7 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
         src = {
             "backend": "local_text",
             "repeat": d.repeat,
-            "local_text_hash": hashlib.sha1(d.local_text.encode("utf-8")).hexdigest(),
+            "local_text": d.local_text,
         }
 
     tok = {
@@ -862,9 +691,6 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
         "vocab_size_multiple": t.vocab_size_multiple,
         "auto_set_special_tokens": t.auto_set_special_tokens,
     }
-    if tokenizer_snapshot_hash is not None:
-        tok["snapshot_sha256"] = tokenizer_snapshot_hash
-
     # Record only active mode knobs and effective shuffle geometry so inert
     # defaults and raw budgets cannot reject a behaviorally identical resume.
     window_shuffle_rows = resolve_window_shuffle_rows(cfg)

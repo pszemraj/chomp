@@ -12,9 +12,7 @@ Each checkpoint stores three items:
 2) `data_state`: the checkpointable data path described in [Data Pipeline: iterator state and resume](data_pipeline.md#iterator-state-and-resume)
 3) `meta`: JSON metadata (config snapshot, data fingerprint, and required non-negative `tokens_seen`)
 
-The run directory also includes a required tokenizer snapshot under `tokenizer/` and the pinned `eval_tokens.json.gz` set when evaluation data is enabled. Eval cache creation, drift checks, and the `data.recreate_eval_cache` override are covered in [Data Pipeline validation set](data_pipeline.md#validation-set).
-
-Tokenizer snapshots are written to a temporary sibling, loaded back for validation, and atomically renamed. A failed or interrupted save never leaves an incomplete `tokenizer/` directory that a later resume could mistake for a valid snapshot.
+The run directory also includes the tokenizer snapshot under `tokenizer/`; resumed runs load that snapshot instead of the configured remote tokenizer source.
 
 ## Save cadence
 

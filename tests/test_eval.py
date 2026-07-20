@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -105,9 +104,6 @@ def test_eval_batches_assembled_once_and_reused(
     cfg = _eval_cfg(run_dir, steps=2)
 
     run(cfg, config_path=None, resume="none")
-
-    # The training entrypoint pins the eval set to the run directory.
-    assert (run_dir / "eval_tokens.json.gz").exists()
 
     assert calls["n"] == 1, f"eval iterator rebuilt {calls['n']} times for 2 evals"
     metrics_path = run_dir / cfg.logging.metrics_file
@@ -283,18 +279,15 @@ def test_eval_collection_always_closes_hf_stream(
     assert record["close_calls"] == 1
 
 
-def test_malformed_eval_row_never_creates_cache(
-    tmp_path: Path,
+def test_malformed_eval_row_fails(
     patch_hf_load_dataset: Callable[..., dict[str, int]],
 ) -> None:
-    """A non-string text field must fail before an eval cache is persisted."""
+    """A non-string text field must fail evaluation collection."""
     patch_hf_load_dataset({"validation": [{"text": None}]})
     cfg = _eval_cfg(backend="hf")
 
     with pytest.raises(RuntimeError, match="Failed to collect evaluation documents"):
-        load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg), run_dir=tmp_path)
-
-    assert not (tmp_path / "eval_tokens.json.gz").exists()
+        load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg))
 
 
 @pytest.mark.parametrize(
@@ -302,7 +295,7 @@ def test_malformed_eval_row_never_creates_cache(
     [FileNotFoundError("missing validation split"), PermissionError("authentication failed")],
 )
 def test_explicit_eval_split_failure_never_falls_back(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
+    monkeypatch: pytest.MonkeyPatch, failure: Exception
 ) -> None:
     """Missing or inaccessible explicit eval data must not become train-set eval."""
     requested_splits: list[str] = []
@@ -327,44 +320,20 @@ def test_explicit_eval_split_failure_never_falls_back(
     cfg = _eval_cfg(backend="hf")
 
     with pytest.raises(RuntimeError, match="never falls back"):
-        load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg), run_dir=tmp_path)
+        load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg))
 
     assert requested_splits == ["validation"]
-    assert not (tmp_path / "eval_tokens.json.gz").exists()
 
 
 def test_positive_eval_sample_count_rejects_empty_source(
-    tmp_path: Path, patch_hf_load_dataset: Callable[..., dict[str, int]]
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
 ) -> None:
     """An empty configured source must fail instead of silently disabling eval."""
     patch_hf_load_dataset({"validation": [], "train": [{"text": "unused"}]})
     cfg = _eval_cfg(backend="hf")
 
     with pytest.raises(RuntimeError, match="collected zero documents"):
-        load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg), run_dir=tmp_path)
-
-    assert not (tmp_path / "eval_tokens.json.gz").exists()
-
-
-def test_eval_cache_manifest_records_actual_source_split(
-    tmp_path: Path, patch_hf_load_dataset: Callable[..., dict[str, int]]
-) -> None:
-    """Pinned eval identity must record the split that actually supplied documents."""
-    import gzip
-
-    patch_hf_load_dataset(
-        {
-            "validation": [{"text": "val-a"}, {"text": "val-b"}],
-            "train": [{"text": "train-a"}],
-        }
-    )
-    cfg = _eval_cfg(backend="hf")
-    load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg), run_dir=tmp_path)
-
-    with gzip.open(tmp_path / "eval_tokens.json.gz", "rt", encoding="utf-8") as handle:
-        payload = json.load(handle)
-    assert payload["manifest"]["source"]["split"] == "validation"
-    assert payload["manifest"]["source"]["revision"] == cfg.data.hf_revision
+        load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg))
 
 
 def test_eval_empty_when_disabled() -> None:
@@ -373,127 +342,6 @@ def test_eval_empty_when_disabled() -> None:
     cfg = replace(cfg, data=replace(cfg.data, max_eval_samples=0))
     tok = build_tokenizer(cfg)
     assert load_or_create_eval_tokens(cfg, tokenizer=tok) == []
-
-
-def test_eval_tokens_pinned_to_run_dir(tmp_path: Path) -> None:
-    """The eval set is created once and reloaded from the run directory, so
-    upstream source drift cannot silently change what a resumed run
-    evaluates on (config-visible drift is resume-compat's job)."""
-    cfg = _eval_cfg(local_text="first corpus")
-    tok = build_tokenizer(cfg)
-    tokens_first = load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=tmp_path)
-    assert tokens_first
-    assert (tmp_path / "eval_tokens.json.gz").exists()
-
-    drifted = replace(cfg, data=replace(cfg.data, local_text="different corpus"))
-    assert load_or_create_eval_tokens(drifted, tokenizer=tok, run_dir=tmp_path) == tokens_first
-    # Sanity: without the cache the drifted source yields a different set.
-    assert load_or_create_eval_tokens(drifted, tokenizer=tok) != tokens_first
-
-
-def test_eval_tokens_cache_rejects_eval_knob_drift(tmp_path: Path) -> None:
-    """Changing an eval-identity knob against an existing cache fails loudly."""
-    cfg = _eval_cfg()
-    tok = build_tokenizer(cfg)
-    load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=tmp_path)
-
-    drifted = replace(cfg, data=replace(cfg.data, max_eval_samples=5))
-    with pytest.raises(RuntimeError, match="different eval settings"):
-        load_or_create_eval_tokens(drifted, tokenizer=tok, run_dir=tmp_path)
-
-
-def test_eval_cache_missing_on_resume_fails(tmp_path: Path) -> None:
-    """A resume whose pinned eval set vanished must fail hard: recollecting
-    silently would compare post-resume eval losses against a different token
-    set. data.recreate_eval_cache is the explicit one-shot override."""
-    cfg = _eval_cfg()
-    tok = build_tokenizer(cfg)
-    tokens = load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=tmp_path, resume=False)
-    assert tokens
-    (tmp_path / "eval_tokens.json.gz").unlink()
-
-    with pytest.raises(RuntimeError, match="pinned eval set is missing"):
-        load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=tmp_path, resume=True)
-
-    override = replace(cfg, data=replace(cfg.data, recreate_eval_cache=True))
-    recreated = load_or_create_eval_tokens(override, tokenizer=tok, run_dir=tmp_path, resume=True)
-    assert recreated == tokens
-    assert (tmp_path / "eval_tokens.json.gz").exists()
-
-
-def test_run_resume_requires_eval_cache(tmp_path: Path) -> None:
-    """The training entrypoint treats resume + missing eval cache as fatal."""
-    run_dir = tmp_path / "run"
-    cfg = _eval_cfg(
-        run_dir,
-        steps=1,
-        checkpoint=CheckpointConfig(enabled=True, save_every=1, max_to_keep=2, async_save=False),
-    )
-
-    run(cfg, config_path=None, resume="none")
-    cache = run_dir / "eval_tokens.json.gz"
-    assert cache.exists()
-    cache.unlink()
-
-    with pytest.raises(RuntimeError, match="pinned eval set is missing"):
-        run(cfg, config_path=None, resume="latest")
-
-
-def test_failed_resume_does_not_persist_recreated_eval_cache(tmp_path: Path) -> None:
-    """A rejected resume must not poison a missing eval cache.
-
-    Recollection may use a changed source, tokenizer, or eval identity. The
-    replacement therefore cannot enter the run directory until checkpoint
-    compatibility accepts the current configuration.
-    """
-    run_dir = tmp_path / "run"
-    cfg = _eval_cfg(
-        run_dir,
-        steps=1,
-        checkpoint=CheckpointConfig(enabled=True, save_every=1, max_to_keep=2, async_save=False),
-    )
-    run(cfg, config_path=None, resume="none")
-
-    cache = run_dir / "eval_tokens.json.gz"
-    tok = build_tokenizer(cfg)
-    expected_tokens = load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=run_dir)
-    cache.unlink()
-
-    incompatible = replace(
-        cfg,
-        data=replace(
-            cfg.data,
-            local_text="incompatible replacement corpus",
-            recreate_eval_cache=True,
-        ),
-    )
-    with pytest.raises(RuntimeError, match="local_text_hash"):
-        run(incompatible, config_path=None, resume="latest")
-    assert not cache.exists()
-
-    correct = replace(cfg, data=replace(cfg.data, recreate_eval_cache=True))
-    run(correct, config_path=None, resume="latest")
-    assert cache.exists()
-    assert load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=run_dir) == expected_tokens
-
-
-def test_eval_tokens_cache_rejects_corruption(tmp_path: Path) -> None:
-    """A cache whose content no longer matches its hash is refused."""
-    import gzip
-
-    cfg = _eval_cfg()
-    tok = build_tokenizer(cfg)
-    load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=tmp_path)
-
-    path = tmp_path / "eval_tokens.json.gz"
-    with gzip.open(path, "rt", encoding="utf-8") as f:
-        payload = json.load(f)
-    payload["tokens"][0][0] = int(payload["tokens"][0][0]) + 1
-    with gzip.open(path, "wt", encoding="utf-8") as f:
-        json.dump(payload, f)
-
-    with pytest.raises(RuntimeError, match="corrupt"):
-        load_or_create_eval_tokens(cfg, tokenizer=tok, run_dir=tmp_path)
 
 
 def test_null_eval_split_wires_complementary_content_partitions(
