@@ -20,8 +20,8 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-# Stateful data/checkpoint dependencies stay at the reviewed dedicated-environment
-# versions. The model stack follows compatible release lines.
+# Stateful data/checkpoint dependencies stay pinned where their behavior is
+# part of the harness. Other packages follow compatible release lines.
 dependencies = [
   # Chomp is a Linux/NVIDIA training harness. JAX's CUDA extra installs the
   # matching jaxlib, CUDA plugin, and pip-managed CUDA 13 runtime libraries.
@@ -31,10 +31,10 @@ dependencies = [
   "megalodon-jax>=0.2.1,<0.3",
   "optax>=0.2.8,<0.3",
   "orbax-checkpoint==0.11.31",
-  "PyYAML==6.0.3",
-  "tqdm==4.67.1",
-  "rich==14.2.0",
-  "wandb==0.24.0",
+  "PyYAML>=6.0",
+  "tqdm>=4.67",
+  "rich>=13.0",
+  "wandb>=0.16",
   # Exact pin is deliberate: the window-shuffle resume-exactness fix
   # (_ResumeSafeWindowShuffleIterDataset in chomp.data.grain) patches grain's
   # private _WindowShuffleDatasetIterator._init flag. A construction-time
@@ -45,14 +45,13 @@ dependencies = [
   # for apache/arrow#45214. Earlier releases can abort a successful run at
   # interpreter exit after a partially consumed streaming shard.
   "datasets==5.0.0",
-  "transformers==4.57.3",
-  "tokenizers==0.22.1",
+  "transformers>=4.57,<5",
   # CLI
-  "click==8.3.1",
+  "click>=8.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==9.0.1", "ruff==0.14.11"]
+dev = ["pytest>=9.0", "ruff>=0.14"]
 
 [project.scripts]
 chomp = "chomp.cli.main:cli"
