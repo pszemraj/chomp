@@ -17,7 +17,6 @@ from chomp.config import Config, DataConfig, ModelConfig, OptimConfig, Tokenizer
 from chomp.data.pipeline import build_train_iterator
 from chomp.model import (
     build_model,
-    build_parameter_manifest,
     classify_model_array,
     parameter_decay_mask,
     parameter_optimizer_groups,
@@ -95,9 +94,8 @@ def test_parameter_decay_policy_is_model_aware(
     megalodon_parts: tuple[Config, Any, Any],
 ) -> None:
     """Only learned embeddings and dense projections receive weight decay."""
-    cfg, params, static = megalodon_parts
-    manifest = build_parameter_manifest(cfg, params, static)
-    assert not any("rotary" in entry["path"] for entry in manifest["arrays"])
+    cfg, params, _ = megalodon_parts
+    assert not any("rotary" in path for path in _leaf_map(params))
 
     decay = _leaf_map(parameter_decay_mask(cfg, params))
     assert decay["model.embed.weight"] is True
@@ -130,21 +128,20 @@ def test_parameter_contract_covers_supported_model_variants(
     """Every array in each supported Megalodon layout must classify explicitly."""
     base = make_tiny_megalodon_model(chunk_size=16, share_emb=False)
     cfg = Config(model=replace(base, **model_updates))
-    params, static = build_model(cfg, key=jax.random.PRNGKey(1))
-    manifest = build_parameter_manifest(cfg, params, static)
+    params, _ = build_model(cfg, key=jax.random.PRNGKey(1))
+    leaves = _leaf_map(params)
     if model_updates.get("swiglu"):
-        assert any(entry["path"].endswith("ffn.fc3.weight") for entry in manifest["arrays"])
+        assert any(path.endswith("ffn.fc3.weight") for path in leaves)
     if model_updates.get("rescale_nffn"):
-        residual_scale = next(
-            entry for entry in manifest["arrays"] if entry["path"].endswith("ffn.alpha")
-        )
-        assert residual_scale["family"] == "ffn_residual_scale"
-        assert residual_scale["optimizer_group"] == "adam"
-        assert residual_scale["decay"] is False
+        path = next(path for path in leaves if path.endswith("ffn.alpha"))
+        classification = classify_model_array(cfg, path)
+        assert classification.family == "ffn_residual_scale"
+        assert classification.decay is False
+        assert _leaf_map(parameter_optimizer_groups(cfg, params))[path] == "adam"
     if model_updates.get("output_size"):
-        assert any(entry["path"] == "lm_head.weight" for entry in manifest["arrays"])
+        assert "lm_head.weight" in leaves
     if model_updates.get("share_emb"):
-        assert not any(entry["path"] == "lm_head.weight" for entry in manifest["arrays"])
+        assert "lm_head.weight" not in leaves
 
 
 def test_ffn_residual_scale_is_trainable_without_weight_decay(

@@ -10,9 +10,9 @@ Each checkpoint stores three items:
 
 1) `train_state`: model parameters, optimizer state, step, RNG
 2) `data_state`: the checkpointable data path described in [Data Pipeline: iterator state and resume](data_pipeline.md#iterator-state-and-resume)
-3) `meta`: JSON metadata (config snapshot, data fingerprint, required non-negative `tokens_seen`, parameter-manifest hash, and strict runtime identity)
+3) `meta`: JSON metadata (config snapshot, data fingerprint, and required non-negative `tokens_seen`)
 
-The run directory also includes a required tokenizer snapshot under `tokenizer/`, the pinned `eval_tokens.json.gz` set when evaluation data is enabled, and `parameter-manifest.json`, which lists every trainable parameter with its optimizer group and decay policy. Eval cache creation, drift checks, and the `data.recreate_eval_cache` override are covered in [Data Pipeline validation set](data_pipeline.md#validation-set).
+The run directory also includes a required tokenizer snapshot under `tokenizer/` and the pinned `eval_tokens.json.gz` set when evaluation data is enabled. Eval cache creation, drift checks, and the `data.recreate_eval_cache` override are covered in [Data Pipeline validation set](data_pipeline.md#validation-set).
 
 Tokenizer snapshots are written to a temporary sibling, loaded back for validation, and atomically renamed. A failed or interrupted save never leaves an incomplete `tokenizer/` directory that a later resume could mistake for a valid snapshot.
 
@@ -62,8 +62,6 @@ On resume, chomp compares the checkpoint metadata against the current config. Mi
 - objective knobs (`mask_boundary_loss`, `train_on_eos`) and eval knobs
 - batch shape invariants (`seq_len`, `batch_size`, `grad_accum`)
 - active model and optimizer config, `train.deterministic`
-- the complete parameter, optimizer-group, and decay assignment through the parameter-manifest hash
-- Python/platform, accelerator backend and device, Chomp source revision, and exact JAX/JAXlib/Equinox/Optax/Orbax/Grain/Datasets/Transformers/tokenizers/Megalodon-JAX identities (version plus source revision for editable Megalodon-JAX)
 
 Resume comparisons ignore backend- or mode-specific settings only when execution cannot consume them, such as Megalodon fields under DummyLM or Muon settings under AdamW. Muon remains a hybrid optimizer whose non-Muon leaves use AdamW, so `optim.adam` is active in both optimizer modes. Active fingerprint sections are compared over the union of keys recorded on either side, so a newly recorded data or packing knob is never silently skipped.
 
@@ -72,8 +70,6 @@ Resume comparisons ignore backend- or mode-specific settings only when execution
 The effective `xla_gpu_deterministic_ops` setting (parsed from `XLA_FLAGS`, recorded at save time) is also compared and warns on drift: kernel determinism is opt-in and only affects low-order step numerics; see [Scope of exactness](#scope-of-exactness).
 
 Remaining warnings are logged so you can make an informed decision, but anything that changes what data the resumed run sees or what it optimizes is an error, not a warning.
-
-Source identity is the Git commit for a clean checkout. For a dirty checkout it also contains a SHA-256 digest of every tracked or untracked, non-ignored file under `src/` plus `pyproject.toml`, including deletions. A non-editable installation that is not loaded from an owning Chomp checkout uses `package:<version>` instead, even when its environment is nested inside an unrelated Git worktree. Editable Megalodon-JAX installs use the same owning-checkout identity in addition to their package version. The identity is captured once at the public `run()` boundary and reused for every checkpoint in that process, so distinct uncommitted code cannot share a resume identity and mid-run filesystem edits cannot change it.
 
 ## Typical usage
 

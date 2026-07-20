@@ -20,18 +20,15 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-# Stateful data/checkpoint dependencies and the supporting runtime stay at the
-# reviewed dedicated-environment versions. The model stack follows compatible
-# release lines; checkpoints record and hard-gate resolved versions.
+# Stateful data/checkpoint dependencies stay at the reviewed dedicated-environment
+# versions. The model stack follows compatible release lines.
 dependencies = [
   # Chomp is a Linux/NVIDIA training harness. JAX's CUDA extra installs the
   # matching jaxlib, CUDA plugin, and pip-managed CUDA 13 runtime libraries.
   "jax[cuda13]>=0.10.2,<0.11",
   "equinox>=0.13.8,<0.14",
   # 0.2.1 is the first published release with the model/config contract used here.
-  # The runtime version check remains a clear failure for editable installs.
   "megalodon-jax>=0.2.1,<0.3",
-  "packaging==25.0",
   "optax>=0.2.8,<0.3",
   "orbax-checkpoint==0.11.31",
   "PyYAML==6.0.3",

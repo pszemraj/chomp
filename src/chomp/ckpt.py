@@ -22,22 +22,16 @@ Orbax notes:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
-import os
-import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import unquote, urlparse
 
 if TYPE_CHECKING:
     import orbax.checkpoint as ocp
 
-from chomp import __version__ as _chomp_version
 from chomp.config import Config, decay_horizon_from_values
 
 logger = logging.getLogger(__name__)
@@ -57,17 +51,11 @@ class CheckpointMeta:
     timestamp: str
     tokens_seen: int
 
-    # Runtime/code identity (strict resume gate)
-    runtime: dict[str, Any]
-
-    # Repro snapshot
+    # Config snapshot used for semantic resume checks.
     config: dict[str, Any]
 
     # Minimal data fingerprint
     data_fingerprint: dict[str, Any]
-
-    # Executable model/optimizer leaf contract
-    parameter_manifest_hash: str
 
     def to_dict(self) -> dict[str, Any]:
         """Convert metadata to a JSON-serializable dictionary.
@@ -77,224 +65,11 @@ class CheckpointMeta:
         return asdict(self)
 
 
-def _safe_version(pkg: str) -> str | None:
-    """Get package version string, returning None if not installed.
-
-    :param str pkg: Package name to look up.
-    :return str | None: Version string or None if unavailable.
-    """
-    try:
-        import importlib.metadata as im
-
-        return im.version(pkg)
-    except Exception:
-        return None
-
-
-def _source_revision_for(repo_root: Path, *, package_version: str = _chomp_version) -> str:
-    """Return the repository commit plus content-addressed dirty source state.
-
-    Dirty covers unstaged, staged, and untracked (non-ignored) files under
-    the source paths — ``git diff`` alone misses a brand-new uncommitted
-    module, which is exactly the drift the resume identity gate must catch.
-
-    Installed wheels may not have repository metadata; their package version
-    remains a stable fallback identity.
-
-    :param Path repo_root: Repository root to inspect.
-    :param str package_version: Version used when repository identity is unavailable.
-    :return str: Git commit, optionally suffixed by a dirty-tree digest, or package version.
-    """
-    repo_root = repo_root.resolve()
-    try:
-        top_level = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=repo_root,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        if Path(top_level).resolve() != repo_root:
-            return f"package:{package_version}"
-        commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repo_root,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        status = subprocess.run(
-            [
-                "git",
-                "status",
-                "--porcelain",
-                "--untracked-files=all",
-                "--",
-                "src",
-                "pyproject.toml",
-            ],
-            cwd=repo_root,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-    except Exception:
-        return f"package:{package_version}"
-
-    if not status.strip():
-        return commit
-
-    try:
-        listed = subprocess.run(
-            [
-                "git",
-                "ls-files",
-                "-z",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-                "--",
-                "src",
-                "pyproject.toml",
-            ],
-            cwd=repo_root,
-            check=True,
-            capture_output=True,
-        ).stdout
-        digest = hashlib.sha256()
-        for raw_path in sorted(path for path in listed.split(b"\0") if path):
-            path = repo_root / os.fsdecode(raw_path)
-            digest.update(len(raw_path).to_bytes(8, "big"))
-            digest.update(raw_path)
-            if path.is_symlink():
-                payload = os.fsencode(os.readlink(path))
-                kind = b"symlink"
-            else:
-                try:
-                    payload = path.read_bytes()
-                    kind = b"file"
-                except FileNotFoundError:
-                    payload = b""
-                    kind = b"deleted"
-            digest.update(len(kind).to_bytes(8, "big"))
-            digest.update(kind)
-            digest.update(len(payload).to_bytes(8, "big"))
-            digest.update(payload)
-    except Exception as exc:
-        raise RuntimeError(f"Could not fingerprint dirty source tree at {repo_root}") from exc
-    return f"{commit}+dirty.{digest.hexdigest()}"
-
-
-def _editable_package_identity(pkg: str) -> str | None:
-    """Return a package version augmented by source identity for editable installs.
-
-    :param str pkg: Distribution name to inspect.
-    :return str | None: Version, optionally suffixed by its editable source identity.
-    """
-    try:
-        import importlib.metadata as im
-
-        distribution = im.distribution(pkg)
-    except Exception:
-        return None
-
-    version = distribution.version
-    direct_url_text = distribution.read_text("direct_url.json")
-    if direct_url_text is None:
-        return version
-    direct_url = json.loads(direct_url_text)
-    if not direct_url.get("dir_info", {}).get("editable"):
-        return version
-
-    source_url = urlparse(direct_url["url"])
-    if source_url.scheme != "file":
-        return version
-    revision = _source_revision_for(
-        Path(unquote(source_url.path)),
-        package_version=version,
-    )
-    if revision == f"package:{version}":
-        return version
-    return f"{version}@{revision}"
-
-
-@lru_cache(maxsize=1)
-def _source_revision() -> str:
-    """Return the cached source revision for this Chomp installation.
-
-    :return str: Git commit, optionally suffixed by a dirty-tree digest, or package version.
-    """
-    module_path = Path(__file__).resolve()
-    repo_root = module_path.parents[2]
-    if module_path != repo_root / "src" / "chomp" / "ckpt.py":
-        return f"package:{_chomp_version}"
-    return _source_revision_for(repo_root)
-
-
-@lru_cache(maxsize=1)
-def runtime_identity() -> dict[str, Any]:
-    """Return the strict code, dependency, and accelerator resume identity.
-
-    :return dict[str, Any]: JSON-serializable runtime identity.
-    """
-    import platform
-
-    packages = (
-        "jax",
-        "jaxlib",
-        "equinox",
-        "optax",
-        "orbax-checkpoint",
-        "grain",
-        "datasets",
-        "transformers",
-        "tokenizers",
-        "megalodon-jax",
-    )
-    backend: dict[str, Any]
-    try:
-        import jax
-
-        devices = jax.devices()
-        first = devices[0]
-        backend = {
-            "platform": jax.default_backend(),
-            "platform_version": str(getattr(first.client, "platform_version", "unknown")),
-            "device_kind": str(getattr(first, "device_kind", "unknown")),
-        }
-    except Exception as exc:
-        backend = {"error": f"{type(exc).__name__}: {exc}"}
-
-    package_identities = {name: _safe_version(name) for name in packages}
-    package_identities["megalodon-jax"] = _editable_package_identity("megalodon-jax")
-
-    return {
-        "python": platform.python_version(),
-        "system": platform.system(),
-        "machine": platform.machine(),
-        "chomp": _chomp_version,
-        "source_revision": _source_revision(),
-        "packages": package_identities,
-        "backend": backend,
-    }
-
-
-def refresh_runtime_identity() -> dict[str, Any]:
-    """Capture and cache the runtime identity for a new run.
-
-    :return dict[str, Any]: Runtime identity frozen for all checkpoints in the run.
-    """
-    _source_revision.cache_clear()
-    runtime_identity.cache_clear()
-    return runtime_identity()
-
-
 def build_meta(
     *,
     step: int,
     config: dict[str, Any],
     data_fingerprint: dict[str, Any],
-    parameter_manifest_hash: str,
     tokens_seen: int,
 ) -> CheckpointMeta:
     """Build checkpoint metadata with version info and config snapshot.
@@ -302,18 +77,15 @@ def build_meta(
     :param int step: Current training step.
     :param dict[str, Any] config: Full config dict for reproducibility.
     :param dict[str, Any] data_fingerprint: Data pipeline fingerprint.
-    :param str parameter_manifest_hash: Hash of parameter and optimizer assignments.
     :param int tokens_seen: Cumulative loss-token count for exact resume accounting.
     :return CheckpointMeta: Populated metadata object.
     """
     return CheckpointMeta(
         step=int(step),
         timestamp=datetime.now().isoformat(timespec="seconds"),
-        runtime=runtime_identity(),
         tokens_seen=int(tokens_seen),
         config=config,
         data_fingerprint=data_fingerprint,
-        parameter_manifest_hash=str(parameter_manifest_hash),
     )
 
 
@@ -634,14 +406,12 @@ def check_resume_compat(
     cfg: Config,
     meta: dict[str, Any] | None,
     *,
-    parameter_manifest_hash: str,
     tokenizer_snapshot_hash: str | None = None,
 ) -> None:
     """Validate checkpoint metadata against current config.
 
     :param Config cfg: Current training configuration.
     :param meta: Checkpoint metadata dict (or None if missing).
-    :param str parameter_manifest_hash: Current model/optimizer manifest hash.
     :param str | None tokenizer_snapshot_hash: Optional tokenizer snapshot hash for strict checks.
     :raises RuntimeError: If meta is missing or config mismatches are found.
     """
@@ -653,15 +423,9 @@ def check_resume_compat(
 
     meta_cfg = meta.get("config")
     meta_fp = meta.get("data_fingerprint")
-    meta_runtime = meta.get("runtime")
-    if (
-        not isinstance(meta_cfg, dict)
-        or not isinstance(meta_fp, dict)
-        or not isinstance(meta_runtime, dict)
-    ):
+    if not isinstance(meta_cfg, dict) or not isinstance(meta_fp, dict):
         raise RuntimeError(
-            "Checkpoint meta is missing config/data_fingerprint/runtime identity; "
-            "cannot verify resume compatibility."
+            "Checkpoint meta is missing config/data_fingerprint; cannot verify resume compatibility."
         )
     tokens_seen = meta.get("tokens_seen")
     if isinstance(tokens_seen, bool) or not isinstance(tokens_seen, int) or tokens_seen < 0:
@@ -712,14 +476,6 @@ def check_resume_compat(
 
     cur_fp = data_fingerprint(cfg, tokenizer_snapshot_hash=tokenizer_snapshot_hash)
 
-    current_runtime = runtime_identity()
-    _cmp_mapping("runtime", current_runtime, meta_runtime)
-    _cmp(
-        "parameter_manifest_hash",
-        parameter_manifest_hash,
-        meta.get("parameter_manifest_hash"),
-        severity="error",
-    )
     _cmp_mapping(
         "",
         cur_fp,

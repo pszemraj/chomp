@@ -50,7 +50,7 @@ Shared by both packed modes:
 - TimestepNorm running statistics (count/mean/M2) restarted at every boundary,
 - cross-segment label pairs and pairs targeting padding excluded from the loss by the backend automatically.
 
-chomp gates this path on the backend's `supports_segment_reset` capability flag and fails fast at startup if the installed megalodon-jax predates it (older versions accepted the same kwargs but only isolated attention). Independently of packing mode, chomp requires **megalodon-jax >= 0.2.1 across the board**: every megalodon model build (train and generate) enforces the version floor, so a stale environment fails immediately rather than running degraded semantics anywhere.
+chomp gates this path on the backend's `supports_segment_reset` capability flag and fails fast at startup if the installed megalodon-jax does not support it. The package dependency requires megalodon-jax >= 0.2.1.
 
 Costs and notes:
 

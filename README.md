@@ -11,7 +11,7 @@ git clone https://github.com/pszemraj/chomp.git && cd chomp
 pip install -e .
 ```
 
-CPU-only and non-NVIDIA installations are not supported. Chomp accepts compatible fixes along the JAX 0.10.x and Megalodon-JAX 0.2.x release lines from the minimum versions declared in `pyproject.toml`; checkpoint metadata records the exact resolved runtime and rejects version drift on resume.
+CPU-only and non-NVIDIA installations are not supported. Chomp accepts compatible fixes along the JAX 0.10.x and Megalodon-JAX 0.2.x release lines from the minimum versions declared in `pyproject.toml`.
 
 ## Quick start
 

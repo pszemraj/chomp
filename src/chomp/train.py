@@ -51,7 +51,6 @@ from chomp.ckpt import (
     check_resume_compat,
     claim_external_checkpoint_root,
     make_manager,
-    refresh_runtime_identity,
     resolve_ckpt_root,
     restore_at_step,
     restore_meta_at_step,
@@ -76,14 +75,12 @@ from chomp.data import (
 )
 from chomp.model import (
     build_model,
-    build_parameter_manifest,
     causal_loss_mask,
     generate_tokens,
     parameter_decay_mask,
     parameter_optimizer_groups,
     supports_packed_segments,
     training_loss,
-    write_parameter_manifest,
 )
 from chomp.types import IGNORE_INDEX, Batch, TrainState
 from chomp.utils.devices import assert_batch_on_device, validate_default_device
@@ -583,7 +580,6 @@ def _save_training_checkpoint(
     step: int,
     cfg: Config,
     tokenizer_hash: str | None,
-    parameter_manifest_hash: str,
     tokens_seen: int,
     train_state: TrainState,
     data_iter: Any,
@@ -595,7 +591,6 @@ def _save_training_checkpoint(
     :param int step: Completed training step to save.
     :param Config cfg: Training configuration.
     :param str | None tokenizer_hash: Hash of the run tokenizer snapshot.
-    :param str parameter_manifest_hash: Hash of model/optimizer leaf assignments.
     :param int tokens_seen: Cumulative exact loss-token count.
     :param TrainState train_state: Train state to checkpoint.
     :param data_iter: Data iterator to checkpoint.
@@ -605,7 +600,6 @@ def _save_training_checkpoint(
         step=step,
         config=cfg.to_dict(),
         data_fingerprint=data_fingerprint(cfg, tokenizer_snapshot_hash=tokenizer_hash),
-        parameter_manifest_hash=parameter_manifest_hash,
         tokens_seen=int(tokens_seen),
     )
     save(
@@ -627,7 +621,6 @@ def _maybe_restore_state(
     data_it: Any,
     cfg: Config,
     tokenizer_hash: str | None,
-    parameter_manifest_hash: str,
 ) -> tuple[TrainState, dict[str, Any] | None]:
     """Restore state if requested, otherwise return the initial state.
 
@@ -638,7 +631,6 @@ def _maybe_restore_state(
     :param Any data_it: Data iterator to restore.
     :param Config cfg: Training configuration.
     :param str | None tokenizer_hash: Optional tokenizer snapshot hash for resume checks.
-    :param str parameter_manifest_hash: Current model/optimizer manifest hash.
     :return tuple: (TrainState, meta) where meta is checkpoint metadata if restored.
     """
     if resume == "none":
@@ -669,7 +661,6 @@ def _maybe_restore_state(
         cfg,
         meta,
         tokenizer_snapshot_hash=tokenizer_hash,
-        parameter_manifest_hash=parameter_manifest_hash,
     )
     _, state, restored_meta = restore_at_step(
         manager,
@@ -1299,8 +1290,6 @@ def run(
     """
 
     validate_default_device(allow_cpu=cfg.train.allow_cpu)
-    refresh_runtime_identity()
-
     if dry_run and resume != "none":
         raise RuntimeError("dry_run does not support resume; use a fresh run.")
 
@@ -1380,13 +1369,6 @@ def _run_impl(
 
     params, static, tx, schedule, state0, abstract_state = _build_model_state(cfg)
     _validate_packing_capabilities(cfg, params=params, static=static)
-    parameter_manifest = build_parameter_manifest(cfg, params, static)
-    parameter_manifest_hash = str(parameter_manifest["sha256"])
-    logger.info(
-        "Parameter manifest %s: %s",
-        parameter_manifest_hash,
-        parameter_manifest["group_counts"],
-    )
 
     # Log param count once
     n_params = param_count(params)
@@ -1408,9 +1390,7 @@ def _run_impl(
             data_it=data_it,
             cfg=cfg,
             tokenizer_hash=tokenizer_hash,
-            parameter_manifest_hash=parameter_manifest_hash,
         )
-        write_parameter_manifest(run_dir, parameter_manifest)
 
         if eval_tokens is None:
             # Reaching here means check_resume_compat accepted the restored
@@ -1784,7 +1764,6 @@ def _run_impl(
                             step=step_i,
                             cfg=cfg,
                             tokenizer_hash=tokenizer_hash,
-                            parameter_manifest_hash=parameter_manifest_hash,
                             tokens_seen=int(tokens_seen_count),
                             train_state=state,
                             data_iter=data_it,
@@ -1955,7 +1934,6 @@ def _run_impl(
                     step=final_step,
                     cfg=cfg,
                     tokenizer_hash=tokenizer_hash,
-                    parameter_manifest_hash=parameter_manifest_hash,
                     tokens_seen=int(tokens_seen_count),
                     train_state=state,
                     data_iter=data_it,

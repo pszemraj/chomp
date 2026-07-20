@@ -19,10 +19,7 @@ Backends:
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import equinox as eqx
@@ -154,12 +151,6 @@ class DummyLM(eqx.Module):
 
 
 # ------------------------------ Builders -----------------------------------
-
-# Repo-wide floor, enforced for every megalodon model build (train and
-# generate) regardless of packing mode. This runtime floor also protects
-# editable or otherwise stale environments from bypassing package resolution.
-_MIN_MEGALODON_JAX = "0.2.1"
-_PARAMETER_MANIFEST_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -323,104 +314,6 @@ def parameter_optimizer_groups(cfg: Config, params: Any) -> Any:
     return jax.tree_util.tree_map_with_path(label, params)
 
 
-def build_parameter_manifest(cfg: Config, params: Any, static: Any) -> dict[str, Any]:
-    """Build the complete parameter and optimizer assignment manifest.
-
-    :param Config cfg: Model and optimizer configuration.
-    :param Any params: Trainable model partition.
-    :param Any static: Fixed model partition.
-    :return dict[str, Any]: JSON-serializable manifest with a deterministic hash.
-    """
-    model = eqx.combine(params, static)
-    entries: list[dict[str, Any]] = []
-    counts: dict[str, int] = {}
-    for path, leaf in jax.tree_util.tree_flatten_with_path(model)[0]:
-        if not eqx.is_array(leaf):
-            continue
-        path_str = path_to_str(path)
-        classification = classify_model_array(cfg, path_str)
-        optimizer_group = _optimizer_group(cfg, leaf, classification)
-        counts[optimizer_group] = counts.get(optimizer_group, 0) + 1
-        entries.append(
-            {
-                "path": path_str,
-                "shape": [int(dim) for dim in leaf.shape],
-                "dtype": str(leaf.dtype),
-                "family": classification.family,
-                "optimizer_group": optimizer_group,
-                "decay": classification.decay,
-            }
-        )
-
-    payload: dict[str, Any] = {
-        "schema_version": _PARAMETER_MANIFEST_SCHEMA_VERSION,
-        "backend": cfg.model.backend,
-        "group_counts": dict(sorted(counts.items())),
-        "arrays": entries,
-    }
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    payload["sha256"] = hashlib.sha256(canonical).hexdigest()
-    return payload
-
-
-def write_parameter_manifest(run_dir: Path, manifest: dict[str, Any]) -> Path:
-    """Validate or atomically persist the run's parameter manifest.
-
-    :param Path run_dir: Training run directory.
-    :param dict[str, Any] manifest: Manifest from :func:`build_parameter_manifest`.
-    :raises RuntimeError: If an existing run artifact differs.
-    :return Path: Manifest path.
-    """
-    path = Path(run_dir) / "parameter-manifest.json"
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise RuntimeError(f"Parameter manifest at {path} is unreadable") from exc
-        if existing != manifest:
-            raise RuntimeError(
-                f"Parameter manifest at {path} does not match the current model/optimizer contract"
-            )
-        return path
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
-    return path
-
-
-def _require_megalodon_jax_version() -> None:
-    """Fail fast when the installed megalodon-jax predates the required floor.
-
-    Package metadata is deliberately the *only* version source because wheel
-    and editable installs both provide it. Missing metadata means an unsupported
-    sys.path-injected source tree whose actual version cannot be verified, so
-    this errors rather than guessing. Strict packed mode is independently
-    guarded by the ``supports_segment_reset`` capability flag on the model.
-
-    :raises RuntimeError: If megalodon-jax is older than _MIN_MEGALODON_JAX
-        or its version metadata cannot be read.
-    """
-    from importlib import metadata
-
-    from packaging.version import Version
-
-    try:
-        found = metadata.version("megalodon-jax")
-    except metadata.PackageNotFoundError as exc:
-        raise RuntimeError(
-            "Cannot verify the installed megalodon-jax version (no package "
-            f"metadata); chomp requires megalodon-jax >= {_MIN_MEGALODON_JAX}. "
-            "Reinstall chomp's supported dependencies from the project checkout: "
-            "pip install -U ."
-        ) from exc
-    if Version(found) < Version(_MIN_MEGALODON_JAX):
-        raise RuntimeError(
-            f"chomp requires megalodon-jax >= {_MIN_MEGALODON_JAX}, found {found}. "
-            "Reinstall chomp's supported dependencies from the project checkout: "
-            "pip install -U ."
-        )
-
-
 def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
     """Build model and return (params, static).
 
@@ -450,8 +343,6 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
     elif cfg.model.backend == "megalodon":
         from megalodon_jax.config import MegalodonConfig
         from megalodon_jax.model import MegalodonForCausalLM
-
-        _require_megalodon_jax_version()
 
         mcfg = MegalodonConfig(
             vocab_size=cfg.model.vocab_size,

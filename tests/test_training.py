@@ -7,7 +7,6 @@ import logging
 import os
 import shutil
 import signal
-import subprocess
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import replace
@@ -118,20 +117,17 @@ def check_resume_compat(
     meta: dict[str, Any] | None,
     *,
     tokenizer_snapshot_hash: str | None = None,
-    parameter_manifest_hash: str = "test-parameter-manifest",
 ) -> None:
-    """Call resume validation with the test model-manifest identity.
+    """Call resume validation with an optional tokenizer snapshot hash.
 
     :param Config cfg: Current configuration.
     :param meta: Checkpoint metadata.
     :param str | None tokenizer_snapshot_hash: Current tokenizer snapshot hash.
-    :param str parameter_manifest_hash: Current parameter-manifest hash.
     """
     _check_resume_compat(
         cfg,
         meta,
         tokenizer_snapshot_hash=tokenizer_snapshot_hash,
-        parameter_manifest_hash=parameter_manifest_hash,
     )
 
 
@@ -147,7 +143,6 @@ def _checkpoint_record(cfg: Config, *, step: int = 0, tokens_seen: int = 0) -> C
         step=step,
         config=cfg.to_dict(),
         data_fingerprint=data_fingerprint(cfg),
-        parameter_manifest_hash="test-parameter-manifest",
         tokens_seen=tokens_seen,
     )
 
@@ -1436,9 +1431,7 @@ def test_dry_run_compiles_single_step(tmp_path: Path, monkeypatch: pytest.Monkey
     run(cfg, config_path=None, resume="none", dry_run=True)
 
     assert (run_dir / "config_resolved.json").exists()
-    manifest = json.loads((run_dir / "parameter-manifest.json").read_text())
-    assert manifest["group_counts"] == {"adam": 2}
-    assert {entry["family"] for entry in manifest["arrays"]} == {"embedding", "projection"}
+    assert not (run_dir / "parameter-manifest.json").exists()
     assert not (run_dir / cfg.logging.metrics_file).exists()
     assert profile_events == ["start", "stop"]
 
@@ -1770,161 +1763,6 @@ def test_resume_compat_rejects_multipack_knob_changes(tmp_path: Path) -> None:
     bin_changed = replace(binc, data=replace(binc.data, packing_strict_segments=False))
     with pytest.raises(RuntimeError, match="packing_strict_segments"):
         check_resume_compat(bin_changed, bin_meta)
-
-
-def test_resume_compat_hard_gates_parameter_manifest(tmp_path: Path) -> None:
-    """Resume must reject any change to trainable, optimizer, or decay assignments."""
-    cfg = _base_cfg(tmp_path / "run_manifest_compat")
-    meta = _checkpoint_record(cfg).to_dict()
-
-    check_resume_compat(cfg, meta, parameter_manifest_hash="test-parameter-manifest")
-    with pytest.raises(RuntimeError, match="parameter_manifest_hash"):
-        check_resume_compat(cfg, meta, parameter_manifest_hash="changed-parameter-manifest")
-
-    del meta["parameter_manifest_hash"]
-    with pytest.raises(RuntimeError, match="parameter_manifest_hash"):
-        check_resume_compat(cfg, meta, parameter_manifest_hash="test-parameter-manifest")
-
-
-def _git(repo: Path, *args: str) -> None:
-    """Run a git command in a test repository with a fixed identity."""
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=chomp-test",
-            "-c",
-            "user.email=chomp-test@example.com",
-            "-c",
-            "commit.gpgsign=false",
-            *args,
-        ],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-
-
-def test_source_revision_flags_untracked_and_tracked_changes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Source identity must flag checkout and editable-dependency changes.
-
-    `git diff` alone misses a brand-new uncommitted module, letting the strict
-    runtime-identity resume gate pass on exactly the source drift it exists to
-    catch.
-
-    :param Path tmp_path: Temporary source repository.
-    :param pytest.MonkeyPatch monkeypatch: Fixture used to provide editable metadata.
-    """
-    import importlib.metadata as importlib_metadata
-
-    from chomp.ckpt import _editable_package_identity, _source_revision_for
-
-    repo = tmp_path / "repo"
-    (repo / "src").mkdir(parents=True)
-    tracked = repo / "src" / "module.py"
-    tracked.write_text("x = 1\n")
-    _git(repo, "init", "--quiet")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "--quiet", "-m", "init")
-
-    clean = _source_revision_for(repo)
-    assert not clean.startswith("package:")
-    assert "+dirty." not in clean
-
-    untracked = repo / "src" / "new_module.py"
-    untracked.write_text("y = 2\n")
-    untracked_identity = _source_revision_for(repo)
-    assert untracked_identity.startswith(f"{clean}+dirty.")
-    untracked.write_text("y = 3\n")
-    assert _source_revision_for(repo) != untracked_identity
-    untracked.unlink()
-    assert _source_revision_for(repo) == clean
-
-    tracked.write_text("x = 2\n")
-    unstaged_identity = _source_revision_for(repo)
-    assert unstaged_identity.startswith(f"{clean}+dirty.")
-    _git(repo, "add", "-A")
-    assert _source_revision_for(repo) == unstaged_identity
-
-    outside_scope = repo / "notes.txt"
-    outside_scope.write_text("not source\n")
-    _git(repo, "reset", "--quiet")
-    _git(repo, "checkout", "--quiet", "--", "src")
-    assert _source_revision_for(repo) == clean
-
-    class _EditableDistribution:
-        """Minimal editable distribution metadata backed by the test repository."""
-
-        version = "0.2.1"
-
-        def read_text(self, filename: str) -> str:
-            """Return PEP 610 provenance for the test repository."""
-            assert filename == "direct_url.json"
-            return json.dumps({"dir_info": {"editable": True}, "url": repo.as_uri()})
-
-    monkeypatch.setattr(
-        importlib_metadata,
-        "distribution",
-        lambda _pkg: _EditableDistribution(),
-    )
-    assert _editable_package_identity("megalodon-jax") == f"0.2.1@{clean}"
-    tracked.write_text("x = 3\n")
-    assert _editable_package_identity("megalodon-jax") != f"0.2.1@{clean}"
-
-
-@pytest.mark.parametrize(
-    "module_relpath",
-    [
-        Path(".venv/lib/python3.12/site-packages/chomp/ckpt.py"),
-        Path("nested/src/chomp/ckpt.py"),
-    ],
-    ids=["installed-package", "nested-source-tree"],
-)
-def test_source_revision_ignores_enclosing_host_checkout(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    module_relpath: Path,
-) -> None:
-    """Only an owning checkout may supply the Chomp source revision.
-
-    :param Path tmp_path: Temporary directory used to build the host checkout.
-    :param pytest.MonkeyPatch monkeypatch: Fixture used to point at the installed module.
-    :param Path module_relpath: Installed or nested-source module layout to test.
-    """
-    import chomp.ckpt as ckpt_mod
-
-    host_repo = tmp_path / "host"
-    installed_module = host_repo / module_relpath
-    installed_module.parent.mkdir(parents=True)
-    installed_module.write_text("# installed Chomp module\n")
-    (host_repo / ".gitignore").write_text(".venv/\n")
-    (host_repo / "host.py").write_text("host = True\n")
-    _git(host_repo, "init", "--quiet")
-    _git(host_repo, "add", "-A")
-    _git(host_repo, "commit", "--quiet", "-m", "host")
-
-    monkeypatch.setattr(ckpt_mod, "__file__", str(installed_module))
-    ckpt_mod._source_revision.cache_clear()
-    try:
-        assert ckpt_mod._source_revision() == f"package:{ckpt_mod._chomp_version}"
-    finally:
-        ckpt_mod._source_revision.cache_clear()
-
-
-def test_resume_compat_hard_gates_runtime_identity(tmp_path: Path) -> None:
-    """Dependency, source, platform, and accelerator drift must reject resume."""
-    cfg = _base_cfg(tmp_path / "run_runtime_compat")
-    meta = _checkpoint_record(cfg).to_dict()
-    meta["runtime"]["packages"]["jaxlib"] = "incompatible"
-
-    with pytest.raises(RuntimeError, match="runtime.packages"):
-        check_resume_compat(cfg, meta)
-
-    del meta["runtime"]
-    with pytest.raises(RuntimeError, match="runtime identity"):
-        check_resume_compat(cfg, meta)
 
 
 @pytest.mark.parametrize(
@@ -2329,35 +2167,6 @@ def test_training_loss_passes_segments_iff_packed() -> None:
     assert calls["segment_ids"] is None
     assert calls["position_ids"] is None
     assert calls["loss_chunk_size"] is None
-
-
-def test_megalodon_version_floor_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Any Megalodon model build must reject releases older than 0.2.1."""
-    import importlib.metadata as real_metadata
-
-    pytest.importorskip("megalodon_jax")
-
-    cfg = Config(model=make_tiny_megalodon_model(vocab_size=64))
-
-    real_version = real_metadata.version
-
-    def _stale_version(name: str) -> str:
-        if name == "megalodon-jax":
-            return "0.2.0"
-        return real_version(name)
-
-    monkeypatch.setattr("importlib.metadata.version", _stale_version)
-    with pytest.raises(RuntimeError, match="requires megalodon-jax >= 0.2.1"):
-        build_model(cfg, key=jax.random.PRNGKey(0))
-
-    def _missing_version(name: str) -> str:
-        if name == "megalodon-jax":
-            raise real_metadata.PackageNotFoundError(name)
-        return real_version(name)
-
-    monkeypatch.setattr("importlib.metadata.version", _missing_version)
-    with pytest.raises(RuntimeError, match="Cannot verify"):
-        build_model(cfg, key=jax.random.PRNGKey(0))
 
 
 def test_megalodon_backend_advertises_segment_reset() -> None:
