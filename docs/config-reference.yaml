@@ -360,9 +360,6 @@ checkpoint:
   # checkpoint.enabled -- bool; default: true. False disables saves/resume and makes positive save/retention constraints inactive; with data.backend=hf, true requires data.hf_revision to be a full 40-hex commit. Keep true for real runs.
   enabled: "<bool>"
 
-  # checkpoint.root_dir -- string | null; default: null, computed as <run_dir>/checkpoints; otherwise nonempty. Relative paths resolve under run_dir; any resolved path outside run_dir receives its own lock and ownership marker. Prefer null.
-  root_dir: "<nonempty string | null>"
-
   # checkpoint.save_every -- int; default: 5000; > 0 when enabled. Periodic optimizer-step cadence; aligned final save is separate. Maintained 100k recipes use 2500 to limit lost work.
   save_every: "<int>"
 

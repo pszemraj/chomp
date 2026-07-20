@@ -130,49 +130,24 @@ def load_config_for_checkpoint(
     return build_config(data)
 
 
-def _infer_run_dir_from_meta(step_dir: Path) -> Path | None:
-    """Infer run_dir from checkpoint metadata if possible.
+def _latest_run_step(run_dir: Path) -> Path:
+    """Resolve the latest checkpoint beneath a run directory.
 
-    :param Path step_dir: Checkpoint step directory.
-    :return Path | None: Run directory from metadata, if present.
-    """
-    data = _read_meta_config(step_dir)
-    if data is None:
-        return None
-    logging_cfg = data.get("logging")
-    if isinstance(logging_cfg, dict):
-        run_dir = logging_cfg.get("run_dir")
-        if run_dir:
-            path = Path(run_dir)
-            if path.exists():
-                return path
-    return None
-
-
-def _latest_configured_step(cfg: Any, run_dir: Path) -> Path:
-    """Resolve the latest checkpoint selected by a run configuration.
-
-    :param Any cfg: Resolved Chomp configuration.
-    :param Path run_dir: Run directory used to resolve relative checkpoint roots.
-    :raises FileNotFoundError: If the configured root has no checkpoint steps.
+    :param Path run_dir: Run directory containing ``checkpoints``.
+    :raises FileNotFoundError: If the run has no checkpoint steps.
     :return Path: Latest valid checkpoint step directory.
     """
-    from chomp.ckpt import resolve_ckpt_root
-
-    ckpt_root = resolve_ckpt_root(cfg, run_dir)
+    ckpt_root = run_dir / "checkpoints"
     step_dir = _latest_step_dir(ckpt_root)
     if step_dir is None:
         raise FileNotFoundError(f"No step directories found in {ckpt_root}")
     return step_dir
 
 
-def resolve_checkpoint_path(
-    checkpoint_path: str | Path, *, config_override: str | None = None
-) -> tuple[Path, Path | None]:
+def resolve_checkpoint_path(checkpoint_path: str | Path) -> tuple[Path, Path | None]:
     """Resolve a checkpoint path to a step directory and optional run_dir.
 
     :param str | Path checkpoint_path: Path to a run dir, checkpoint root, or step dir.
-    :param str | None config_override: Optional config override path.
     :return tuple[Path, Path | None]: (step_dir, run_dir) where run_dir may be None.
 
     Supports:
@@ -184,29 +159,16 @@ def resolve_checkpoint_path(
 
     if _is_step_dir(path):
         run_dir = _find_run_dir_upwards(path)
-        if run_dir is None:
-            run_dir = _infer_run_dir_from_meta(path)
         return path, run_dir
 
     if (path / "config_resolved.json").exists():
         run_dir = path
-        # Use the run's resolved config to locate checkpoints, regardless of overrides.
-        cfg = build_config(_read_run_dir_config(run_dir))
-        return _latest_configured_step(cfg, run_dir), run_dir
+        return _latest_run_step(run_dir), run_dir
 
     step_dir = _latest_step_dir(path)
     if step_dir is not None:
         run_dir = _find_run_dir_upwards(path)
-        if run_dir is None:
-            run_dir = _infer_run_dir_from_meta(step_dir)
         return step_dir, run_dir
-
-    if config_override is not None:
-        run_dir = path
-        cfg = load_config_for_checkpoint(
-            step_dir=path, run_dir=run_dir, config_override=config_override
-        )
-        return _latest_configured_step(cfg, run_dir), run_dir
 
     raise FileNotFoundError(
         f"Could not find checkpoint at {path}. Provide a run_dir, checkpoint root, or step dir."

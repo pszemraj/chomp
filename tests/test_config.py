@@ -476,10 +476,6 @@ def test_data_and_logging_validation_rejects_invalid_values() -> None:
             "wandb.project",
         ),
         (
-            lambda cfg: replace(cfg, checkpoint=replace(cfg.checkpoint, root_dir=" ")),
-            "checkpoint.root_dir",
-        ),
-        (
             lambda cfg: replace(cfg, train=replace(cfg.train, profile_dir=" ")),
             "train.profile_dir",
         ),

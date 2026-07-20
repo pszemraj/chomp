@@ -31,11 +31,7 @@ A save succeeds only when Orbax explicitly accepts it. Before save and after res
 
 When `debug.nan_check` is enabled, save steps force a metrics sync and validate loss, gradient norm, learning rate, post-update parameters, and optimizer state before the write. A non-finite step is rejected even when the save cadence does not land on a logging step.
 
-## Run ownership and preemption
-
-Each resolved run directory has a nonblocking sibling lock held from before artifact setup until checkpoint-manager shutdown. The path is canonicalized before deriving the lock, so a symlink alias and its target contend on the same inode. A second fresh or resumed process targeting that run fails before it can write config, tokenizer, eval, metrics, manifest, or checkpoint artifacts. Lock files persist; the operating-system lock, not file existence, determines ownership.
-
-A `checkpoint.root_dir` that resolves outside the run directory has its own lock held over the same lifetime. Chomp stores `.chomp-owner.json` inside that root with the canonical run-directory path. A fresh run accepts only an empty unowned root (or an empty root already marked for the same interrupted setup); resume requires the existing marker to match. This prevents different run directories from mixing steps in one Orbax tree, both concurrently and sequentially.
+## Preemption
 
 On `SIGTERM` or `SIGUSR1`, the main-thread handler records only a stop flag. The loop does no IO inside the signal handler: it finishes an optimizer step already in flight, stops at the next aligned model/data boundary, writes a `preemption_requested` metrics row with `preemption_signal`, forces the final checkpoint, and closes Orbax before exiting. A fresh run stopped before its first batch saves the aligned step-zero state, so `--resume latest` remains available. A request received between steps stops before another batch is consumed; a request during the final step's evaluation, generation, or logging tail is recorded before finalization. The stop flag is checked again after checkpoint, resource, and telemetry finalization so a request during teardown cannot be reported as success. The Python API raises `TrainingPreempted` only after finalization; the CLI exits with `128 + signal` (143 for SIGTERM, 138 for SIGUSR1), so schedulers can distinguish a completed preemption from success or a training failure.
 

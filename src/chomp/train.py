@@ -49,9 +49,8 @@ from tqdm import tqdm
 from chomp.ckpt import (
     build_meta,
     check_resume_compat,
-    claim_external_checkpoint_root,
+    default_ckpt_dir,
     make_manager,
-    resolve_ckpt_root,
     restore_at_step,
     restore_meta_at_step,
     save,
@@ -85,7 +84,6 @@ from chomp.types import IGNORE_INDEX, Batch, TrainState
 from chomp.utils.devices import validate_default_device
 from chomp.utils.io import (
     MetricsWriter,
-    RunDirectoryLock,
     add_file_logging,
     create_run_dir,
     resolve_run_dir,
@@ -516,7 +514,7 @@ def _build_checkpoint_manager(cfg: Config, run_dir: Path) -> Any | None:
     if not cfg.checkpoint.enabled:
         return None
     return make_manager(
-        resolve_ckpt_root(cfg, run_dir),
+        default_ckpt_dir(run_dir),
         max_to_keep=cfg.checkpoint.max_to_keep,
         save_every=cfg.checkpoint.save_every,
         async_save=cfg.checkpoint.async_save,
@@ -1266,7 +1264,7 @@ def run(
     :param config_path: Optional path to the source YAML config file.
     :param resume: Resume mode - "none" (fresh), "latest", or specific step number.
     :param bool dry_run: If True, compile and run a single step, then exit early.
-    :raises RuntimeError: If the run directory is active or resume setup is invalid.
+    :raises RuntimeError: If resume setup is invalid.
     :raises TrainingPreempted: After a signal-requested final checkpoint closes successfully.
     :return Path: Path to the run directory.
     """
@@ -1275,27 +1273,9 @@ def run(
     if dry_run and resume != "none":
         raise RuntimeError("dry_run does not support resume; use a fresh run.")
 
-    # Resolve first so fresh and resumed processes contend on the same stable
-    # sibling lock before create_run_dir or artifact setup can write anything.
     run_dir = resolve_run_dir(cfg, config_path=config_path)
     cfg = dc_replace(cfg, logging=dc_replace(cfg.logging, run_dir=str(run_dir)))
-    checkpoint_lock: contextlib.AbstractContextManager[Any]
-    checkpoint_root = resolve_ckpt_root(cfg, run_dir).resolve()
-    external_checkpoint_root = cfg.checkpoint.enabled and not checkpoint_root.is_relative_to(
-        run_dir.resolve()
-    )
-    if external_checkpoint_root:
-        checkpoint_lock = RunDirectoryLock(checkpoint_root, resource_name="Checkpoint root")
-    else:
-        checkpoint_lock = contextlib.nullcontext()
-
-    with _StopSignalState() as stop_request, RunDirectoryLock(run_dir), checkpoint_lock:
-        if external_checkpoint_root:
-            claim_external_checkpoint_root(
-                checkpoint_root,
-                run_dir=run_dir,
-                resume=resume != "none",
-            )
+    with _StopSignalState() as stop_request:
         return _run_impl(
             cfg,
             config_path=config_path,

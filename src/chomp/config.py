@@ -368,8 +368,6 @@ class CheckpointConfig:
     """
 
     enabled: bool = True
-    # If None, checkpoints live under <run_dir>/checkpoints
-    root_dir: str | None = None
 
     save_every: int = 5000
     max_to_keep: int = 3
@@ -926,8 +924,6 @@ def _validate_optim(cfg: Config) -> None:
 
 def _validate_checkpoint(cfg: Config) -> None:
     """Validate checkpoint-related config fields."""
-    if cfg.checkpoint.root_dir is not None and not cfg.checkpoint.root_dir.strip():
-        _vfail("checkpoint.root_dir must be a non-empty string or null")
     if cfg.checkpoint.enabled:
         if cfg.checkpoint.save_every <= 0:
             _vfail(f"checkpoint.save_every must be positive, got {cfg.checkpoint.save_every}")

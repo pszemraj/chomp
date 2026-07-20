@@ -59,7 +59,6 @@ from chomp.train import (
     _METRICS_FILE_DROP,
     _WANDB_DROP,
     TrainingPreempted,
-    _build_checkpoint_manager,
     _project_metrics,
     _StopSignalState,
     build_optimizer,
@@ -67,7 +66,6 @@ from chomp.train import (
     run,
 )
 from chomp.types import Batch, TrainState
-from chomp.utils.io import RunDirectoryLock
 from chomp.utils.tree import abstractify_tree
 from tests.helpers.config_factories import (
     make_pipeline_cfg,
@@ -446,57 +444,6 @@ def test_max_to_keep_prunes_checkpoints(
     assert _checkpoint_steps(run_dir) == {3, 4}
 
 
-def test_checkpoint_root_dir_resolves_relative_to_run_dir(
-    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
-) -> None:
-    """Relative checkpoint.root_dir should resolve against run_dir."""
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-
-    cfg = Config()
-    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, root_dir="ckpts"))
-
-    manager = track_checkpoint_manager(_build_checkpoint_manager(cfg, run_dir))
-
-    assert manager is not None
-    assert Path(manager.directory) == (run_dir / "ckpts").resolve()
-
-
-def test_external_checkpoint_root_is_locked_owned_and_resumable(
-    tmp_path: Path,
-) -> None:
-    """One external Orbax tree must belong to exactly one inactive or active run."""
-    checkpoint_root = tmp_path / "external-checkpoints"
-    cfg = make_small_run_cfg(tmp_path, run_subdir="owner-run", decay_steps=1)
-    cfg = replace(
-        cfg,
-        checkpoint=replace(cfg.checkpoint, root_dir=str(checkpoint_root)),
-    )
-    run_dir = Path(cfg.logging.run_dir or "")
-
-    with (
-        RunDirectoryLock(checkpoint_root, resource_name="Checkpoint root"),
-        pytest.raises(RuntimeError, match="Checkpoint root is already active"),
-    ):
-        run(cfg, config_path=None, resume="none", dry_run=False)
-    assert not run_dir.exists()
-    assert not checkpoint_root.exists()
-
-    assert run(cfg, config_path=None, resume="none", dry_run=False) == run_dir
-    marker = json.loads((checkpoint_root / ".chomp-owner.json").read_text())
-    assert marker == {"schema_version": 1, "run_dir": str(run_dir.resolve())}
-    assert run(cfg, config_path=None, resume="latest", dry_run=False) == run_dir
-
-    other_cfg = make_small_run_cfg(tmp_path, run_subdir="other-run", decay_steps=1)
-    other_cfg = replace(
-        other_cfg,
-        checkpoint=replace(other_cfg.checkpoint, root_dir=str(checkpoint_root)),
-    )
-    with pytest.raises(RuntimeError, match="belongs to run"):
-        run(other_cfg, config_path=None, resume="none", dry_run=False)
-    assert not Path(other_cfg.logging.run_dir or "").exists()
-
-
 def test_run_closes_manager_and_preflights_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -541,14 +488,11 @@ def test_resume_requires_existing_tokenizer_snapshot(tmp_path: Path) -> None:
     run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
     tokenizer_dir = run_dir / "tokenizer"
     shutil.rmtree(tokenizer_dir)
-    resume_record = run_dir / "config_resume.json"
-    assert not resume_record.exists()
 
     with pytest.raises(FileNotFoundError, match="tokenizer snapshot is missing"):
         run(cfg, config_path=None, resume="latest", dry_run=False)
 
     assert not tokenizer_dir.exists()
-    assert not resume_record.exists()
 
 
 def test_checkpoint_saves_final_step(tmp_path: Path) -> None:
@@ -761,17 +705,6 @@ def test_run_enforces_device_before_artifact_setup(
         run(cfg, config_path=None, resume="none", dry_run=False)
 
     assert calls == [False]
-    assert not run_dir.exists()
-
-
-def test_run_lock_fails_before_fresh_artifact_setup(tmp_path: Path) -> None:
-    """A competing owner must prevent even fresh config/tokenizer artifact writes."""
-    cfg = make_small_run_cfg(tmp_path)
-    run_dir = Path(cfg.logging.run_dir or "")
-
-    with RunDirectoryLock(run_dir), pytest.raises(RuntimeError, match="already active"):
-        run(cfg, config_path=None, resume="none", dry_run=False)
-
     assert not run_dir.exists()
 
 

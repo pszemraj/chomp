@@ -82,7 +82,7 @@ def generate(
 
     # Find checkpoint and load config
     try:
-        step_dir, run_dir = resolve_checkpoint_path(checkpoint, config_override=config_override)
+        step_dir, run_dir = resolve_checkpoint_path(checkpoint)
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Loading checkpoint from: {step_dir}")

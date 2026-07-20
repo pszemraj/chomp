@@ -6,19 +6,14 @@ chomp uses deliberately boring IO:
 
 W&B integration is optional and configured via logging.wandb.*.
 
-Phase 3 addendum:
-- If you resume into an existing run_dir, we do not clobber the original
-  config snapshot. We write a `config_resume.json` alongside it.
+Resuming does not clobber the original config snapshot.
 """
 
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import logging
-import os
-import socket
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -40,67 +35,6 @@ def resolve_run_dir(cfg: Config, *, config_path: str | Path | None) -> Path:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = Path(config_path).stem if config_path is not None else "run"
     return Path("runs") / cfg.logging.project / f"{stamp}_{name}"
-
-
-class RunDirectoryLock:
-    """Nonblocking process lock for a run or its external storage root."""
-
-    def __init__(self, run_dir: str | Path, *, resource_name: str = "Run directory") -> None:
-        """Initialize a stable sibling lock path.
-
-        :param run_dir: Resolved run directory, which need not exist yet.
-        :param str resource_name: Human-readable resource name for failures.
-        """
-        run_path = Path(run_dir).resolve()
-        self.path = run_path.parent / f".{run_path.name}.lock"
-        self.resource_name = resource_name
-        self._handle: Any | None = None
-
-    def acquire(self) -> None:
-        """Acquire the run lock without waiting.
-
-        :raises RuntimeError: If another process already owns the run.
-        """
-        if self._handle is not None:
-            raise RuntimeError(f"{self.resource_name} lock is already held: {self.path}")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.path.open("a+", encoding="utf-8")
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            handle.seek(0)
-            owner = handle.read().strip() or "owner metadata unavailable"
-            handle.close()
-            raise RuntimeError(
-                f"{self.resource_name} is already active (lock {self.path}; {owner}). "
-                "Use a different path or wait for that process to exit."
-            ) from exc
-        owner = {
-            "hostname": socket.gethostname(),
-            "pid": os.getpid(),
-            "acquired_at": datetime.now().astimezone().isoformat(),
-        }
-        handle.seek(0)
-        handle.truncate()
-        handle.write(json.dumps(owner, sort_keys=True))
-        handle.flush()
-        self._handle = handle
-
-    def close(self) -> None:
-        """Release the run lock, if held."""
-        handle = self._handle
-        self._handle = None
-        if handle is None:
-            return
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
-
-    def __enter__(self) -> RunDirectoryLock:
-        self.acquire()
-        return self
-
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        self.close()
 
 
 class _ConsoleNoiseFilter(logging.Filter):
@@ -191,9 +125,7 @@ def create_run_dir(
       clobber an existing directory.
     - If allow_existing=True, require that explicit run directory to exist.
 
-    We persist config snapshots:
-    - fresh run: config_resolved.json + optional config_original.yaml
-    - resume:    config_resume.json (so you can see how you invoked resume)
+    Fresh runs persist config_resolved.json and optional config_original.yaml.
 
     :param Config cfg: Training configuration.
     :param config_path: Optional path to original YAML config.
@@ -228,11 +160,7 @@ def create_run_dir(
             "decay_steps_effective": int(resolve_decay_horizon(cfg)),
         }
     }
-    if (run_dir / "config_resolved.json").exists() and allow_existing:
-        (run_dir / "config_resume.json").write_text(
-            json.dumps(resolved_cfg, indent=2, sort_keys=True)
-        )
-    else:
+    if not allow_existing:
         (run_dir / "config_resolved.json").write_text(
             json.dumps(resolved_cfg, indent=2, sort_keys=True)
         )

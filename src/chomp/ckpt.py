@@ -22,7 +22,6 @@ Orbax notes:
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -35,9 +34,6 @@ if TYPE_CHECKING:
 from chomp.config import Config, decay_horizon_from_values
 
 logger = logging.getLogger(__name__)
-
-_CHECKPOINT_OWNER_FILE = ".chomp-owner.json"
-_CHECKPOINT_OWNER_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -96,83 +92,6 @@ def default_ckpt_dir(run_dir: Path) -> Path:
     :return Path: Path to checkpoints subdirectory.
     """
     return run_dir / "checkpoints"
-
-
-def resolve_ckpt_root(cfg: Config, run_dir: Path) -> Path:
-    """Resolve the checkpoint root directory for a run.
-
-    checkpoint.root_dir wins when set (relative paths resolve against
-    run_dir); otherwise the default `<run_dir>/checkpoints`.
-
-    :param Config cfg: Training configuration.
-    :param Path run_dir: Run directory path.
-    :return Path: Checkpoint root directory.
-    """
-    if cfg.checkpoint.root_dir:
-        root = Path(cfg.checkpoint.root_dir)
-        return root if root.is_absolute() else run_dir / root
-    return default_ckpt_dir(run_dir)
-
-
-def claim_external_checkpoint_root(checkpoint_root: Path, *, run_dir: Path, resume: bool) -> None:
-    """Bind an external checkpoint root to exactly one run directory.
-
-    The caller must hold the checkpoint root's process lock for the entire run.
-
-    :param Path checkpoint_root: Canonical checkpoint storage root.
-    :param Path run_dir: Canonical owner run directory.
-    :param bool resume: Whether the invocation is resuming an existing run.
-    :raises RuntimeError: If ownership is missing, invalid, conflicting, or the fresh root is dirty.
-    """
-    root = checkpoint_root.resolve()
-    owner_run = run_dir.resolve()
-    marker = root / _CHECKPOINT_OWNER_FILE
-    temporary = marker.with_name(marker.name + ".tmp")
-
-    if marker.exists():
-        temporary.unlink(missing_ok=True)
-        try:
-            owner = json.loads(marker.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise RuntimeError(f"Checkpoint owner marker is invalid: {marker}") from exc
-        expected = {
-            "schema_version": _CHECKPOINT_OWNER_SCHEMA_VERSION,
-            "run_dir": str(owner_run),
-        }
-        if owner != expected:
-            recorded_run = owner.get("run_dir") if isinstance(owner, dict) else None
-            raise RuntimeError(
-                f"Checkpoint root {root} belongs to run {recorded_run!r}, "
-                f"not {str(owner_run)!r}. Use a distinct checkpoint.root_dir."
-            )
-        if not resume:
-            contents = [path for path in root.iterdir() if path.name != _CHECKPOINT_OWNER_FILE]
-            if contents:
-                raise RuntimeError(
-                    f"Fresh run refuses nonempty checkpoint root {root}; it already contains "
-                    f"{len(contents)} artifact(s)."
-                )
-        return
-
-    if resume:
-        raise RuntimeError(
-            f"Resume requires checkpoint owner marker {marker}; refusing an unowned external root."
-        )
-
-    root.mkdir(parents=True, exist_ok=True)
-    temporary.unlink(missing_ok=True)
-    contents = list(root.iterdir())
-    if contents:
-        raise RuntimeError(
-            f"Fresh run refuses nonempty unowned checkpoint root {root}; found "
-            f"{len(contents)} artifact(s)."
-        )
-    owner = {
-        "schema_version": _CHECKPOINT_OWNER_SCHEMA_VERSION,
-        "run_dir": str(owner_run),
-    }
-    temporary.write_text(json.dumps(owner, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(marker)
 
 
 def make_manager(
