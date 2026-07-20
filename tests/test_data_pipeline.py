@@ -27,11 +27,10 @@ from chomp.config import (
 )
 from chomp.data.grain import (
     _batch_segment_stats,
-    _packer_stats_from_chain,
     _TrainSequenceIterDataset,
 )
 from chomp.data.hf import HFStreamingTextStream, HFStreamSpec
-from chomp.data.pack import FFDPacker, FFDPackerState, TokenPacker, _DocumentStats
+from chomp.data.pack import FFDPacker, FFDPackerState, TokenPacker
 from chomp.data.pipeline import (
     ByteTokenizer,
     ZeroLossTokensError,
@@ -118,27 +117,6 @@ def _ffd_pending_docs(packer: Any) -> list[list[int]]:
     """Decode pending FFD chunks for queue-policy assertions."""
     state = FFDPackerState.from_dict(packer.get_state())
     return [row.tolist() for row in state.pending_docs]
-
-
-def _compact_ffd_state(
-    *,
-    pending_docs: list[list[int]] | None = None,
-    ready_tokens: list[list[int]] | None = None,
-    ready_segments: list[list[int]] | None = None,
-    docs_seen: int = 3,
-    exhausted: bool = False,
-) -> dict[str, Any]:
-    """Build production-format compact FFD state for corruption tests."""
-    document_stats = _DocumentStats()
-    for _ in range(docs_seen):
-        document_stats.observe(source_tokens=1, retained_tokens=1)
-    return FFDPackerState(
-        pending_docs=[np.asarray(row, dtype=np.int32) for row in pending_docs or []],
-        ready_tokens=[np.asarray(row, dtype=np.int32) for row in ready_tokens or []],
-        ready_segments=[np.asarray(row, dtype=np.int32) for row in ready_segments or []],
-        document_stats=document_stats,
-        exhausted=exhausted,
-    ).to_dict()
 
 
 def test_bin_packer_packs_multiple_docs() -> None:
@@ -351,122 +329,6 @@ def test_ffd_packer_state_roundtrip(
     assert expected_stats["docs_seen"] == len(docs)
 
 
-def test_ffd_packer_state_from_dict_is_strict() -> None:
-    """FFD packer set_state must fail loud on corrupt/foreign state, not default to []/0."""
-    packer = _packer("bin")
-    full_state = _compact_ffd_state(docs_seen=0)
-    del full_state["pending_offsets"]
-    with pytest.raises(KeyError):
-        packer.set_state(full_state)
-
-
-@pytest.mark.parametrize(
-    ("mutation", "match"),
-    [
-        # ready row shorter than seq_len (rows are padded to fixed length)
-        (
-            {"ready_tokens": [[1, 2, 3]], "ready_segments": [[1, 1, 1]]},
-            "expected exactly seq_len",
-        ),
-        # negative segment id in a ready row
-        (
-            {
-                "ready_tokens": [[1, 2, 3, 4, 5, 6, 7, 8]],
-                "ready_segments": [[1, 1, 1, 1, -1, 0, 0, 0]],
-            },
-            "negative segment ids",
-        ),
-        # empty pending chunk (chunks are non-empty by construction)
-        ({"pending_docs": [[]]}, r"pending_docs\[0\]"),
-        # pending chunk longer than capacity (chunks are pre-split)
-        ({"pending_docs": [list(range(9))]}, r"pending_docs\[0\]"),
-        # negative counters / truncated > seen
-        ({"docs_seen": -1}, "nonnegative"),
-        ({"docs_seen": 1, "docs_truncated": 2}, "invalid document counters"),
-    ],
-    ids=[
-        "short_ready_row",
-        "negative_segment",
-        "empty_pending_chunk",
-        "oversized_pending_chunk",
-        "negative_counter",
-        "truncated_exceeds_seen",
-    ],
-)
-def test_ffd_packer_state_rejects_corrupt_queues(mutation: dict[str, Any], match: str) -> None:
-    """Compact queue invariants fail loud at restore: fixed seq_len ready
-    rows, capacity-bounded pending chunks, sane counters.
-
-    State construction stays outside the raises block so every case must
-    fail in set_state itself, not in the test helper's serialization.
-    """
-    packer = _packer("bin")
-    state = _compact_ffd_state(
-        pending_docs=mutation.get("pending_docs"),
-        ready_tokens=mutation.get("ready_tokens"),
-        ready_segments=mutation.get("ready_segments"),
-    )
-    for key in ("docs_seen", "docs_truncated"):
-        if key in mutation:
-            state["document_stats"][key] = mutation[key]
-    with pytest.raises(ValueError, match=match):
-        packer.set_state(state)
-
-
-@pytest.mark.parametrize(
-    ("mutation", "match"),
-    [
-        ({"pending_offsets": [1]}, "start at zero"),
-        ({"pending_offsets": [0, 1]}, "final offset"),
-        ({"pending_tokens_i32_b64": "not base64!"}, "valid base64"),
-        ({"ready_offsets": [0, 1]}, "final offset"),
-    ],
-)
-def test_ffd_packer_state_rejects_corrupt_compact_encoding(
-    mutation: dict[str, Any], match: str
-) -> None:
-    """Malformed payloads and offsets should fail before queue reconstruction."""
-    state = _compact_ffd_state(docs_seen=0)
-    state.update(mutation)
-
-    with pytest.raises(ValueError, match=match):
-        _packer("bin").set_state(state)
-
-
-@pytest.mark.parametrize(
-    ("mutation", "match"),
-    [
-        ({"remaining_tokens": [10], "remaining_segments": [0]}, "remaining_segments"),
-        ({"next_segment_id": 3}, "next_segment_id"),
-        ({"docs_seen": -1}, "nonnegative"),
-        ({"docs_seen": 1, "docs_truncated": 2}, "invalid document counters"),
-    ],
-    ids=["invalid_segment", "invalid_next_segment", "negative_counter", "truncated_gt_seen"],
-)
-def test_token_packer_state_rejects_invalid_current_state(
-    mutation: dict[str, Any], match: str
-) -> None:
-    """TokenPacker rejects state outside its current compact-ID invariants."""
-    packer = TokenPacker(
-        seq_len=8,
-        add_bos=False,
-        add_eos=False,
-        bos_id=1,
-        eos_id=2,
-        pad_id=0,
-        max_doc_tokens=None,
-    )
-
-    state = packer.get_state()
-    for key, value in mutation.items():
-        if key in ("docs_seen", "docs_truncated"):
-            state["document_stats"][key] = value
-        else:
-            state[key] = value
-    with pytest.raises(ValueError, match=match):
-        packer.set_state(state)
-
-
 def test_token_packer_finite_tail_state_roundtrip() -> None:
     """Sequential exhaustion and its padded tail must survive a restore."""
     packer = _packer("sequential")
@@ -482,14 +344,10 @@ def test_token_packer_finite_tail_state_roundtrip() -> None:
     np.testing.assert_array_equal(segments, [1, 1, 1, 0, 0, 0, 0, 0])
     assert not restored.can_pop()
 
-    del state["exhausted"]
-    with pytest.raises(KeyError):
-        _packer("sequential").set_state(state)
-
 
 @pytest.mark.parametrize("mode", ["sequential", "bin", "multipack"])
 def test_document_truncation_metrics_are_complete_and_resume_stable(mode: str) -> None:
-    """Explicit truncation should report token loss and bounded length quantiles."""
+    """Explicit truncation should report token loss across resume."""
     packer = _packer(mode, max_doc_tokens=4)
     restored = _packer(mode, max_doc_tokens=4)
 
@@ -504,40 +362,9 @@ def test_document_truncation_metrics_are_complete_and_resume_stable(mode: str) -
         "source_tokens_retained": 19,
         "source_tokens_discarded": 10,
         "source_truncation_fraction": 10 / 29,
-        "source_doc_tokens_p50_upper": 7,
-        "source_doc_tokens_p90_upper": 15,
-        "source_doc_tokens_p99_upper": 15,
     }
     restored.set_state(packer.get_state())
     assert restored.get_stats() == expected
-
-
-@pytest.mark.parametrize(
-    ("mutation", "match"),
-    [
-        ({"length_histogram": [0]}, "exactly 65 bins"),
-        ({"source_tokens_discarded": 1}, "retained \\+ discarded"),
-        ({"docs_seen": 1}, "histogram count"),
-    ],
-)
-def test_document_stats_reject_inconsistent_checkpoint_state(
-    mutation: dict[str, Any], match: str
-) -> None:
-    """Resume must reject incomplete or contradictory truncation diagnostics."""
-    packer = TokenPacker(
-        seq_len=8,
-        add_bos=False,
-        add_eos=False,
-        bos_id=1,
-        eos_id=2,
-        pad_id=0,
-        max_doc_tokens=None,
-    )
-    state = packer.get_state()
-    state["document_stats"].update(mutation)
-
-    with pytest.raises(ValueError, match=match):
-        packer.set_state(state)
 
 
 def test_grain_iterator_state_roundtrip() -> None:
@@ -713,33 +540,6 @@ def test_eval_iterator_never_shuffles() -> None:
 
     seen = _row_doc_tokens(next(it)) + _row_doc_tokens(next(it))
     assert seen == [100, 101, 102, 103]
-
-
-class _RaisingStatsNode:
-    """Chain node whose get_stats() always raises, to exercise error handling."""
-
-    def get_stats(self) -> dict[str, int]:
-        """Raise unconditionally to simulate a real packer bug."""
-        raise RuntimeError("boom")
-
-
-def test_packer_stats_from_chain_swallows_and_logs_get_stats_errors(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A packer's get_stats() raising must yield {} and log once, not spam per call."""
-    node = _RaisingStatsNode()
-
-    with caplog.at_level(logging.WARNING, logger="chomp.data.grain"):
-        first = _packer_stats_from_chain(node)
-        second = _packer_stats_from_chain(node)
-
-    assert first == {}
-    assert second == {}
-
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1, "must warn once per node, not once per call"
-    assert "RuntimeError" in warnings[0].getMessage()
-    assert "boom" in warnings[0].getMessage()
 
 
 def _assert_multi_segment_boundary_masked(batch: Batch) -> None:

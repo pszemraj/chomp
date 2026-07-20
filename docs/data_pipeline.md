@@ -45,7 +45,7 @@ When using `hf`, chomp resolves tokenizer-dependent model settings (`model.vocab
 
 chomp saves a tokenizer snapshot under `run_dir/tokenizer`. Resume requires that snapshot and fails before modifying the run directory when it is missing; it never rebuilds a replacement from a potentially changed repository or path.
 
-`data.tokenizer.max_doc_tokens: null` means no truncation. A positive cap is explicit data loss applied after tokenization and before BOS/EOS insertion; the iterator reports documents truncated, source tokens observed/retained/discarded, discarded-token fraction, and approximate p50/p90/p99 document length upper bounds. Quantiles come from a checkpointed fixed-size log2 histogram, so diagnostics remain resume-stable without retaining an unbounded length list. The cap does not reduce the tokenizer's peak work because the full document is encoded first.
+`data.tokenizer.max_doc_tokens: null` means no truncation. A positive cap is explicit data loss applied after tokenization and before BOS/EOS insertion; the iterator reports documents truncated, source tokens observed/retained/discarded, and discarded-token fraction. The cap does not reduce the tokenizer's peak work because the full document is encoded first.
 
 ## Packing
 

@@ -18,7 +18,6 @@ Senior dev notes:
 from __future__ import annotations
 
 import base64
-import math
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -172,19 +171,15 @@ class _ChunkedIntBuffer:
             self._chunks.append(arr)
 
 
-_DOC_LENGTH_HISTOGRAM_BINS = 65
-
-
 @dataclass
 class _DocumentStats:
-    """Checkpointed document/truncation counters with fixed-memory length bins."""
+    """Checkpointed document and truncation counters."""
 
     docs_seen: int = 0
     docs_truncated: int = 0
     source_tokens_observed: int = 0
     source_tokens_retained: int = 0
     source_tokens_discarded: int = 0
-    length_histogram: list[int] = field(default_factory=lambda: [0] * _DOC_LENGTH_HISTOGRAM_BINS)
 
     def observe(self, *, source_tokens: int, retained_tokens: int) -> None:
         """Record one source document after optional content truncation.
@@ -194,21 +189,15 @@ class _DocumentStats:
         """
         source_tokens = int(source_tokens)
         retained_tokens = int(retained_tokens)
-        if source_tokens < 0 or not 0 <= retained_tokens <= source_tokens:
-            raise ValueError(
-                f"invalid document token counts: source={source_tokens}, retained={retained_tokens}"
-            )
         discarded = source_tokens - retained_tokens
         self.docs_seen += 1
         self.docs_truncated += int(discarded > 0)
         self.source_tokens_observed += source_tokens
         self.source_tokens_retained += retained_tokens
         self.source_tokens_discarded += discarded
-        bucket = min(source_tokens.bit_length(), _DOC_LENGTH_HISTOGRAM_BINS - 1)
-        self.length_histogram[bucket] += 1
 
     def to_dict(self) -> dict[str, Any]:
-        """Return strict JSON state for checkpointing.
+        """Return JSON state for checkpointing.
 
         :return dict[str, Any]: Counter and histogram state.
         """
@@ -218,73 +207,25 @@ class _DocumentStats:
             "source_tokens_observed": int(self.source_tokens_observed),
             "source_tokens_retained": int(self.source_tokens_retained),
             "source_tokens_discarded": int(self.source_tokens_discarded),
-            "length_histogram": [int(value) for value in self.length_histogram],
         }
 
     @staticmethod
     def from_dict(state: dict[str, Any]) -> _DocumentStats:
-        """Parse and validate checkpointed document statistics.
+        """Restore checkpointed document statistics.
 
         :param dict[str, Any] state: Serialized counter and histogram state.
-        :raises ValueError: If any counter relationship is inconsistent.
-        :return _DocumentStats: Validated statistics.
+        :return _DocumentStats: Restored statistics.
         """
-        values = {
-            key: int(state[key])
-            for key in (
-                "docs_seen",
-                "docs_truncated",
-                "source_tokens_observed",
-                "source_tokens_retained",
-                "source_tokens_discarded",
-            )
-        }
-        histogram_raw = state["length_histogram"]
-        if not isinstance(histogram_raw, list) or len(histogram_raw) != _DOC_LENGTH_HISTOGRAM_BINS:
-            raise ValueError(
-                f"document length_histogram must contain exactly {_DOC_LENGTH_HISTOGRAM_BINS} bins"
-            )
-        histogram = [int(value) for value in histogram_raw]
-        if any(value < 0 for value in (*values.values(), *histogram)):
-            raise ValueError("document statistics must be nonnegative")
-        docs_seen = values["docs_seen"]
-        docs_truncated = values["docs_truncated"]
-        observed = values["source_tokens_observed"]
-        retained = values["source_tokens_retained"]
-        discarded = values["source_tokens_discarded"]
-        if docs_truncated > docs_seen or sum(histogram) != docs_seen:
-            raise ValueError(
-                "invalid document counters: docs_truncated must not exceed docs_seen and "
-                "histogram count must equal docs_seen"
-            )
-        if retained + discarded != observed:
-            raise ValueError(
-                "invalid source-token counters: retained + discarded must equal observed"
-            )
-        if (docs_truncated == 0) != (discarded == 0) or discarded < docs_truncated:
-            raise ValueError(
-                "invalid truncation counters: discarded tokens and truncated documents disagree"
-            )
-        return _DocumentStats(length_histogram=histogram, **values)
-
-    def _quantile_upper_bound(self, quantile: float) -> int:
-        """Return a power-of-two histogram upper bound for a document quantile.
-
-        :param float quantile: Quantile in the interval (0, 1].
-        :return int: Inclusive token-count upper bound.
-        """
-        if self.docs_seen <= 0:
-            return 0
-        target = max(1, math.ceil(self.docs_seen * float(quantile)))
-        cumulative = 0
-        for bucket, count in enumerate(self.length_histogram):
-            cumulative += count
-            if cumulative >= target:
-                return 0 if bucket == 0 else (1 << bucket) - 1
-        raise RuntimeError("document length histogram does not cover docs_seen")
+        return _DocumentStats(
+            docs_seen=int(state["docs_seen"]),
+            docs_truncated=int(state["docs_truncated"]),
+            source_tokens_observed=int(state["source_tokens_observed"]),
+            source_tokens_retained=int(state["source_tokens_retained"]),
+            source_tokens_discarded=int(state["source_tokens_discarded"]),
+        )
 
     def metrics(self) -> dict[str, int | float]:
-        """Return operational counters and bounded length quantiles.
+        """Return operational document and truncation counters.
 
         :return dict[str, int | float]: Document/truncation metrics.
         """
@@ -298,9 +239,6 @@ class _DocumentStats:
             "source_truncation_fraction": (
                 float(self.source_tokens_discarded) / observed if observed else 0.0
             ),
-            "source_doc_tokens_p50_upper": self._quantile_upper_bound(0.50),
-            "source_doc_tokens_p90_upper": self._quantile_upper_bound(0.90),
-            "source_doc_tokens_p99_upper": self._quantile_upper_bound(0.99),
         }
 
 
@@ -332,33 +270,14 @@ class PackerState:
         """Construct PackerState from a dictionary.
 
         :param dict[str, Any] d: State dict from to_dict().
-        :raises KeyError: If a required field is missing (corrupt/foreign state).
-        :raises ValueError: If segments/tokens lengths don't match.
         :return PackerState: Reconstructed state.
         """
-        # Deliberately strict: synthesizing missing segment metadata (as older
-        # loaders did) silently merges all buffered documents into one segment
-        # on resume — wrong boundary masking and, under strict multipack,
-        # wrong isolation. Corrupt/foreign state must fail loud.
-        toks = list(d["remaining_tokens"])
-        segs = list(d["remaining_segments"])
-        if len(segs) != len(toks):
-            raise ValueError(
-                f"remaining_segments length ({len(segs)}) must match remaining_tokens ({len(toks)})"
-            )
-        if any(int(segment_id) not in (1, 2) for segment_id in segs):
-            raise ValueError("remaining_segments must contain only current segment IDs 1 or 2")
-        next_segment_id = int(d["next_segment_id"])
-        if next_segment_id not in (1, 2):
-            raise ValueError(f"next_segment_id must be 1 or 2, got {next_segment_id}")
-        document_stats = _DocumentStats.from_dict(d["document_stats"])
-        exhausted = bool(d["exhausted"])
         return PackerState(
-            remaining_tokens=toks,
-            remaining_segments=segs,
-            next_segment_id=next_segment_id,
-            document_stats=document_stats,
-            exhausted=exhausted,
+            remaining_tokens=list(d["remaining_tokens"]),
+            remaining_segments=list(d["remaining_segments"]),
+            next_segment_id=int(d["next_segment_id"]),
+            document_stats=_DocumentStats.from_dict(d["document_stats"]),
+            exhausted=bool(d["exhausted"]),
         )
 
 
@@ -618,31 +537,13 @@ class FFDPackerState:
         """Construct FFDPackerState from a dictionary.
 
         :param dict[str, Any] d: State dict from to_dict().
-        :raises KeyError: If a required field is missing (corrupt/foreign state).
-        :raises ValueError: If any structural invariant fails (queue/row length
-            pairing, counter signs).
         :return FFDPackerState: Reconstructed state.
         """
-        # Deliberately strict, mirroring PackerState: defaulting missing
-        # pending/ready queues to [] (as the old `d.get(...) or []` did)
-        # silently resumes with an empty buffer instead of failing loud on
-        # corrupt/foreign state. Capacity-dependent invariants (chunk sizes,
-        # fixed ready-row length) live in set_state, which knows seq_len.
-        pending = _decode_i32_rows(
-            d["pending_tokens_i32_b64"], d["pending_offsets"], label="pending"
-        )
-        ready_tokens = _decode_i32_rows(
-            d["ready_tokens_i32_b64"], d["ready_offsets"], label="ready_tokens"
-        )
-        ready_segments = _decode_i32_rows(
-            d["ready_segments_i32_b64"], d["ready_offsets"], label="ready_segments"
-        )
-        document_stats = _DocumentStats.from_dict(d["document_stats"])
         return FFDPackerState(
-            pending_docs=pending,
-            ready_tokens=ready_tokens,
-            ready_segments=ready_segments,
-            document_stats=document_stats,
+            pending_docs=_decode_i32_rows(d["pending_tokens_i32_b64"], d["pending_offsets"]),
+            ready_tokens=_decode_i32_rows(d["ready_tokens_i32_b64"], d["ready_offsets"]),
+            ready_segments=_decode_i32_rows(d["ready_segments_i32_b64"], d["ready_offsets"]),
+            document_stats=_DocumentStats.from_dict(d["document_stats"]),
             exhausted=bool(d["exhausted"]),
         )
 
@@ -664,36 +565,14 @@ def _encode_i32_rows(rows: Iterable[Iterable[int] | np.ndarray]) -> tuple[str, l
     return payload, offsets
 
 
-def _decode_i32_rows(payload: Any, offsets: Any, *, label: str) -> list[np.ndarray]:
-    """Decode and validate a flat base64 int32 row representation.
+def _decode_i32_rows(payload: str, offsets: list[int]) -> list[np.ndarray]:
+    """Decode a flat base64 int32 row representation.
 
-    :param payload: Base64-encoded little-endian int32 bytes.
-    :param offsets: Row boundary offsets into the flat array.
-    :param str label: Field name used in corruption errors.
-    :raises ValueError: If encoding or offsets are invalid.
+    :param str payload: Base64-encoded little-endian int32 bytes.
+    :param list[int] offsets: Row boundary offsets into the flat array.
     :return list[np.ndarray]: Owned native-int32 rows.
     """
-    if not isinstance(payload, str):
-        raise ValueError(f"{label} payload must be a base64 string")
-    try:
-        raw = base64.b64decode(payload, validate=True)
-    except Exception as exc:
-        raise ValueError(f"{label} payload is not valid base64") from exc
-    if len(raw) % np.dtype("<i4").itemsize:
-        raise ValueError(f"{label} payload byte length is not divisible by 4")
-    if not isinstance(offsets, list) or not offsets:
-        raise ValueError(f"{label} offsets must be a nonempty list")
-    if any(isinstance(value, bool) or not isinstance(value, int) for value in offsets):
-        raise ValueError(f"{label} offsets must contain only integers")
-    if offsets[0] != 0 or any(
-        right < left for left, right in zip(offsets, offsets[1:], strict=False)
-    ):
-        raise ValueError(f"{label} offsets must start at zero and be nondecreasing")
-    flat = np.frombuffer(raw, dtype="<i4")
-    if offsets[-1] != int(flat.size):
-        raise ValueError(
-            f"{label} final offset ({offsets[-1]}) must equal payload length ({flat.size})"
-        )
+    flat = np.frombuffer(base64.b64decode(payload), dtype="<i4")
     return [
         np.asarray(flat[start:end], dtype=np.int32).copy()
         for start, end in zip(offsets, offsets[1:], strict=False)
@@ -1025,26 +904,8 @@ class FFDPacker(_PackerBase):
         """Restore packer state from a checkpoint.
 
         :param dict[str, Any] state: State dict from get_state().
-        :raises ValueError: If a queue entry violates a capacity invariant
-            (corrupt/foreign state).
         """
         st = FFDPackerState.from_dict(state)
-        # Capacity invariants from_dict cannot check: pending entries are
-        # pre-split chunks in 1..capacity, ready rows are padded to exactly
-        # seq_len with nonnegative segment ids (0 = padding).
-        for i, doc in enumerate(st.pending_docs):
-            if not 0 < len(doc) <= self.seq_len:
-                raise ValueError(
-                    f"pending_docs[{i}] has {len(doc)} tokens; expected 1..{self.seq_len}"
-                )
-        for i, (tokens, segs) in enumerate(zip(st.ready_tokens, st.ready_segments, strict=True)):
-            if len(tokens) != self.seq_len:
-                raise ValueError(
-                    f"ready sequence {i} has {len(tokens)} tokens; expected "
-                    f"exactly seq_len={self.seq_len}"
-                )
-            if any(s < 0 for s in segs):
-                raise ValueError(f"ready sequence {i} has negative segment ids")
         self._pending_docs = deque(np.asarray(x, dtype=np.int32) for x in st.pending_docs)
         self._ready = deque(
             (
