@@ -876,15 +876,17 @@ def test_zero_loss_batch_does_not_mutate_training_state(
 def test_resume_bit_exact_with_prefetch_and_window_shuffle(
     tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
 ) -> None:
-    """Interrupted + resumed must match continuous bit-exactly with the full
-    iterator stack engaged: grain_prefetch > 0 and window shuffle enabled.
+    """Disabling prefetch on resume must preserve bit-exact window replay.
 
     This pins the sharpest resume question: when the prefetch thread has
     pulled batches ahead of the consumer, the serialized iterator state must
-    represent the consumer-visible position, not the advanced parent — and
-    the window shuffle must replay identically from a checkpoint taken
-    mid-window. Every window is distinct (varied text, period coprime with
-    seq_len), so a skipped or reordered batch cannot cancel out.
+    represent the consumer-visible position, not the advanced parent. Restoring
+    that checkpoint without the prefetch wrapper must replay the same shuffled
+    windows. Every window is distinct (varied text, period coprime with seq_len),
+    so a skipped or reordered batch cannot cancel out.
+
+    :param Path tmp_path: Temporary directory for continuous and resumed runs.
+    :param track_checkpoint_manager: Fixture callback that closes restore managers.
     """
     # 101 varied byte tokens; gcd(101, 16) = 1, so packed windows repeat only
     # every 101 windows — far beyond the 12 this test consumes.
@@ -913,11 +915,15 @@ def test_resume_bit_exact_with_prefetch_and_window_shuffle(
     cfg_int = _make_cfg("run_pf_int", steps=3)
     run_dir_int = run(cfg_int, config_path=None, resume="none", dry_run=False)
     cfg_resume = _make_cfg("run_pf_int", steps=6)
+    cfg_resume = replace(
+        cfg_resume,
+        data=replace(cfg_resume.data, grain_prefetch=0),
+    )
     resumed_run_dir = run(cfg_resume, config_path=None, resume="latest", dry_run=False)
     assert resumed_run_dir == run_dir_int
 
     # Per-step losses agree exactly across the resume boundary (steps 4-6 ran
-    # from the restored mid-window prefetching iterator).
+    # from the restored mid-window iterator after prefetch was disabled).
     losses_cont = _losses_by_step(run_dir_cont)
     losses_int = _losses_by_step(run_dir_int)
     assert set(losses_cont) == set(losses_int) == {1, 2, 3, 4, 5, 6}

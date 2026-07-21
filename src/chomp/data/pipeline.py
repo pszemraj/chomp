@@ -635,6 +635,8 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
     }
     # Record only active mode knobs and effective shuffle geometry so inert
     # defaults and raw budgets cannot reject a behaviorally identical resume.
+    # Thread prefetch is deliberately absent: Grain serializes the parent
+    # state paired with the last consumer-delivered batch, not its queued rows.
     window_shuffle_rows = resolve_window_shuffle_rows(cfg)
     packing = {
         "mode": d.packing_mode,
