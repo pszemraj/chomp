@@ -81,6 +81,8 @@ Guidance:
 - Long-document corpora: `sequential` + `window_shuffle_tokens` (default) + a large `shuffle_buffer_size` count cap (e.g. `200_000`) bounded by `shuffle_buffer_bytes` (default 512 MiB). The document-level shuffle window fights source/domain/shard-order homogeneity of the stream; the window shuffle fights within-document, adjacent-window homogeneity. They are complementary; neither replaces the other.
 - `bin`/`multipack` mainly improve utilization on short-document mixes (Zyda-2, SmolLM2-style); on long-document corpora most windows are full-capacity chunks and bin packing adds no utilization benefit.
 
+TODO: Replace the eager FFD long-document chunk queue with an owned token buffer plus offset and bound `bin` candidate selection. One enormous document currently creates every capacity-sized chunk up front, and `bin` repeatedly sorts the remaining pool; changing that order and serialized state requires an explicit pipeline compatibility transition.
+
 ## Boundary-aware loss masking
 
 Two config knobs control loss behavior at packed boundaries:
