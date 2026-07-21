@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from chomp.config import build_config, load_config, read_config_mapping
+from chomp.config import Config, build_config, load_config, read_config_mapping
 
 
 def _is_step_dir(path: Path) -> bool:
@@ -103,8 +103,8 @@ def _read_meta_config(step_dir: Path) -> dict[str, Any] | None:
 
 def load_config_for_checkpoint(
     *, step_dir: Path, run_dir: Path | None, config_override: str | None
-) -> Any:
-    """Load config for a checkpoint from override, run_dir, or checkpoint meta.
+) -> Config:
+    """Load config from an override, checkpoint metadata, or legacy run config.
 
     :param Path step_dir: Checkpoint step directory.
     :param Path | None run_dir: Run directory if known.
@@ -115,19 +115,18 @@ def load_config_for_checkpoint(
     if config_override:
         return load_config(config_override)
 
-    if run_dir is not None:
-        try:
-            return build_config(_read_run_dir_config(run_dir))
-        except FileNotFoundError:
-            pass
-
     data = _read_meta_config(step_dir)
-    if data is None:
-        raise FileNotFoundError(
-            f"No config found for checkpoint {step_dir}. "
-            "Provide --config or ensure config_resolved.json is available."
-        )
-    return build_config(data)
+    if data is not None:
+        # Static model semantics belong to the exact arrays being restored.
+        return build_config(data)
+
+    if run_dir is not None:
+        return build_config(_read_run_dir_config(run_dir))
+
+    raise FileNotFoundError(
+        f"No config found for checkpoint {step_dir}. Provide --config or use a "
+        "checkpoint containing config metadata."
+    )
 
 
 def _infer_run_dir_from_meta(step_dir: Path) -> Path | None:

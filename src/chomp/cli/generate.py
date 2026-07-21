@@ -48,7 +48,10 @@ import click
     "config_override",
     type=click.Path(exists=True),
     default=None,
-    help="Override config file (defaults to checkpoint's config_resolved.json).",
+    help=(
+        "Override config file (defaults to selected checkpoint metadata; "
+        "legacy checkpoints use the run config)."
+    ),
 )
 def generate(
     checkpoint: str,
