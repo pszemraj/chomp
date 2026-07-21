@@ -513,6 +513,34 @@ def test_strict_packed_rejects_disabled_boundary_masking(mode: str) -> None:
     validate_config(non_strict)  # deliberate bleed stays allowed
 
 
+@pytest.mark.parametrize(
+    ("section", "field", "value", "match"),
+    [
+        ("data", "shuffle", "false", "data.shuffle must be a boolean"),
+        ("data", "packing_strict_segments", "true", "must be a boolean"),
+        ("optim", "lr", "0.0003", "optim.lr must be a number"),
+        ("optim", "lr", float("nan"), "optim.lr must be finite"),
+        ("optim", "weight_decay", float("inf"), "must be finite"),
+        ("train", "steps", 1.5, "train.steps must be an integer"),
+    ],
+)
+def test_config_rejects_mistyped_scalars(
+    section: str, field: str, value: object, match: str
+) -> None:
+    """Quoted YAML scalars and non-finite numbers fail at config time."""
+    cfg = _base_cfg()
+    cfg = replace(cfg, **{section: replace(getattr(cfg, section), **{field: value})})
+    with pytest.raises(ValueError, match=match):
+        validate_config(cfg)
+
+
+def test_override_null_rejected_for_non_optional_field() -> None:
+    """--override key=null cannot silently clear a required scalar."""
+    cfg = _base_cfg()
+    with pytest.raises(ValueError, match="optim.lr must be a number"):
+        build_config(cfg.to_dict(), overrides=["optim.lr=null"])
+
+
 def test_hf_eval_split_allows_null() -> None:
     """hf_eval_split=None should validate as a disjoint content holdout."""
     cfg = _base_cfg()

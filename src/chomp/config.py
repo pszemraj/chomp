@@ -19,12 +19,13 @@ Design stance (hard-earned):
 from __future__ import annotations
 
 import json
+import math
 import re
 import warnings
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields as dataclass_fields, is_dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, get_args, get_origin, get_type_hints
 
 import yaml
 
@@ -668,6 +669,50 @@ def _vfail(msg: str) -> None:
     raise ValueError(f"Config validation failed: {msg}")
 
 
+def _validate_field_types(obj: Any, prefix: str = "") -> None:
+    """Reject scalar fields whose runtime type doesn't match the annotation.
+
+    Catches YAML footguns like quoted booleans (the string "false" is truthy)
+    and non-finite numerics before they silently steer the pipeline. Literal
+    and container internals are left to the targeted checks below.
+
+    :param Any obj: Config dataclass to walk.
+    :param str prefix: Dotted path prefix for error messages.
+    :raises ValueError: If a scalar field has the wrong type or a non-finite value.
+    """
+    hints = get_type_hints(type(obj))
+    for f in dataclass_fields(obj):
+        value = getattr(obj, f.name)
+        path = f"{prefix}{f.name}"
+        if is_dataclass(value):
+            _validate_field_types(value, prefix=f"{path}.")
+            continue
+        tp = hints.get(f.name)
+        args = get_args(tp)
+        if type(None) in args:
+            if value is None:
+                continue
+            remaining = [a for a in args if a is not type(None)]
+            if len(remaining) != 1:
+                continue
+            tp = remaining[0]
+        if tp is None or tp is Any or get_origin(tp) is not None:
+            continue
+        if tp is bool:
+            if not isinstance(value, bool):
+                _vfail(f"{path} must be a boolean, got {value!r}")
+        elif tp is int:
+            if isinstance(value, bool) or not isinstance(value, int):
+                _vfail(f"{path} must be an integer, got {value!r}")
+        elif tp is float:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                _vfail(f"{path} must be a number, got {value!r}")
+            elif not math.isfinite(value):
+                _vfail(f"{path} must be finite, got {value!r}")
+        elif tp is str and not isinstance(value, str):
+            _vfail(f"{path} must be a string, got {value!r}")
+
+
 def _validate_train(cfg: Config) -> None:
     """Validate training-related config fields."""
     if cfg.train.seed < 0:
@@ -1084,6 +1129,7 @@ def _validate_tokenizer(cfg: Config) -> None:
 
 def validate_config(cfg: Config) -> None:
     """Validate config with actionable error messages."""
+    _validate_field_types(cfg)
     _validate_train(cfg)
     _validate_optim(cfg)
     _validate_checkpoint(cfg)
