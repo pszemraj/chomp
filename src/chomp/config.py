@@ -23,7 +23,8 @@ import math
 import re
 import warnings
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass, fields as dataclass_fields, is_dataclass, replace
+from dataclasses import asdict, dataclass, is_dataclass, replace
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, get_args, get_origin, get_type_hints
 
@@ -97,7 +98,7 @@ class ModelConfig:
 
     # Dtype policy (strings so YAML is clean; converted at runtime).
     # param_dtype must stay float32: optimizer state follows param dtype and
-    # chomp has no fp32 master-param path (tracked in docs/dev.md), so
+    # chomp has no fp32 master-param path, so
     # validate_config rejects bfloat16 params rather than silently training
     # with bf16 optimizer moments. bf16 belongs in compute_dtype.
     param_dtype: Literal["float32"] = "float32"

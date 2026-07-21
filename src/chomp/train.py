@@ -1297,7 +1297,7 @@ def _run_impl(
     dry_run: bool,
     stop_request: _StopSignalState,
 ) -> Path:
-    """Execute one run while its directory lock and signal guard are held.
+    """Execute one run while its signal guard is held.
 
     :param Config cfg: Configuration with a resolved logging.run_dir.
     :param config_path: Optional source YAML path.
@@ -1805,8 +1805,8 @@ def _run_impl(
     finally:
         # Final checkpoint: save if training advanced beyond the resume point,
         # or a fresh run was preempted at aligned step zero. In the
-        # fetched-but-unfinished window (Ctrl-C mid train_step, device failure,
-        # placement check) the iterator is one batch ahead of state.step; a
+        # fetched-but-unfinished window (Ctrl-C mid train_step, device
+        # failure) the iterator is one batch ahead of state.step; a
         # checkpoint written there would silently skip that batch on resume.
         # Checkpoint failures must never be silent: on a clean exit they are
         # re-raised (training must not exit successfully with an unwritten

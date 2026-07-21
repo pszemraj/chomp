@@ -14,7 +14,6 @@ Tokenization + packing happen elsewhere.
 from __future__ import annotations
 
 import hashlib
-import logging
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -22,8 +21,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     import datasets
-
-logger = logging.getLogger(__name__)
 
 _UINT64_MASK = 2**64 - 1
 _SPLITMIX_INCREMENT = 0x9E3779B97F4A7C15
@@ -341,9 +338,10 @@ class HFStreamingTextStream:
         """Capture stream state for checkpointing.
 
         :return dict[str, Any]: State dict with epoch and HF iterator state.
-        :raises RuntimeError: If the dataset cannot produce a ``state_dict()``.
-            Better to fail the save than write a checkpoint that silently
-            cannot resume exactly.
+
+        A dataset that cannot produce ``state_dict()`` raises here: better to
+        fail the save than write a checkpoint that silently cannot resume
+        exactly.
         """
         if not self._spec.shuffle:
             return {"epoch": int(self._epoch), "hf_state": self._source_state()}

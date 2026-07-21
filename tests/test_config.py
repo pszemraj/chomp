@@ -61,7 +61,7 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
         (lambda cfg: replace(cfg, model=replace(cfg.model, chunk_size=32)), "chunk_size"),
         (lambda cfg: replace(cfg, model=replace(cfg.model, chunk_size=10)), "divisible"),
         # bf16 params without an fp32 master-param path silently give bf16
-        # optimizer moments; rejected until that path exists (docs/dev.md).
+        # optimizer moments; rejected until such a path exists.
         (
             lambda cfg: replace(cfg, model=replace(cfg.model, param_dtype="bfloat16")),
             "param_dtype",

@@ -1,10 +1,8 @@
 """Device validation utilities.
 
-Silent CPU fallback is one of the most expensive failures in JAX training:
-- you think you're benchmarking the GPU
-- but you're actually running on CPU and burning hours
-
-So we fail fast unless explicitly allowed.
+Silent CPU fallback is one of the most expensive failures in JAX training,
+so the default backend is validated once at startup and must be CUDA unless
+train.allow_cpu explicitly permits otherwise.
 """
 
 from __future__ import annotations

@@ -53,6 +53,7 @@ On resume, chomp compares the checkpoint metadata against the current config. Mi
 - tokenizer settings and vocab rounding
 - packing mode, packing buffer sizes, and strict-segment settings
 - objective knobs (`mask_boundary_loss`, `train_on_eos`)
+- eval selection (`max_eval_samples` plus the resolved eval split and content partition while eval is enabled): eval tokens are rebuilt from the live stream on every start, so selection drift would silently change what `eval_loss` measures
 - batch shape invariants (`seq_len`, `batch_size`, `grad_accum`)
 - active model and optimizer config, `train.deterministic`
 

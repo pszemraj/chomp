@@ -37,9 +37,10 @@ dependencies = [
   "wandb>=0.16",
   # Exact pin is deliberate: the window-shuffle resume-exactness fix
   # (_ResumeSafeWindowShuffleIterDataset in chomp.data.grain) patches grain's
-  # private _WindowShuffleDatasetIterator._init flag. A construction-time
-  # tripwire fails fast if the attribute vanishes, but any bump must re-verify
-  # the workaround and the full interrupted-versus-continuous resume tests.
+  # private _WindowShuffleDatasetIterator._init flag. There is no runtime
+  # guard: if a newer grain drops the attribute the patch becomes a silent
+  # no-op, so any bump must re-verify the workaround and the full
+  # interrupted-versus-continuous resume tests.
   "grain==0.2.15",
   # 5.0.0 is the first release with the remote-Parquet thread-shutdown fix
   # for apache/arrow#45214. Earlier releases can abort a successful run at

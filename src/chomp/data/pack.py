@@ -199,7 +199,7 @@ class _DocumentStats:
     def to_dict(self) -> dict[str, Any]:
         """Return JSON state for checkpointing.
 
-        :return dict[str, Any]: Counter and histogram state.
+        :return dict[str, Any]: Counter state.
         """
         return {
             "docs_seen": int(self.docs_seen),
@@ -213,7 +213,7 @@ class _DocumentStats:
     def from_dict(state: dict[str, Any]) -> _DocumentStats:
         """Restore checkpointed document statistics.
 
-        :param dict[str, Any] state: Serialized counter and histogram state.
+        :param dict[str, Any] state: Serialized counter state.
         :return _DocumentStats: Restored statistics.
         """
         return _DocumentStats(

@@ -69,8 +69,6 @@ The packing iterator itself remains a small, explicit Python object; Grain only 
 
 The iterator exposes packing utilization, exact host loss-token counts, and boundary/segment summaries. Their logged field names and meanings are listed under [Training metrics](training.md#metrics).
 
-Original-document/source batch composition and the owned Grain shuffle replacement are tracked in [Development Guide: tracked follow-ups](dev.md#tracked-follow-ups).
-
 ## Iterator state and resume
 
 The iterator exposes checkpointable state containing the source cursor (HF or local text), document- and packed-window shuffle replay progress, packer buffered/ready queues, and enabled prefetch-wrapper state.
@@ -79,7 +77,7 @@ Bin and multipack queue rows are checkpointed as flat int32 payloads with row of
 
 This is checkpointed alongside the model so resume does not rely on `.skip()` or re-streaming.
 
-Hugging Face's streaming shuffle omits the contents of its read-ahead buffer from `state_dict()`, so chomp never calls it in the checkpointed path. Chomp instead permutes disjoint document windows. State stores the unshuffled source position at the current window's start, its index, and the output cursor; a restore reconstructs the window deterministically without inflating the checkpoint with document text. Pin `data.hf_revision` when exact source replay matters, because iterator state cannot compensate for an upstream repository changing beneath the same name.
+Hugging Face's streaming shuffle omits the contents of its read-ahead buffer from `state_dict()`, so chomp never calls it in the checkpointed path. Chomp instead permutes disjoint document windows. State stores the unshuffled source position at the current window's start, its index, and the output cursor; a restore reconstructs the window deterministically without inflating the checkpoint with document text. Iterator state cannot compensate for an upstream repository changing beneath the same name, so validation requires `data.hf_revision` to be a full 40-hex commit whenever checkpointing is enabled.
 
 The configured `data.text_key` must exist in every selected row and contain a string. Missing fields and non-string values are deterministic schema failures: Chomp does not stringify them or retry them.
 
@@ -88,7 +86,7 @@ The configured `data.text_key` must exist in every selected row and contain a st
 chomp builds a fixed validation set when the run is created:
 
 - If `data.hf_eval_split` is set, it is authoritative. Any loading, authentication, schema, decoding, or collection error fails startup. It must differ from `data.hf_split` while evaluation is enabled.
-- The selected split uses the configured `data.shuffle` behavior and contributes at most `data.max_eval_samples` examples.
+- The selected split is read unshuffled in literal order (`data.shuffle` applies only to the training stream) and contributes at most `data.max_eval_samples` examples.
 - With `data.hf_eval_split: null`, a stable BLAKE2 content hash reserves `data.hf_eval_holdout_fraction` of identities for eval and removes them from the training stream. Duplicate content always lands on the same side. The sparse hash selection does not also fill a document-shuffle window; doing so would multiply startup reads by roughly the inverse holdout fraction.
 - A positive `data.max_eval_samples` that yields no documents fails startup; use `0` to disable evaluation intentionally.
 
