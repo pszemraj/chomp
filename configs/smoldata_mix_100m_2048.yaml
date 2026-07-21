@@ -18,7 +18,7 @@ data:
   hf_dataset: HuggingFaceFW/finepdfs_edu_50BT-dclm_30BT-fineweb_edu_20BT-shuffled
   hf_name: default
   hf_split: train
-  hf_revision: 8904a95879538b9e7db6cf8636b2cd16b5e86a76
+  hf_revision: main
   hf_eval_split: null
   text_key: text
   shuffle_buffer_size: 200000

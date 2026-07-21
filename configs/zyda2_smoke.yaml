@@ -7,7 +7,7 @@ data:
   backend: hf
   hf_dataset: Zyphra/Zyda-2
   hf_name: sample-100BT
-  hf_revision: bc389cd62969a275b2e3c3e11db826ba1918411a
+  hf_revision: main
   shuffle_buffer_size: 31
   shuffle_buffer_bytes: 8388608
   packing_mode: bin

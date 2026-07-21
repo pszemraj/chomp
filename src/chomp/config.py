@@ -180,7 +180,7 @@ class DataConfig:
     hf_dataset: str = "Zyphra/Zyda-2"
     hf_name: str = "sample-100BT"
     hf_split: str = "train"
-    hf_revision: str | None = "bc389cd62969a275b2e3c3e11db826ba1918411a"
+    hf_revision: str | None = "main"
     # Evaluation split. None uses a disjoint content-hash holdout from hf_split.
     hf_eval_split: str | None = None
     hf_eval_holdout_fraction: float = 0.01
