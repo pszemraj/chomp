@@ -473,26 +473,30 @@ def test_run_closes_manager_and_preflights_metadata(
     assert close_calls == []
 
 
-def test_warn_resume_restarts_incompatible_data_stream(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: LogCaptureFixture
+@pytest.mark.parametrize("resume_compat", ["warn", "strict"])
+def test_resume_rejects_unrestorable_data_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume_compat: str
 ) -> None:
-    """A Grain restore failure must not discard a valid restored train state."""
+    """A Grain restore failure must never restart behind restored train state."""
     cfg = make_small_run_cfg(tmp_path, decay_steps=2)
-    cfg = replace(cfg, train=replace(cfg.train, steps=1))
+    cfg = replace(
+        cfg,
+        train=replace(cfg.train, steps=1),
+        checkpoint=replace(cfg.checkpoint, resume_compat=resume_compat),
+    )
     run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
 
     resumed = replace(cfg, train=replace(cfg.train, steps=2))
 
     def _incompatible_data_state(*args: Any, **kwargs: Any) -> None:
-        """Inject the failure produced by a changed Grain pipeline schema."""
+        """Inject an unclassified iterator-state restore failure."""
         raise ValueError("incompatible Grain state")
 
     monkeypatch.setattr("chomp.train.restore_data_state_at_step", _incompatible_data_state)
-    with caplog.at_level(logging.WARNING, logger="chomp.train"):
-        assert run(resumed, config_path=None, resume="latest", dry_run=False) == run_dir
+    with pytest.raises(ValueError, match="incompatible Grain state"):
+        run(resumed, config_path=None, resume="latest", dry_run=False)
 
-    assert "fresh data stream" in caplog.text
-    assert _checkpoint_steps(run_dir) == {1, 2}
+    assert _checkpoint_steps(run_dir) == {1}
 
 
 def test_checkpoint_saves_final_step(tmp_path: Path) -> None:

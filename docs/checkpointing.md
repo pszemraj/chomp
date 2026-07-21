@@ -57,7 +57,7 @@ Both modes always reject missing/invalid checkpoint metadata, invalid `tokens_se
 
 The metadata-only compatibility check runs before evaluation or training datasets are constructed, so strict mismatches fail without opening the configured remote source.
 
-Warn mode first restores model parameters, optimizer state, RNG, and step, then asks Grain to restore the iterator. If a changed pipeline cannot accept that data state, chomp logs the failure and continues from a fresh data stream. Strict mode propagates the Grain restore failure.
+After restoring model parameters, optimizer state, RNG, and step, chomp requires Grain to restore the matching iterator state. A data-state restore failure aborts resume in both compatibility modes; restarting the corpus behind a restored optimizer would produce a contradictory training history.
 
 Resume comparisons ignore settings that cannot affect restored execution, including fresh-model `model.init_mode`, activation-checkpoint/segmented-scan implementation choices, tokenizer download settings, and vocab rounding once the resolved model vocabulary is already checked. Keys absent from older checkpoint metadata are skipped; the actual array restore remains the authority on structural compatibility.
 
@@ -81,6 +81,6 @@ Add `-o checkpoint.resume_compat=strict` when exact semantic continuation is req
 
 The exact-resume contract covers checkpoint save and restore.
 
-With unchanged config, resume guarantees exact **state and data replay**: parameters, optimizer state, RNG, and the data iterator position restore exactly, so the resumed run optimizes the same objective over the same batches in the same order as the continuous run. Warn-mode mismatches deliberately relax the data/objective portion while retaining the restored train state.
+With unchanged config, resume guarantees exact **state and data replay**: parameters, optimizer state, RNG, and the data iterator position restore exactly, so the resumed run optimizes the same objective over the same batches in the same order as the continuous run. Warn mode permits declared semantic mismatches, but it does not permit a failed iterator-state restore.
 
 GPU step arithmetic is bit-identical only with the opt-in setting described in [Training: GPU environment notes](training.md#gpu-environment-notes).

@@ -669,8 +669,6 @@ def _maybe_restore_state(
     state0: TrainState,
     abstract_state: Any,
     data_it: Any,
-    cfg: Config,
-    tokenizer: Any,
 ) -> tuple[TrainState, dict[str, Any] | None, Any]:
     """Restore state if requested, otherwise return the initial state.
 
@@ -679,8 +677,6 @@ def _maybe_restore_state(
     :param TrainState state0: Initial state.
     :param Any abstract_state: Abstract train state for restore shape.
     :param Any data_it: Data iterator to restore.
-    :param Config cfg: Training configuration.
-    :param Any tokenizer: Prepared tokenizer used to rebuild an incompatible data stream.
     :return tuple: Train state, checkpoint metadata, and active data iterator.
     """
     if resume_step is None:
@@ -693,22 +689,8 @@ def _maybe_restore_state(
         step=step_r,
         abstract_train_state=abstract_state,
     )
-    try:
-        restore_data_state_at_step(manager, step=step_r, data_iter=data_it)
-        stream_note = ""
-    except Exception as exc:
-        if cfg.checkpoint.resume_compat == "strict":
-            raise
-        logger.warning(
-            "Checkpoint data state could not be applied to the current pipeline; "
-            "resuming train state at step %d from a fresh data stream: %s",
-            step_r,
-            exc,
-        )
-        _close_iterator(data_it, label="incompatible training data iterator")
-        data_it = build_train_iterator(cfg, tokenizer=tokenizer)
-        stream_note = " with a fresh data stream"
-    print(f"[chomp] resumed from checkpoint step {step_r}{stream_note}")
+    restore_data_state_at_step(manager, step=step_r, data_iter=data_it)
+    print(f"[chomp] resumed from checkpoint step {step_r}")
     return state, restored_meta, data_it
 
 
@@ -1463,8 +1445,6 @@ def _run_impl(
             state0=state0,
             abstract_state=abstract_state,
             data_it=data_it,
-            cfg=cfg,
-            tokenizer=tokenizer,
         )
 
         train_step = make_train_step(cfg, static=static, tx=tx, lr_schedule=schedule)
