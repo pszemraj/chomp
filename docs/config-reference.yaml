@@ -2,7 +2,7 @@
 #
 # Reference only: the typed placeholders below intentionally make this invalid as a chomp config. Runnable scenario configs live under configs/.
 # Every section and key is optional to author unless its comment says otherwise. Omission applies the literal or computed default stated on that key.
-# Unknown top-level sections, unsupported choices, and invalid field values or interactions fail before training.
+# Unknown top-level sections, duplicate explicit YAML keys, unsupported choices, and invalid field values or interactions fail before training. Standard YAML merge defaults may be overridden explicitly.
 
 # variables -- mapping[str, value]; default: {}. Values may be nested. A full `$variables.path` reference preserves type; `{$variables.path}` and `${variables.path}` interpolate into strings. Missing or circular references fail.
 variables: "<mapping[str, value]>"
@@ -99,7 +99,7 @@ model:
   # model.use_checkpoint -- bool; default: false. Trades compute for activation memory. Effective train.deterministic=true disables it, so the full recipes set deterministic=false even with zero dropout.
   use_checkpoint: "<bool>"
 
-  # model.output_size -- int; default: -1, computed as effective vocab_size; otherwise > 0. With share_emb=true it must be -1 or model.vocab_size; keep -1 for causal-LM training.
+  # model.output_size -- int; default: -1, computed as effective vocab_size; otherwise > 0. With share_emb=true it must be -1 or model.vocab_size; an untied Megalodon head must be at least model.vocab_size. Keep -1 for causal-LM training.
   output_size: "<-1 | positive int>"
 
   # model.use_associative_segment_scan -- bool; default: true. Used only for strict bin/multipack batches: true is the faster parallel CEMA reset path; false uses a compact sequential forward carry, but compiled backward-memory savings are not guaranteed. [Experimental]

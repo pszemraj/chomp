@@ -136,6 +136,17 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
             lambda cfg: replace(cfg, model=replace(cfg.model, share_emb=True, output_size=128)),
             "share_emb",
         ),
+        (
+            lambda cfg: replace(
+                cfg,
+                model=replace(
+                    cfg.model,
+                    share_emb=False,
+                    output_size=cfg.model.vocab_size - 1,
+                ),
+            ),
+            "output_size.*vocab_size",
+        ),
         (lambda cfg: replace(cfg, model=replace(cfg.model, pad_token_id=-1)), "pad_token_id"),
         (
             lambda cfg: replace(cfg, model=replace(cfg.model, eos_token_id=cfg.model.vocab_size)),
@@ -229,6 +240,25 @@ def test_debug_smoke_config_loads() -> None:
     """The checked-in quick-start configuration should remain loadable."""
     config_path = Path(__file__).parents[1] / "configs/debug_smoke.yaml"
     assert load_config(config_path).model.backend == "dummy"
+
+
+def test_yaml_loader_rejects_duplicate_explicit_keys(tmp_path: Path) -> None:
+    """Repeated explicit YAML keys must fail instead of silently taking the last value."""
+    config_path = tmp_path / "duplicate.yaml"
+    config_path.write_text("train:\n  steps: 10\n  steps: 20\n")
+
+    with pytest.raises(ValueError, match="duplicate key 'steps'"):
+        read_config_mapping(config_path)
+
+
+def test_yaml_loader_allows_explicit_merge_overrides(tmp_path: Path) -> None:
+    """Standard YAML merge defaults may still be overridden explicitly."""
+    config_path = tmp_path / "merge.yaml"
+    config_path.write_text(
+        "defaults: &defaults\n  steps: 10\ntrain:\n  <<: *defaults\n  steps: 20\n"
+    )
+
+    assert read_config_mapping(config_path)["train"]["steps"] == 20
 
 
 def test_defaults_select_the_real_training_data_path() -> None:

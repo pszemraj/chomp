@@ -22,7 +22,7 @@ import json
 import math
 import re
 import warnings
-from collections.abc import Iterable
+from collections.abc import Hashable, Iterable
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
@@ -39,6 +39,37 @@ TokenizerKind = Literal["byte", "hf"]
 PackingMode = Literal["sequential", "bin", "multipack"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 ResumeCompat = Literal["strict", "warn"]
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects repeated explicit mapping keys."""
+
+    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Any, Any]:
+        """Construct one mapping after rejecting duplicate explicit keys.
+
+        YAML merge keys are skipped here so an explicit key may override a
+        merged default using standard merge semantics.
+
+        :param yaml.MappingNode node: Mapping node to construct.
+        :param bool deep: Whether to construct nested values eagerly.
+        :raises yaml.constructor.ConstructorError: If an explicit key repeats.
+        :return dict[Any, Any]: Constructed mapping.
+        """
+        seen: set[Hashable] = set()
+        for key_node, _ in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                continue
+            key = self.construct_object(key_node, deep=deep)
+            if isinstance(key, Hashable):
+                if key in seen:
+                    raise yaml.constructor.ConstructorError(
+                        "while constructing a mapping",
+                        node.start_mark,
+                        f"found duplicate key {key!r}",
+                        key_node.start_mark,
+                    )
+                seen.add(key)
+        return super().construct_mapping(node, deep=deep)
 
 
 @dataclass(frozen=True)
@@ -473,7 +504,7 @@ def read_config_mapping(path: str | Path) -> dict[str, Any]:
             if path.suffix == ".json":
                 data = json.load(f) or {}
             else:
-                data = yaml.safe_load(f) or {}
+                data = yaml.load(f, Loader=_UniqueKeySafeLoader) or {}
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid JSON in {path}: {exc}") from exc
     except yaml.YAMLError as exc:
@@ -930,6 +961,16 @@ def _validate_model(cfg: Config) -> None:
         _vfail(f"model.output_size must be -1 or positive, got {cfg.model.output_size}")
     if cfg.model.share_emb and cfg.model.output_size not in (-1, cfg.model.vocab_size):
         _vfail("model.share_emb=true requires model.output_size to be -1 or equal model.vocab_size")
+    if (
+        cfg.model.backend == "megalodon"
+        and not cfg.model.share_emb
+        and cfg.model.output_size != -1
+        and cfg.model.output_size < cfg.model.vocab_size
+    ):
+        _vfail(
+            "model.output_size must be >= model.vocab_size for an untied causal-LM head, "
+            f"got output_size={cfg.model.output_size} and vocab_size={cfg.model.vocab_size}"
+        )
 
     if cfg.model.pad_token_id == cfg.model.eos_token_id:
         warnings.warn(
