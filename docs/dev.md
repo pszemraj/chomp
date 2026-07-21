@@ -60,3 +60,25 @@ Shared helper modules:
 - [`tests/helpers/io.py`](../tests/helpers/io.py): test artifact readers
 
 GPU invariants remain isolated in [`tests/test_gpu_smoke.py`](../tests/test_gpu_smoke.py).
+
+## Planned: best-effort resume (`checkpoint.resume_compat`)
+
+Not implemented yet. Resume is currently all-or-nothing: `check_resume_compat`
+([`src/chomp/ckpt.py`](../src/chomp/ckpt.py)) hard-errors on any config/fingerprint drift
+before restore. The planned relaxation:
+
+- Add `checkpoint.resume_compat: "strict" | "warn"` to `CheckpointConfig`
+  ([`src/chomp/config.py`](../src/chomp/config.py)), default `strict`.
+- Tier the checks in `check_resume_compat`. Always error: drift that makes the array
+  restore structurally impossible (model architecture, optimizer structure) — Orbax would
+  fail anyway, just later and cryptically. Downgrade to warnings in `warn` mode:
+  data-order/objective drift (source revision, shuffle knobs, packing, seed,
+  `mask_boundary_loss`, `train_on_eos`) and diagnostic drift (eval selection). The
+  `hf_revision` 40-hex requirement in `validate_config` also demotes to a warning.
+- At the resume site in [`src/chomp/train.py`](../src/chomp/train.py), wrap the data-state
+  restore: in `warn` mode a Grain `set_state` failure (the saved state no longer fits a
+  changed pipeline shape) logs loudly and falls back to a fresh stream. Train state —
+  params, opt_state, RNG, step, and therefore the LR schedule — always restores fully.
+- Tests in [`tests/test_training.py`](../tests/test_training.py): warn-mode resume across a
+  shuffle-knob change (state restored, warning logged), across a packing-mode change
+  (fresh-stream fallback), and strict mode unchanged.
