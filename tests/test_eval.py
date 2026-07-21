@@ -335,6 +335,25 @@ def test_positive_eval_sample_count_rejects_empty_source(
         load_or_create_eval_tokens(cfg, tokenizer=build_tokenizer(cfg))
 
 
+def test_explicit_eval_split_ignores_document_shuffle(
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+) -> None:
+    """Eval documents keep literal split order even when data.shuffle=true."""
+    docs = [{"text": f"doc{i:02d}"} for i in range(16)]
+    patch_hf_load_dataset({"train": [{"text": "unused"}], "validation": docs})
+    cfg = _eval_cfg(
+        backend="hf",
+        max_eval_samples=8,
+        shuffle=True,
+        shuffle_buffer_size=4,
+    )
+    tok = build_tokenizer(cfg)
+
+    tokens = load_or_create_eval_tokens(cfg, tokenizer=tok)
+
+    assert tokens == [tok.encode(f"doc{i:02d}") for i in range(8)]
+
+
 def test_eval_empty_when_disabled() -> None:
     """Eval should return empty list when max_eval_samples=0."""
     cfg = _eval_cfg(backend="hf")

@@ -266,11 +266,7 @@ def _hf_source_fields(
         "split": split,
         "text_key": cfg.data.text_key,
         "revision": cfg.data.hf_revision,
-        # Hash selection already samples sparsely across the source. Filling a
-        # second document-shuffle window would scan roughly
-        # shuffle_buffer_size / holdout_fraction source documents before the
-        # first eval row, for no disjointness benefit.
-        "shuffle": cfg.data.shuffle and content_partition != "eval",
+        "shuffle": cfg.data.shuffle,
         "shuffle_buffer_size": cfg.data.shuffle_buffer_size,
         "shuffle_buffer_bytes": cfg.data.shuffle_buffer_bytes,
         "seed": int(cfg.data.seed),
@@ -520,9 +516,16 @@ def load_or_create_eval_tokens(cfg: Config, *, tokenizer: Tokenizer) -> list[lis
     if cfg.data.backend == "hf":
         split = _eval_source_split(cfg)
         content_partition: ContentPartition = "eval" if _content_holdout_enabled(cfg) else "all"
+        # Evaluation never shuffles, whichever source selection is active: the
+        # content-hash holdout already samples sparsely across the source
+        # (filling a document-shuffle window would scan roughly
+        # shuffle_buffer_size / holdout_fraction documents for no disjointness
+        # benefit), and an explicit split is consumed in literal order so the
+        # eval set is a pure function of source identity.
+        eval_cfg = replace(cfg, data=replace(cfg.data, shuffle=False))
         try:
             stream = _build_hf_stream(
-                cfg,
+                eval_cfg,
                 split=split,
                 repeat=False,
                 content_partition=content_partition,
