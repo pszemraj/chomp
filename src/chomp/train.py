@@ -71,6 +71,7 @@ from chomp.data import (
     prepare_tokenizer_and_config,
     save_tokenizer_snapshot,
 )
+from chomp.data.hf import resolve_dataset_revision
 from chomp.model import (
     build_model,
     causal_loss_mask,
@@ -1276,6 +1277,17 @@ def run(
     validate_default_device(allow_cpu=cfg.train.allow_cpu)
     if dry_run and resume != "none":
         raise RuntimeError("dry_run does not support resume; use a fresh run.")
+
+    # Checkpointed runs need content identity, not a mutable name: resolve a
+    # branch/tag/default ref to its commit once, up front, so the resolved
+    # config, fingerprint, and resume-compat all see the pinned value.
+    if cfg.data.backend == "hf" and cfg.checkpoint.enabled:
+        resolved_revision = resolve_dataset_revision(cfg.data.hf_dataset, cfg.data.hf_revision)
+        if resolved_revision != cfg.data.hf_revision:
+            logger.info(
+                "Resolved data.hf_revision %r -> %s", cfg.data.hf_revision, resolved_revision
+            )
+            cfg = dc_replace(cfg, data=dc_replace(cfg.data, hf_revision=resolved_revision))
 
     run_dir = resolve_run_dir(cfg, config_path=config_path)
     cfg = dc_replace(cfg, logging=dc_replace(cfg.logging, run_dir=str(run_dir)))

@@ -72,9 +72,8 @@ before restore. The planned relaxation:
 - Tier the checks in `check_resume_compat`. Always error: drift that makes the array
   restore structurally impossible (model architecture, optimizer structure) — Orbax would
   fail anyway, just later and cryptically. Downgrade to warnings in `warn` mode:
-  data-order/objective drift (source revision, shuffle knobs, packing, seed,
-  `mask_boundary_loss`, `train_on_eos`) and diagnostic drift (eval selection). The
-  `hf_revision` 40-hex requirement in `validate_config` also demotes to a warning.
+  data-order/objective drift (resolved source revision, shuffle knobs, packing, seed,
+  `mask_boundary_loss`, `train_on_eos`) and diagnostic drift (eval selection).
 - At the resume site in [`src/chomp/train.py`](../src/chomp/train.py), wrap the data-state
   restore: in `warn` mode a Grain `set_state` failure (the saved state no longer fits a
   changed pipeline shape) logs loudly and falls back to a fresh stream. Train state —

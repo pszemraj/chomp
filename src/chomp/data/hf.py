@@ -14,6 +14,7 @@ Tokenization + packing happen elsewhere.
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -26,6 +27,40 @@ _UINT64_MASK = 2**64 - 1
 _SPLITMIX_INCREMENT = 0x9E3779B97F4A7C15
 _CONTENT_HOLDOUT_PERSON = b"chomp-eval"
 ContentPartition = Literal["all", "train", "eval"]
+
+
+def resolve_dataset_revision(dataset: str, revision: str | None) -> str:
+    """Resolve a dataset ref to the concrete commit it points to right now.
+
+    A 40-hex commit passes through untouched (no network). Anything else -
+    a branch, a tag, or None for the repository default - is resolved once
+    via the Hub API so checkpointed runs record content identity instead of
+    a mutable name, without users having to hand-pin commits.
+
+    :param str dataset: HF dataset repo id.
+    :param revision: Ref to resolve, or None for the repository default.
+    :return str: 40-hex commit hash.
+    :raises RuntimeError: If the ref cannot be resolved to a commit.
+    """
+    if revision is not None and re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+        return revision
+
+    from huggingface_hub import HfApi
+
+    try:
+        sha = HfApi().dataset_info(dataset, revision=revision).sha
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not resolve data.hf_revision {revision!r} for dataset {dataset!r} "
+            "to a commit. Checkpointed runs pin the resolved commit so resume compares "
+            "content identity, not a mutable name. Check network/auth, or set "
+            "data.hf_revision to a 40-hex commit explicitly."
+        ) from exc
+    if not sha:
+        raise RuntimeError(
+            f"Hub returned no commit hash for dataset {dataset!r} at revision {revision!r}."
+        )
+    return sha
 
 
 def is_eval_holdout(text: str, *, fraction: float) -> bool:

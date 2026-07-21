@@ -44,6 +44,7 @@ from chomp.config import (
     TokenizerConfig,
     TrainConfig,
     WandbConfig,
+    build_config,
     resolve_window_shuffle_rows,
     strict_packed_segments,
 )
@@ -2040,6 +2041,43 @@ def test_megalodon_backend_advertises_segment_reset() -> None:
     cfg = Config(model=make_tiny_megalodon_model(vocab_size=64))
     params, static = build_model(cfg, key=jax.random.PRNGKey(0))
     assert supports_packed_segments(params, static)
+
+
+def test_run_pins_resolved_dataset_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+) -> None:
+    """A ref revision is resolved to a commit before artifacts and fingerprints.
+
+    Users write refs like "main"; checkpointed runs must record the resolved
+    commit so resume compares content identity instead of a mutable name.
+    """
+    patch_hf_load_dataset({"train": [{"text": "abcdefgh"} for _ in range(64)]})
+    monkeypatch.setattr("chomp.train.resolve_dataset_revision", lambda dataset, revision: "a" * 40)
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_resolve")
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_split="train",
+            hf_revision="main",
+            shuffle=False,
+            repeat=True,
+            max_eval_samples=0,
+        ),
+    )
+
+    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
+
+    resolved = json.loads((run_dir / "config_resolved.json").read_text())
+    assert resolved["data"]["hf_revision"] == "a" * 40
+    # The same resolved cfg object feeds checkpoint meta and data_fingerprint,
+    # so the recorded source identity is the commit, not the ref.
+    assert data_fingerprint(build_config(resolved))["source"]["revision"] == "a" * 40
 
 
 def test_train_step_does_not_recompile_across_steps(caplog: LogCaptureFixture) -> None:

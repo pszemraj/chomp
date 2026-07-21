@@ -24,7 +24,7 @@ from chomp.data.grain import (
     _batch_segment_stats,
     _TrainSequenceIterDataset,
 )
-from chomp.data.hf import HFStreamingTextStream, HFStreamSpec
+from chomp.data.hf import HFStreamingTextStream, HFStreamSpec, resolve_dataset_revision
 from chomp.data.pack import FFDPacker, FFDPackerState, TokenPacker
 from chomp.data.pipeline import (
     ByteTokenizer,
@@ -736,6 +736,37 @@ def test_grain_close_reaches_hf_source_with_prefetch(
     iterator.close()
 
     assert record["close_calls"] == 1
+
+
+def test_resolve_dataset_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pinned commits skip the Hub; refs resolve to commits; failures guide the user."""
+    import huggingface_hub
+
+    def _exploding_api() -> None:
+        raise AssertionError("Hub must not be contacted for a pinned commit")
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", _exploding_api)
+    assert resolve_dataset_revision("d", "a" * 40) == "a" * 40
+
+    class _FakeApi:
+        def dataset_info(self, dataset: str, revision: str | None = None) -> Any:
+            assert dataset == "d"
+
+            class _Info:
+                sha = "b" * 40
+
+            return _Info()
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", _FakeApi)
+    assert resolve_dataset_revision("d", "main") == "b" * 40
+    assert resolve_dataset_revision("d", None) == "b" * 40
+
+    def _offline_api() -> None:
+        raise ConnectionError("offline")
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", _offline_api)
+    with pytest.raises(RuntimeError, match="Could not resolve data.hf_revision"):
+        resolve_dataset_revision("d", "main")
 
 
 def test_hf_state_roundtrip(patch_hf_load_dataset: Callable[..., dict[str, int]]) -> None:
