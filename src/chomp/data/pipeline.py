@@ -660,10 +660,18 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
         packing["buffer_docs"] = d.packing_buffer_docs
     if d.packing_mode == "multipack":
         packing["group_docs"] = d.packing_group_docs
+    # Eval tokens are rebuilt from the live stream on every process start, so
+    # the knobs that select them must match for eval_loss to stay comparable
+    # across a resume. Selection knobs are inert while eval is disabled.
+    eval_fp: dict[str, Any] = {"max_eval_samples": d.max_eval_samples}
+    if d.max_eval_samples > 0:
+        eval_fp["split"] = _eval_source_split(cfg)
+        eval_fp["content_partition"] = "eval" if _content_holdout_enabled(cfg) else "all"
     return {
         "source": src,
         "tokenizer": tok,
         "packing": packing,
+        "eval": eval_fp,
         "seq_len": cfg.train.seq_len,
         "batch_size": cfg.train.batch_size,
         "grad_accum": cfg.train.grad_accum,

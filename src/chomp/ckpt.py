@@ -426,6 +426,17 @@ def check_resume_compat(
         label = f"data.packing_{key}" if key in packing_prefixed else f"data.{key}"
         _cmp(label, pack_cur.get(key), pack_prev.get(key), severity="error")
 
+    # Eval tokens are rebuilt from the live stream on every start; selection
+    # drift silently changes what eval_loss measures across the resume.
+    eval_prev = meta_fp.get("eval") or {}
+    eval_cur = cur_fp.get("eval") or {}
+    _cmp_mapping(
+        "data.eval",
+        eval_cur,
+        eval_prev,
+        labels={"max_eval_samples": "data.max_eval_samples"},
+    )
+
     # Model/optimizer comparisons.
     cur_cfg = cfg.to_dict()
     train_prev = meta_cfg.get("train") or {}

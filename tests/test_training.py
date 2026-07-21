@@ -1799,6 +1799,44 @@ def test_resume_compat_rejects_stream_and_objective_drift(
         check_resume_compat(mutate(cfg), meta)
 
 
+def test_resume_compat_rejects_eval_selection_drift(tmp_path: Path) -> None:
+    """Eval tokens are rebuilt live on start; selection drift must hard-error."""
+    cfg = _base_cfg(tmp_path / "run_eval_drift")
+    cfg = replace(cfg, data=replace(cfg.data, max_eval_samples=4))
+    meta = _checkpoint_record(cfg).to_dict()
+
+    drifted = replace(cfg, data=replace(cfg.data, max_eval_samples=8))
+    with pytest.raises(RuntimeError, match="max_eval_samples"):
+        check_resume_compat(drifted, meta)
+
+    hf = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_split="train",
+            hf_eval_split=None,
+            shuffle=False,
+        ),
+    )
+    hf_meta = _checkpoint_record(hf).to_dict()
+    split_drift = replace(hf, data=replace(hf.data, hf_eval_split="validation"))
+    with pytest.raises(RuntimeError, match="data.eval"):
+        check_resume_compat(split_drift, hf_meta)
+
+
+def test_resume_compat_ignores_eval_selection_when_disabled(tmp_path: Path) -> None:
+    """Eval selection knobs are inert while max_eval_samples=0."""
+    cfg = _base_cfg(tmp_path / "run_eval_inert")
+    cfg = replace(cfg, data=replace(cfg.data, max_eval_samples=0))
+    meta = _checkpoint_record(cfg).to_dict()
+
+    drifted = replace(cfg, data=replace(cfg.data, hf_eval_split="validation"))
+    check_resume_compat(drifted, meta)
+
+
 @pytest.mark.parametrize(
     ("field", "initial", "changed", "match"),
     [
