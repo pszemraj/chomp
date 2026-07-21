@@ -1943,6 +1943,8 @@ def _run_impl(
         # all run resources have had their chance to error.
         if finalization_errors and not exc_in_flight and exit_code == 0:
             exit_code = 1
+        elif exit_code == 0 and (preemption_reason is not None or stop_request.requested):
+            exit_code = stop_request.exit_code
         _finish_run_telemetry(
             wandb_run,
             profile_enabled=profile_enabled,

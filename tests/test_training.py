@@ -556,7 +556,9 @@ def test_preemption_finishes_one_step_and_writes_aligned_checkpoint(
     cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, save_every=100))
 
     stop = _FakeStopSignal()
+    dummy_wandb = DummyWandbRun()
     monkeypatch.setattr(train_mod, "_StopSignalState", lambda: stop)
+    monkeypatch.setattr(train_mod, "_maybe_init_wandb", lambda *args, **kwargs: dummy_wandb)
     real_make_train_step = train_mod.make_train_step
 
     def _make_stopping_step(*args: Any, **kwargs: Any) -> Any:
@@ -585,6 +587,7 @@ def test_preemption_finishes_one_step_and_writes_aligned_checkpoint(
         for row in rows
     )
     assert _checkpoint_steps(run_dir) == {1}
+    assert dummy_wandb.finish_calls == [143]
 
 
 def test_preemption_before_first_batch_writes_resumable_step_zero(
