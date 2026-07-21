@@ -85,11 +85,11 @@ The configured `data.text_key` must exist in every selected row and contain a st
 
 chomp builds a fixed validation set when the run is created:
 
-- If `data.hf_eval_split` is set, it is authoritative. Any loading, authentication, schema, decoding, or collection error fails startup. It must differ from `data.hf_split` while evaluation is enabled.
+- If `data.hf_eval_split` is set, it is authoritative and never falls back to training data. It must differ from `data.hf_split` while evaluation is enabled.
 - The selected split is read unshuffled in literal order (`data.shuffle` applies only to the training stream) and contributes at most `data.max_eval_samples` examples.
 - With `data.hf_eval_split: null`, a stable BLAKE2 content hash reserves `data.hf_eval_holdout_fraction` of identities for eval and removes them from the training stream. Duplicate content always lands on the same side. The sparse hash selection does not also fill a document-shuffle window; doing so would multiply startup reads by roughly the inverse holdout fraction.
-- A positive `data.max_eval_samples` that yields no documents fails startup; use `0` to disable evaluation intentionally.
+- A positive `data.max_eval_samples` that yields no documents, or any loading/authentication/schema/decoding failure, logs a warning and disables evaluation for that process. Training still starts.
 
 The selected documents are tokenized once when a process starts, then the resulting eval batches are reused for every evaluation in that process.
 
-At end of stream the `bin`/`multipack` packers flush their remaining pending documents into padded windows, so an eval doc set below the pack threshold still emits windows. Eval uses `A=1` and pads missing final rows independently of `train.grad_accum`. If it yields no usable window or emits batches whose labels are entirely masked (zero valid loss tokens), the run fails instead of silently emitting a null eval loss.
+At end of stream the `bin`/`multipack` packers flush their remaining pending documents into padded windows, so an eval doc set below the pack threshold still emits windows. Eval uses `A=1` and pads missing final rows independently of `train.grad_accum`. If a scheduled pass yields no usable window, emits a zero-loss-token batch, or otherwise fails, chomp logs the failure and disables later evals. Training data assembly retains its strict zero-loss-token failure because advancing the optimizer without an objective would be invalid.

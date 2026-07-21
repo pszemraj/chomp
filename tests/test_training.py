@@ -1364,6 +1364,61 @@ def test_dry_run_compiles_single_step(tmp_path: Path, monkeypatch: pytest.Monkey
     assert len(close_calls) == 1
 
 
+def test_eval_collection_failure_disables_eval_without_stopping_training(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    """Unavailable diagnostic data must not prevent optimizer steps."""
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_eval_setup_failure", decay_steps=2)
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, max_eval_samples=2),
+        train=replace(cfg.train, steps=2, eval_every=1),
+    )
+
+    def _fail_eval_setup(*args: Any, **kwargs: Any) -> list[list[int]]:
+        """Inject an unavailable or malformed eval source."""
+        raise RuntimeError("broken validation split")
+
+    monkeypatch.setattr("chomp.train.load_or_create_eval_tokens", _fail_eval_setup)
+    with caplog.at_level(logging.WARNING, logger="chomp.train"):
+        run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
+
+    assert "disabling evaluation" in caplog.text
+    assert _checkpoint_steps(run_dir) == {1, 2}
+
+
+def test_eval_batch_failure_disables_future_evals_without_stopping_training(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    """A degenerate eval tail batch must not crash an otherwise valid run."""
+    import chomp.train as train_mod
+
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_eval_batch_failure", decay_steps=2)
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, max_eval_samples=2),
+        train=replace(cfg.train, steps=2, eval_every=1),
+    )
+    real_build_eval_iterator = train_mod.build_eval_iterator
+    build_calls = 0
+
+    def _build_broken_eval_iterator(config: Config, *, tokens: list[list[int]]) -> Iterator[Batch]:
+        """Yield one usable batch, then reproduce a zero-token tail failure."""
+        nonlocal build_calls
+        build_calls += 1
+        iterator = iter(real_build_eval_iterator(config, tokens=tokens))
+        yield next(iterator)
+        raise ZeroLossTokensError("tail batch contains zero valid loss tokens")
+
+    monkeypatch.setattr(train_mod, "build_eval_iterator", _build_broken_eval_iterator)
+    with caplog.at_level(logging.WARNING, logger="chomp.train"):
+        run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
+
+    assert build_calls == 1
+    assert "Evaluation failed at step 1; disabling evaluation" in caplog.text
+    assert _checkpoint_steps(run_dir) == {1, 2}
+
+
 @pytest.mark.parametrize(
     ("field", "match"),
     [

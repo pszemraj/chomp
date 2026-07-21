@@ -348,7 +348,11 @@ def _setup_run_dir_and_tokenizer(
     if dry_run:
         eval_tokens = []
     else:
-        eval_tokens = load_or_create_eval_tokens(cfg, tokenizer=tokenizer)
+        try:
+            eval_tokens = load_or_create_eval_tokens(cfg, tokenizer=tokenizer)
+        except Exception as exc:
+            logger.warning("Failed to initialize evaluation data; disabling evaluation: %s", exc)
+            eval_tokens = []
 
     gen_settings: GenerationSettings | None = None
     gen_prompts = None
@@ -1752,7 +1756,15 @@ def _run_impl(
 
                     eval_row: dict[str, Any] = {}
                     if should_eval:
-                        eval_row = _run_eval(state.params)
+                        try:
+                            eval_row = _run_eval(state.params)
+                        except Exception as exc:
+                            logger.warning(
+                                "Evaluation failed at step %d; disabling evaluation: %s",
+                                step_i,
+                                exc,
+                            )
+                            eval_step = None
 
                     if (
                         gen_settings is not None

@@ -38,7 +38,7 @@ XLA kernel selection on GPU is nondeterministic by default. This is the fast pat
 
 ## Evaluation
 
-If `train.eval_every > 0` and `data.max_eval_samples > 0`, chomp runs a full pass over the process-local eval token set and logs `eval_loss`. A non-finite loss reduction fails the run before a metric is logged. Eval text selection, packed eval flushing, and zero-batch/zero-token failures are documented in [Data Pipeline validation set](data_pipeline.md#validation-set).
+If `train.eval_every > 0` and `data.max_eval_samples > 0`, chomp runs a full pass over the process-local eval token set and logs `eval_loss`. Eval setup or execution failures warn and disable evaluation for that process without stopping training; this includes non-finite reductions and zero-loss-token tail batches. Eval text selection and packed flushing are documented in [Data Pipeline validation set](data_pipeline.md#validation-set).
 
 Eval batches are assembled once and cached host-side for the whole run; device transfer happens per batch each eval, so no device memory is held between evals.
 

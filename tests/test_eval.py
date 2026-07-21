@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
+from _pytest.logging import LogCaptureFixture
 
 from chomp.config import (
     CheckpointConfig,
@@ -112,10 +114,10 @@ def test_eval_batches_assembled_once_and_reused(
     assert len(eval_rows) == 2  # both evals produced a loss from the cached batches
 
 
-def test_nonfinite_eval_fails_before_metric_logging(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_nonfinite_eval_disables_eval_before_metric_logging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: LogCaptureFixture
 ) -> None:
-    """A non-finite eval reduction must fail the run instead of logging NaN."""
+    """A non-finite eval reduction disables eval without logging NaN."""
     run_dir = tmp_path / "run_nonfinite_eval"
     cfg = _eval_cfg(run_dir)
 
@@ -133,9 +135,10 @@ def test_nonfinite_eval_fails_before_metric_logging(
         lambda *_args, **_kwargs: _nonfinite_eval_step,
     )
 
-    with pytest.raises(RuntimeError, match="non-finite loss sum"):
+    with caplog.at_level(logging.WARNING, logger="chomp.train"):
         run(cfg, config_path=None, resume="none", dry_run=False)
 
+    assert "non-finite loss sum" in caplog.text
     rows = read_jsonl(run_dir / cfg.logging.metrics_file)
     assert not any("eval_loss" in row for row in rows)
 
@@ -209,11 +212,12 @@ def test_eval_pads_missing_rows_and_ignores_train_grad_accum(
     assert eval_batches[0].input_ids.shape == (1, 1, 8)
 
 
-def test_eval_fails_fast_on_zero_valid_tokens(
-    tmp_path: Path, patch_hf_load_dataset: Callable[..., dict[str, int]]
+def test_eval_zero_valid_tokens_disables_eval(
+    tmp_path: Path,
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+    caplog: LogCaptureFixture,
 ) -> None:
-    """Eval batches whose labels are entirely masked must raise, not log
-    eval_loss=None.
+    """Entirely masked eval labels disable eval without logging a null loss.
 
     Single-token eval docs make every adjacent window position a segment
     transition, so boundary masking wipes all shifted labels — batches emit
@@ -230,8 +234,11 @@ def test_eval_fails_fast_on_zero_valid_tokens(
     run_dir = tmp_path / "run_zero_tokens"
     cfg = _eval_cfg(run_dir, backend="hf", packing_mode="sequential", max_eval_samples=64)
 
-    with pytest.raises(RuntimeError, match="zero valid loss tokens"):
+    with caplog.at_level(logging.WARNING, logger="chomp.train"):
         run(cfg, config_path=None, resume="none")
+    assert "zero valid loss tokens" in caplog.text
+    rows = read_jsonl(run_dir / cfg.logging.metrics_file)
+    assert not any("eval_loss" in row for row in rows)
 
 
 def test_eval_split_selection(monkeypatch: pytest.MonkeyPatch) -> None:
