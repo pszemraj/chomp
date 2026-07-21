@@ -57,3 +57,4 @@ checkpoint:
   save_every: 2500
   max_to_keep: 3
   async_save: true
+  resume_compat: strict

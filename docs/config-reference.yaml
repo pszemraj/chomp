@@ -259,7 +259,7 @@ train:
   # train.jit -- bool; default: true. JIT-compiles train/eval; keep true for training and use false only for focused eager debugging.
   jit: "<bool>"
 
-  # train.deterministic -- bool | null; default: null, computed true only when every active dropout is zero. Explicit values override that rule; effective true disables model.use_checkpoint. Raw-value drift fails resume. This controls dropout only: exact checkpoint/data restoration does not make interrupted and continuous GPU runs bit-identical when backend kernels are nondeterministic.
+  # train.deterministic -- bool | null; default: null, computed true only when every active dropout is zero. Explicit values override that rule; effective true disables model.use_checkpoint. Resume compares the effective value, so null and true are equivalent when all active dropout is zero. This controls dropout only: exact checkpoint/data restoration does not make interrupted and continuous GPU runs bit-identical when backend kernels are nondeterministic.
   deterministic: "<bool | null>"
 
   # train.allow_cpu -- bool; default: false. False requires GPU execution; true permits CPU or any other non-GPU/indeterminate backend rather than forcing CPU. [Debug only]
@@ -372,7 +372,7 @@ checkpoint:
   # checkpoint.async_save -- bool; default: true; used only when enabled. Overlaps I/O with training and is recommended for GPU runs; graceful shutdown waits, but abrupt termination can lose the newest in-flight save.
   async_save: "<bool>"
 
-  # checkpoint.resume_compat -- string; default: warn; one of: strict | warn. Warn mode permits intentional data, objective, schedule, and optimizer-value changes while logging each mismatch; strict rejects those changes. Parameter/optimizer-state structure mismatches always fail. If warn mode cannot apply saved Grain state to a changed pipeline, train state restores and data restarts from the beginning.
+  # checkpoint.resume_compat -- string; default: warn; one of: strict | warn. Warn mode permits intentional data, objective, schedule, and optimizer-value changes while logging each mismatch; strict rejects those changes. Parameter/optimizer-state structure mismatches always fail. Maintained long-run recipes select strict explicitly. If warn mode cannot apply saved Grain state to a changed pipeline, train state restores and data restarts from the beginning.
   resume_compat: "<strict | warn>"
 
 # logging -- mapping | null; default: {}. Relative artifact paths resolve under the final run directory unless stated otherwise.

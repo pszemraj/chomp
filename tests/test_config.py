@@ -242,6 +242,16 @@ def test_debug_smoke_config_loads() -> None:
     assert load_config(config_path).model.backend == "dummy"
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["smoldata_mix_100m_2048.yaml", "zyda2_200m_2048.yaml"],
+)
+def test_maintained_training_recipes_require_strict_resume(name: str) -> None:
+    """Maintained long-run recipes should reject semantic resume drift."""
+    config_path = Path(__file__).parents[1] / "configs" / name
+    assert load_config(config_path).checkpoint.resume_compat == "strict"
+
+
 def test_yaml_loader_rejects_duplicate_explicit_keys(tmp_path: Path) -> None:
     """Repeated explicit YAML keys must fail instead of silently taking the last value."""
     config_path = tmp_path / "duplicate.yaml"

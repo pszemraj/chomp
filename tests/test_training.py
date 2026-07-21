@@ -1905,6 +1905,24 @@ def test_resume_compat_strict_rejects_semantic_drift(tmp_path: Path) -> None:
         check_resume_compat(drifted, meta)
 
 
+def test_resume_compat_compares_effective_determinism(tmp_path: Path) -> None:
+    """Equivalent null/true dropout behavior must not block strict resume."""
+    cfg = _base_cfg(tmp_path / "run_effective_determinism")
+    cfg = replace(
+        cfg,
+        train=replace(cfg.train, deterministic=None),
+        checkpoint=replace(cfg.checkpoint, resume_compat="strict"),
+    )
+    meta = _checkpoint_record(cfg).to_dict()
+
+    explicit_true = replace(cfg, train=replace(cfg.train, deterministic=True))
+    check_resume_compat(explicit_true, meta)
+
+    effective_change = replace(cfg, train=replace(cfg.train, deterministic=False))
+    with pytest.raises(RuntimeError, match="train.deterministic_effective"):
+        check_resume_compat(effective_change, meta)
+
+
 def test_resume_compat_allows_schedule_and_optimizer_value_changes(
     tmp_path: Path, caplog: LogCaptureFixture
 ) -> None:

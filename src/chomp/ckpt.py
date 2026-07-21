@@ -31,9 +31,35 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import orbax.checkpoint as ocp
 
-from chomp.config import Config, decay_horizon_from_values
+from chomp.config import Config, decay_horizon_from_values, derived_deterministic
 
 logger = logging.getLogger(__name__)
+
+
+def _effective_deterministic_from_mapping(config: dict[str, Any]) -> bool | None:
+    """Resolve stored dropout determinism when enough config fields exist.
+
+    :param dict[str, Any] config: Configuration mapping from checkpoint metadata.
+    :return bool | None: Effective determinism, or None for incomplete legacy metadata.
+    """
+    train = config.get("train")
+    model = config.get("model")
+    if not isinstance(train, dict) or not isinstance(model, dict):
+        return None
+    if "deterministic" not in train:
+        return None
+    configured = train["deterministic"]
+    if configured is not None:
+        return configured if isinstance(configured, bool) else None
+
+    dropout_fields = (
+        ("dropout",)
+        if model.get("backend") == "dummy"
+        else ("dropout", "attention_dropout", "hidden_dropout")
+    )
+    if any(field not in model for field in dropout_fields):
+        return None
+    return all(model[field] == 0.0 for field in dropout_fields)
 
 
 @dataclass(frozen=True)
@@ -511,14 +537,16 @@ def check_resume_compat(
     cur_cfg = cfg.to_dict()
     train_prev = meta_cfg.get("train") or {}
     train_cur = cur_cfg.get("train") or {}
-    # Flipping deterministic toggles dropout against a restored optimizer
-    # state — a silent objective change mid-run.
-    _cmp(
-        "train.deterministic",
-        train_cur.get("deterministic"),
-        train_prev.get("deterministic"),
-        severity=semantic_severity,
-    )
+    # Compare the executed dropout behavior: null and true are equivalent
+    # when all active dropout rates are zero.
+    previous_deterministic = _effective_deterministic_from_mapping(meta_cfg)
+    if previous_deterministic is not None:
+        _cmp(
+            "train.deterministic_effective",
+            derived_deterministic(cfg),
+            previous_deterministic,
+            severity=semantic_severity,
+        )
     model_prev = meta_cfg.get("model") or {}
     model_cur = cur_cfg.get("model") or {}
     model_active = set(model_cur) & set(model_prev)
