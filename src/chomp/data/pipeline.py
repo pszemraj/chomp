@@ -657,7 +657,10 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
         packing["max_docs_per_bin"] = d.packing_max_docs_per_bin
         packing["strict_segments"] = d.packing_strict_segments
     if d.packing_mode == "bin":
-        packing["buffer_docs"] = d.packing_buffer_docs
+        packing["buffer_docs"] = max(
+            d.packing_buffer_docs,
+            cfg.train.batch_size * cfg.train.grad_accum,
+        )
     if d.packing_mode == "multipack":
         packing["group_docs"] = d.packing_group_docs
     # Eval tokens are rebuilt from the live stream on every process start, so
@@ -822,6 +825,13 @@ def _build_packer(cfg: Config, *, rows_per_pack: int | None = None) -> TokenPack
             if cfg.data.packing_mode == "bin"
             else cfg.data.packing_group_docs
         )
+        if cfg.data.packing_mode == "bin" and lookahead_docs < bins_per_pack:
+            logger.info(
+                "Raising data.packing_buffer_docs from %d to %d to fill one packing cycle.",
+                lookahead_docs,
+                bins_per_pack,
+            )
+            lookahead_docs = bins_per_pack
         return FFDPacker(
             **common,
             mode=cfg.data.packing_mode,

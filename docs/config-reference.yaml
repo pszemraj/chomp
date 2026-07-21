@@ -132,8 +132,8 @@ data:
   # data.hf_dataset -- string; default: Zyphra/Zyda-2; nonempty when backend=hf. Changing repositories normally requires replacing the Zyda-specific default hf_name and hf_revision too.
   hf_dataset: "<nonempty string>"
 
-  # data.hf_name -- string; default: sample-100BT; nonempty when backend=hf; ignored by local_text. Hugging Face dataset configuration/subset name.
-  hf_name: "<nonempty string>"
+  # data.hf_name -- string | null; default: sample-100BT; null lets Hugging Face Datasets select a repository's default configuration; ignored by local_text.
+  hf_name: "<nonempty string | null>"
 
   # data.hf_split -- string; default: train; nonempty when backend=hf; ignored by local_text. Training split and source for a null-split content holdout.
   hf_split: "<nonempty string>"
@@ -170,10 +170,10 @@ data:
   # data.local_text -- string; default: "Hello from chomp.\n"; nonempty when backend=local_text; ignored by HF. Literal text, not a path. For quick local smoke tests set max_eval_samples=0 and window_shuffle_tokens=0. [Debug only]
   local_text: "<nonempty string>"
 
-  # data.packing_mode -- string; default: sequential; one of: sequential | bin | multipack. Sequential preserves stream order and lets recurrent state cross documents while boundary loss remains masked by default; FFD modes combine documents and can isolate state.
+  # data.packing_mode -- string; default: bin; one of: sequential | bin | multipack. Bin packing is the maintained real-training path; sequential preserves stream order and lets recurrent state cross documents while boundary loss remains masked.
   packing_mode: "<sequential | bin | multipack>"
 
-  # data.packing_buffer_docs -- int; default: 128; in bin mode must be > 0 and >= train.batch_size * train.grad_accum. Lookahead counts prepared chunks despite the legacy name; larger values trade startup memory for utilization.
+  # data.packing_buffer_docs -- int; default: 256; > 0 in bin mode. Lookahead counts prepared chunks despite the legacy name; values below train.batch_size * train.grad_accum are raised to that effective minimum and logged. Larger values trade startup memory for utilization.
   packing_buffer_docs: "<int>"
 
   # data.packing_max_docs_per_bin -- int | null; default: null (no cap); otherwise > 0; used only by bin/multipack. Caps prepared segments per row, not original source documents.
@@ -198,15 +198,15 @@ data:
   # data.window_shuffle_max_rows -- int; default: 4096; > 0 and, when window shuffling is enabled, >= train.batch_size * train.grad_accum. Bounds Python row objects and packed rows requested for each Grain window fill; effective rows are aligned down to a complete optimizer batch.
   window_shuffle_max_rows: "<int>"
 
-  # data.grain_prefetch -- int; default: 0; >= 0; zero disables. Counts assembled batches; raise only after measuring input stalls because it consumes memory.
+  # data.grain_prefetch -- int; default: 2; >= 0; zero disables. Counts assembled batches and trades host memory for overlap with training.
   grain_prefetch: "<int>"
 
   # data.max_eval_samples -- int; default: 1000; >= 0; zero disables eval data. Positive values collect up to this many documents when a run starts; local_text produces repeated copies of the same text.
   max_eval_samples: "<int>"
 
-  # data.tokenizer -- mapping | null; default: {}. Every raw tokenizer child is a hard resume invariant, including fields inactive under the selected tokenizer kind.
+  # data.tokenizer -- mapping | null; default: {}. Active tokenization semantics participate in resume compatibility; runtime-only loading knobs do not.
   tokenizer:
-    # data.tokenizer.kind -- string; default: byte; one of: byte | hf. Use HF for pretraining; byte is an offline infrastructure tokenizer.
+    # data.tokenizer.kind -- string; default: hf; one of: byte | hf. Byte is an offline infrastructure tokenizer and must disable special insertion unless byte_offset reserves IDs for it.
     kind: "<byte | hf>"
 
     # data.tokenizer.hf_name_or_path -- string | null; default: pszemraj/bytebpe-tokenizer-32k-mlm; nonempty when kind=hf. Fresh runs snapshot these assets; resume loads only the snapshot and fails if it is missing.
@@ -230,7 +230,7 @@ data:
     # data.tokenizer.add_bos -- bool; default: false. Prepends BOS after truncation and before packing, not to generation prompts. Byte mode requires bos_token_id < byte_offset; HF auto-special mode requires a tokenizer BOS ID.
     add_bos: "<bool>"
 
-    # data.tokenizer.add_eos -- bool; default: false. Appends EOS after truncation and before packing; data.train_on_eos controls its loss. Byte mode requires eos_token_id < byte_offset; HF auto-special mode requires a tokenizer EOS ID.
+    # data.tokenizer.add_eos -- bool; default: true. Appends EOS after truncation and before packing; data.train_on_eos controls its loss. Byte mode requires eos_token_id < byte_offset; HF auto-special mode requires a tokenizer EOS ID.
     add_eos: "<bool>"
 
     # data.tokenizer.max_doc_tokens -- int | null; default: null (no truncation); otherwise > 0. Applied after full tokenization and before inserted specials, so it discards document tails without reducing tokenizer peak work; leave null unless intentional.

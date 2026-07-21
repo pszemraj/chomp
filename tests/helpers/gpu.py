@@ -35,6 +35,7 @@ def run_training_smoke(run_dir: str, *, backend: str) -> None:
     from tests.helpers.config_factories import make_tiny_megalodon_model
 
     cfg = Config()
+    tokenizer = replace(cfg.data.tokenizer, kind="byte", add_bos=False, add_eos=False)
     if backend == "dummy":
         model = replace(cfg.model, backend="dummy", vocab_size=256, d_model=32, dropout=0.0)
         data = replace(
@@ -44,6 +45,7 @@ def run_training_smoke(run_dir: str, *, backend: str) -> None:
             repeat=True,
             max_eval_samples=4,
             packing_mode="sequential",
+            tokenizer=tokenizer,
         )
         jit = False
         deterministic = True
@@ -65,6 +67,7 @@ def run_training_smoke(run_dir: str, *, backend: str) -> None:
             packing_buffer_docs=4,
             packing_strict_segments=True,
             mask_boundary_loss=True,
+            tokenizer=tokenizer,
         )
         jit = True
         deterministic = False

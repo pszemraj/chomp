@@ -114,7 +114,7 @@ class HFStreamSpec:
     """Specification for a HuggingFace streaming dataset."""
 
     dataset: str
-    name: str
+    name: str | None
     split: str
     text_key: str
     revision: str | None

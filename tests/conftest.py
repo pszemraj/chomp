@@ -49,7 +49,7 @@ def patch_hf_load_dataset(monkeypatch: pytest.MonkeyPatch) -> Callable[..., dict
         calls = {"builds": 0}
 
         def _load_dataset(
-            dataset: str, *, name: str, split: str, streaming: bool, revision: str | None
+            dataset: str, *, name: str | None, split: str, streaming: bool, revision: str | None
         ) -> FakeHFIterable:
             _ = (dataset, name, streaming, revision)
             calls["builds"] += 1

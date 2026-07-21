@@ -29,9 +29,11 @@ from chomp.data.pack import FFDPacker, FFDPackerState, TokenPacker
 from chomp.data.pipeline import (
     ByteTokenizer,
     ZeroLossTokensError,
+    _build_packer,
     _SequenceProducer,
     build_eval_iterator,
     build_train_iterator,
+    data_fingerprint,
     effective_window_shuffle_seed,
 )
 from tests.helpers.config_factories import make_pipeline_cfg
@@ -133,6 +135,25 @@ def test_bin_packer_packs_multiple_docs() -> None:
 
         unique = np.unique(segs[segs > 0])
         assert unique.size >= 2
+
+
+def test_small_bin_lookahead_is_raised_to_one_packing_cycle(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A small positive lookahead should clamp to the required output rows."""
+    cfg = make_pipeline_cfg(
+        batch_size=4,
+        packing_mode="bin",
+        packing_buffer_docs=1,
+    )
+
+    with caplog.at_level(logging.INFO, logger="chomp.data.pipeline"):
+        packer = _build_packer(cfg)
+
+    assert isinstance(packer, FFDPacker)
+    assert packer._pack_threshold() == 4
+    assert data_fingerprint(cfg)["packing"]["buffer_docs"] == 4
+    assert any("packing_buffer_docs from 1 to 4" in record.message for record in caplog.records)
 
 
 @pytest.mark.parametrize("mode", ["bin", "multipack"])

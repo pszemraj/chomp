@@ -231,6 +231,25 @@ def test_debug_smoke_config_loads() -> None:
     assert load_config(config_path).model.backend == "dummy"
 
 
+def test_defaults_select_the_real_training_data_path() -> None:
+    """Bare defaults should use the maintained packed HF training path."""
+    cfg = Config()
+
+    assert cfg.data.packing_mode == "bin"
+    assert cfg.data.packing_buffer_docs == 256
+    assert cfg.data.grain_prefetch == 2
+    assert cfg.data.tokenizer.kind == "hf"
+    assert cfg.data.tokenizer.add_eos is True
+    validate_config(cfg)
+
+
+def test_hf_dataset_name_may_be_omitted() -> None:
+    """Single-config HF repositories should accept the Datasets default config."""
+    cfg = replace(_base_cfg(), data=replace(_hf_data(), hf_name=None))
+
+    validate_config(cfg)
+
+
 def test_config_variables_must_be_a_mapping() -> None:
     """Variable resolution requires a mapping."""
     with pytest.raises(ValueError, match="variables"):
@@ -334,7 +353,7 @@ def test_data_and_logging_validation_rejects_invalid_values() -> None:
         (
             lambda cfg: replace(
                 cfg,
-                data=replace(cfg.data, packing_mode="bin", packing_buffer_docs=1),
+                data=replace(cfg.data, packing_mode="bin", packing_buffer_docs=0),
             ),
             "packing_buffer_docs",
         ),
@@ -644,7 +663,12 @@ def _tokenizer_resolution_cfg(
             backend="local_text",
             local_text="tokenizer config text\n",
             tokenizer=tokenizer
-            or TokenizerConfig(kind="byte", vocab_size_multiple=128, max_doc_tokens=None),
+            or TokenizerConfig(
+                kind="byte",
+                vocab_size_multiple=128,
+                add_eos=False,
+                max_doc_tokens=None,
+            ),
         ),
         train=TrainConfig(
             steps=train_steps,
@@ -661,7 +685,7 @@ def test_vocab_size_rounds_up_to_multiple() -> None:
     """Vocab size should round up to configured multiple."""
     cfg = _tokenizer_resolution_cfg(
         model=ModelConfig(backend="dummy", vocab_size=300, d_model=32),
-        tokenizer=TokenizerConfig(kind="byte", vocab_size_multiple=128),
+        tokenizer=TokenizerConfig(kind="byte", vocab_size_multiple=128, add_eos=False),
     )
     tok = _DummyTokenizer(size=256, bos=None, eos=None, pad=None)
     updated = resolve_tokenizer_config(cfg, tok)
@@ -748,7 +772,12 @@ def test_default_max_doc_tokens_disables_truncation() -> None:
 def test_nonpositive_max_doc_tokens_is_rejected(value: int) -> None:
     """Only null or a positive explicit truncation cap is valid."""
     cfg = _tokenizer_resolution_cfg(
-        tokenizer=TokenizerConfig(kind="byte", vocab_size_multiple=128, max_doc_tokens=value),
+        tokenizer=TokenizerConfig(
+            kind="byte",
+            vocab_size_multiple=128,
+            add_eos=False,
+            max_doc_tokens=value,
+        ),
         train_steps=10,
         train_seq_len=16,
     )
@@ -791,6 +820,7 @@ data:
   local_text: hello
   tokenizer:
     kind: byte
+    add_eos: false
     vocab_size_multiple: 128
 """
     )

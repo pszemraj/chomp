@@ -128,7 +128,7 @@ class TokenizerConfig:
     embeddings up to a GPU-friendly multiple (default: 128).
     """
 
-    kind: TokenizerKind = "byte"
+    kind: TokenizerKind = "hf"
 
     # HF tokenizer
     hf_name_or_path: str | None = "pszemraj/bytebpe-tokenizer-32k-mlm"
@@ -148,7 +148,7 @@ class TokenizerConfig:
 
     # Special token insertion
     add_bos: bool = False
-    add_eos: bool = False
+    add_eos: bool = True
 
     # Optional truncation (in tokens) per document before packing
     max_doc_tokens: int | None = None
@@ -179,7 +179,7 @@ class DataConfig:
     # HF streaming dataset spec
     # TODO: v0 is single-source only; add multi-source mixing when needed.
     hf_dataset: str = "Zyphra/Zyda-2"
-    hf_name: str = "sample-100BT"
+    hf_name: str | None = "sample-100BT"
     hf_split: str = "train"
     hf_revision: str | None = "main"
     # Evaluation split. None uses a disjoint content-hash holdout from hf_split.
@@ -201,9 +201,10 @@ class DataConfig:
     local_text: str = "Hello from chomp.\n"
 
     # Packing mode: sequential stream packer, bin-packing (FFD), or multipack.
-    packing_mode: PackingMode = "sequential"
-    # Bin-packing buffer size (documents). Must be >= batch_size * grad_accum.
-    packing_buffer_docs: int = 128
+    packing_mode: PackingMode = "bin"
+    # Bin-packing lookahead size (prepared chunks). Values below the number of
+    # output rows are raised to that effective minimum at runtime.
+    packing_buffer_docs: int = 256
     # Optional cap on how many documents may be packed into a single bin.
     packing_max_docs_per_bin: int | None = None
     # Multipack lookahead group size (documents). Nothing is emitted until this
@@ -228,7 +229,7 @@ class DataConfig:
     window_shuffle_max_rows: int = 4_096
 
     # Grain pipeline settings.
-    grain_prefetch: int = 0
+    grain_prefetch: int = 2
 
     # Validation set creation from the explicitly selected split/source.
     max_eval_samples: int = 1000
@@ -937,8 +938,8 @@ def _validate_data(cfg: Config) -> None:
     if cfg.data.backend == "hf":
         if not cfg.data.hf_dataset:
             _vfail("data.hf_dataset must be non-empty when data.backend='hf'")
-        if not cfg.data.hf_name:
-            _vfail("data.hf_name must be non-empty when data.backend='hf' (use named configs)")
+        if cfg.data.hf_name is not None and not cfg.data.hf_name.strip():
+            _vfail("data.hf_name must be null or non-empty when data.backend='hf'")
         if not cfg.data.hf_split:
             _vfail("data.hf_split must be non-empty when data.backend='hf'")
         if cfg.data.hf_revision is not None and not cfg.data.hf_revision.strip():
@@ -993,18 +994,11 @@ def _validate_data(cfg: Config) -> None:
             "data.packing_max_docs_per_bin must be positive when set, "
             f"got {cfg.data.packing_max_docs_per_bin}"
         )
-    if cfg.data.packing_mode == "bin":
-        if cfg.data.packing_buffer_docs <= 0:
-            _vfail(
-                "data.packing_buffer_docs must be positive when packing_mode='bin', "
-                f"got {cfg.data.packing_buffer_docs}"
-            )
-        min_docs = cfg.train.batch_size * cfg.train.grad_accum
-        if cfg.data.packing_buffer_docs < min_docs:
-            _vfail(
-                "data.packing_buffer_docs must be >= train.batch_size * train.grad_accum "
-                f"({min_docs}), got {cfg.data.packing_buffer_docs}"
-            )
+    if cfg.data.packing_mode == "bin" and cfg.data.packing_buffer_docs <= 0:
+        _vfail(
+            "data.packing_buffer_docs must be positive when packing_mode='bin', "
+            f"got {cfg.data.packing_buffer_docs}"
+        )
     if cfg.data.packing_mode == "multipack" and cfg.data.packing_group_docs <= 0:
         _vfail(
             "data.packing_group_docs must be positive when packing_mode='multipack', "

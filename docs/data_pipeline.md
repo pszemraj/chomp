@@ -38,8 +38,8 @@ Inside the compiled train step, the batch is sliced along the microbatch axis to
 
 `data.tokenizer.kind` selects the tokenizer:
 
-- `byte` (default): a simple byte-level tokenizer for infrastructure bring-up
-- `hf`: `transformers.AutoTokenizer` for real pretraining
+- `hf` (default): `transformers.AutoTokenizer` for real pretraining
+- `byte`: a simple byte-level tokenizer for offline infrastructure bring-up
 
 When using `hf`, chomp resolves tokenizer-dependent model settings (`model.vocab_size`, special token IDs) before training starts. Tokenizer knobs are defined in [Config Reference](config-reference.yaml) under `data.tokenizer.*`.
 

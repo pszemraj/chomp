@@ -8,10 +8,10 @@ Related: [Data Pipeline](data_pipeline.md), [Config Reference](config-reference.
 
 chomp uses a Grain-backed input pipeline and supports three packing strategies, all emitting fixed-length windows of `seq_len`:
 
-1) **Sequential packer** (`data.packing_mode: sequential`, default)
+1) **Sequential packer** (`data.packing_mode: sequential`)
    - Appends tokenized documents into a rolling buffer and emits windows in stream order.
 
-2) **Bin packer** (`data.packing_mode: bin`)
+2) **Bin packer** (`data.packing_mode: bin`, default)
    - Buffers multiple documents, seeds bins from the oldest candidates, and uses a First-Fit-Decreasing heuristic to fill remaining capacity.
    - Useful for higher utilization when documents are short or variable length.
    - Note this is a **length-based local reorder with bounded lookahead**, not "stream order with less padding": fill candidates are length-sorted, but FIFO seeds guarantee that no old short candidate can starve.
@@ -24,7 +24,7 @@ Each window follows the [Data Pipeline batch contract](data_pipeline.md#batch-co
 
 Key bin-packing knobs:
 
-- `data.packing_buffer_docs`: number of documents to buffer before packing.
+- `data.packing_buffer_docs`: prepared-chunk lookahead before packing. Values below `A*B` are raised to `A*B` and logged.
 - `data.packing_max_docs_per_bin`: optional cap on documents per bin.
 
 Key multipack knobs:
