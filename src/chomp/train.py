@@ -51,13 +51,15 @@ from chomp.ckpt import (
     check_resume_compat,
     default_ckpt_dir,
     make_manager,
-    restore_at_step,
+    restore_data_state_at_step,
     restore_meta_at_step,
+    restore_train_state_at_step,
     save,
 )
 from chomp.config import (
     Config,
     derived_deterministic,
+    read_config_mapping,
     resolve_decay_horizon,
     strict_packed_segments,
 )
@@ -601,7 +603,8 @@ def _maybe_restore_state(
     abstract_state: Any,
     data_it: Any,
     cfg: Config,
-) -> tuple[TrainState, dict[str, Any] | None]:
+    tokenizer: Any,
+) -> tuple[TrainState, dict[str, Any] | None, Any]:
     """Restore state if requested, otherwise return the initial state.
 
     :param Literal["none", "latest"] | int resume: Resume selector.
@@ -610,10 +613,11 @@ def _maybe_restore_state(
     :param Any abstract_state: Abstract train state for restore shape.
     :param Any data_it: Data iterator to restore.
     :param Config cfg: Training configuration.
-    :return tuple: (TrainState, meta) where meta is checkpoint metadata if restored.
+    :param Any tokenizer: Prepared tokenizer used to rebuild an incompatible data stream.
+    :return tuple: Train state, checkpoint metadata, and active data iterator.
     """
     if resume == "none":
-        return state0, None
+        return state0, None, data_it
     if manager is None:
         raise RuntimeError("resume requested but checkpointing is disabled")
 
@@ -633,18 +637,31 @@ def _maybe_restore_state(
             )
 
     # Validate metadata before Grain restores/replays any iterator buffers.
-    # A pipeline schema or source mismatch must fail without reading up to a
-    # full document/packed shuffle window from an incompatible source.
+    # Strict semantic mismatches fail before an incompatible source is read.
     meta = restore_meta_at_step(manager, step=step_r)
     check_resume_compat(cfg, meta)
-    _, state, restored_meta = restore_at_step(
+    state, restored_meta = restore_train_state_at_step(
         manager,
         step=step_r,
         abstract_train_state=abstract_state,
-        data_iter=data_it,
     )
-    print(f"[chomp] resumed from checkpoint step {step_r}")
-    return state, restored_meta
+    try:
+        restore_data_state_at_step(manager, step=step_r, data_iter=data_it)
+        stream_note = ""
+    except Exception as exc:
+        if cfg.checkpoint.resume_compat == "strict":
+            raise
+        logger.warning(
+            "Checkpoint data state could not be applied to the current pipeline; "
+            "resuming train state at step %d from a fresh data stream: %s",
+            step_r,
+            exc,
+        )
+        _close_iterator(data_it, label="incompatible training data iterator")
+        data_it = build_train_iterator(cfg, tokenizer=tokenizer)
+        stream_note = " with a fresh data stream"
+    print(f"[chomp] resumed from checkpoint step {step_r}{stream_note}")
+    return state, restored_meta, data_it
 
 
 def _validate_packing_capabilities(cfg: Config, *, params: Any, static: Any) -> None:
@@ -1278,18 +1295,28 @@ def run(
     if dry_run and resume != "none":
         raise RuntimeError("dry_run does not support resume; use a fresh run.")
 
-    # Checkpointed runs need content identity, not a mutable name: resolve a
-    # branch/tag/default ref to its commit once, up front, so the resolved
-    # config, fingerprint, and resume-compat all see the pinned value.
-    if cfg.data.backend == "hf" and cfg.checkpoint.enabled:
-        resolved_revision = resolve_dataset_revision(cfg.data.hf_dataset, cfg.data.hf_revision)
+    run_dir = resolve_run_dir(cfg, config_path=config_path)
+
+    # Fresh checkpointed runs resolve a mutable Hub ref once. Resume reuses
+    # that run's resolved revision, so upstream branch movement and offline
+    # operation cannot change or block an existing run.
+    if cfg.data.backend == "hf" and cfg.checkpoint.enabled and not dry_run:
+        if resume != "none" and cfg.logging.run_dir is not None and run_dir.exists():
+            saved_data = read_config_mapping(run_dir / "config_resolved.json")["data"]
+            if saved_data["hf_dataset"] == cfg.data.hf_dataset:
+                resolved_revision = saved_data["hf_revision"]
+            else:
+                resolved_revision = resolve_dataset_revision(
+                    cfg.data.hf_dataset, cfg.data.hf_revision
+                )
+        else:
+            resolved_revision = resolve_dataset_revision(cfg.data.hf_dataset, cfg.data.hf_revision)
         if resolved_revision != cfg.data.hf_revision:
             logger.info(
                 "Resolved data.hf_revision %r -> %s", cfg.data.hf_revision, resolved_revision
             )
             cfg = dc_replace(cfg, data=dc_replace(cfg.data, hf_revision=resolved_revision))
 
-    run_dir = resolve_run_dir(cfg, config_path=config_path)
     cfg = dc_replace(cfg, logging=dc_replace(cfg.logging, run_dir=str(run_dir)))
     with _StopSignalState() as stop_request:
         return _run_impl(
@@ -1358,13 +1385,14 @@ def _run_impl(
 
     try:
         # Restore if requested.
-        state, resume_meta = _maybe_restore_state(
+        state, resume_meta, data_it = _maybe_restore_state(
             resume=resume,
             manager=manager,
             state0=state0,
             abstract_state=abstract_state,
             data_it=data_it,
             cfg=cfg,
+            tokenizer=tokenizer,
         )
 
         train_step = make_train_step(cfg, static=static, tx=tx, lr_schedule=schedule)

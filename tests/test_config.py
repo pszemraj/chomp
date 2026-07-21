@@ -164,6 +164,13 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
             ),
             "warmup_steps",
         ),
+        (
+            lambda cfg: replace(
+                cfg,
+                checkpoint=replace(cfg.checkpoint, resume_compat="invalid"),
+            ),
+            "resume_compat",
+        ),
     ]
 
     for mutate, match in cases:

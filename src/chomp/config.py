@@ -38,6 +38,7 @@ DatasetBackend = Literal["hf", "local_text"]
 TokenizerKind = Literal["byte", "hf"]
 PackingMode = Literal["sequential", "bin", "multipack"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
+ResumeCompat = Literal["strict", "warn"]
 
 
 @dataclass(frozen=True)
@@ -305,16 +306,14 @@ class OptimConfig:
 
 @dataclass(frozen=True)
 class CheckpointConfig:
-    """Orbax checkpointing configuration (Phase 3).
-
-    chomp treats resume correctness as a contract.
-    """
+    """Orbax checkpointing and resume configuration."""
 
     enabled: bool = True
 
     save_every: int = 5000
     max_to_keep: int = 3
     async_save: bool = True
+    resume_compat: ResumeCompat = "warn"
 
 
 @dataclass(frozen=True)
@@ -805,6 +804,11 @@ def _validate_optim(cfg: Config) -> None:
 
 def _validate_checkpoint(cfg: Config) -> None:
     """Validate checkpoint-related config fields."""
+    if cfg.checkpoint.resume_compat not in ("strict", "warn"):
+        _vfail(
+            "checkpoint.resume_compat must be 'strict' or 'warn', got "
+            f"{cfg.checkpoint.resume_compat!r}"
+        )
     if cfg.checkpoint.enabled:
         if cfg.checkpoint.save_every <= 0:
             _vfail(f"checkpoint.save_every must be positive, got {cfg.checkpoint.save_every}")

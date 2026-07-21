@@ -1,6 +1,6 @@
 # Checkpointing and Resume
 
-chomp uses Orbax to checkpoint **both** training state and data iterator state. Resume is treated as a contract, not a best-effort feature.
+chomp uses Orbax to checkpoint **both** training state and data iterator state. An unchanged run resumes exactly; intentional config changes use the compatibility policy below.
 
 Related: [Config Reference](config-reference.yaml) (`checkpoint.*`), [Training Loop](training.md), [Data Pipeline](data_pipeline.md).
 
@@ -46,20 +46,18 @@ A final save that fails on an otherwise clean exit fails the run; training never
 
 ## Resume compatibility checks
 
-On resume, chomp compares the checkpoint metadata against the current config. Missing or invalid `tokens_seen` metadata is also rejected so cumulative token accounting resumes exactly. Hard failures include:
+On resume, chomp compares the checkpoint metadata against the current config. `checkpoint.resume_compat` controls semantic mismatches:
 
-- data source identity (`hf_dataset`, `hf_name`, `split`, `hf_revision`, `text_key`)
-- effective stream-order and termination semantics (`shuffle`, its active buffer limits and seed, `repeat`, and derived token- and row-bounded packed-window shuffle rows/effective seed); inert raw limits do not block resume
-- tokenizer settings and vocab rounding
-- packing mode, packing buffer sizes, and strict-segment settings
-- objective knobs (`mask_boundary_loss`, `train_on_eos`)
-- eval selection (`max_eval_samples` plus the resolved eval split and content partition while eval is enabled): eval tokens are rebuilt from the live stream on every start, so selection drift would silently change what `eval_loss` measures
-- batch shape invariants (`seq_len`, `batch_size`, `grad_accum`)
-- active model and optimizer config, `train.deterministic`
+- `warn` (default) logs each data, objective, batch-shape, model-runtime, optimizer-value, schedule, or eval-selection change and continues. This supports ordinary workflows such as extending `train.steps`, lowering the LR, or changing eval size.
+- `strict` rejects those semantic changes before restore when exact continuation is required.
 
-Resume comparisons ignore backend- or mode-specific settings when execution cannot consume them, such as Megalodon fields under DummyLM or Muon settings under AdamW. Muon remains a hybrid optimizer whose non-Muon leaves use AdamW, so `optim.adam` is active in both optimizer modes.
+Both modes always reject missing/invalid checkpoint metadata, invalid `tokens_seen`, model parameter-tree changes, and optimizer-state structure changes such as switching `optim.name`. Muon routing flags and enabling/disabling its optional `consistent_rms` transform are structural as well. These cannot consume the saved arrays.
 
-Remaining warnings are logged so you can make an informed decision, but anything that changes what data the resumed run sees or what it optimizes is an error, not a warning.
+Warn mode first restores model parameters, optimizer state, RNG, and step, then asks Grain to restore the iterator. If a changed pipeline cannot accept that data state, chomp logs the failure and continues from a fresh data stream. Strict mode propagates the Grain restore failure.
+
+Resume comparisons ignore settings that cannot affect restored execution, including fresh-model `model.init_mode`, activation-checkpoint/segmented-scan implementation choices, tokenizer download settings, and vocab rounding once the resolved model vocabulary is already checked. Keys absent from older checkpoint metadata are skipped; the actual array restore remains the authority on structural compatibility.
+
+For Hugging Face data, a fresh checkpointed run resolves its configured branch/tag to a commit. Resume reads that commit from the run's `config_resolved.json` instead of resolving the mutable ref again, so an upstream update or offline Hub API does not block continuation.
 
 ## Typical usage
 
@@ -71,12 +69,12 @@ chomp train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run
 chomp train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run --resume latest
 ```
 
-If a mismatch is detected, resume fails fast with a detailed error.
+Add `-o checkpoint.resume_compat=strict` when exact semantic continuation is required.
 
 ## Scope of exactness
 
 The exact-resume contract covers checkpoint save and restore.
 
-What resume guarantees is exact **state and data replay**: parameters, optimizer state, RNG, and the data iterator position restore exactly, so the resumed run optimizes the same objective over the same batches in the same order as the continuous run.
+With unchanged config, resume guarantees exact **state and data replay**: parameters, optimizer state, RNG, and the data iterator position restore exactly, so the resumed run optimizes the same objective over the same batches in the same order as the continuous run. Warn-mode mismatches deliberately relax the data/objective portion while retaining the restored train state.
 
 GPU step arithmetic is bit-identical only with the opt-in setting described in [Training: GPU environment notes](training.md#gpu-environment-notes).

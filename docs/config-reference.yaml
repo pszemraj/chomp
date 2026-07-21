@@ -292,7 +292,7 @@ train:
   # train.profile_dir -- string | null; default: null, computed as <run_dir>/trace; otherwise nonempty. Used only with profile=true; explicit relative paths resolve from the process working directory.
   profile_dir: "<nonempty string | null>"
 
-# optim -- mapping | null; default: {}. Selects the optimizer and warmup-plus-cosine schedule; all supplied nested values are validated even when inactive. Top-level and Adam values are hard resume invariants; Muon values are compared when either run uses Muon.
+# optim -- mapping | null; default: {}. Selects the optimizer and warmup-plus-cosine schedule; all supplied nested values are validated even when inactive. Value changes warn on default resume and are rejected by checkpoint.resume_compat=strict; optimizer-state structure changes always fail.
 optim:
   # optim.name -- string; default: adamw; one of: adamw | muon. Muon handles eligible projection matrices and nested Adam handles all others; no eligible matrices falls back to AdamW with a warning. Maintained full-run recipes use Muon; AdamW is the conventional baseline.
   name: "<adamw | muon>"
@@ -309,7 +309,7 @@ optim:
   # optim.warmup_steps -- int; default: 10; >= 0 and < train.steps. Linear warmup duration; no ratio alternative exists. Maintained 100k-step recipes use 1000.
   warmup_steps: "<int>"
 
-  # optim.decay_steps -- int | null; default: null, computed as train.steps - warmup_steps; otherwise > 0. This post-warmup duration plus warmup_steps is a hard resume invariant; use null for a fixed-horizon run, or set it before the first checkpoint if train.steps may later increase.
+  # optim.decay_steps -- int | null; default: null, computed as train.steps - warmup_steps; otherwise > 0. Extending train.steps with null extends the schedule and produces a resume warning; set an explicit duration when the original horizon should remain fixed.
   decay_steps: "<int | null>"
 
   # optim.min_lr_ratio -- float; default: 0.0; 0 <= value <= 1. Final schedule floor divided by optim.lr; maintained 100k-step recipes use 0.1, while an explicit decay horizon may end before or after train.steps.
@@ -368,6 +368,9 @@ checkpoint:
 
   # checkpoint.async_save -- bool; default: true; used only when enabled. Overlaps I/O with training and is recommended for GPU runs; graceful shutdown waits, but abrupt termination can lose the newest in-flight save.
   async_save: "<bool>"
+
+  # checkpoint.resume_compat -- string; default: warn; one of: strict | warn. Warn mode permits intentional data, objective, schedule, and optimizer-value changes while logging each mismatch; strict rejects those changes. Parameter/optimizer-state structure mismatches always fail. If warn mode cannot apply saved Grain state to a changed pipeline, train state restores and data restarts from the beginning.
+  resume_compat: "<strict | warn>"
 
 # logging -- mapping | null; default: {}. Relative artifact paths resolve under the final run directory unless stated otherwise.
 logging:

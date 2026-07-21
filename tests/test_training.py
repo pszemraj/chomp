@@ -439,6 +439,7 @@ def test_run_closes_manager_and_preflights_metadata(
 
     monkeypatch.setattr(ocp.CheckpointManager, "close", _tracked_close)
     cfg = make_small_run_cfg(tmp_path, decay_steps=1)
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, resume_compat="strict"))
     run(cfg, config_path=None, resume="none", dry_run=False)
     assert len(close_calls) == 1
 
@@ -450,7 +451,7 @@ def test_run_closes_manager_and_preflights_metadata(
         restore_calls += 1
         raise AssertionError("full restore ran before compatibility validation")
 
-    monkeypatch.setattr("chomp.train.restore_at_step", _unexpected_full_restore)
+    monkeypatch.setattr("chomp.train.restore_train_state_at_step", _unexpected_full_restore)
     incompatible = replace(cfg, data=replace(cfg.data, local_text="different corpus"))
     close_calls.clear()
 
@@ -459,6 +460,28 @@ def test_run_closes_manager_and_preflights_metadata(
 
     assert restore_calls == 0
     assert len(close_calls) == 1
+
+
+def test_warn_resume_restarts_incompatible_data_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    """A Grain restore failure must not discard a valid restored train state."""
+    cfg = make_small_run_cfg(tmp_path, decay_steps=2)
+    cfg = replace(cfg, train=replace(cfg.train, steps=1))
+    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
+
+    resumed = replace(cfg, train=replace(cfg.train, steps=2))
+
+    def _incompatible_data_state(*args: Any, **kwargs: Any) -> None:
+        """Inject the failure produced by a changed Grain pipeline schema."""
+        raise ValueError("incompatible Grain state")
+
+    monkeypatch.setattr("chomp.train.restore_data_state_at_step", _incompatible_data_state)
+    with caplog.at_level(logging.WARNING, logger="chomp.train"):
+        assert run(resumed, config_path=None, resume="latest", dry_run=False) == run_dir
+
+    assert "fresh data stream" in caplog.text
+    assert _checkpoint_steps(run_dir) == {1, 2}
 
 
 def test_checkpoint_saves_final_step(tmp_path: Path) -> None:
@@ -1235,8 +1258,8 @@ def test_checkpoint_disabled_run_rejects_nonfinite_final_metrics(
         run(cfg, config_path=None, resume="none", dry_run=False)
 
 
-def test_resume_rejects_seq_len_mismatch(tmp_path: Path) -> None:
-    """Resuming with different seq_len should raise RuntimeError."""
+def test_resume_warns_for_seq_len_mismatch(tmp_path: Path, caplog: LogCaptureFixture) -> None:
+    """A changed batch shape warns but remains resumable when state shapes fit."""
     base = Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
         data=DataConfig(
@@ -1277,8 +1300,9 @@ def test_resume_rejects_seq_len_mismatch(tmp_path: Path) -> None:
         logging=replace(base.logging, run_dir=str(run_dir)),
         train=replace(base.train, steps=3, seq_len=32),
     )
-    with pytest.raises(RuntimeError, match="Resume config mismatch"):
-        run(cfg_b, config_path=None, resume="latest")
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+        assert run(cfg_b, config_path=None, resume="latest") == run_dir
+    assert "train.seq_len" in caplog.text
 
 
 def test_dry_run_compiles_single_step(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1629,8 +1653,10 @@ def test_strict_packed_guard_raises_when_backend_unsupported(
         run(cfg, config_path=None, resume="none")
 
 
-def test_resume_compat_rejects_multipack_knob_changes(tmp_path: Path) -> None:
-    """Resume must reject changed packing_group_docs / packing_strict_segments.
+def test_resume_compat_warns_for_multipack_knob_changes(
+    tmp_path: Path, caplog: LogCaptureFixture
+) -> None:
+    """Default resume warns for changed packing order and objective knobs.
 
     group_docs changes which documents each multipack cycle packs (data-order
     divergence); strict_segments silently changes the training objective.
@@ -1651,22 +1677,27 @@ def test_resume_compat_rejects_multipack_knob_changes(tmp_path: Path) -> None:
     check_resume_compat(cfg, meta)  # identical config resumes cleanly
 
     changed_group = replace(cfg, data=replace(cfg.data, packing_group_docs=16))
-    with pytest.raises(RuntimeError, match="packing_group_docs"):
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
         check_resume_compat(changed_group, meta)
+    assert "packing_group_docs" in caplog.text
 
+    caplog.clear()
     changed_strict = replace(cfg, data=replace(cfg.data, packing_strict_segments=False))
-    with pytest.raises(RuntimeError, match="packing_strict_segments"):
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
         check_resume_compat(changed_strict, meta)
+    assert "packing_strict_segments" in caplog.text
 
     binc = replace(cfg, data=replace(cfg.data, packing_mode="bin", packing_buffer_docs=8))
     bin_meta = _checkpoint_record(binc).to_dict()
     bin_changed = replace(binc, data=replace(binc.data, packing_strict_segments=False))
-    with pytest.raises(RuntimeError, match="packing_strict_segments"):
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
         check_resume_compat(bin_changed, bin_meta)
+    assert "packing_strict_segments" in caplog.text
 
 
 @pytest.mark.parametrize(
-    ("optimizer_name", "section", "blocks"),
+    ("optimizer_name", "section", "active"),
     [
         ("adamw", "adam", True),
         ("adamw", "muon", False),
@@ -1675,9 +1706,13 @@ def test_resume_compat_rejects_multipack_knob_changes(tmp_path: Path) -> None:
     ],
 )
 def test_resume_compat_tracks_consumed_optimizer_config(
-    tmp_path: Path, optimizer_name: str, section: str, blocks: bool
+    tmp_path: Path,
+    optimizer_name: str,
+    section: str,
+    active: bool,
+    caplog: LogCaptureFixture,
 ) -> None:
-    """Resume must gate every optimizer section consumed by the active transform.
+    """Optimizer value drift warns only when the active transform consumes it.
 
     Muon remains a hybrid: non-Muon leaves use AdamW, so ``optim.adam`` is
     active in both modes. Only ``optim.muon`` under plain AdamW is inert.
@@ -1685,7 +1720,8 @@ def test_resume_compat_tracks_consumed_optimizer_config(
     :param Path tmp_path: Temporary run directory root.
     :param str optimizer_name: Active optimizer mode.
     :param str section: Nested optimizer section to change.
-    :param bool blocks: Whether the changed section is consumed in this mode.
+    :param bool active: Whether the changed section is consumed in this mode.
+    :param LogCaptureFixture caplog: Captured resume warnings.
     """
     cfg = _base_cfg(tmp_path / f"run_{optimizer_name}_{section}")
     cfg = replace(cfg, optim=replace(cfg.optim, name=optimizer_name))
@@ -1702,11 +1738,9 @@ def test_resume_compat_tracks_consumed_optimizer_config(
             optim=replace(cfg.optim, muon=replace(cfg.optim.muon, momentum=0.9)),
         )
 
-    if blocks:
-        with pytest.raises(RuntimeError, match=f"optim.{section}"):
-            check_resume_compat(drifted, meta)
-    else:
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
         check_resume_compat(drifted, meta)
+    assert (f"optim.{section}" in caplog.text) is active
 
 
 def test_resume_compat_ignores_inert_dummy_model_config(tmp_path: Path) -> None:
@@ -1791,25 +1825,116 @@ def test_resume_compat_requires_valid_token_count(tmp_path: Path, tokens_seen: A
     ],
     ids=["window_shuffle", "mask_boundary", "train_on_eos", "deterministic"],
 )
-def test_resume_compat_rejects_stream_and_objective_drift(
-    tmp_path: Path, mutate: Any, match: str
+def test_resume_compat_warns_for_stream_and_objective_drift(
+    tmp_path: Path, mutate: Any, match: str, caplog: LogCaptureFixture
 ) -> None:
-    """Every knob that changes data order or the objective must hard-error on resume."""
+    """Data-order and objective changes warn without blocking default resume."""
     cfg = _base_cfg(tmp_path / "run_drift")
     meta = _checkpoint_record(cfg).to_dict()
-    with pytest.raises(RuntimeError, match=match):
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
         check_resume_compat(mutate(cfg), meta)
+    assert match in caplog.text
 
 
-def test_resume_compat_rejects_eval_selection_drift(tmp_path: Path) -> None:
-    """Eval tokens are rebuilt live on start; selection drift must hard-error."""
+def test_resume_compat_strict_rejects_semantic_drift(tmp_path: Path) -> None:
+    """Strict mode remains available for exact data/objective continuation."""
+    cfg = _base_cfg(tmp_path / "run_strict_drift")
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, resume_compat="strict"))
+    meta = _checkpoint_record(cfg).to_dict()
+    drifted = replace(cfg, data=replace(cfg.data, train_on_eos=not cfg.data.train_on_eos))
+
+    with pytest.raises(RuntimeError, match="train_on_eos"):
+        check_resume_compat(drifted, meta)
+
+
+def test_resume_compat_allows_schedule_and_optimizer_value_changes(
+    tmp_path: Path, caplog: LogCaptureFixture
+) -> None:
+    """Extending a run and lowering its LR must warn rather than refuse resume."""
+    cfg = _base_cfg(tmp_path / "run_extend")
+    cfg = replace(
+        cfg, train=replace(cfg.train, steps=10), optim=replace(cfg.optim, decay_steps=None)
+    )
+    meta = _checkpoint_record(cfg).to_dict()
+    drifted = replace(
+        cfg,
+        train=replace(cfg.train, steps=20),
+        optim=replace(
+            cfg.optim,
+            lr=cfg.optim.lr / 2,
+            weight_decay=cfg.optim.weight_decay / 2,
+            grad_clip_norm=cfg.optim.grad_clip_norm / 2,
+            warmup_steps=cfg.optim.warmup_steps + 1,
+            min_lr_ratio=0.1,
+            adam=replace(cfg.optim.adam, b1=0.8),
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+        check_resume_compat(drifted, meta)
+
+    for field in (
+        "train.steps",
+        "optim.decay_steps_effective",
+        "optim.lr",
+        "optim.weight_decay",
+        "optim.grad_clip_norm",
+        "optim.warmup_steps",
+        "optim.min_lr_ratio",
+        "optim.adam.b1",
+    ):
+        assert field in caplog.text
+
+
+def test_resume_compat_rejects_optimizer_structure_change(tmp_path: Path) -> None:
+    """Changing optimizer families still fails before incompatible state restore."""
+    cfg = _base_cfg(tmp_path / "run_optim_structure")
+    meta = _checkpoint_record(cfg).to_dict()
+    drifted = replace(cfg, optim=replace(cfg.optim, name="muon"))
+
+    with pytest.raises(RuntimeError, match="optim.name"):
+        check_resume_compat(drifted, meta)
+
+
+def test_resume_compat_ignores_new_and_inert_fields(
+    tmp_path: Path, caplog: LogCaptureFixture
+) -> None:
+    """New defaults and restore-inert knobs must not orphan a checkpoint."""
+    cfg = _base_cfg(tmp_path / "run_old_meta")
+    meta = _checkpoint_record(cfg).to_dict()
+    del meta["config"]["model"]["dropout"]
+    del meta["data_fingerprint"]["tokenizer"]["add_eos"]
+    drifted = replace(
+        cfg,
+        model=replace(cfg.model, init_mode="xavier", use_checkpoint=True),
+        data=replace(
+            cfg.data,
+            tokenizer=replace(
+                cfg.data.tokenizer,
+                hf_use_fast=not cfg.data.tokenizer.hf_use_fast,
+                hf_trust_remote_code=not cfg.data.tokenizer.hf_trust_remote_code,
+                vocab_size_multiple=cfg.data.tokenizer.vocab_size_multiple * 2,
+            ),
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+        check_resume_compat(drifted, meta)
+    assert "Resume config warnings" not in caplog.text
+
+
+def test_resume_compat_warns_for_eval_selection_drift(
+    tmp_path: Path, caplog: LogCaptureFixture
+) -> None:
+    """Eval selection drift warns without blocking training resume."""
     cfg = _base_cfg(tmp_path / "run_eval_drift")
     cfg = replace(cfg, data=replace(cfg.data, max_eval_samples=4))
     meta = _checkpoint_record(cfg).to_dict()
 
     drifted = replace(cfg, data=replace(cfg.data, max_eval_samples=8))
-    with pytest.raises(RuntimeError, match="max_eval_samples"):
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
         check_resume_compat(drifted, meta)
+    assert "max_eval_samples" in caplog.text
 
     hf = replace(
         cfg,
@@ -1825,8 +1950,10 @@ def test_resume_compat_rejects_eval_selection_drift(tmp_path: Path) -> None:
     )
     hf_meta = _checkpoint_record(hf).to_dict()
     split_drift = replace(hf, data=replace(hf.data, hf_eval_split="validation"))
-    with pytest.raises(RuntimeError, match="data.eval"):
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
         check_resume_compat(split_drift, hf_meta)
+    assert "data.eval" in caplog.text
 
 
 def test_resume_compat_ignores_eval_selection_when_disabled(tmp_path: Path) -> None:
@@ -1848,10 +1975,15 @@ def test_resume_compat_ignores_eval_selection_when_disabled(tmp_path: Path) -> N
         ("repeat", True, False, "data.repeat"),
     ],
 )
-def test_resume_compat_rejects_hf_source_drift(
-    tmp_path: Path, field: str, initial: Any, changed: Any, match: str
+def test_resume_compat_warns_for_hf_source_drift(
+    tmp_path: Path,
+    field: str,
+    initial: Any,
+    changed: Any,
+    match: str,
+    caplog: LogCaptureFixture,
 ) -> None:
-    """Every HF field that changes source order or identity is a hard error."""
+    """HF source-order and identity changes warn in the default mode."""
     cfg = _base_cfg(tmp_path / f"run_{field}")
     data = replace(
         cfg.data,
@@ -1866,8 +1998,9 @@ def test_resume_compat_rejects_hf_source_drift(
     meta = _checkpoint_record(cfg).to_dict()
     drifted = replace(cfg, data=replace(cfg.data, **{field: changed}))
 
-    with pytest.raises(RuntimeError, match=match):
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
         check_resume_compat(drifted, meta)
+    assert match in caplog.text
 
 
 def test_resume_compat_ignores_inert_shuffle_values(tmp_path: Path) -> None:
@@ -1909,8 +2042,10 @@ def test_resume_compat_ignores_inert_shuffle_values(tmp_path: Path) -> None:
     check_resume_compat(inert_hf_drift, _checkpoint_record(hf).to_dict())
 
 
-def test_resume_compat_rejects_local_window_shuffle_seed_drift(tmp_path: Path) -> None:
-    """Local window-shuffle replay must reject a changed data seed."""
+def test_resume_compat_warns_for_local_window_shuffle_seed_drift(
+    tmp_path: Path, caplog: LogCaptureFixture
+) -> None:
+    """Local window-shuffle seed drift warns in the default mode."""
     cfg = _base_cfg(tmp_path / "run_window_seed")
     cfg = replace(cfg, data=replace(cfg.data, window_shuffle_tokens=64))
     assert cfg.data.backend == "local_text"
@@ -1918,8 +2053,9 @@ def test_resume_compat_rejects_local_window_shuffle_seed_drift(tmp_path: Path) -
     meta = _checkpoint_record(cfg).to_dict()
 
     drifted = replace(cfg, data=replace(cfg.data, seed=cfg.data.seed + 1))
-    with pytest.raises(RuntimeError, match="window_shuffle_seed"):
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
         check_resume_compat(drifted, meta)
+    assert "window_shuffle_seed" in caplog.text
 
     disabled = replace(cfg, data=replace(cfg.data, window_shuffle_tokens=0))
     disabled_meta = _checkpoint_record(disabled).to_dict()
@@ -2078,6 +2214,70 @@ def test_run_pins_resolved_dataset_revision(
     # The same resolved cfg object feeds checkpoint meta and data_fingerprint,
     # so the recorded source identity is the commit, not the ref.
     assert data_fingerprint(build_config(resolved))["source"]["revision"] == "a" * 40
+
+
+def test_resume_reuses_pinned_dataset_revision_without_hub_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+) -> None:
+    """Resume must reuse the run's commit even when the YAML still says main."""
+    patch_hf_load_dataset({"train": [{"text": "abcdefgh"} for _ in range(64)]})
+    resolve_calls = 0
+
+    def _resolve_once(dataset: str, revision: str | None) -> str:
+        """Resolve the fresh run and fail if resume calls the Hub resolver."""
+        nonlocal resolve_calls
+        resolve_calls += 1
+        if resolve_calls > 1:
+            raise AssertionError("resume unexpectedly resolved the live Hub ref")
+        assert (dataset, revision) == ("dummy", "main")
+        return "b" * 40
+
+    monkeypatch.setattr("chomp.train.resolve_dataset_revision", _resolve_once)
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_pinned_resume", decay_steps=2)
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_split="train",
+            hf_revision="main",
+            shuffle=False,
+            max_eval_samples=0,
+        ),
+        train=replace(cfg.train, steps=1),
+    )
+    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
+
+    resumed = replace(cfg, train=replace(cfg.train, steps=2))
+    assert run(resumed, config_path=None, resume="latest", dry_run=False) == run_dir
+    assert resolve_calls == 1
+
+
+def test_dry_run_skips_dataset_revision_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dry-run setup must not add an eager Hub revision request."""
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_dry_revision")
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, backend="hf", hf_dataset="dummy", hf_revision="main"),
+    )
+
+    def _unexpected_resolve(dataset: str, revision: str | None) -> str:
+        raise AssertionError(f"unexpected Hub resolution for {dataset}@{revision}")
+
+    monkeypatch.setattr("chomp.train.resolve_dataset_revision", _unexpected_resolve)
+    monkeypatch.setattr(
+        "chomp.train._run_impl", lambda config, **kwargs: Path(config.logging.run_dir)
+    )
+
+    assert run(cfg, config_path=None, resume="none", dry_run=True) == Path(
+        cfg.logging.run_dir or ""
+    )
 
 
 def test_train_step_does_not_recompile_across_steps(caplog: LogCaptureFixture) -> None:
