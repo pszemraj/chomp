@@ -62,6 +62,7 @@ from chomp.train import (
     _StopSignalState,
     build_optimizer,
     init_train_state,
+    make_train_step,
     run,
 )
 from chomp.types import Batch, TrainState
@@ -2039,3 +2040,57 @@ def test_megalodon_backend_advertises_segment_reset() -> None:
     cfg = Config(model=make_tiny_megalodon_model(vocab_size=64))
     params, static = build_model(cfg, key=jax.random.PRNGKey(0))
     assert supports_packed_segments(params, static)
+
+
+def test_train_step_does_not_recompile_across_steps(caplog: LogCaptureFixture) -> None:
+    """Fixed [A, B, T] shapes must compile train_step exactly once.
+
+    The first call must produce compile logs (proving detection works); a
+    second call with same-shape, different-content batches must produce none.
+    """
+    cfg = Config(
+        model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
+        data=DataConfig(
+            backend="local_text",
+            repeat=True,
+            local_text="The quick brown fox jumps over the lazy dog.\n",
+            tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
+        ),
+        train=TrainConfig(
+            seed=0,
+            steps=2,
+            batch_size=1,
+            seq_len=16,
+            grad_accum=2,
+            jit=True,
+            allow_cpu=True,
+            deterministic=True,
+        ),
+        optim=OptimConfig(lr=1e-3, weight_decay=0.0, grad_clip_norm=1.0, warmup_steps=0),
+    )
+    key = jax.random.PRNGKey(cfg.train.seed)
+    key, k_model = jax.random.split(key)
+    params, static = build_model(cfg, key=k_model)
+    tx, sched = build_optimizer(cfg, params)
+    state = init_train_state(params=params, tx=tx, key=key)
+    step = make_train_step(cfg, static=static, tx=tx, lr_schedule=sched)
+
+    it = build_train_iterator(cfg)
+    first = jax.device_put(next(it))
+    second = jax.device_put(next(it))
+
+    def compile_messages() -> list[str]:
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if "Compiling" in r.getMessage() or "Finished tracing" in r.getMessage()
+        ]
+
+    with caplog.at_level(logging.DEBUG, logger="jax"), jax.log_compiles(True):
+        state, _ = step(state, first)
+        jax.block_until_ready(state.params)
+        assert compile_messages(), "no compile logs on first call; detection is broken"
+        caplog.clear()
+        state, _ = step(state, second)
+        jax.block_until_ready(state.params)
+        assert not compile_messages(), compile_messages()
