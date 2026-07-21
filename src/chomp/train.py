@@ -52,9 +52,9 @@ from chomp.ckpt import (
     default_ckpt_dir,
     make_manager,
     restore_data_state_at_step,
-    restore_meta_at_step,
     restore_train_state_at_step,
     save,
+    validate_checkpoint_steps,
 )
 from chomp.config import (
     Config,
@@ -84,7 +84,11 @@ from chomp.model import (
     training_loss,
 )
 from chomp.types import IGNORE_INDEX, Batch, TrainState
-from chomp.utils.ckpt_paths import load_config_for_checkpoint, resolve_checkpoint_path
+from chomp.utils.ckpt_paths import (
+    load_config_for_checkpoint,
+    read_checkpoint_meta,
+    resolve_checkpoint_path,
+)
 from chomp.utils.devices import validate_default_device
 from chomp.utils.io import (
     MetricsWriter,
@@ -308,6 +312,7 @@ def _setup_run_dir_and_tokenizer(
     config_path: str | None,
     allow_existing: bool,
     dry_run: bool,
+    resume_step_dir: Path | None,
 ) -> tuple[
     Config,
     Any,
@@ -325,6 +330,7 @@ def _setup_run_dir_and_tokenizer(
     :param str | None config_path: Optional config path for run_dir bookkeeping.
     :param bool allow_existing: Whether to reuse an existing run directory.
     :param bool dry_run: If True, skip heavy data/generation setup.
+    :param Path | None resume_step_dir: Selected checkpoint for compatibility preflight.
     :return tuple[Config, Any, Path, Path, list[list[int]], GenerationSettings | None, list[list[int]] | None, jax.Array | None, random.Random | None]:
         Updated config, tokenizer, run/metrics paths, eval tokens, generation
         settings, prompt pool, key, and RNG.
@@ -338,6 +344,18 @@ def _setup_run_dir_and_tokenizer(
             tokenizer = load_tokenizer_snapshot(run_dir_hint, cfg)
 
     cfg, tokenizer = prepare_tokenizer_and_config(cfg, tokenizer=tokenizer)
+
+    if resume_step_dir is not None:
+        # Reject strict incompatibilities before constructing remote eval or
+        # training streams. The later Orbax restore validates the same meta
+        # against the restored train-state step.
+        meta = read_checkpoint_meta(resume_step_dir)
+        validate_checkpoint_steps(
+            directory_step=int(resume_step_dir.name),
+            meta=meta,
+            train_state=None,
+        )
+        check_resume_compat(cfg, meta)
 
     run_dir = create_run_dir(cfg, config_path=config_path, allow_existing=allow_existing)
     if cfg.logging.log_file is not None:
@@ -599,9 +617,54 @@ def _save_training_checkpoint(
     )
 
 
+def _resolve_resume_step_dir(
+    cfg: Config,
+    *,
+    run_dir: Path,
+    resume: Literal["none", "latest"] | int,
+) -> Path | None:
+    """Resolve and validate the exact checkpoint step selected for resume.
+
+    :param Config cfg: Current training configuration.
+    :param Path run_dir: Existing run directory.
+    :param resume: Resume selector.
+    :raises RuntimeError: If resume is disabled or selects an older retained step.
+    :return Path | None: Selected checkpoint step, or None for a fresh run.
+    """
+    if resume == "none":
+        return None
+    if not cfg.checkpoint.enabled:
+        raise RuntimeError("resume requested but checkpointing is disabled")
+    if cfg.logging.run_dir is None:
+        raise RuntimeError(
+            "Resume requested but logging.run_dir is null. "
+            "Set logging.run_dir to an existing run directory to resume."
+        )
+    if not run_dir.exists():
+        raise RuntimeError(f"Resume requested but run directory does not exist: {run_dir}")
+
+    latest_dir, _ = resolve_checkpoint_path(default_ckpt_dir(run_dir))
+    if resume == "latest":
+        return latest_dir
+
+    requested_step = int(resume)
+    latest_step = int(latest_dir.name)
+    if requested_step < latest_step:
+        raise RuntimeError(
+            f"Refusing to resume checkpoint step {requested_step} in place because newer "
+            f"step {latest_step} already exists in {latest_dir.parent}. Use "
+            "--resume latest, or copy the older checkpoint into a new run directory "
+            "before branching from it."
+        )
+    if requested_step == latest_step:
+        return latest_dir
+    step_dir, _ = resolve_checkpoint_path(default_ckpt_dir(run_dir) / str(requested_step))
+    return step_dir
+
+
 def _maybe_restore_state(
     *,
-    resume: Literal["none", "latest"] | int,
+    resume_step: int | None,
     manager: Any | None,
     state0: TrainState,
     abstract_state: Any,
@@ -611,7 +674,7 @@ def _maybe_restore_state(
 ) -> tuple[TrainState, dict[str, Any] | None, Any]:
     """Restore state if requested, otherwise return the initial state.
 
-    :param Literal["none", "latest"] | int resume: Resume selector.
+    :param int | None resume_step: Selected checkpoint step, or None for a fresh run.
     :param Any | None manager: Checkpoint manager.
     :param TrainState state0: Initial state.
     :param Any abstract_state: Abstract train state for restore shape.
@@ -620,30 +683,11 @@ def _maybe_restore_state(
     :param Any tokenizer: Prepared tokenizer used to rebuild an incompatible data stream.
     :return tuple: Train state, checkpoint metadata, and active data iterator.
     """
-    if resume == "none":
+    if resume_step is None:
         return state0, None, data_it
     if manager is None:
         raise RuntimeError("resume requested but checkpointing is disabled")
-
-    latest = manager.latest_step()
-    if resume == "latest":
-        if latest is None:
-            raise FileNotFoundError(f"No checkpoints found in {manager.directory}")
-        step_r = int(latest)
-    else:
-        step_r = int(resume)
-        if latest is not None and step_r < int(latest):
-            raise RuntimeError(
-                f"Refusing to resume checkpoint step {step_r} in place because newer "
-                f"step {int(latest)} already exists in {manager.directory}. Use "
-                "--resume latest, or copy the older checkpoint into a new run directory "
-                "before branching from it."
-            )
-
-    # Validate metadata before Grain restores/replays any iterator buffers.
-    # Strict semantic mismatches fail before an incompatible source is read.
-    meta = restore_meta_at_step(manager, step=step_r)
-    check_resume_compat(cfg, meta)
+    step_r = int(resume_step)
     state, restored_meta = restore_train_state_at_step(
         manager,
         step=step_r,
@@ -1300,6 +1344,7 @@ def run(
         raise RuntimeError("dry_run does not support resume; use a fresh run.")
 
     run_dir = resolve_run_dir(cfg, config_path=config_path)
+    resume_step_dir = _resolve_resume_step_dir(cfg, run_dir=run_dir, resume=resume)
 
     # Checkpointed runs retain both the user-facing ref and the immutable
     # commit used by the pipeline. Resume reuses a commit only when the exact
@@ -1308,14 +1353,10 @@ def run(
     if cfg.data.backend == "hf" and cfg.checkpoint.enabled and not dry_run:
         requested_revision = cfg.data.hf_revision
         previous_cfg = None
-        if resume != "none":
-            checkpoint_path = default_ckpt_dir(run_dir)
-            if resume != "latest":
-                checkpoint_path /= str(int(resume))
-            step_dir, checkpoint_run_dir = resolve_checkpoint_path(checkpoint_path)
+        if resume_step_dir is not None:
             previous_cfg = load_config_for_checkpoint(
-                step_dir=step_dir,
-                run_dir=checkpoint_run_dir or run_dir,
+                step_dir=resume_step_dir,
+                run_dir=run_dir,
                 config_override=None,
             )
 
@@ -1350,6 +1391,7 @@ def run(
             cfg,
             config_path=config_path,
             resume=resume,
+            resume_step_dir=resume_step_dir,
             dry_run=dry_run,
             stop_request=stop_request,
         )
@@ -1360,6 +1402,7 @@ def _run_impl(
     *,
     config_path: str | None,
     resume: Literal["none", "latest"] | int,
+    resume_step_dir: Path | None,
     dry_run: bool,
     stop_request: _StopSignalState,
 ) -> Path:
@@ -1368,6 +1411,7 @@ def _run_impl(
     :param Config cfg: Configuration with a resolved logging.run_dir.
     :param config_path: Optional source YAML path.
     :param resume: Resume selector.
+    :param Path | None resume_step_dir: Exact checkpoint selected for resume.
     :param bool dry_run: Whether to run only one compile/step smoke test.
     :param _StopSignalState stop_request: Cooperative preemption state.
     :return Path: Run directory.
@@ -1390,6 +1434,7 @@ def _run_impl(
         config_path=config_path,
         allow_existing=allow_existing,
         dry_run=dry_run,
+        resume_step_dir=resume_step_dir,
     )
     if cfg.model.backend == "megalodon" and cfg.model.use_checkpoint and derived_deterministic(cfg):
         logger.warning(
@@ -1413,7 +1458,7 @@ def _run_impl(
     try:
         # Restore if requested.
         state, resume_meta, data_it = _maybe_restore_state(
-            resume=resume,
+            resume_step=None if resume_step_dir is None else int(resume_step_dir.name),
             manager=manager,
             state0=state0,
             abstract_state=abstract_state,

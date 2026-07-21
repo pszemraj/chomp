@@ -426,7 +426,7 @@ def test_max_to_keep_prunes_checkpoints(
 def test_run_closes_manager_and_preflights_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Run must close its manager and reject drift before restoring iterator state."""
+    """Run must reject strict drift before constructing data or a restore manager."""
     import orbax.checkpoint as ocp
 
     close_calls: list[int] = []
@@ -444,6 +444,7 @@ def test_run_closes_manager_and_preflights_metadata(
     assert len(close_calls) == 1
 
     restore_calls = 0
+    data_calls = 0
 
     def _unexpected_full_restore(*args: Any, **kwargs: Any) -> Any:
         """Fail if incompatible metadata reaches model/data restoration."""
@@ -452,6 +453,15 @@ def test_run_closes_manager_and_preflights_metadata(
         raise AssertionError("full restore ran before compatibility validation")
 
     monkeypatch.setattr("chomp.train.restore_train_state_at_step", _unexpected_full_restore)
+
+    def _unexpected_data_construction(*args: Any, **kwargs: Any) -> Any:
+        """Fail if strict incompatibility reaches eval or training data setup."""
+        nonlocal data_calls
+        data_calls += 1
+        raise AssertionError("data construction ran before compatibility validation")
+
+    monkeypatch.setattr("chomp.train.load_or_create_eval_tokens", _unexpected_data_construction)
+    monkeypatch.setattr("chomp.train.build_train_iterator", _unexpected_data_construction)
     incompatible = replace(cfg, data=replace(cfg.data, local_text="different corpus"))
     close_calls.clear()
 
@@ -459,7 +469,8 @@ def test_run_closes_manager_and_preflights_metadata(
         run(incompatible, config_path=None, resume="latest", dry_run=False)
 
     assert restore_calls == 0
-    assert len(close_calls) == 1
+    assert data_calls == 0
+    assert close_calls == []
 
 
 def test_warn_resume_restarts_incompatible_data_stream(

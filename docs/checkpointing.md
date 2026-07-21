@@ -29,6 +29,8 @@ A save succeeds only when Orbax explicitly accepts it. Before save and after res
 
 `--resume latest` continues the newest finalized checkpoint. An explicit step may select that newest step, but Chomp rejects an older retained step in the same checkpoint root because subsequent saves would collide with the already finalized future. To branch from an older step, copy it into a new run directory first.
 
+A run directory is single-writer: do not start concurrent training processes against the same `logging.run_dir`. Use a separate copied run directory when branching or running another continuation.
+
 When `debug.nan_check` is enabled, save steps force a metrics sync and validate loss, gradient norm, learning rate, post-update parameters, and optimizer state before the write. A non-finite step is rejected even when the save cadence does not land on a logging step.
 
 ## Preemption
@@ -52,6 +54,8 @@ On resume, chomp compares the checkpoint metadata against the current config. `c
 - `strict` rejects those semantic changes before restore when exact continuation is required.
 
 Both modes always reject missing/invalid checkpoint metadata, invalid `tokens_seen`, model parameter-tree changes, and optimizer-state structure changes such as switching `optim.name`. Muon routing flags and enabling/disabling its optional `consistent_rms` transform are structural as well. These cannot consume the saved arrays.
+
+The metadata-only compatibility check runs before evaluation or training datasets are constructed, so strict mismatches fail without opening the configured remote source.
 
 Warn mode first restores model parameters, optimizer state, RNG, and step, then asks Grain to restore the iterator. If a changed pipeline cannot accept that data state, chomp logs the failure and continues from a fresh data stream. Strict mode propagates the Grain restore failure.
 

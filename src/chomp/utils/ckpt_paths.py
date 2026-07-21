@@ -29,6 +29,8 @@ def _latest_step_dir(root: Path) -> Path | None:
     :param Path root: Checkpoint root directory.
     :return Path | None: Latest step directory or None if not found.
     """
+    if not root.is_dir():
+        return None
     step_dirs = sorted(
         (path for path in root.iterdir() if path.is_dir() and path.name.isdigit()),
         key=lambda path: int(path.name),
@@ -89,16 +91,31 @@ def _read_meta_config(step_dir: Path) -> dict[str, Any] | None:
     meta_path = meta_dir / "metadata" if meta_dir.is_dir() else meta_dir
     if not meta_path.exists():
         return None
-    try:
-        meta = _read_json(meta_path)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Corrupted checkpoint metadata in {meta_path}: {exc}") from exc
+    meta = read_checkpoint_meta(step_dir)
     cfg = meta.get("config")
     if cfg is None:
         return None
     if not isinstance(cfg, dict):
         raise ValueError(f"Checkpoint metadata config must be a mapping, got {type(cfg).__name__}")
     return cfg
+
+
+def read_checkpoint_meta(step_dir: Path) -> dict[str, Any]:
+    """Read the JSON metadata belonging to one checkpoint step.
+
+    :param Path step_dir: Checkpoint step directory.
+    :raises FileNotFoundError: If the checkpoint has no metadata item.
+    :raises ValueError: If the metadata JSON is corrupted.
+    :return dict[str, Any]: Checkpoint metadata mapping.
+    """
+    meta_dir = step_dir / "meta"
+    meta_path = meta_dir / "metadata" if meta_dir.is_dir() else meta_dir
+    if not meta_path.exists():
+        raise FileNotFoundError(f"Checkpoint metadata not found in {step_dir}")
+    try:
+        return _read_json(meta_path)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Corrupted checkpoint metadata in {meta_path}: {exc}") from exc
 
 
 def load_config_for_checkpoint(
