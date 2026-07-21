@@ -76,6 +76,7 @@ from chomp.model import (
     causal_loss_mask,
     generate_tokens,
     parameter_decay_mask,
+    parameter_family_counts,
     parameter_optimizer_groups,
     supports_packed_segments,
     training_loss,
@@ -877,6 +878,16 @@ def build_optimizer(
         decay_steps=schedule_horizon,
         end_value=cfg.optim.lr * cfg.optim.min_lr_ratio,
     )
+
+    family_counts = parameter_family_counts(cfg, params)
+    logger.info("Parameter families: %s", family_counts)
+    if family_counts.get("other"):
+        logger.warning(
+            "%d model array(s) fell through classification to the 'other' family "
+            "(Adam, no weight decay); classify_model_array likely predates a "
+            "backend change and should learn the new parameters.",
+            family_counts["other"],
+        )
 
     # NOTE: grad clipping is done manually in make_train_step to avoid
     # computing global_norm twice (once for clipping, once for logging).

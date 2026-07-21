@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
@@ -19,6 +20,7 @@ from chomp.model import (
     build_model,
     classify_model_array,
     parameter_decay_mask,
+    parameter_family_counts,
     parameter_optimizer_groups,
     training_loss,
 )
@@ -106,6 +108,31 @@ def test_parameter_decay_policy_is_model_aware(
     assert decay["model.layers.[0].attn.timenorm.weight"] is False
 
 
+def test_megalodon_classification_covers_every_array(
+    megalodon_parts: tuple[Config, Any, Any],
+) -> None:
+    """No trainable array in a real build falls through to the 'other' family.
+
+    A megalodon-jax update that adds parameters classify_model_array does not
+    know would silently train them under Adam without decay; this is the
+    tripline that catches the version bump.
+    """
+    cfg, params, _ = megalodon_parts
+    counts = parameter_family_counts(cfg, params)
+    assert counts.get("other", 0) == 0, counts
+
+
+def test_build_optimizer_warns_on_unclassified_arrays(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Arrays that fall through classification are surfaced, not silent."""
+    cfg = Config()
+    params = {"model": {"future_array": jnp.ones((2, 2), dtype=jnp.float32)}}
+    with caplog.at_level(logging.WARNING, logger="chomp.train"):
+        build_optimizer(cfg, params)
+    assert any("'other' family" in rec.getMessage() for rec in caplog.records)
+
+
 def test_unknown_model_array_uses_adam_without_decay() -> None:
     """Unrecognized model arrays should follow the ordinary conservative policy."""
     cfg = Config()
@@ -134,6 +161,7 @@ def test_parameter_contract_covers_supported_model_variants(
     cfg = Config(model=replace(base, **model_updates))
     params, _ = build_model(cfg, key=jax.random.PRNGKey(1))
     leaves = _leaf_map(params)
+    assert parameter_family_counts(cfg, params).get("other", 0) == 0
     if model_updates.get("swiglu"):
         assert any(path.endswith("ffn.fc3.weight") for path in leaves)
     if model_updates.get("rescale_nffn"):

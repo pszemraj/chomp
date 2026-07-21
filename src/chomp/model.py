@@ -262,6 +262,23 @@ def parameter_decay_mask(cfg: Config, params: Any) -> Any:
     return treedef.unflatten(mask)
 
 
+def parameter_family_counts(cfg: Config, params: Any) -> dict[str, int]:
+    """Count trainable array leaves per classification family.
+
+    :param Config cfg: Model/optimizer configuration.
+    :param Any params: Trainable parameter pytree.
+    :return dict[str, int]: Leaf count per family, sorted by family name.
+    """
+    counts: dict[str, int] = {}
+    flat, _ = jax.tree_util.tree_flatten_with_path(params)
+    for path, leaf in flat:
+        if not eqx.is_array(leaf):
+            continue
+        family = classify_model_array(cfg, path_to_str(path)).family
+        counts[family] = counts.get(family, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def parameter_optimizer_groups(cfg: Config, params: Any) -> Any:
     """Return the optimizer group for every trainable parameter leaf.
 
