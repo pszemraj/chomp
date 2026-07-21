@@ -519,19 +519,20 @@ def test_hf_eval_split_allows_null() -> None:
     validate_config(replace(cfg, data=_hf_data()))
 
 
-@pytest.mark.parametrize("revision", [None, "main", "abc123"])
-def test_checkpointed_hf_source_allows_any_revision(revision: str | None) -> None:
-    """HF revisions may be omitted or use any revision accepted by datasets."""
+@pytest.mark.parametrize("revision", [None, "main", "abc123", "g" * 40])
+def test_checkpointed_hf_source_requires_full_commit(revision: str | None) -> None:
+    """Checkpointed streaming state is invalid without immutable source identity."""
     cfg = _base_cfg()
-    validate_config(replace(cfg, data=replace(_hf_data(), hf_revision=revision)))
+    with pytest.raises(ValueError, match="full 40-hex commit"):
+        validate_config(replace(cfg, data=replace(_hf_data(), hf_revision=revision)))
 
 
-def test_hf_source_allows_null_revision_override() -> None:
-    """A CLI override may clear the default HF revision."""
+def test_noncheckpointed_hf_source_allows_null_revision_override() -> None:
+    """Explicitly non-resumable exploration may clear the default HF revision."""
     cfg = _base_cfg()
     cfg = build_config(
         replace(cfg, data=_hf_data()).to_dict(),
-        overrides=["data.hf_revision=null"],
+        overrides=["checkpoint.enabled=false", "data.hf_revision=null"],
     )
 
     assert cfg.data.hf_revision is None

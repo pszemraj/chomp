@@ -893,6 +893,14 @@ def _validate_data(cfg: Config) -> None:
             _vfail("data.hf_split must be non-empty when data.backend='hf'")
         if cfg.data.hf_revision is not None and not cfg.data.hf_revision.strip():
             _vfail("data.hf_revision must be null or a non-empty revision when data.backend='hf'")
+        if cfg.checkpoint.enabled and not re.fullmatch(
+            r"[0-9a-fA-F]{40}", cfg.data.hf_revision or ""
+        ):
+            _vfail(
+                "data.hf_revision must be a full 40-hex commit when checkpoint.enabled=true; "
+                "resume-compat only compares the revision string, so a mutable ref could "
+                "silently change the stream across a resume"
+            )
         if cfg.data.hf_eval_split is not None:
             if not isinstance(cfg.data.hf_eval_split, str):
                 _vfail(
