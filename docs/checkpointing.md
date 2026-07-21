@@ -57,7 +57,7 @@ Warn mode first restores model parameters, optimizer state, RNG, and step, then 
 
 Resume comparisons ignore settings that cannot affect restored execution, including fresh-model `model.init_mode`, activation-checkpoint/segmented-scan implementation choices, tokenizer download settings, and vocab rounding once the resolved model vocabulary is already checked. Keys absent from older checkpoint metadata are skipped; the actual array restore remains the authority on structural compatibility.
 
-For Hugging Face data, a fresh checkpointed run resolves its configured branch/tag to a commit. Resume reads that commit from the run's `config_resolved.json` instead of resolving the mutable ref again, so an upstream update or offline Hub API does not block continuation.
+For Hugging Face data, a checkpointed run records both the requested branch/tag and the immutable commit it resolved to. Resume reads that identity from the selected checkpoint metadata and reuses the commit without a Hub request only when the repository and requested ref still match. A deliberate new ref or commit is honored and then handled by the configured `warn` or `strict` compatibility policy.
 
 ## Typical usage
 

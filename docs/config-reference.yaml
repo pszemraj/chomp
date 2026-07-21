@@ -138,9 +138,12 @@ data:
   # data.hf_split -- string; default: train; nonempty when backend=hf; ignored by local_text. Training split and source for a null-split content holdout.
   hf_split: "<nonempty string>"
 
-  # data.hf_revision -- string | null; default: main. Any ref accepted by Hugging Face datasets is valid; null uses the repository default branch. While checkpoint.enabled=true, a branch/tag/null ref is resolved to its concrete commit once at run start and the resolved commit is what gets recorded and compared on resume, so a mutable ref cannot silently change the stream.
+  # data.hf_revision -- string | null; default: main. Any ref accepted by Hugging Face datasets is valid; null uses the repository default branch. While checkpoint.enabled=true, a branch/tag/null ref is resolved to its concrete commit before use; the active resolved config stores that commit here and records the original ref separately below.
   # This value belongs to hf_dataset: replace both together when changing sources.
   hf_revision: "<revision string | null>"
+
+  # data.hf_requested_revision -- string | null; default: null. Internal snapshot field populated with the user-facing hf_revision before resolution; leave null in authored configs. Resume reuses a selected checkpoint's commit only when this request and hf_dataset still match.
+  hf_requested_revision: "<revision string | null>"
 
   # data.hf_eval_split -- string | null; default: null. Null creates a content-hash holdout from hf_split and excludes it from training; an explicit nonempty split must differ from hf_split when evaluation is enabled.
   # Explicit-split collection follows data.shuffle; hash-holdout collection does not. Collection/schema failures never fall back to the training split.

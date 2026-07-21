@@ -2279,6 +2279,7 @@ def test_run_pins_resolved_dataset_revision(
 
     resolved = json.loads((run_dir / "config_resolved.json").read_text())
     assert resolved["data"]["hf_revision"] == "a" * 40
+    assert resolved["data"]["hf_requested_revision"] == "main"
     # The same resolved cfg object feeds checkpoint meta and data_fingerprint,
     # so the recorded source identity is the commit, not the ref.
     assert data_fingerprint(build_config(resolved))["source"]["revision"] == "a" * 40
@@ -2319,37 +2320,96 @@ def test_resume_reuses_pinned_dataset_revision_without_hub_resolution(
         train=replace(cfg.train, steps=1),
     )
     run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
+    (run_dir / "config_resolved.json").unlink()
 
     resumed = replace(cfg, train=replace(cfg.train, steps=2))
     assert run(resumed, config_path=None, resume="latest", dry_run=False) == run_dir
     assert resolve_calls == 1
 
 
-def test_hf_resume_requires_saved_dataset_identity(tmp_path: Path) -> None:
-    """HF resume should report a missing or incomplete resolved run config."""
-    for name, resolved in (("missing", None), ("incomplete", {"data": {}})):
-        cfg = make_small_run_cfg(tmp_path, run_subdir=f"run_{name}")
-        cfg = replace(
-            cfg,
-            data=replace(
-                cfg.data,
-                backend="hf",
-                hf_dataset="dummy",
-                hf_name="dummy",
-                hf_revision="main",
-                max_eval_samples=0,
-            ),
-        )
-        run_dir = Path(cfg.logging.run_dir or "")
-        run_dir.mkdir()
-        if resolved is not None:
-            (run_dir / "config_resolved.json").write_text(json.dumps(resolved))
+def test_warn_resume_honors_new_hf_ref_and_reuses_selected_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+    caplog: LogCaptureFixture,
+) -> None:
+    """A deliberate ref change should run once, then become the resume identity."""
+    patch_hf_load_dataset({"train": [{"text": "abcdefgh"} for _ in range(64)]})
+    revisions = {"main": "a" * 40, "branch-b": "b" * 40}
+    resolve_calls: list[str | None] = []
 
-        with pytest.raises(
-            RuntimeError,
-            match="config_resolved.json.*data.hf_dataset.*data.hf_revision",
-        ):
-            run(cfg, config_path=None, resume="latest", dry_run=False)
+    def _resolve(dataset: str, revision: str | None) -> str:
+        """Record each mutable ref resolved through the Hub boundary."""
+        assert dataset == "dummy"
+        assert revision is not None
+        resolve_calls.append(revision)
+        return revisions[revision]
+
+    monkeypatch.setattr("chomp.train.resolve_dataset_revision", _resolve)
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_changed_ref", decay_steps=3)
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_revision="main",
+            shuffle=False,
+            max_eval_samples=0,
+        ),
+        train=replace(cfg.train, steps=1),
+    )
+    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
+
+    changed = replace(
+        cfg,
+        data=replace(cfg.data, hf_revision="branch-b"),
+        train=replace(cfg.train, steps=2),
+    )
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+        run(changed, config_path=None, resume="latest", dry_run=False)
+    assert "data.hf_revision" in caplog.text
+
+    continued = replace(changed, train=replace(changed.train, steps=3))
+    run(continued, config_path=None, resume="latest", dry_run=False)
+
+    assert resolve_calls == ["main", "branch-b"]
+    meta = json.loads((run_dir / "checkpoints" / "3" / "meta" / "metadata").read_text())
+    assert meta["config"]["data"]["hf_revision"] == "b" * 40
+    assert meta["config"]["data"]["hf_requested_revision"] == "branch-b"
+
+
+def test_strict_resume_rejects_new_hf_commit_in_same_repository(
+    tmp_path: Path,
+    patch_hf_load_dataset: Callable[..., dict[str, int]],
+) -> None:
+    """Strict compatibility should reject a deliberate same-repo commit change."""
+    patch_hf_load_dataset({"train": [{"text": "abcdefgh"} for _ in range(64)]})
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_strict_revision", decay_steps=2)
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_revision="1" * 40,
+            shuffle=False,
+            max_eval_samples=0,
+        ),
+        train=replace(cfg.train, steps=1),
+        checkpoint=replace(cfg.checkpoint, resume_compat="strict"),
+    )
+    run(cfg, config_path=None, resume="none", dry_run=False)
+
+    changed = replace(
+        cfg,
+        data=replace(cfg.data, hf_revision="2" * 40),
+        train=replace(cfg.train, steps=2),
+    )
+    with pytest.raises(RuntimeError, match="data.hf_revision"):
+        run(changed, config_path=None, resume="latest", dry_run=False)
 
 
 def test_dry_run_skips_dataset_revision_resolution(

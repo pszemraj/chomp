@@ -59,7 +59,6 @@ from chomp.ckpt import (
 from chomp.config import (
     Config,
     derived_deterministic,
-    read_config_mapping,
     resolve_decay_horizon,
     strict_packed_segments,
 )
@@ -85,6 +84,7 @@ from chomp.model import (
     training_loss,
 )
 from chomp.types import IGNORE_INDEX, Batch, TrainState
+from chomp.utils.ckpt_paths import load_config_for_checkpoint, resolve_checkpoint_path
 from chomp.utils.devices import validate_default_device
 from chomp.utils.io import (
     MetricsWriter,
@@ -1301,34 +1301,48 @@ def run(
 
     run_dir = resolve_run_dir(cfg, config_path=config_path)
 
-    # Fresh checkpointed runs resolve a mutable Hub ref once. Resume reuses
-    # that run's resolved revision, so upstream branch movement and offline
-    # operation cannot change or block an existing run.
+    # Checkpointed runs retain both the user-facing ref and the immutable
+    # commit used by the pipeline. Resume reuses a commit only when the exact
+    # requested ref matches the selected checkpoint; deliberate source changes
+    # flow through normal warn/strict compatibility checks.
     if cfg.data.backend == "hf" and cfg.checkpoint.enabled and not dry_run:
-        if resume != "none" and cfg.logging.run_dir is not None and run_dir.exists():
-            resolved_config_path = run_dir / "config_resolved.json"
-            try:
-                saved_data = read_config_mapping(resolved_config_path)["data"]
-                saved_dataset = saved_data["hf_dataset"]
-                saved_revision = saved_data["hf_revision"]
-            except (FileNotFoundError, KeyError) as exc:
-                raise RuntimeError(
-                    "Hugging Face resume requires "
-                    f"{resolved_config_path} with data.hf_dataset and data.hf_revision."
-                ) from exc
-            if saved_dataset == cfg.data.hf_dataset:
-                resolved_revision = saved_revision
-            else:
-                resolved_revision = resolve_dataset_revision(
-                    cfg.data.hf_dataset, cfg.data.hf_revision
-                )
+        requested_revision = cfg.data.hf_revision
+        previous_cfg = None
+        if resume != "none":
+            checkpoint_path = default_ckpt_dir(run_dir)
+            if resume != "latest":
+                checkpoint_path /= str(int(resume))
+            step_dir, checkpoint_run_dir = resolve_checkpoint_path(checkpoint_path)
+            previous_cfg = load_config_for_checkpoint(
+                step_dir=step_dir,
+                run_dir=checkpoint_run_dir or run_dir,
+                config_override=None,
+            )
+
+        if (
+            previous_cfg is not None
+            and previous_cfg.data.backend == "hf"
+            and previous_cfg.data.hf_dataset == cfg.data.hf_dataset
+            and previous_cfg.data.hf_requested_revision == requested_revision
+        ):
+            resolved_revision = previous_cfg.data.hf_revision
         else:
-            resolved_revision = resolve_dataset_revision(cfg.data.hf_dataset, cfg.data.hf_revision)
+            resolved_revision = resolve_dataset_revision(
+                cfg.data.hf_dataset,
+                requested_revision,
+            )
         if resolved_revision != cfg.data.hf_revision:
             logger.info(
                 "Resolved data.hf_revision %r -> %s", cfg.data.hf_revision, resolved_revision
             )
-            cfg = dc_replace(cfg, data=dc_replace(cfg.data, hf_revision=resolved_revision))
+        cfg = dc_replace(
+            cfg,
+            data=dc_replace(
+                cfg.data,
+                hf_revision=resolved_revision,
+                hf_requested_revision=requested_revision,
+            ),
+        )
 
     cfg = dc_replace(cfg, logging=dc_replace(cfg.logging, run_dir=str(run_dir)))
     with _StopSignalState() as stop_request:

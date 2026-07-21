@@ -182,6 +182,9 @@ class DataConfig:
     hf_name: str | None = "sample-100BT"
     hf_split: str = "train"
     hf_revision: str | None = "main"
+    # User-facing ref captured before checkpointed runs replace hf_revision
+    # with its immutable commit. Leave null in authored configs.
+    hf_requested_revision: str | None = None
     # Evaluation split. None uses a disjoint content-hash holdout from hf_split.
     hf_eval_split: str | None = None
     hf_eval_holdout_fraction: float = 0.01
@@ -949,6 +952,14 @@ def _validate_data(cfg: Config) -> None:
             _vfail("data.hf_split must be non-empty when data.backend='hf'")
         if cfg.data.hf_revision is not None and not cfg.data.hf_revision.strip():
             _vfail("data.hf_revision must be null or a non-empty revision when data.backend='hf'")
+        if (
+            cfg.data.hf_requested_revision is not None
+            and not cfg.data.hf_requested_revision.strip()
+        ):
+            _vfail(
+                "data.hf_requested_revision must be null or a non-empty revision "
+                "when data.backend='hf'"
+            )
         if cfg.data.hf_eval_split is not None:
             if not isinstance(cfg.data.hf_eval_split, str):
                 _vfail(
