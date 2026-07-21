@@ -65,8 +65,8 @@ def test_resolve_checkpoint_ignores_cwd_shadow(
     assert "999" not in str(found_step)
 
 
-def test_standalone_step_uses_metadata_config(tmp_path: Path) -> None:
-    """A standalone step can load its config from checkpoint metadata."""
+def test_standalone_step_recovers_metadata_run_dir(tmp_path: Path) -> None:
+    """A detached step should retain access to its run-pinned artifacts."""
     run_dir = tmp_path / "run"
     run_dir.mkdir(parents=True)
 
@@ -82,7 +82,11 @@ def test_standalone_step_uses_metadata_config(tmp_path: Path) -> None:
     found_step, found_run = resolve_checkpoint_path(str(step_dir))
 
     assert found_step == step_dir
-    assert found_run is None
+    assert found_run == run_dir
 
-    loaded = load_config_for_checkpoint(step_dir=step_dir, run_dir=None, config_override=None)
+    loaded = load_config_for_checkpoint(
+        step_dir=step_dir,
+        run_dir=found_run,
+        config_override=None,
+    )
     assert loaded.logging.run_dir == str(run_dir)

@@ -130,6 +130,25 @@ def load_config_for_checkpoint(
     return build_config(data)
 
 
+def _infer_run_dir_from_meta(step_dir: Path) -> Path | None:
+    """Return an existing run directory recorded in checkpoint metadata.
+
+    :param Path step_dir: Checkpoint step directory.
+    :return Path | None: Recorded run directory when it still exists.
+    """
+    data = _read_meta_config(step_dir)
+    if data is None:
+        return None
+    logging_cfg = data.get("logging")
+    if not isinstance(logging_cfg, dict):
+        return None
+    run_dir = logging_cfg.get("run_dir")
+    if not run_dir:
+        return None
+    path = Path(run_dir)
+    return path.resolve() if path.exists() else None
+
+
 def _latest_run_step(run_dir: Path) -> Path:
     """Resolve the latest checkpoint beneath a run directory.
 
@@ -159,6 +178,8 @@ def resolve_checkpoint_path(checkpoint_path: str | Path) -> tuple[Path, Path | N
 
     if _is_step_dir(path):
         run_dir = _find_run_dir_upwards(path)
+        if run_dir is None:
+            run_dir = _infer_run_dir_from_meta(path)
         return path, run_dir
 
     if (path / "config_resolved.json").exists():
@@ -168,6 +189,8 @@ def resolve_checkpoint_path(checkpoint_path: str | Path) -> tuple[Path, Path | N
     step_dir = _latest_step_dir(path)
     if step_dir is not None:
         run_dir = _find_run_dir_upwards(path)
+        if run_dir is None:
+            run_dir = _infer_run_dir_from_meta(step_dir)
         return step_dir, run_dir
 
     raise FileNotFoundError(
