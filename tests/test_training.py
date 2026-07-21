@@ -2228,6 +2228,16 @@ def test_training_loss_passes_segments_iff_packed() -> None:
     assert calls["position_ids"] is None
     assert calls["loss_chunk_size"] is None
 
+    with pytest.raises(TypeError, match="unexpected keyword argument 'cache'"):
+        training_loss(  # type: ignore[call-arg]
+            params,
+            static,
+            batch=micro,
+            deterministic=True,
+            key=None,
+            cache=None,
+        )
+
 
 def test_megalodon_backend_advertises_segment_reset() -> None:
     """The installed megalodon-jax must expose the full-isolation capability flag."""
