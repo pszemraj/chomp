@@ -57,7 +57,10 @@ def train(
     :param bool dry_run: If True, compile one step then exit.
     """
     click.echo(BANNER)
-    cfg = load_config(config, overrides=list(overrides))
+    try:
+        cfg = load_config(config, overrides=list(overrides))
+    except Exception as exc:
+        raise click.ClickException(f"Invalid config: {exc}") from exc
 
     if run_dir is not None:
         cfg = replace(cfg, logging=replace(cfg.logging, run_dir=run_dir))

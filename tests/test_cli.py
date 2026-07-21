@@ -67,6 +67,19 @@ def test_parse_resume_rejects_invalid_values(raw: str, match: str) -> None:
         parse_resume(raw)
 
 
+def test_train_reports_nested_config_typos_without_a_traceback(tmp_path: Path) -> None:
+    """Dataclass construction errors should surface as concise CLI errors."""
+    config_path = tmp_path / "typo.yaml"
+    config_path.write_text("optim:\n  lrr: 0.001\n")
+
+    result = CliRunner().invoke(cli, ["train", str(config_path)])
+
+    assert result.exit_code != 0
+    assert "Error: Invalid config:" in result.output
+    assert "unexpected keyword argument 'lrr'" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_generate_rejects_non_megalodon_backend(tmp_path: Path) -> None:
     """generate should fail fast when model.backend is not megalodon."""
     run_dir = tmp_path / "run"
