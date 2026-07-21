@@ -2315,6 +2315,33 @@ def test_resume_reuses_pinned_dataset_revision_without_hub_resolution(
     assert resolve_calls == 1
 
 
+def test_hf_resume_requires_saved_dataset_identity(tmp_path: Path) -> None:
+    """HF resume should report a missing or incomplete resolved run config."""
+    for name, resolved in (("missing", None), ("incomplete", {"data": {}})):
+        cfg = make_small_run_cfg(tmp_path, run_subdir=f"run_{name}")
+        cfg = replace(
+            cfg,
+            data=replace(
+                cfg.data,
+                backend="hf",
+                hf_dataset="dummy",
+                hf_name="dummy",
+                hf_revision="main",
+                max_eval_samples=0,
+            ),
+        )
+        run_dir = Path(cfg.logging.run_dir or "")
+        run_dir.mkdir()
+        if resolved is not None:
+            (run_dir / "config_resolved.json").write_text(json.dumps(resolved))
+
+        with pytest.raises(
+            RuntimeError,
+            match="config_resolved.json.*data.hf_dataset.*data.hf_revision",
+        ):
+            run(cfg, config_path=None, resume="latest", dry_run=False)
+
+
 def test_dry_run_skips_dataset_revision_resolution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

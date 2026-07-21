@@ -1306,9 +1306,18 @@ def run(
     # operation cannot change or block an existing run.
     if cfg.data.backend == "hf" and cfg.checkpoint.enabled and not dry_run:
         if resume != "none" and cfg.logging.run_dir is not None and run_dir.exists():
-            saved_data = read_config_mapping(run_dir / "config_resolved.json")["data"]
-            if saved_data["hf_dataset"] == cfg.data.hf_dataset:
-                resolved_revision = saved_data["hf_revision"]
+            resolved_config_path = run_dir / "config_resolved.json"
+            try:
+                saved_data = read_config_mapping(resolved_config_path)["data"]
+                saved_dataset = saved_data["hf_dataset"]
+                saved_revision = saved_data["hf_revision"]
+            except (FileNotFoundError, KeyError) as exc:
+                raise RuntimeError(
+                    "Hugging Face resume requires "
+                    f"{resolved_config_path} with data.hf_dataset and data.hf_revision."
+                ) from exc
+            if saved_dataset == cfg.data.hf_dataset:
+                resolved_revision = saved_revision
             else:
                 resolved_revision = resolve_dataset_revision(
                     cfg.data.hf_dataset, cfg.data.hf_revision
