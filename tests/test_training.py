@@ -1987,14 +1987,10 @@ def test_resume_compat_rejects_optimizer_structure_change(tmp_path: Path) -> Non
         check_resume_compat(drifted, meta)
 
 
-def test_resume_compat_ignores_new_and_inert_fields(
-    tmp_path: Path, caplog: LogCaptureFixture
-) -> None:
-    """New defaults and restore-inert knobs must not orphan a checkpoint."""
+def test_resume_compat_ignores_inert_fields(tmp_path: Path, caplog: LogCaptureFixture) -> None:
+    """Restore-inert knobs must not produce compatibility warnings."""
     cfg = _base_cfg(tmp_path / "run_old_meta")
     meta = _checkpoint_record(cfg).to_dict()
-    del meta["config"]["model"]["dropout"]
-    del meta["data_fingerprint"]["tokenizer"]["add_eos"]
     drifted = replace(
         cfg,
         model=replace(cfg.model, init_mode="xavier", use_checkpoint=True),
@@ -2012,6 +2008,58 @@ def test_resume_compat_ignores_new_and_inert_fields(
     with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
         check_resume_compat(drifted, meta)
     assert "Resume config warnings" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("path", "match"),
+    [
+        (("data_fingerprint", "source", "local_text"), "data.local_text"),
+        (("data_fingerprint", "tokenizer", "add_eos"), "tokenizer.add_eos"),
+        (
+            ("data_fingerprint", "packing", "window_shuffle_rows"),
+            "data.window_shuffle_rows",
+        ),
+        (("data_fingerprint", "eval", "max_eval_samples"), "data.max_eval_samples"),
+        (("config", "model", "dropout"), "model.dropout"),
+        (("config", "optim", "lr"), "optim.lr"),
+        (("config", "optim", "adam", "b1"), "optim.adam.b1"),
+        (("config", "train", "deterministic"), "train.deterministic_effective"),
+        (("config", "train", "steps"), "train.steps"),
+        (("config", "optim", "decay_steps"), "optim.decay_steps"),
+    ],
+    ids=[
+        "source",
+        "tokenizer",
+        "packing",
+        "eval",
+        "model",
+        "optimizer",
+        "adam",
+        "determinism",
+        "steps",
+        "schedule",
+    ],
+)
+def test_strict_resume_rejects_missing_active_fields(
+    tmp_path: Path, path: tuple[str, ...], match: str
+) -> None:
+    """Strict compatibility must treat a missing active value as unknown.
+
+    :param Path tmp_path: Temporary run directory root.
+    :param tuple[str, ...] path: Metadata path to delete.
+    :param str match: Expected compatibility error path.
+    """
+    cfg = _base_cfg(tmp_path / "run_missing_active")
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, resume_compat="strict"))
+    meta = _checkpoint_record(cfg).to_dict()
+    parent = meta
+    for part in path[:-1]:
+        parent = parent[part]
+    del parent[path[-1]]
+
+    with pytest.raises(RuntimeError, match=match) as exc_info:
+        check_resume_compat(cfg, meta)
+    assert "checkpoint=<missing>" in str(exc_info.value)
 
 
 def test_resume_compat_warns_for_eval_selection_drift(

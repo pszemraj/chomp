@@ -35,6 +35,8 @@ from chomp.config import Config, decay_horizon_from_values, derived_deterministi
 
 logger = logging.getLogger(__name__)
 
+_MISSING = object()
+
 
 def _effective_deterministic_from_mapping(config: dict[str, Any]) -> bool | None:
     """Resolve stored dropout determinism when enough config fields exist.
@@ -428,7 +430,9 @@ def check_resume_compat(
         :param str severity: Either "error" or "warning".
         """
         if cur != prev:
-            msg = f"{path} mismatch (checkpoint={prev!r}, current={cur!r})"
+            prev_text = "<missing>" if prev is _MISSING else repr(prev)
+            cur_text = "<missing>" if cur is _MISSING else repr(cur)
+            msg = f"{path} mismatch (checkpoint={prev_text}, current={cur_text})"
             if severity == "error":
                 errors.append(msg)
             else:
@@ -448,15 +452,19 @@ def check_resume_compat(
         :param str prefix: Default dotted path prefix.
         :param dict[str, Any] cur: Current values.
         :param dict[str, Any] prev: Checkpoint values.
-        :param set[str] | None keys: Keys to compare, or their intersection when omitted.
+        :param set[str] | None keys: Active keys, or all current keys when omitted.
         :param str severity: ``error`` or ``warning``.
         :param dict[str, str] | None labels: Optional full path overrides by key.
         """
-        common = set(cur) & set(prev)
-        selected = common if keys is None else keys & common
+        selected = set(cur) if keys is None else keys
         for key in sorted(selected):
             path = (labels or {}).get(key, f"{prefix}.{key}" if prefix else key)
-            _cmp(path, cur.get(key), prev.get(key), severity=severity)
+            _cmp(
+                path,
+                cur.get(key, _MISSING),
+                prev.get(key, _MISSING),
+                severity=severity,
+            )
 
     cur_fp = data_fingerprint(cfg)
     semantic_severity = "error" if cfg.checkpoint.resume_compat == "strict" else "warning"
@@ -474,9 +482,8 @@ def check_resume_compat(
         severity=semantic_severity,
     )
 
-    # Fingerprint sections contain only active backend/mode keys. Compare keys
-    # recorded by both versions so adding a config field does not orphan older
-    # checkpoints; array restoration remains the structural backstop.
+    # Fingerprint sections contain only active backend/mode keys. Every current
+    # key must be present because missing metadata cannot establish equality.
     src_prev = meta_fp.get("source") or {}
     src_cur = cur_fp.get("source") or {}
     _cmp_mapping(
@@ -507,7 +514,7 @@ def check_resume_compat(
         "tokenizer",
         tok_cur,
         tok_prev,
-        keys=(set(tok_cur) & set(tok_prev)) - tokenizer_inert,
+        keys=set(tok_cur) - tokenizer_inert,
         severity=semantic_severity,
     )
 
@@ -517,9 +524,14 @@ def check_resume_compat(
     # Knobs whose DataConfig field carries the packing_ prefix; the rest are
     # top-level data.* fields recorded in the fingerprint's packing section.
     packing_prefixed = {"mode", "buffer_docs", "max_docs_per_bin", "group_docs", "strict_segments"}
-    for key in sorted(set(pack_prev) & set(pack_cur)):
+    for key in sorted(pack_cur):
         label = f"data.packing_{key}" if key in packing_prefixed else f"data.{key}"
-        _cmp(label, pack_cur.get(key), pack_prev.get(key), severity=semantic_severity)
+        _cmp(
+            label,
+            pack_cur.get(key, _MISSING),
+            pack_prev.get(key, _MISSING),
+            severity=semantic_severity,
+        )
 
     # Eval tokens are rebuilt from the live stream on every start; selection
     # drift silently changes what eval_loss measures across the resume.
@@ -540,18 +552,17 @@ def check_resume_compat(
     # Compare the executed dropout behavior: null and true are equivalent
     # when all active dropout rates are zero.
     previous_deterministic = _effective_deterministic_from_mapping(meta_cfg)
-    if previous_deterministic is not None:
-        _cmp(
-            "train.deterministic_effective",
-            derived_deterministic(cfg),
-            previous_deterministic,
-            severity=semantic_severity,
-        )
+    _cmp(
+        "train.deterministic_effective",
+        derived_deterministic(cfg),
+        _MISSING if previous_deterministic is None else previous_deterministic,
+        severity=semantic_severity,
+    )
     model_prev = meta_cfg.get("model") or {}
     model_cur = cur_cfg.get("model") or {}
-    model_active = set(model_cur) & set(model_prev)
-    if model_prev.get("backend") == "dummy" and model_cur.get("backend") == "dummy":
-        model_active &= {
+    model_active = set(model_cur)
+    if model_cur.get("backend") == "dummy":
+        model_active = {
             "backend",
             "vocab_size",
             "d_model",
@@ -600,12 +611,10 @@ def check_resume_compat(
 
     optim_prev = meta_cfg.get("optim") or {}
     optim_cur = cur_cfg.get("optim") or {}
-    optim_name_prev = optim_prev.get("name")
     optim_name_cur = optim_cur.get("name")
-    if "name" in optim_prev and "name" in optim_cur:
-        _cmp("optim.name", optim_name_cur, optim_name_prev, severity="error")
+    _cmp_mapping("optim", optim_cur, optim_prev, keys={"name"}, severity="error")
 
-    optim_value_keys = (set(optim_prev) & set(optim_cur)) - {
+    optim_value_keys = set(optim_cur) - {
         "name",
         "decay_steps",
         "adam",
@@ -623,10 +632,10 @@ def check_resume_compat(
     adam_cur = optim_cur.get("adam") or {}
     _cmp_mapping("optim.adam", adam_cur, adam_prev, severity=semantic_severity)
 
-    if optim_name_prev == "muon" and optim_name_cur == "muon":
+    if optim_name_cur == "muon":
         muon_prev = optim_prev.get("muon") or {}
         muon_cur = optim_cur.get("muon") or {}
-        muon_structural = {"allow_all_2d", "allow_tied_embed"} & set(muon_prev) & set(muon_cur)
+        muon_structural = {"allow_all_2d", "allow_tied_embed"}
         _cmp_mapping(
             "optim.muon",
             muon_cur,
@@ -634,7 +643,16 @@ def check_resume_compat(
             keys=muon_structural,
             severity="error",
         )
-        if "consistent_rms" in muon_prev and "consistent_rms" in muon_cur:
+        consistent_rms_prev = muon_prev.get("consistent_rms", _MISSING)
+        consistent_rms_cur = muon_cur.get("consistent_rms", _MISSING)
+        if consistent_rms_prev is _MISSING or consistent_rms_cur is _MISSING:
+            _cmp(
+                "optim.muon.consistent_rms",
+                consistent_rms_cur,
+                consistent_rms_prev,
+                severity=semantic_severity,
+            )
+        else:
             if (muon_prev["consistent_rms"] is None) != (muon_cur["consistent_rms"] is None):
                 _cmp(
                     "optim.muon.consistent_rms",
@@ -653,18 +671,24 @@ def check_resume_compat(
             "optim.muon",
             muon_cur,
             muon_prev,
-            keys=(set(muon_cur) & set(muon_prev)) - muon_structural - {"consistent_rms"},
+            keys=set(muon_cur) - muon_structural - {"consistent_rms"},
             severity=semantic_severity,
         )
 
-    decay_keys_present = (
-        "steps" in train_prev
-        and "steps" in train_cur
-        and "warmup_steps" in optim_prev
-        and "warmup_steps" in optim_cur
-        and "decay_steps" in optim_prev
-        and "decay_steps" in optim_cur
+    schedule_fields = (
+        ("train.steps", train_cur, train_prev, "steps"),
+        ("optim.warmup_steps", optim_cur, optim_prev, "warmup_steps"),
+        ("optim.decay_steps", optim_cur, optim_prev, "decay_steps"),
     )
+    decay_keys_present = all(key in cur and key in prev for _, cur, prev, key in schedule_fields)
+    for path, cur, prev, key in (schedule_fields[0], schedule_fields[2]):
+        if key not in cur or key not in prev:
+            _cmp(
+                path,
+                cur.get(key, _MISSING),
+                prev.get(key, _MISSING),
+                severity=semantic_severity,
+            )
     if decay_keys_present:
         decay_prev = decay_horizon_from_values(
             steps=train_prev["steps"],

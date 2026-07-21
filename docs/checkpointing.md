@@ -59,7 +59,7 @@ The metadata-only compatibility check runs before evaluation or training dataset
 
 After restoring model parameters, optimizer state, RNG, and step, chomp requires Grain to restore the matching iterator state. A data-state restore failure aborts resume in both compatibility modes; restarting the corpus behind a restored optimizer would produce a contradictory training history.
 
-Resume comparisons ignore settings that cannot affect restored execution, including fresh-model `model.init_mode`, activation-checkpoint/segmented-scan implementation choices, tokenizer download settings, and vocab rounding once the resolved model vocabulary is already checked. Keys absent from older checkpoint metadata are skipped; the actual array restore remains the authority on structural compatibility.
+Resume comparisons ignore settings that cannot affect restored execution, including fresh-model `model.init_mode`, activation-checkpoint/segmented-scan implementation choices, tokenizer download settings, and vocab rounding once the resolved model vocabulary is already checked. Every active field in the current canonical config and data fingerprint must be present in checkpoint metadata: absence is a compatibility mismatch, distinct from a recorded `null` value. Strict mode rejects that mismatch; warn mode reports it before restore.
 
 `train.deterministic` is compared by its effective dropout behavior, so an inferred `null` and explicit `true` are resume-equivalent when all active dropout rates are zero. The maintained 100k-step recipes select strict compatibility explicitly.
 
