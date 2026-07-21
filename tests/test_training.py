@@ -2025,6 +2025,76 @@ def test_resume_compat_ignores_eval_selection_when_disabled(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
+    ("mode", "lookahead_name"),
+    [
+        ("bin", "packing_buffer_docs"),
+        ("multipack", "packing_group_docs"),
+    ],
+)
+def test_strict_resume_detects_eval_effective_lookahead_change(
+    tmp_path: Path,
+    mode: str,
+    lookahead_name: str,
+) -> None:
+    """Strict resume must reject lookahead drift that changes only eval packing."""
+    cfg = _base_cfg(tmp_path / f"run_eval_lookahead_{mode}")
+    cfg = replace(
+        cfg,
+        train=replace(cfg.train, batch_size=2, grad_accum=4),
+        data=replace(
+            cfg.data,
+            packing_mode=mode,
+            max_eval_samples=4,
+            **{lookahead_name: 2},
+        ),
+        checkpoint=replace(cfg.checkpoint, resume_compat="strict"),
+    )
+    meta = _checkpoint_record(cfg).to_dict()
+    drifted = replace(
+        cfg,
+        data=replace(cfg.data, **{lookahead_name: 4}),
+    )
+
+    with pytest.raises(RuntimeError, match="data.eval.packing_lookahead_docs"):
+        check_resume_compat(drifted, meta)
+
+
+@pytest.mark.parametrize(
+    ("mode", "lookahead_name"),
+    [
+        ("bin", "packing_buffer_docs"),
+        ("multipack", "packing_group_docs"),
+    ],
+)
+def test_lookahead_change_is_inert_when_eval_disabled(
+    tmp_path: Path,
+    mode: str,
+    lookahead_name: str,
+) -> None:
+    """Lookahead drift below the train clamp is inert without eval data."""
+    cfg = _base_cfg(tmp_path / f"run_no_eval_lookahead_{mode}")
+    cfg = replace(
+        cfg,
+        train=replace(cfg.train, batch_size=2, grad_accum=4),
+        data=replace(
+            cfg.data,
+            packing_mode=mode,
+            max_eval_samples=0,
+            **{lookahead_name: 2},
+        ),
+        checkpoint=replace(cfg.checkpoint, resume_compat="strict"),
+    )
+    meta = _checkpoint_record(cfg).to_dict()
+    drifted = replace(
+        cfg,
+        data=replace(cfg.data, **{lookahead_name: 4}),
+    )
+
+    assert data_fingerprint(drifted) == data_fingerprint(cfg)
+    check_resume_compat(drifted, meta)
+
+
+@pytest.mark.parametrize(
     ("field", "initial", "changed", "match"),
     [
         ("shuffle_buffer_size", 10_000, 200_000, "shuffle_buffer_size"),

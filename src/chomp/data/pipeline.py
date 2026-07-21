@@ -599,6 +599,23 @@ def load_generation_prompt_tokens(
     return [tokenizer.encode(text) for text in texts]
 
 
+def resolve_ffd_lookahead(cfg: Config, *, rows_per_pack: int) -> int:
+    """Return the effective FFD candidate lookahead for one packing cycle.
+
+    :param Config cfg: Training configuration.
+    :param int rows_per_pack: Output rows emitted by each packing cycle.
+    :raises ValueError: If the configured packing mode is not FFD-based.
+    :return int: Effective candidate lookahead.
+    """
+    if cfg.data.packing_mode == "bin":
+        configured = cfg.data.packing_buffer_docs
+    elif cfg.data.packing_mode == "multipack":
+        configured = cfg.data.packing_group_docs
+    else:
+        raise ValueError(f"FFD lookahead requested for {cfg.data.packing_mode!r}")
+    return max(int(configured), int(rows_per_pack))
+
+
 def data_fingerprint(cfg: Config) -> dict[str, Any]:
     """A small, stable fingerprint that we store in checkpoint meta.
 
@@ -657,14 +674,14 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
         packing["max_docs_per_bin"] = d.packing_max_docs_per_bin
         packing["strict_segments"] = d.packing_strict_segments
     if d.packing_mode == "bin":
-        packing["buffer_docs"] = max(
-            d.packing_buffer_docs,
-            cfg.train.batch_size * cfg.train.grad_accum,
+        packing["buffer_docs"] = resolve_ffd_lookahead(
+            cfg,
+            rows_per_pack=cfg.train.batch_size * cfg.train.grad_accum,
         )
     if d.packing_mode == "multipack":
-        packing["group_docs"] = max(
-            d.packing_group_docs,
-            cfg.train.batch_size * cfg.train.grad_accum,
+        packing["group_docs"] = resolve_ffd_lookahead(
+            cfg,
+            rows_per_pack=cfg.train.batch_size * cfg.train.grad_accum,
         )
     # Eval tokens are rebuilt from the live stream on every process start, so
     # the knobs that select them must match for eval_loss to stay comparable
@@ -673,6 +690,13 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
     if d.max_eval_samples > 0:
         eval_fp["split"] = _eval_source_split(cfg)
         eval_fp["content_partition"] = "eval" if _content_holdout_enabled(cfg) else "all"
+        if d.packing_mode in ("bin", "multipack"):
+            # Evaluation emits B rows per cycle rather than training's A*B,
+            # so a raw lookahead change can be inert for train but active here.
+            eval_fp["packing_lookahead_docs"] = resolve_ffd_lookahead(
+                cfg,
+                rows_per_pack=cfg.train.batch_size,
+            )
     return {
         "source": src,
         "tokenizer": tok,
@@ -825,18 +849,18 @@ def _build_packer(cfg: Config, *, rows_per_pack: int | None = None) -> TokenPack
     if cfg.data.packing_mode in ("bin", "multipack"):
         if cfg.data.packing_mode == "bin":
             lookahead_name = "packing_buffer_docs"
-            lookahead_docs = cfg.data.packing_buffer_docs
+            configured_lookahead = cfg.data.packing_buffer_docs
         else:
             lookahead_name = "packing_group_docs"
-            lookahead_docs = cfg.data.packing_group_docs
-        if lookahead_docs < bins_per_pack:
+            configured_lookahead = cfg.data.packing_group_docs
+        lookahead_docs = resolve_ffd_lookahead(cfg, rows_per_pack=bins_per_pack)
+        if lookahead_docs != configured_lookahead:
             logger.info(
                 "Raising data.%s from %d to %d to fill one packing cycle.",
                 lookahead_name,
+                configured_lookahead,
                 lookahead_docs,
-                bins_per_pack,
             )
-            lookahead_docs = bins_per_pack
         return FFDPacker(
             **common,
             mode=cfg.data.packing_mode,

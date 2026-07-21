@@ -176,13 +176,13 @@ data:
   # data.packing_mode -- string; default: bin; one of: sequential | bin | multipack. Bin packing is the maintained real-training path; sequential preserves stream order and lets recurrent state cross documents while boundary loss remains masked.
   packing_mode: "<sequential | bin | multipack>"
 
-  # data.packing_buffer_docs -- int; default: 256; > 0 in bin mode. Lookahead counts prepared chunks despite the legacy name; values below train.batch_size * train.grad_accum are raised to that effective minimum and logged. Larger values trade startup memory for utilization.
+  # data.packing_buffer_docs -- int; default: 256; > 0 in bin mode. Lookahead counts prepared chunks despite the legacy name. Training raises values below train.batch_size * train.grad_accum to that cycle size; evaluation raises values below train.batch_size. Effective changes in either active pipeline are resume-significant. Larger values trade startup memory for utilization.
   packing_buffer_docs: "<int>"
 
   # data.packing_max_docs_per_bin -- int | null; default: null (no cap); otherwise > 0; used only by bin/multipack. Caps prepared segments per row, not original source documents.
   packing_max_docs_per_bin: "<int | null>"
 
-  # data.packing_group_docs -- int; default: 512; > 0 in multipack mode. Effective lookahead is max(this, train.batch_size * train.grad_accum); larger groups increase memory and latency.
+  # data.packing_group_docs -- int; default: 512; > 0 in multipack mode. Effective lookahead is max(this, cycle rows): train.batch_size * train.grad_accum for training and train.batch_size for evaluation. Effective changes in either active pipeline are resume-significant; larger groups increase memory and latency.
   packing_group_docs: "<int>"
 
   # data.packing_strict_segments -- bool; default: true; used only by bin/multipack and requires mask_boundary_loss=true. Keep true to isolate attention, RoPE, CEMA, and TimestepNorm; false deliberately leaks state across documents.

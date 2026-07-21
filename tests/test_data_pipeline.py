@@ -35,6 +35,7 @@ from chomp.data.pipeline import (
     build_train_iterator,
     data_fingerprint,
     effective_window_shuffle_seed,
+    resolve_ffd_lookahead,
 )
 from tests.helpers.config_factories import make_pipeline_cfg
 
@@ -162,8 +163,56 @@ def test_small_ffd_lookahead_is_raised_to_one_packing_cycle(
 
     assert isinstance(packer, FFDPacker)
     assert packer._pack_threshold() == 4
+    assert resolve_ffd_lookahead(cfg, rows_per_pack=4) == 4
     assert data_fingerprint(cfg)["packing"][fingerprint_key] == 4
     assert any(f"data.{lookahead_name} from 1 to 4" in record.message for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("mode", "lookahead_name", "fingerprint_key"),
+    [
+        ("bin", "packing_buffer_docs", "buffer_docs"),
+        ("multipack", "packing_group_docs", "group_docs"),
+    ],
+)
+def test_eval_fingerprint_tracks_effective_ffd_geometry(
+    mode: str,
+    lookahead_name: str,
+    fingerprint_key: str,
+) -> None:
+    """Eval lookahead changes below the train clamp must change its arrays and identity."""
+    common = {
+        "batch_size": 2,
+        "seq_len": 8,
+        "packing_mode": mode,
+        "max_eval_samples": 4,
+        "tokenizer": TokenizerConfig(
+            kind="byte",
+            byte_offset=0,
+            add_bos=False,
+            add_eos=False,
+        ),
+    }
+    initial = make_pipeline_cfg(**common, **{lookahead_name: 2})
+    initial = replace(initial, train=replace(initial.train, grad_accum=4))
+    changed = replace(
+        initial,
+        data=replace(initial.data, **{lookahead_name: 4}),
+    )
+
+    initial_fp = data_fingerprint(initial)
+    changed_fp = data_fingerprint(changed)
+    assert initial_fp["packing"][fingerprint_key] == 8
+    assert changed_fp["packing"][fingerprint_key] == 8
+    assert initial_fp["eval"]["packing_lookahead_docs"] == 2
+    assert changed_fp["eval"]["packing_lookahead_docs"] == 4
+
+    tokens = [[10] * 6, [20] * 6, [30] * 2, [40] * 2]
+    initial_batches = list(build_eval_iterator(initial, tokens=tokens))
+    changed_batches = list(build_eval_iterator(changed, tokens=tokens))
+    assert len(initial_batches) == 2
+    assert len(changed_batches) == 1
+    assert not np.array_equal(initial_batches[0].input_ids, changed_batches[0].input_ids)
 
 
 @pytest.mark.parametrize("mode", ["bin", "multipack"])

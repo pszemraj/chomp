@@ -18,25 +18,26 @@ chomp uses a Grain-backed input pipeline and supports three packing strategies, 
    - Note this is a **length-based local reorder with bounded lookahead**, not "stream order with less padding": fill candidates are length-sorted, but FIFO seeds guarantee that no old short candidate can starve.
 
 3) **Multipack packer** (`data.packing_mode: multipack`)
-   - Uses FIFO-seeded, grouped First-Fit-Decreasing packing over `max(data.packing_group_docs, A*B)` candidates and emits `A*B` packed sequences per cycle.
+   - Uses FIFO-seeded, grouped First-Fit-Decreasing packing over at least one cycle's rows and emits one complete cycle at a time.
    - Intended for strict packed training semantics with segment-aware attention.
 
 Each window follows the [Data Pipeline batch contract](data_pipeline.md#batch-contract). Segment IDs identify packed document runs, and position IDs reset within each run. Bin and multipack output pad with `model.pad_token_id`, `segment_id=0`, and a false attention mask.
 
 Key bin-packing knobs:
 
-- `data.packing_buffer_docs`: prepared-chunk lookahead before packing. Values below `A*B` are raised to `A*B` and logged.
+- `data.packing_buffer_docs`: prepared-chunk lookahead before packing. Values below the cycle's output-row count are raised to that count and logged.
 - `data.packing_max_docs_per_bin`: optional cap on documents per bin.
 
 Key multipack knobs:
 
-- `data.packing_group_docs`: grouped lookahead size for multipack packing. Values below `A*B` are raised to `A*B` and logged.
+- `data.packing_group_docs`: grouped lookahead size for multipack packing. Values below the cycle's output-row count are raised to that count and logged.
 - `data.packing_max_docs_per_bin`: optional cap on packed segments per sequence.
 
 Shared by both packed modes:
 
 - `data.packing_strict_segments` (default `true`): require full per-document state isolation in the backend.
-- FIFO progress: every cycle emits the oldest `A*B` pending chunks as mandatory seeds before FFD fill. Document tails therefore make bounded progress even under an endless stream of full-size chunks.
+- Cycle size is `A*B` for training and `B` for evaluation (`A=1` there). Resume metadata records both effective lookaheads when evaluation data is enabled, because a configured change can be clamped away for training while still changing eval packing.
+- FIFO progress: every cycle emits its oldest pending chunks as mandatory seeds before FFD fill. Document tails therefore make bounded progress even under an endless stream of full-size chunks.
 - End-of-stream flush: when the upstream stream is exhausted (`data.repeat: false`, or the finite eval doc set), both packers flush their remaining sub-threshold pending documents into as many padded windows as needed instead of silently dropping them. Sequential packing likewise right-pads its final nonempty token tail. Batch assembly right-pads missing rows, so every usable final window reaches training or evaluation without changing the compiled `[A, B, T]` shape. Evaluation always uses `A=1`; changing `train.grad_accum` does not change finite eval coverage.
 
 ## Segment-isolation semantics
