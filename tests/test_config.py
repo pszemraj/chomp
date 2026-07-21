@@ -262,6 +262,12 @@ def test_override_rejects_empty_dotted_path_component() -> None:
         build_config(_base_cfg().to_dict(), overrides=["train..steps=2"])
 
 
+def test_override_cast_failure_names_dotted_path() -> None:
+    """Invalid scalar overrides should identify the field that failed."""
+    with pytest.raises(ValueError, match="Invalid override 'train.steps'"):
+        build_config(_base_cfg().to_dict(), overrides=["train.steps=abc"])
+
+
 def test_optim_validation_rejects_invalid_values() -> None:
     """Optimizer validation should fail for out-of-range settings."""
     cases: list[tuple[Callable[[Config], Config], str]] = [
@@ -507,6 +513,13 @@ def test_wandb_tags_require_and_normalize_a_string_list() -> None:
     data["logging"]["wandb"]["tags"] = "baseline,smoke"
     with pytest.raises(ValueError, match="YAML/JSON list"):
         build_config(data)
+
+    for raw in ("null", "baseline,smoke"):
+        with pytest.raises(ValueError, match="logging.wandb.tags.*list-valued"):
+            build_config(
+                _base_cfg().to_dict(),
+                overrides=[f"logging.wandb.tags={raw}"],
+            )
 
 
 @pytest.mark.parametrize("mode", ["bin", "multipack"])

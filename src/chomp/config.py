@@ -404,7 +404,10 @@ def _set_by_dotted_path(obj: Any, path: str, raw_value: str) -> Any:
         raise ValueError(f"Unknown config key: {path!r} (missing {leaf!r})")
 
     old = getattr(cur, leaf)
-    new = _cast_like(old, raw_value)
+    try:
+        new = _cast_like(old, raw_value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid override {path!r}: {exc}") from exc
 
     # Rebuild dataclasses from the bottom up (frozen dataclasses)
     cur_new = replace(cur, **{leaf: new})
@@ -424,6 +427,8 @@ def _cast_like(old: Any, raw: str) -> Any:
     :return Any: Value cast to the type of `old`.
     """
 
+    if isinstance(old, tuple):
+        raise ValueError("list-valued overrides are not supported; set this value in YAML")
     if raw.lower() in {"null", "none"}:
         return None
     if isinstance(old, bool):
