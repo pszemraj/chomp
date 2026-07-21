@@ -475,7 +475,8 @@ class TokenPacker(_PackerBase):
 
         :return dict[str, Any]: Serializable state dict.
         """
-        # NOTE: Remaining tokens are at most seq_len in steady state.
+        # With unlimited document length, exact resume retains the full
+        # unconsumed document tail, which can exceed seq_len.
         st = PackerState(
             remaining_tokens=self._token_buf.dump_remaining(),
             remaining_segments=self._segment_buf.dump_remaining(),

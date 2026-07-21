@@ -662,7 +662,10 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
             cfg.train.batch_size * cfg.train.grad_accum,
         )
     if d.packing_mode == "multipack":
-        packing["group_docs"] = d.packing_group_docs
+        packing["group_docs"] = max(
+            d.packing_group_docs,
+            cfg.train.batch_size * cfg.train.grad_accum,
+        )
     # Eval tokens are rebuilt from the live stream on every process start, so
     # the knobs that select them must match for eval_loss to stay comparable
     # across a resume. Selection knobs are inert while eval is disabled.
@@ -820,14 +823,16 @@ def _build_packer(cfg: Config, *, rows_per_pack: int | None = None) -> TokenPack
         "pad_id": cfg.model.pad_token_id,
     }
     if cfg.data.packing_mode in ("bin", "multipack"):
-        lookahead_docs = (
-            cfg.data.packing_buffer_docs
-            if cfg.data.packing_mode == "bin"
-            else cfg.data.packing_group_docs
-        )
-        if cfg.data.packing_mode == "bin" and lookahead_docs < bins_per_pack:
+        if cfg.data.packing_mode == "bin":
+            lookahead_name = "packing_buffer_docs"
+            lookahead_docs = cfg.data.packing_buffer_docs
+        else:
+            lookahead_name = "packing_group_docs"
+            lookahead_docs = cfg.data.packing_group_docs
+        if lookahead_docs < bins_per_pack:
             logger.info(
-                "Raising data.packing_buffer_docs from %d to %d to fill one packing cycle.",
+                "Raising data.%s from %d to %d to fill one packing cycle.",
+                lookahead_name,
                 lookahead_docs,
                 bins_per_pack,
             )

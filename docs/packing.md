@@ -10,6 +10,7 @@ chomp uses a Grain-backed input pipeline and supports three packing strategies, 
 
 1) **Sequential packer** (`data.packing_mode: sequential`)
    - Appends tokenized documents into a rolling buffer and emits windows in stream order.
+   - With `data.tokenizer.max_doc_tokens: null`, exact resume retains the unconsumed tail of the current tokenized document. A single long document can therefore make packer checkpoint state much larger than `seq_len`; set a positive cap only when intentional tail truncation is acceptable.
 
 2) **Bin packer** (`data.packing_mode: bin`, default)
    - Buffers multiple documents, seeds bins from the oldest candidates, and uses a First-Fit-Decreasing heuristic to fill remaining capacity.
@@ -29,7 +30,7 @@ Key bin-packing knobs:
 
 Key multipack knobs:
 
-- `data.packing_group_docs`: grouped lookahead size for multipack packing.
+- `data.packing_group_docs`: grouped lookahead size for multipack packing. Values below `A*B` are raised to `A*B` and logged.
 - `data.packing_max_docs_per_bin`: optional cap on packed segments per sequence.
 
 Shared by both packed modes:

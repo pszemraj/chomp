@@ -137,14 +137,24 @@ def test_bin_packer_packs_multiple_docs() -> None:
         assert unique.size >= 2
 
 
-def test_small_bin_lookahead_is_raised_to_one_packing_cycle(
+@pytest.mark.parametrize(
+    ("mode", "lookahead_name", "fingerprint_key"),
+    [
+        ("bin", "packing_buffer_docs", "buffer_docs"),
+        ("multipack", "packing_group_docs", "group_docs"),
+    ],
+)
+def test_small_ffd_lookahead_is_raised_to_one_packing_cycle(
     caplog: pytest.LogCaptureFixture,
+    mode: str,
+    lookahead_name: str,
+    fingerprint_key: str,
 ) -> None:
     """A small positive lookahead should clamp to the required output rows."""
     cfg = make_pipeline_cfg(
         batch_size=4,
-        packing_mode="bin",
-        packing_buffer_docs=1,
+        packing_mode=mode,
+        **{lookahead_name: 1},
     )
 
     with caplog.at_level(logging.INFO, logger="chomp.data.pipeline"):
@@ -152,8 +162,8 @@ def test_small_bin_lookahead_is_raised_to_one_packing_cycle(
 
     assert isinstance(packer, FFDPacker)
     assert packer._pack_threshold() == 4
-    assert data_fingerprint(cfg)["packing"]["buffer_docs"] == 4
-    assert any("packing_buffer_docs from 1 to 4" in record.message for record in caplog.records)
+    assert data_fingerprint(cfg)["packing"][fingerprint_key] == 4
+    assert any(f"data.{lookahead_name} from 1 to 4" in record.message for record in caplog.records)
 
 
 @pytest.mark.parametrize("mode", ["bin", "multipack"])
@@ -344,19 +354,27 @@ def test_ffd_packer_state_roundtrip(
     assert expected_stats["docs_seen"] == len(docs)
 
 
-def test_token_packer_finite_tail_state_roundtrip() -> None:
-    """Sequential exhaustion and its padded tail must survive a restore."""
+def test_token_packer_long_tail_state_roundtrip() -> None:
+    """Sequential state may exceed one row and must restore without loss."""
     packer = _packer("sequential")
-    packer.add_document([4, 5, 6])
+    packer.add_document(list(range(20)))
     packer.finish()
+    first, _ = packer.pop_seq_with_segments()
     state = packer.get_state()
+
+    np.testing.assert_array_equal(first, np.arange(8, dtype=np.int32))
     assert state["exhausted"] is True
+    assert len(state["remaining_tokens"]) == 12 > packer.seq_len
+
+    expected = [packer.pop_seq_with_segments(), packer.pop_seq_with_segments()]
 
     restored = _packer("sequential")
     restored.set_state(state)
-    tokens, segments = restored.pop_seq_with_segments()
-    np.testing.assert_array_equal(tokens, [4, 5, 6, 0, 0, 0, 0, 0])
-    np.testing.assert_array_equal(segments, [1, 1, 1, 0, 0, 0, 0, 0])
+    actual = [restored.pop_seq_with_segments(), restored.pop_seq_with_segments()]
+
+    for expected_row, actual_row in zip(expected, actual, strict=True):
+        for expected_array, actual_array in zip(expected_row, actual_row, strict=True):
+            np.testing.assert_array_equal(actual_array, expected_array)
     assert not restored.can_pop()
 
 
