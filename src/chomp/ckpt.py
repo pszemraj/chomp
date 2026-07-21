@@ -71,6 +71,9 @@ class CheckpointMeta:
     Keep this JSON-serializable.
     """
 
+    # This is a semantic resume record, not an environment manifest. Source
+    # trees, package installations, devices, and XLA flags remain external.
+
     step: int
     timestamp: str
     tokens_seen: int

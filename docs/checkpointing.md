@@ -61,6 +61,8 @@ After restoring model parameters, optimizer state, RNG, and step, chomp requires
 
 Resume comparisons ignore settings that cannot affect restored execution, including fresh-model `model.init_mode`, activation-checkpoint/segmented-scan implementation choices, tokenizer download settings, and vocab rounding once the resolved model vocabulary is already checked. Every active field in the current canonical config and data fingerprint must be present in checkpoint metadata: absence is a compatibility mismatch, distinct from a recorded `null` value. Strict mode rejects that mismatch; warn mode reports it before restore.
 
+Checkpoint compatibility deliberately does not fingerprint source trees, dirty or untracked files, package environments, devices, or XLA flags. Those are experiment provenance rather than saved-state alignment and remain external to checkpoint restore.
+
 `train.deterministic` is compared by its effective dropout behavior, so an inferred `null` and explicit `true` are resume-equivalent when all active dropout rates are zero. The maintained 100k-step recipes select strict compatibility explicitly.
 
 For Hugging Face data, a checkpointed run records both the requested branch/tag and the immutable commit it resolved to. Resume reads that identity from the selected checkpoint metadata and reuses the commit without a Hub request only when the repository and requested ref still match. A deliberate new ref or commit is honored and then handled by the configured `warn` or `strict` compatibility policy.
