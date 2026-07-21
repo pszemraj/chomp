@@ -1557,6 +1557,7 @@ def _run_impl(
     preemption_reason: str | None = None
 
     eval_batches_cache: list[Batch] = []
+    eval_doc_count = len(eval_tokens)
 
     def _record_stop_if_requested(mw: MetricsWriter) -> bool:
         """Record a cooperative stop request at an aligned data boundary.
@@ -1594,7 +1595,7 @@ def _run_impl(
         :param Any params: Model parameters.
         :return dict[str, Any]: Eval metrics row with eval_loss and eval_tokens.
         """
-        if eval_step is None or not eval_tokens:
+        if eval_step is None:
             return {}
         # Eval batches are deterministic (collected tokens, never shuffled), so
         # assemble them once and reuse across evals instead of re-running
@@ -1602,6 +1603,9 @@ def _run_impl(
         # each eval transfer, so device memory is never held between evals.
         if not eval_batches_cache:
             eval_batches_cache.extend(build_eval_iterator(cfg, tokens=eval_tokens))
+            # Packed arrays now own the deterministic payload; retain no
+            # duplicate Python token lists for the rest of the run.
+            eval_tokens.clear()
         total_loss = jnp.zeros((), dtype=jnp.float32)
         total_tokens = jnp.zeros((), dtype=jnp.int32)
         batch_count = 0
@@ -1617,7 +1621,7 @@ def _run_impl(
                 "Evaluation produced zero batches. "
                 f"packing_mode={cfg.data.packing_mode!r}, "
                 f"eval_rows_per_batch={int(cfg.train.batch_size)}, "
-                f"eval_doc_count={len(eval_tokens)}. "
+                f"eval_doc_count={eval_doc_count}. "
                 "The eval set did not yield any usable packed window. Increase "
                 "data.max_eval_samples or check tokenization and masking."
             )

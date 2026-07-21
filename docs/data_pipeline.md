@@ -92,4 +92,6 @@ chomp builds a fixed validation set when the run is created:
 
 The selected documents are tokenized once when a process starts, then the resulting eval batches are reused for every evaluation in that process. For `bin` and `multipack`, evaluation's effective packing lookahead is the larger of the configured lookahead and `train.batch_size`; checkpoint compatibility tracks it separately from training's `train.batch_size * train.grad_accum` minimum.
 
+After the first eval batch assembly, the original tokenized Python lists are released because the packed arrays own the payload. TODO: bound initial evaluation collection by tokens rather than only `data.max_eval_samples`, and replace the Python-list cache with a compact contiguous int32 ragged representation. This needs an explicit selection/fingerprint policy for the token budget.
+
 At end of stream the `bin`/`multipack` packers flush their remaining pending documents into padded windows, so an eval doc set below the pack threshold still emits windows. Eval uses `A=1` and pads missing final rows independently of `train.grad_accum`. If a scheduled pass yields no usable window, emits a zero-loss-token batch, or otherwise fails, chomp logs the failure and disables later evals. Training data assembly retains its strict zero-loss-token failure because advancing the optimizer without an objective would be invalid.

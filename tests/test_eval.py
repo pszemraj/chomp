@@ -95,9 +95,12 @@ def test_eval_batches_assembled_once_and_reused(
     from chomp.data import build_eval_iterator as real_build
 
     calls = {"n": 0}
+    captured_tokens: list[list[int]] | None = None
 
     def _counting_build(*args: Any, **kwargs: Any) -> Any:
+        nonlocal captured_tokens
         calls["n"] += 1
+        captured_tokens = kwargs["tokens"]
         return real_build(*args, **kwargs)
 
     monkeypatch.setattr("chomp.train.build_eval_iterator", _counting_build)
@@ -108,6 +111,7 @@ def test_eval_batches_assembled_once_and_reused(
     run(cfg, config_path=None, resume="none")
 
     assert calls["n"] == 1, f"eval iterator rebuilt {calls['n']} times for 2 evals"
+    assert captured_tokens == []
     metrics_path = run_dir / cfg.logging.metrics_file
     rows = read_jsonl(metrics_path)
     eval_rows = [row for row in rows if row.get("eval_loss") not in (None, "")]
