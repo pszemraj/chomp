@@ -218,6 +218,12 @@ def test_config_reference_matches_config_fields() -> None:
     _assert_matching_keys(reference, Config().to_dict())
 
 
+def test_debug_smoke_config_loads() -> None:
+    """The checked-in quick-start configuration should remain loadable."""
+    config_path = Path(__file__).parents[1] / "configs/debug_smoke.yaml"
+    assert load_config(config_path).model.backend == "dummy"
+
+
 def test_config_variables_must_be_a_mapping() -> None:
     """Variable resolution requires a mapping."""
     with pytest.raises(ValueError, match="variables"):

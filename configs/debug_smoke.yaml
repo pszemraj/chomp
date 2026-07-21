@@ -32,6 +32,3 @@ optim:
 checkpoint:
   save_every: 5
   async_save: false
-
-debug:
-  check_device_every: 1
