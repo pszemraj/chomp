@@ -15,6 +15,8 @@ conda run --name mega-jax <command>
 
 Grain, Datasets, and Orbax are pinned in [`pyproject.toml`](../pyproject.toml) because their iterator/checkpoint behavior is part of the harness. The model stack uses bounded compatible release lines starting at JAX 0.10.2, Equinox 0.13.8, Optax 0.2.8, and Megalodon-JAX 0.2.1. Other runtime and development packages use minimum versions rather than acting as a lockfile. The base JAX dependency includes its `cuda13` extra, which resolves matching jaxlib and CUDA plugin versions plus the pip-managed CUDA 13 runtime. CPU-only installations are unsupported.
 
+Personal experiment configs belong under `configs/custom/`. That directory is recursively gitignored so local recipes do not enter commits accidentally.
+
 ## Reviewing checkpoint changes
 
 The [checkpoint design intent](checkpointing.md#design-intent) is part of the project scope. Preserve the distinction between saved-state coherence and environment provenance:
