@@ -2,6 +2,8 @@
 
 A minimal, single-GPU JAX/Equinox pretraining harness for [Megalodon-JAX](https://github.com/pszemraj/megalodon-jax) models.
 
+Chomp is intentionally researcher-operated. Its checkpoints protect coherent model, optimizer, RNG, and data-stream recovery, while the default compatibility mode keeps visible, shape-compatible experiment changes usable. It is not a distributed job manager or a sealed environment-attestation system; strict config compatibility and bit-exact GPU kernels are opt-in. See [Checkpointing: design intent](docs/checkpointing.md#design-intent).
+
 ## Install
 
 Chomp targets Linux systems with NVIDIA GPUs and directly depends on JAX's pip-managed CUDA 13 stack. A compatible NVIDIA driver is required; the base install supplies JAX, jaxlib, the CUDA plugin, and CUDA/cuDNN runtime wheels:

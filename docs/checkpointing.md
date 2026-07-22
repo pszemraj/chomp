@@ -1,8 +1,20 @@
 # Checkpointing and Resume
 
-chomp uses Orbax to checkpoint **both** training state and data iterator state. An unchanged run resumes exactly; intentional config changes use the compatibility policy below.
+chomp uses Orbax to checkpoint **both** training state and data iterator state. Under the same code and runtime, an unchanged run resumes exactly; intentional config changes use the compatibility policy below.
 
 Related: [Config Reference](config-reference.yaml) (`checkpoint.*`), [Training Loop](training.md), [Data Pipeline](data_pipeline.md).
+
+## Design intent
+
+Checkpointing is recovery for a researcher-operated, single-process, single-GPU training run. It preserves a coherent saved training history without turning ordinary experimentation into a production deployment or environment-certification workflow.
+
+The policy boundary is deliberate:
+
+- **State coherence fails closed.** Missing or structurally incompatible train state, invalid step/accounting metadata, or an iterator state that cannot be restored aborts resume. `warn` never means swallowing restore exceptions or restarting the corpus behind restored optimizer state.
+- **Known semantic changes remain usable.** `warn` is the default because extending a run, changing evaluation, or making a shape-compatible research adjustment is a normal workflow when the saved state remains restorable. Every detected mismatch is reported. `strict` is available when the experiment requires unchanged config and data semantics; maintained long-run recipes select it explicitly.
+- **A selected checkpoint owns its recorded semantics.** Its embedded config and source identity are the prior-state authority for resume compatibility and the default for generation. `config_resolved.json` is the immutable run-start record and a legacy fallback, not an override for later checkpoints. The requested resume config still flows through `warn` or `strict`, and an explicit generation config remains the highest-priority user choice.
+- **Strict is not environment attestation.** Chomp does not hash the checkout, inspect dirty files, inventory packages, pin a device identity, or hard-gate XLA flags. Version control and experiment tracking own that provenance. GPU arithmetic is bit-exact only when the user opts into deterministic kernels.
+- **One writer is the operating model.** Concurrent writers and distributed checkpoint coordination are outside this harness; use another run directory for a branch or continuation.
 
 ## What is saved
 
@@ -11,6 +23,8 @@ Each checkpoint stores three items:
 1) `train_state`: model parameters, optimizer state, step, RNG
 2) `data_state`: the checkpointable data path described in [Data Pipeline: iterator state and resume](data_pipeline.md#iterator-state-and-resume)
 3) `meta`: JSON metadata (config snapshot, data fingerprint, and required non-negative `tokens_seen`)
+
+The per-step metadata is self-describing. Standalone generation uses the selected checkpoint's config before considering the run-start config, while resume compares the requested config against that selected step. A retained step therefore continues to mean the model semantics that produced it without preventing deliberate continuation changes.
 
 Runs using a Hugging Face tokenizer include its files under `tokenizer/`; resumed runs load them instead of the configured remote source. The built-in byte tokenizer has no files and is reconstructed from the resolved config.
 
@@ -51,7 +65,7 @@ A final save that fails on an otherwise clean exit fails the run; training never
 On resume, chomp compares the checkpoint metadata against the current config. `checkpoint.resume_compat` controls semantic mismatches:
 
 - `warn` (default) logs each data, objective, batch-shape, model-runtime, optimizer-value, schedule, or eval-selection change and continues. This supports ordinary workflows such as extending `train.steps`, lowering the LR, or changing eval size.
-- `strict` rejects those semantic changes before restore when exact continuation is required.
+- `strict` rejects those semantic changes before restore when unchanged config and data semantics are required.
 
 Both modes always reject missing/invalid checkpoint metadata, invalid `tokens_seen`, model parameter-tree changes, and optimizer-state structure changes such as switching `optim.name`. Muon routing flags and enabling/disabling its optional `consistent_rms` transform are structural as well. These cannot consume the saved arrays.
 
@@ -77,12 +91,10 @@ chomp train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run
 chomp train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run --resume latest
 ```
 
-Add `-o checkpoint.resume_compat=strict` when exact semantic continuation is required.
+Add `-o checkpoint.resume_compat=strict` when unchanged config and data semantics are required.
 
 ## Scope of exactness
 
-The exact-resume contract covers checkpoint save and restore.
+The exact-resume contract covers the state Chomp saves and restores. With unchanged config under the same code and runtime, parameters, optimizer state, RNG, and the data iterator position restore exactly, so the resumed run optimizes the same objective over the same batches in the same order as the continuous run. Warn mode permits declared semantic mismatches, but it does not permit a failed iterator-state restore.
 
-With unchanged config, resume guarantees exact **state and data replay**: parameters, optimizer state, RNG, and the data iterator position restore exactly, so the resumed run optimizes the same objective over the same batches in the same order as the continuous run. Warn mode permits declared semantic mismatches, but it does not permit a failed iterator-state restore.
-
-GPU step arithmetic is bit-identical only with the opt-in setting described in [Training: GPU environment notes](training.md#gpu-environment-notes).
+Chomp does not prove that the executable, dependency environment, hardware, or external process state remained identical. `strict` tightens config and data compatibility; it is not a claim of cross-environment bitwise reproducibility. GPU step arithmetic is bit-identical only with the opt-in setting described in [Training: GPU environment notes](training.md#gpu-environment-notes).

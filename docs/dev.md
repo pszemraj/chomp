@@ -15,6 +15,16 @@ conda run --name mega-jax <command>
 
 Grain, Datasets, and Orbax are pinned in [`pyproject.toml`](../pyproject.toml) because their iterator/checkpoint behavior is part of the harness. The model stack uses bounded compatible release lines starting at JAX 0.10.2, Equinox 0.13.8, Optax 0.2.8, and Megalodon-JAX 0.2.1. Other runtime and development packages use minimum versions rather than acting as a lockfile. The base JAX dependency includes its `cuda13` extra, which resolves matching jaxlib and CUDA plugin versions plus the pip-managed CUDA 13 runtime. CPU-only installations are unsupported.
 
+## Reviewing checkpoint changes
+
+The [checkpoint design intent](checkpointing.md#design-intent) is part of the project scope. Preserve the distinction between saved-state coherence and environment provenance:
+
+- Hard-fail when model/optimizer/data state cannot form one coherent continuation.
+- Keep known, shape-compatible research changes visible and usable through the default `warn` policy; use `strict` for unchanged config/data experiments.
+- Do not reinterpret `strict` as source-tree, dependency, device, or kernel attestation, and do not add those hard gates without an explicit project-scope change.
+- Do not restore automatic fresh-stream fallback after train-state restore. A deliberate branch uses a separate run directory.
+- Assume one researcher-controlled writer per run directory rather than adding distributed locking or ownership machinery.
+
 ## Lint and format
 
 Run Ruff in fix mode, then format:
@@ -61,4 +71,4 @@ Shared helper modules:
 
 GPU invariants remain isolated in [`tests/test_gpu_smoke.py`](../tests/test_gpu_smoke.py).
 
-Resume compatibility behavior is documented in [Checkpointing and Resume](checkpointing.md#resume-compatibility-checks). The default warns on semantic drift while structural train-state mismatches remain hard errors; strict exact-continuation mode is opt-in.
+Resume compatibility behavior is documented in [Checkpointing and Resume](checkpointing.md#resume-compatibility-checks). The default warns on semantic drift while structural train-state mismatches remain hard errors; strict config/data compatibility is opt-in.
