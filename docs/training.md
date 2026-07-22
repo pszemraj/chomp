@@ -2,7 +2,7 @@
 
 Training step behavior and metrics written to `metrics.jsonl`.
 
-Related: [Config Reference](config-reference.yaml), [Optimization and Optimizers](optimization.md), [Data Pipeline](data_pipeline.md), [Packing and Boundary Semantics](packing.md), [Checkpointing and Resume](checkpointing.md), [Comma stability study](comma_stability_matrix.md).
+Related: [Config Reference](config-reference.yaml), [Optimization and Optimizers](optimization.md), [Data Pipeline](data_pipeline.md), [Packing and Boundary Semantics](packing.md), [Checkpointing and Resume](checkpointing.md).
 
 ## Train step contract
 

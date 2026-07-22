@@ -47,65 +47,13 @@ CUDA_VISIBLE_DEVICES=1 chomp train configs/zyda2_smoke.yaml
 
 ## Quick start and success criteria
 
-### 1. Verify the offline training path
+- `chomp train configs/debug_smoke.yaml` — expect `65,536` parameters, ten finite steps in about three CPU seconds, loss near `5.69 → 5.58`, and a final run directory.
+- `chomp train configs/smoldata_mix_100m_2048.yaml --run-dir runs/my_run` — expect `113,854,464` parameters, a 1-3 minute first compile, initial loss around `10-11`, then metrics every 25 steps; add `--resume latest` to continue a checkpoint.
 
-```bash
-chomp train configs/debug_smoke.yaml
-```
+Additional checks:
 
-This exercises config loading, byte tokenization, bin packing, optimization, metrics, and synchronous checkpoints without network access or a GPU. A passing run prints `65,536` parameters, ten finite step lines, and a final run directory. On the reference development host it completes in about 3 seconds and loss moves from approximately `5.69` to `5.58`:
-
-```text
-[chomp] params: 65,536
-step 1 | loss 5.6931 | ... | pack 0.898
-...
-step 10 | loss 5.5758 | ... | pack 0.898
-[chomp] run_dir: runs/chomp/<timestamp>_debug_smoke
-```
-
-Small CPU timing differences are normal. A traceback, non-finite loss, missing step 10, or missing final run directory is not.
-
-### 2. Verify config, compilation, and one update
-
-```bash
-chomp train configs/debug_smoke.yaml --dry-run
-```
-
-A dry run builds the model and data path, executes one optimizer step, checks finite state, and exits without W&B or a checkpoint save. Success includes `[chomp] dry-run complete` and one finite step line; the debug config takes about 3 seconds on the reference host. Use a new `--run-dir` for each dry run because Chomp refuses to overwrite an existing run.
-
-### 3. Verify the real Hub and GPU input path
-
-```bash
-chomp train configs/zyda2_smoke.yaml
-```
-
-This is a five-step GPU smoke test with the real 32K tokenizer and streamed Zyda-2 sample, but a dummy model. Both referenced datasets are currently public and ungated, so `HF_TOKEN` is optional. On an RTX 5090 with a warm local tokenizer cache, the measured run took 84 seconds end-to-end, reported a `0.4 GB` peak, and produced five finite losses around the random-init baseline:
-
-```text
-[chomp] params: 8,192,000
-step 1 | loss 10.4776 | ... | peak 0.3GB
-...
-step 5 | loss 10.4781 | ... | peak 0.4GB
-```
-
-Allow roughly 1-2 minutes with a healthy network. Most elapsed time is Hub resolution, streaming startup, and first-step compilation; the five optimizer steps themselves are intentionally tiny. Loss is not expected to improve meaningfully in five steps.
-
-### 4. Preflight a real recipe
-
-```bash
-chomp train configs/smoldata_mix_100m_2048.yaml --run-dir /tmp/chomp_100m_dry --dry-run
-```
-
-Success prints `113,854,464` parameters, `[chomp] dry-run complete`, and one finite step. The first compile is expected to take roughly 1-3 minutes on a high-end consumer GPU; do not use first-step throughput to estimate the full run. The command also opens the configured Hub stream, so network and evaluation-data startup add variability.
-
-### 5. Start and resume the recommended run
-
-```bash
-chomp train configs/smoldata_mix_100m_2048.yaml --run-dir runs/my_run
-chomp train configs/smoldata_mix_100m_2048.yaml --run-dir runs/my_run --resume latest
-```
-
-The fresh run should resolve the dataset and tokenizer, print `113,854,464` parameters, compile the first step, then emit compact metrics every 25 steps. Initial cross-entropy around `10-11` is plausible for a 32K-token random initialization; `NaN`, `Inf`, or repeated crashes before step 1 are failures. The resume command should print `[chomp] resumed from checkpoint step N` and continue beyond that step.
+- Add `--dry-run` to either command to execute one finite update without W&B or checkpoint saving; success prints `[chomp] dry-run complete`.
+- `chomp train configs/zyda2_smoke.yaml` checks the real Hub/tokenizer/GPU path in five steps; the measured RTX 5090 run took 84 seconds, peaked at `0.4 GB`, and held loss near `10.48` as expected for this sanity-only run.
 
 With unchanged config under the same code/runtime, resume restores parameters, optimizer state, RNG, and data position exactly, so the resumed run sees the same batches as an uninterrupted run. Bit-identical GPU arithmetic additionally requires the deterministic-kernel setting described in [Checkpointing](docs/checkpointing.md#scope-of-exactness).
 
@@ -120,9 +68,11 @@ With unchanged config under the same code/runtime, resume restores parameters, o
 
 Measurements were taken on 2026-07-21 with JAX 0.10.2. GPU smoke and dry-run probes used an RTX 5090; the offline smoke used the development host CPU. The 114M and 188M VRAM values are reported in-use peaks from one-step local-data probes with the shipped model and batch shapes, not completed Hub-backed runs. They are useful fit checks, not guarantees.
 
-The long recipes have at most `steps × grad_accum × batch_size × (seq_len - 1) = 3,275,200,000` causal target positions. Boundary, EOS, and padding masks make the effective count slightly lower; `tokens_seen` in the final metrics row is the authoritative value. Full-run RTX 4090 wall time and final loss remain visibly pending until a completed baseline exists rather than being extrapolated from a short probe.
+The long recipes process up to ~3.28B target positions; `tokens_seen` in the final metrics row is authoritative.[^target-positions] Full-run RTX 4090 wall time and final loss remain visibly pending until a completed baseline exists rather than being extrapolated from a short probe.
 
 Both production datasets use `datasets.load_dataset(..., streaming=True)`: Chomp reads remote Parquet shards on demand and does not download the complete corpus before training. The mixed corpus is roughly 268 GB of remote Parquet, but a run transfers only the shards and byte ranges it consumes. Expect sustained network use plus small tokenizer/metadata caches under `~/.cache/huggingface`; inspect local cache growth with `du -sh ~/.cache/huggingface`.
+
+[^target-positions]: Config-derived maximum: `100,000 steps × 8 accumulation slices × 2 sequences × (2,048 - 1) = 3,275,200,000`; boundary, EOS, and padding masks reduce the effective count.
 
 ## Monitoring and run directories
 
@@ -132,11 +82,7 @@ Training prints a compact line to stdout at the first step, every `train.log_eve
 tail -f runs/my_run/metrics.jsonl
 ```
 
-Each new line is a JSON object containing loss, gradient norm, learning rate, exact `loss_tokens`, cumulative `tokens_seen`, timing, throughput, packing utilization, and best-effort device memory. For a compact live view with `jq` installed:
-
-```bash
-watch -n 5 'tail -n 1 runs/my_run/metrics.jsonl | jq {step,loss,grad_norm,lr,tokens_seen,tokens_per_sec,peak_memory_gb}'
-```
+See [Training metrics](docs/training.md#metrics) for the JSONL schema and console cadence.
 
 A typical run directory is:
 
@@ -154,25 +100,11 @@ runs/my_run/
         └── meta/              # config, data fingerprint, tokens_seen
 ```
 
-The long recipes save every 2,500 steps and retain the newest three checkpoints. Orbax permanently removes older checkpoints beyond `checkpoint.max_to_keep`; increase it before the run if deeper rollback matters. Full-recipe checkpoint size has not yet been baselined, and it should not be inferred from peak VRAM because serialized optimizer state has a different footprint. After the first save, measure it directly with:
-
-```bash
-du -sh runs/my_run/checkpoints/*
-```
-
-For disk planning, multiply the observed per-step size by the retention count and leave room for one save in progress.
-
-W&B is optional and disabled by default. After `wandb login`, enable it without editing the recipe:
-
-```bash
-chomp train configs/smoldata_mix_100m_2048.yaml --run-dir runs/my_run_wandb -o logging.wandb.enabled=true
-```
-
-Success includes a W&B run URL, while `metrics.jsonl` remains the local source of truth. W&B files use `WANDB_DIR` or `./wandb`, not the Chomp run directory.
+Checkpoint cadence, retention, disk behavior, and resume policy are documented in [Checkpointing](docs/checkpointing.md). W&B is optional; after `wandb login`, enable it with `-o logging.wandb.enabled=true` while retaining `metrics.jsonl` locally.
 
 ## Writing a custom config
 
-Every section has defaults. Start by specifying only the model, source, batch geometry, and optimizer choices that define the experiment:
+Every section has defaults. This minimal experiment overrides only its model shape, source, duration, context, and optimizer:
 
 ```yaml
 model:
@@ -182,39 +114,22 @@ model:
   z_dim: 128
   value_dim: 1024
   ffn_hidden_dim: 2048
-  chunk_size: 512
-  use_checkpoint: true
 
 data:
   hf_dataset: HuggingFaceFW/finepdfs_edu_50BT-dclm_30BT-fineweb_edu_20BT-shuffled
   hf_name: default
-  tokenizer:
-    hf_name_or_path: pszemraj/bytebpe-tokenizer-32k-mlm
 
 train:
   steps: 1000
-  batch_size: 1
   seq_len: 1024
-  grad_accum: 8
 
 optim:
   name: muon
   lr: 3.0e-4
   warmup_steps: 100
-
-checkpoint:
-  save_every: 250
-  max_to_keep: 2
 ```
 
-Save it as `my_experiment.yaml`, then verify one complete update before committing GPU time:
-
-```bash
-chomp train my_experiment.yaml --run-dir /tmp/my_experiment_dry --dry-run
-chomp train my_experiment.yaml --run-dir runs/my_experiment
-```
-
-The dry run should print a parameter count, `[chomp] dry-run complete`, and one finite step. See the annotated [Config Reference](docs/config-reference.yaml) for every key, computed default, constraint, and interaction. Use the shipped 114M recipe as the maintained full-run starting point rather than growing a custom model before the pipeline is verified.
+Save it as `my_experiment.yaml` and run `chomp train my_experiment.yaml --run-dir /tmp/my_experiment_dry --dry-run`; expect a parameter count, one finite update, and `[chomp] dry-run complete`. This exact example has been executed, not only parsed. See the annotated [Config Reference](docs/config-reference.yaml) for every remaining key and default.
 
 ## Generation and export
 
@@ -230,40 +145,11 @@ Chomp currently has no built-in Hugging Face Transformers or safetensors weight 
 
 ## Troubleshooting
 
-### JAX sees CPU or no device
-
-Run the verification command from the same environment as Chomp. If `nvidia-smi` works but JAX prints `CpuDevice`, inspect the installed packages and reinstall the CUDA extra:
-
-```bash
-pip show jax jaxlib jax-cuda13-plugin
-pip install --upgrade "jax[cuda13]>=0.10.2,<0.11"
-```
-
-Then rerun the device assertion. Do not set `train.allow_cpu=true` for a production recipe; it only makes the expensive silent fallback harder to notice.
-
-### Driver, CUDA plugin, or cuDNN initialization fails
-
-- If `nvidia-smi` fails or reports no GPU, fix device visibility or update the NVIDIA driver first.
-- The pip-managed CUDA wheels should not use a conflicting system toolkit. Start a clean shell with `LD_LIBRARY_PATH` unset if JAX reports incompatible CUDA or cuDNN libraries.
-- Do not mix `jax[cuda13]` with a separately installed CPU-only jaxlib. Reinstall from the project environment if package resolution drifted.
-
-### Out of memory
-
-For a fresh run, lower the per-microbatch batch size and raise accumulation to preserve the same 16 sequences per optimizer update:
-
-```bash
-chomp train configs/smoldata_mix_100m_2048.yaml --run-dir runs/my_run_small_batch -o train.batch_size=1 -o train.grad_accum=16
-```
-
-If the vocabulary projection is the peak, also try `-o model.loss_chunk_size=256`. The shipped long recipes already enable activation checkpointing. `XLA_PYTHON_CLIENT_PREALLOCATE=false` can help when sharing a GPU, but it does not reduce the model's true peak requirement.
-
-### Hub startup is slow or fails
-
-The real-data smoke and long recipes need outbound HTTPS throughout training. The datasets are public, but setting `HF_TOKEN` can still help with Hub rate limits. A first run may spend a minute or more resolving revisions, downloading the tokenizer, and opening remote Parquet shards before step 1. Authentication, schema, or network failures are reported; Chomp does not silently substitute another dataset.
-
-### Run directory already exists
-
-Fresh runs refuse to clobber an existing directory. Choose a new `--run-dir`, or use `--resume latest` only when continuing the checkpoints already stored there. Run directories are single-writer; branch an older checkpoint into a separate directory.
+- **JAX sees CPU or no device:** Run the install verification from the same environment. If `nvidia-smi` works but JAX prints `CpuDevice`, inspect `pip show jax jaxlib jax-cuda13-plugin`, reinstall with `pip install --upgrade "jax[cuda13]>=0.10.2,<0.11"`, and rerun the device assertion. Never use `train.allow_cpu=true` for a production recipe.
+- **Driver, CUDA plugin, or cuDNN failure:** Fix `nvidia-smi` or update the driver first. If JAX reports incompatible CUDA/cuDNN libraries, try a clean shell with `LD_LIBRARY_PATH` unset; do not mix `jax[cuda13]` with a separately installed CPU-only jaxlib.
+- **Out of memory:** Lower the microbatch and raise accumulation with `-o train.batch_size=1 -o train.grad_accum=16`; try `-o model.loss_chunk_size=256` if the vocabulary projection is the peak. The long recipes already use activation checkpointing. `XLA_PYTHON_CLIENT_PREALLOCATE=false` may help when sharing a GPU but does not reduce true peak memory.
+- **Hub startup is slow or fails:** Real-data runs need outbound HTTPS throughout training. `HF_TOKEN` is optional but can help with rate limits; first startup may spend over a minute resolving revisions, downloading the tokenizer, and opening remote Parquet. Chomp reports failures rather than substituting another dataset.
+- **Run directory exists:** Fresh runs refuse to clobber it. Choose another `--run-dir`, or use `--resume latest` only to continue its checkpoints; branch an older checkpoint into a separate, single-writer directory.
 
 ## Documentation
 

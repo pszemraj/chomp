@@ -73,6 +73,8 @@ Independent of packing mode, every batch used to be assembled from *consecutive*
 
 `data.window_shuffle_tokens` (default `8_388_608`, `0` disables) and `data.window_shuffle_max_rows` (default `4_096`) insert a seeded, deterministic shuffle of packed `[T]` windows between the packer and batch assembly. The effective row count is the smaller of the token-derived count and row cap, aligned down to an `A*B` row multiple. With `A*B=1`, the default is therefore 4,096 rows from `seq_len=8` through 2,048, then 256 rows at 32K. A 244-window document contributes a few rows per batch instead of every row at the 2K geometry. Resume remains exact: the shuffle checkpoints only the upstream state at the window start plus permutation progress, then reconstructs and replays the window deterministically. Eval batches are never shuffled.
 
+(In the 5,000-step Comma ablation, enabling the 4,096-row window reduced step-to-step absolute loss changes by 31% and the worst gradient-norm spike from 19.6 to 4.1 without reducing throughput; its probe sampled the training corpus, so these are stability rather than generalization results.)
+
 The token budget bounds the raw payload of the int32 token and segment-ID arrays to about 64 MiB by default; it does not account for each row's Python tuple, NumPy objects, or list references. Grain materializes each complete row window and its shuffled list before yielding from that window, so the independent row cap bounds that object count and the number of packed rows requested per fill. Startup logs report the effective row and token counts before data consumption. The compiled model derives position IDs from segment IDs after batching.
 
 Guidance:
