@@ -12,7 +12,6 @@ Keep this file small: it defines the **runtime contracts** between subsystems.
 chomp standardizes on fixed shapes:
   input_ids:      [A, B, T]
   labels:         [A, B, T]
-  attention_mask: [A, B, T] boolean
   segment_ids:    [A, B, T] int32
 where:
   A = grad_accum (microbatches per optimizer update)
@@ -39,14 +38,14 @@ IGNORE_INDEX = -100
 class Batch(eqx.Module):
     """A fixed-shape training batch.
 
-    All fields are arrays. `attention_mask` is always present.
-    `segment_ids` assigns packed-document IDs per position. `labels` may include
-    ignore_index (-100) at packed-document boundaries.
+    `segment_ids` assigns packed-document IDs per position and uses zero for
+    padding. Attention validity and document-local positions are derived from
+    it in the compiled model path. `labels` may include ignore_index (-100) at
+    packed-document boundaries.
     """
 
     input_ids: jax.Array
     labels: jax.Array
-    attention_mask: jax.Array
     segment_ids: jax.Array
 
 

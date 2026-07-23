@@ -1,26 +1,20 @@
-"""Utility tests consolidated by module.
-
-Note: global XLA/device environment setup happens in tests/conftest.py via
-configure_blackwell_xla_env() and setting XLA_PYTHON_CLIENT_PREALLOCATE.
-This file focuses on functional behavior rather than session bootstrapping.
-"""
+"""Utility tests consolidated by module."""
 
 from __future__ import annotations
 
-import logging
-import os
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
 import pytest
-from _pytest.logging import LogCaptureFixture
 
 from chomp.config import Config, ModelConfig, TrainConfig
 from chomp.model import build_model
-from chomp.train import _check_finite_metrics, _estimate_tokens_seen_increment, _init_tokens_seen
-from chomp.types import Batch
-from chomp.utils import devices, xla
-from chomp.utils.devices import device_platform, validate_default_device
+from chomp.train import _check_finite_metrics
+from chomp.utils.devices import validate_default_device
+from chomp.utils.io import create_run_dir
 from chomp.utils.tree import param_count
 
 
@@ -39,93 +33,23 @@ def test_cpu_allowed_when_configured() -> None:
     validate_default_device(allow_cpu=True)
 
 
-def test_device_platform_detects_array() -> None:
-    """device_platform should detect platform from JAX array."""
-    arr = jax.numpy.zeros((1,))
-    plat = device_platform(arr)
-    assert isinstance(plat, str) and plat
+def test_non_gpu_accelerator_is_not_accepted_as_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The production device gate must require a CUDA-backed GPU."""
+    monkeypatch.setattr(jax, "devices", lambda: [SimpleNamespace(platform="tpu")])
+
+    with pytest.raises(RuntimeError, match="required CUDA GPU backend"):
+        validate_default_device(allow_cpu=False)
 
 
-class _Dev:
-    """Mock device with platform attribute."""
+def test_resume_requires_an_existing_run_directory(tmp_path: Path) -> None:
+    """Resume setup must not create a missing run directory."""
+    run_dir = tmp_path / "missing-run"
+    cfg = Config(logging=replace(Config().logging, run_dir=str(run_dir)))
 
-    def __init__(self, platform: str) -> None:
-        self.platform = platform
+    with pytest.raises(RuntimeError, match="does not exist"):
+        create_run_dir(cfg, config_path=None, allow_existing=True)
 
-
-def _arr_with_device_property(platform: str) -> object:
-    """Build a mock array exposing a .device property."""
-
-    class _Arr:
-        def __init__(self) -> None:
-            self.device = _Dev(platform)
-
-    return _Arr()
-
-
-def _arr_with_device_method(platform: str) -> object:
-    """Build a mock array exposing a .device() method."""
-
-    class _Arr:
-        def device(self) -> _Dev:
-            return _Dev(platform)
-
-    return _Arr()
-
-
-def _arr_with_device_buffer(platform: str) -> object:
-    """Build a mock array exposing a .device_buffer.device() path."""
-
-    class _Buffer:
-        def device(self) -> _Dev:
-            return _Dev(platform)
-
-    class _Arr:
-        device_buffer = _Buffer()
-
-    return _Arr()
-
-
-def test_device_platform_handles_supported_object_shapes() -> None:
-    """device_platform should handle property/method/buffer and unknown object forms."""
-    for arr, expected in [
-        (_arr_with_device_property("gpu"), "gpu"),
-        (_arr_with_device_method("cpu"), "cpu"),
-        (_arr_with_device_buffer("gpu"), "gpu"),
-        (object(), None),
-    ]:
-        assert device_platform(arr) == expected  # type: ignore[arg-type]
-
-
-def _make_batch() -> Batch:
-    """Create a minimal Batch for testing.
-
-    :return Batch: Batch with minimal shapes.
-    """
-    arr = jax.numpy.zeros((1, 1, 1), dtype=jax.numpy.int32)
-    return Batch(
-        input_ids=arr,
-        labels=arr,
-        attention_mask=arr.astype(bool),
-        segment_ids=arr,
-    )
-
-
-def test_assert_batch_on_device_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """assert_batch_on_device should enforce platform checks across key combinations."""
-    batch = _make_batch()
-    for platform, allow_cpu, should_raise in [
-        ("gpu", False, False),
-        ("cpu", False, True),
-        (None, True, False),
-        (None, False, True),
-    ]:
-        monkeypatch.setattr(devices, "device_platform", lambda _, p=platform: p)
-        if should_raise:
-            with pytest.raises(RuntimeError):
-                devices.assert_batch_on_device(batch, allow_cpu=allow_cpu)
-        else:
-            devices.assert_batch_on_device(batch, allow_cpu=allow_cpu)
+    assert not run_dir.exists()
 
 
 def test_dummy_init_stats_are_sane() -> None:
@@ -160,76 +84,15 @@ def test_dummy_param_count() -> None:
     assert n == expected
 
 
-def test_init_tokens_seen_host_int() -> None:
-    """Token counter should be a host-side Python int."""
-    counter = _init_tokens_seen(123)
-    assert isinstance(counter, int)
-    assert counter == 123
-
-
-def test_estimate_tokens_seen_increment_prefers_packing_stats() -> None:
-    """Token estimates should use packing stats when available."""
-    cfg = Config(train=TrainConfig(batch_size=2, grad_accum=3, seq_len=8, allow_cpu=True))
-    sequences = int(cfg.train.batch_size) * int(cfg.train.grad_accum)
-    packing_tokens = sequences * int(cfg.train.seq_len)
-
-    inc_stats = _estimate_tokens_seen_increment(cfg, {"packing_tokens": packing_tokens})
-    inc_default = _estimate_tokens_seen_increment(cfg, None)
-
-    assert inc_stats == inc_default
-
-
-def test_finite_check_rejects_nan_loss() -> None:
-    """NaN loss should raise RuntimeError."""
-    with pytest.raises(RuntimeError, match="loss"):
-        _check_finite_metrics({"loss": float("nan"), "grad_norm": 1.0}, step=3)
-
-
-def test_finite_check_rejects_inf_grad_norm() -> None:
-    """Inf grad_norm should raise RuntimeError."""
-    with pytest.raises(RuntimeError, match="grad_norm"):
-        _check_finite_metrics({"loss": 1.0, "grad_norm": float("inf")}, step=3)
-
-
-def test_configure_blackwell_sets_flags_and_warns(
-    monkeypatch: pytest.MonkeyPatch, caplog: LogCaptureFixture
-) -> None:
-    """RTX 50xx detection should set XLA_FLAGS and warn on preallocate.
-
-    :param pytest.MonkeyPatch monkeypatch: Pytest monkeypatch fixture.
-    :param LogCaptureFixture caplog: Log capture fixture.
-    """
-    monkeypatch.setattr(xla, "_query_nvidia_gpu_names", lambda: ["NVIDIA GeForce RTX 5090"])
-    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_enable_triton_gemm=true --foo=bar")
-    monkeypatch.delenv("XLA_PYTHON_CLIENT_PREALLOCATE", raising=False)
-
-    caplog.set_level(logging.INFO)
-    changed = xla.configure_blackwell_xla_env(force=True)
-
-    assert changed is True
-    flags = os.environ.get("XLA_FLAGS", "")
-    assert "--xla_gpu_enable_triton_gemm=false" in flags
-    assert "--xla_gpu_enable_triton_gemm=true" not in flags
-    assert "--foo=bar" in flags
-    assert any(
-        rec.levelno >= logging.WARNING and "XLA_PYTHON_CLIENT_PREALLOCATE" in rec.message
-        for rec in caplog.records
-    )
-
-
-def test_configure_blackwell_skips_non_blackwell(
-    monkeypatch: pytest.MonkeyPatch, caplog: LogCaptureFixture
-) -> None:
-    """Non-50xx GPUs should not modify XLA_FLAGS.
-
-    :param pytest.MonkeyPatch monkeypatch: Pytest monkeypatch fixture.
-    :param LogCaptureFixture caplog: Log capture fixture.
-    """
-    monkeypatch.setattr(xla, "_query_nvidia_gpu_names", lambda: ["NVIDIA GeForce RTX 4090"])
-    monkeypatch.setenv("XLA_FLAGS", "--keep")
-
-    caplog.set_level(logging.DEBUG)
-    changed = xla.configure_blackwell_xla_env(force=True)
-
-    assert changed is False
-    assert os.environ.get("XLA_FLAGS") == "--keep"
+@pytest.mark.parametrize(
+    ("metrics", "match"),
+    [
+        ({"loss": float("nan"), "grad_norm": 1.0, "lr": 1e-3}, "loss"),
+        ({"loss": 1.0, "grad_norm": float("inf"), "lr": 1e-3}, "grad_norm"),
+        ({"loss": 1.0, "grad_norm": 1.0, "lr": float("nan")}, "lr"),
+    ],
+)
+def test_finite_check_rejects_nonfinite_metrics(metrics: dict[str, float], match: str) -> None:
+    """Non-finite metrics should raise RuntimeError with the metric name."""
+    with pytest.raises(RuntimeError, match=match):
+        _check_finite_metrics(metrics, step=3)

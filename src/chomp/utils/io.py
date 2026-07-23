@@ -6,9 +6,7 @@ chomp uses deliberately boring IO:
 
 W&B integration is optional and configured via logging.wandb.*.
 
-Phase 3 addendum:
-- If you resume into an existing run_dir, we do not clobber the original
-  config snapshot. We write a `config_resume.json` alongside it.
+Resuming does not clobber the original config snapshot.
 """
 
 from __future__ import annotations
@@ -23,6 +21,20 @@ from typing import Any
 from chomp.config import Config, resolve_decay_horizon
 
 _NOISY_CONSOLE_PREFIXES = ("orbax", "jax", "jaxlib", "absl")
+
+
+def resolve_run_dir(cfg: Config, *, config_path: str | Path | None) -> Path:
+    """Resolve the run directory before any run-owned artifact is written.
+
+    :param Config cfg: Training configuration.
+    :param config_path: Optional source config path used in generated names.
+    :return Path: Explicit or timestamp-derived run directory.
+    """
+    if cfg.logging.run_dir is not None:
+        return Path(cfg.logging.run_dir)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = Path(config_path).stem if config_path is not None else "run"
+    return Path("runs") / cfg.logging.project / f"{stamp}_{name}"
 
 
 class _ConsoleNoiseFilter(logging.Filter):
@@ -44,25 +56,21 @@ def _console_handler(level: int, *, use_rich: bool) -> logging.Handler:
     """Build a console handler with optional Rich formatting.
 
     :param int level: Logging level to set on the handler.
-    :param bool use_rich: If True, use RichHandler when available.
+    :param bool use_rich: If True, use RichHandler.
     :return logging.Handler: Configured console handler.
     """
 
     if use_rich:
-        try:
-            from rich.logging import RichHandler
+        from rich.logging import RichHandler
 
-            handler: logging.Handler = RichHandler(
-                show_time=True,
-                show_level=True,
-                show_path=False,
-                markup=True,
-                rich_tracebacks=False,
-            )
-            handler.setFormatter(logging.Formatter("%(message)s"))
-        except Exception:
-            handler = logging.StreamHandler()
-            handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+        handler: logging.Handler = RichHandler(
+            show_time=True,
+            show_level=True,
+            show_path=False,
+            markup=True,
+            rich_tracebacks=False,
+        )
+        handler.setFormatter(logging.Formatter("%(message)s"))
     else:
         handler = logging.StreamHandler()
         handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
@@ -76,7 +84,7 @@ def setup_python_logging(level: str, *, use_rich: bool = True) -> None:
     """Configure Python logging with a console handler.
 
     :param str level: Log level name (DEBUG, INFO, WARNING, ERROR).
-    :param bool use_rich: If True, use Rich for nicer console logs when available.
+    :param bool use_rich: If True, use Rich for nicer console logs.
     """
     numeric_level = getattr(logging, level, logging.INFO)
     root = logging.getLogger()
@@ -113,32 +121,29 @@ def create_run_dir(
     - If cfg.logging.run_dir is None: always create a fresh timestamped run dir.
       (Resume is not possible because we don't know which directory to use.)
 
-    - If cfg.logging.run_dir is set:
-      - if it doesn't exist: create it
-      - if it exists:
-         - allow_existing=True  => treat as resume/continue
-         - allow_existing=False => error (refuse to clobber)
+    - If cfg.logging.run_dir is set for a fresh run, create it or refuse to
+      clobber an existing directory.
+    - If allow_existing=True, require that explicit run directory to exist.
 
-    We persist config snapshots:
-    - fresh run: config_resolved.json + optional config_original.yaml
-    - resume:    config_resume.json (so you can see how you invoked resume)
+    Fresh runs persist config_resolved.json and optional config_original.yaml.
 
     :param Config cfg: Training configuration.
     :param config_path: Optional path to original YAML config.
     :param bool allow_existing: If True, allow reusing an existing directory.
-    :raises RuntimeError: If directory exists and allow_existing=False, or resume without run_dir.
+    :raises RuntimeError: If the run directory conflicts with the requested fresh/resume mode.
     :return Path: Path to the run directory.
     """
 
+    run_dir = resolve_run_dir(cfg, config_path=config_path)
     if cfg.logging.run_dir is not None:
-        run_dir = Path(cfg.logging.run_dir)
-        if run_dir.exists():
-            if not allow_existing:
+        if allow_existing and not run_dir.exists():
+            raise RuntimeError(f"Resume requested but run directory does not exist: {run_dir}")
+        if not allow_existing:
+            if run_dir.exists():
                 raise RuntimeError(
                     f"Run dir already exists: {run_dir}. "
                     "Refusing to clobber. Set logging.run_dir to a new path or pass --resume."
                 )
-        else:
             run_dir.mkdir(parents=True, exist_ok=False)
     else:
         if allow_existing:
@@ -146,11 +151,6 @@ def create_run_dir(
                 "Resume requested but logging.run_dir is null. "
                 "Set logging.run_dir to an existing run directory to resume."
             )
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        name = "run"
-        if config_path is not None:
-            name = Path(config_path).stem
-        run_dir = Path("runs") / cfg.logging.project / f"{stamp}_{name}"
         run_dir.mkdir(parents=True, exist_ok=False)
 
     # Save config snapshot (avoid clobbering on resume)
@@ -160,11 +160,7 @@ def create_run_dir(
             "decay_steps_effective": int(resolve_decay_horizon(cfg)),
         }
     }
-    if (run_dir / "config_resolved.json").exists() and allow_existing:
-        (run_dir / "config_resume.json").write_text(
-            json.dumps(resolved_cfg, indent=2, sort_keys=True)
-        )
-    else:
+    if not allow_existing:
         (run_dir / "config_resolved.json").write_text(
             json.dumps(resolved_cfg, indent=2, sort_keys=True)
         )
@@ -188,6 +184,7 @@ class MetricsWriter:
         """
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Text-mode line buffering flushes every newline-terminated JSONL row.
         self._f = self.path.open("a", buffering=1)
 
     def write(self, row: dict[str, Any]) -> None:
@@ -196,7 +193,6 @@ class MetricsWriter:
         :param dict[str, Any] row: Dictionary of metrics to write.
         """
         self._f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        self._f.flush()
 
     def close(self) -> None:
         """Close the file handle."""

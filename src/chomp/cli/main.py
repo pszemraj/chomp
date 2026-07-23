@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import click
 
-from chomp._version import __version__
+from chomp import __version__
 
 BANNER = f"""
            __
@@ -20,11 +20,6 @@ BANNER = f"""
 Version: {__version__}
 Repo:    https://github.com/pszemraj/chomp
 """.strip("\n")
-
-
-def print_banner() -> None:
-    """Print the chomp banner."""
-    click.echo(BANNER)
 
 
 def parse_resume(raw: str) -> str | int:

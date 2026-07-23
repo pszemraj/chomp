@@ -1,73 +1,37 @@
-# Minimal config that actually hits Zyphra/Zyda-2 streaming.
-# Intended for validating the HF streaming path end-to-end.
+# Short GPU smoke test for the real Hugging Face streaming and tokenizer path.
 
 model:
   backend: dummy
-  vocab_size: 32128
-  d_model: 128
-  dropout: 0.0
 
 data:
   backend: hf
   hf_dataset: Zyphra/Zyda-2
   hf_name: sample-100BT
-  hf_split: train
-  hf_eval_split: validation
-  text_key: text
+  hf_revision: main
+  shuffle_buffer_size: 31
+  shuffle_buffer_bytes: 8388608
   packing_mode: bin
-  packing_buffer_docs: 256
-  packing_max_docs_per_bin: null
+  packing_buffer_docs: 32
+  window_shuffle_tokens: 0
   grain_prefetch: 2
-  mask_boundary_loss: true
-  train_on_eos: true
-  max_eval_samples: 1000
-  shuffle: true
-  shuffle_buffer_size: 10000
-  repeat: true
+  max_eval_samples: 0
   tokenizer:
     kind: hf
     hf_name_or_path: pszemraj/bytebpe-tokenizer-32k-mlm
-    hf_use_fast: true
-    hf_trust_remote_code: false
-    vocab_size_multiple: 128
-    auto_set_special_tokens: true
+    add_eos: true
 
 train:
-  seed: 0
-  steps: 20
+  steps: 5
   batch_size: 2
   seq_len: 128
   grad_accum: 2
-  jit: true
   deterministic: true
-  allow_cpu: false
   log_every: 1
   eval_every: 0
+  generate_every: 0
 
 optim:
-  name: muon
-  lr: 3.0e-4
-  weight_decay: 0.01
-  grad_clip_norm: 1.0
-  warmup_steps: 2
-  min_lr_ratio: 0.0
-  muon:
-    lr_scale: 100.0
+  warmup_steps: 1
 
 checkpoint:
-  enabled: true
-  save_every: 10
-  max_to_keep: 3
-  async_save: true
-
-logging:
-  project: chomp
-  run_dir: null
-  metrics_file: metrics.jsonl
-  level: INFO
-  console_use_rich: true
-  log_file: train.log
-
-debug:
-  nan_check: true
-  check_device_every: 10
+  enabled: false

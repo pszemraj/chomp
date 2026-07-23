@@ -9,8 +9,7 @@ We use:
 - YAML files for readability
 - dot-path overrides for quick experiment changes
 
-The loader is intentionally strict: mis-typed keys or invalid values should fail
-fast with error messages that tell you exactly what to fix.
+The loader applies semantic validation for unsupported choices and invalid value combinations.
 
 Design stance (hard-earned):
 - Training must run on *real data* (HF streaming). Debug sources can exist,
@@ -19,12 +18,15 @@ Design stance (hard-earned):
 
 from __future__ import annotations
 
+import json
+import math
 import re
 import warnings
-from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from collections.abc import Hashable, Iterable
+from dataclasses import asdict, dataclass, is_dataclass, replace
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, get_args, get_origin, get_type_hints
 
 import yaml
 
@@ -34,8 +36,40 @@ if TYPE_CHECKING:
 Backend = Literal["dummy", "megalodon"]
 DatasetBackend = Literal["hf", "local_text"]
 TokenizerKind = Literal["byte", "hf"]
-PackingMode = Literal["sequential", "bin"]
+PackingMode = Literal["sequential", "bin", "multipack"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
+ResumeCompat = Literal["strict", "warn"]
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects repeated explicit mapping keys."""
+
+    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Any, Any]:
+        """Construct one mapping after rejecting duplicate explicit keys.
+
+        YAML merge keys are skipped here so an explicit key may override a
+        merged default using standard merge semantics.
+
+        :param yaml.MappingNode node: Mapping node to construct.
+        :param bool deep: Whether to construct nested values eagerly.
+        :raises yaml.constructor.ConstructorError: If an explicit key repeats.
+        :return dict[Any, Any]: Constructed mapping.
+        """
+        seen: set[Hashable] = set()
+        for key_node, _ in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                continue
+            key = self.construct_object(key_node, deep=deep)
+            if isinstance(key, Hashable):
+                if key in seen:
+                    raise yaml.constructor.ConstructorError(
+                        "while constructing a mapping",
+                        node.start_mark,
+                        f"found duplicate key {key!r}",
+                        key_node.start_mark,
+                    )
+                seen.add(key)
+        return super().construct_mapping(node, deep=deep)
 
 
 @dataclass(frozen=True)
@@ -59,7 +93,7 @@ class ModelConfig:
     d_model: int = 128
     dropout: float = 0.0
 
-    # Megalodon fields (subset; add as needed)
+    # Megalodon architecture fields
     model_dim: int = 128
     num_layers: int = 2
     num_heads: int = 1
@@ -68,33 +102,45 @@ class ModelConfig:
     ffn_hidden_dim: int = 256
     cema_ndim: int = 16
     chunk_size: int = 128
-    max_cache_len: int | None = None
-    cache_unbounded: bool = False
+    attention_window: int | None = None
     norm_num_groups: int = 32
     norm_eps: float = 1e-5
     rope_base: float | None = None
     swiglu: bool = False
     rescale_nffn: bool = False
     scale_emb: bool = False
+    # Chomp historically tied the LM head when output_size=-1. Upstream 0.2.1
+    # made tying explicit, so keep Chomp's established topology as the default.
+    share_emb: bool = True
     norm_affine: bool = True
     attention_dropout: float = 0.0
+    attention_dropout_mode: Literal["post_softmax", "dropkey"] = "post_softmax"
     hidden_dropout: float = 0.0
     pad_token_id: int = 0
     bos_token_id: int = 1
     eos_token_id: int = 2
-    max_positions: int = 1_000_000
-    init_mode: Literal["gaussian", "xavier", "he", "bert", "none"] = "he"
+    init_mode: Literal["gaussian", "xavier", "he", "bert"] = "he"
     use_checkpoint: bool = False
     output_size: int = -1
+    # Segmented CEMA path selection for strict packed training (megalodon-jax
+    # >= 0.2.1). True = parallel associative scan (fast, higher peak memory);
+    # False = sequential lax.scan fallback (O(1) memory). Ignored unless
+    # segment_ids reach the model (bin/multipack + packing_strict_segments).
+    use_associative_segment_scan: bool = True
 
-    # Dtype policy (strings so YAML is clean; converted at runtime)
-    param_dtype: Literal["float32", "bfloat16"] = "float32"
+    # Dtype policy (strings so YAML is clean; converted at runtime).
+    # param_dtype must stay float32: optimizer state follows param dtype and
+    # chomp has no fp32 master-param path, so
+    # validate_config rejects bfloat16 params rather than silently training
+    # with bf16 optimizer moments. bf16 belongs in compute_dtype.
+    param_dtype: Literal["float32"] = "float32"
     compute_dtype: Literal["float32", "bfloat16"] = "bfloat16"
-    accum_dtype: Literal["float32", "bfloat16"] = "float32"
-    softmax_dtype: Literal["float32", "bfloat16"] = "float32"
-
-    # Megalodon-jax currently only supports "default"
-    gemm_backend: Literal["default"] = "default"
+    # Model-internal accumulation only (attention/CEMA reductions inside
+    # megalodon-jax); both it and harness gradient accumulation stay fp32.
+    accum_dtype: Literal["float32"] = "float32"
+    attention_softmax_dtype: Literal["float32", "bfloat16"] = "float32"
+    loss_softmax_dtype: Literal["float32", "bfloat16"] = "float32"
+    loss_chunk_size: int | None = None
 
 
 @dataclass(frozen=True)
@@ -113,7 +159,7 @@ class TokenizerConfig:
     embeddings up to a GPU-friendly multiple (default: 128).
     """
 
-    kind: TokenizerKind = "byte"
+    kind: TokenizerKind = "hf"
 
     # HF tokenizer
     hf_name_or_path: str | None = "pszemraj/bytebpe-tokenizer-32k-mlm"
@@ -133,7 +179,7 @@ class TokenizerConfig:
 
     # Special token insertion
     add_bos: bool = False
-    add_eos: bool = False
+    add_eos: bool = True
 
     # Optional truncation (in tokens) per document before packing
     max_doc_tokens: int | None = None
@@ -146,15 +192,17 @@ class DataConfig:
     Default dataset is Zyphra/Zyda-2 sample-100BT streaming split, as requested.
 
     The data pipeline's job is to yield fixed-shape `Batch` objects:
-      input_ids:      [A, B, T]
-      labels:         [A, B, T]
-      attention_mask: [A, B, T]
+      input_ids:   [A, B, T]
+      labels:      [A, B, T]
+      segment_ids: [A, B, T]
 
     where A=grad_accum, B=batch_size, T=seq_len.
+    Attention masks and segment-local positions are derived from segment IDs
+    inside the compiled model path.
 
-    Validation behavior:
-    - If an HF eval split is configured and exists, we take its first max_eval_samples examples.
-    - Otherwise we take the first max_eval_samples examples from the (shuffled) train split.
+    Validation uses ``hf_eval_split`` when set. When null, a deterministic
+    content-hash holdout is selected from ``hf_split`` and excluded from
+    training. Collection errors never silently switch splits.
     """
 
     backend: DatasetBackend = "hf"
@@ -162,52 +210,66 @@ class DataConfig:
     # HF streaming dataset spec
     # TODO: v0 is single-source only; add multi-source mixing when needed.
     hf_dataset: str = "Zyphra/Zyda-2"
-    hf_name: str = "sample-100BT"
+    hf_name: str | None = "sample-100BT"
     hf_split: str = "train"
-    # Preferred eval split; fallback to train if missing.
-    # Default None: derive eval texts from the train split.
+    hf_revision: str | None = "main"
+    # User-facing ref captured before checkpointed runs replace hf_revision
+    # with its immutable commit. Leave null in authored configs.
+    hf_requested_revision: str | None = None
+    # Evaluation split. None uses a disjoint content-hash holdout from hf_split.
     hf_eval_split: str | None = None
+    hf_eval_holdout_fraction: float = 0.01
     text_key: str = "text"
 
     shuffle: bool = True
+    # Hard document-count cap for each owned HF shuffle window.
     shuffle_buffer_size: int = 10_000
+    # UTF-8 payload-byte cap for each owned HF shuffle window. The first
+    # document is always admitted, so a single oversized document can exceed
+    # this value without being dropped.
+    shuffle_buffer_bytes: int = 536_870_912
     seed: int = 0
     repeat: bool = True
-
-    # Network resilience (best-effort; still expect rare failures)
-    max_retries: int = 3
-    retry_delay_sec: float = 1.0
-
-    # For retry: cache a last-known-good HF state dict every N examples.
-    # Smaller => more robust, but more overhead.
-    state_update_interval: int = 2_000
 
     # Debug-only local text source (exercises tokenize+pack path, not synthetic ids)
     local_text: str = "Hello from chomp.\n"
 
-    # Packing mode: sequential stream packer or bin-packing (FFD).
-    packing_mode: PackingMode = "sequential"
-    # Bin-packing buffer size (documents). Must be >= batch_size * grad_accum.
-    packing_buffer_docs: int = 128
+    # Packing mode: sequential stream packer, bin-packing (FFD), or multipack.
+    packing_mode: PackingMode = "bin"
+    # Bin-packing lookahead size (prepared chunks). Values below the number of
+    # output rows are raised to that effective minimum at runtime.
+    packing_buffer_docs: int = 256
     # Optional cap on how many documents may be packed into a single bin.
     packing_max_docs_per_bin: int | None = None
+    # Multipack lookahead group size (documents). Nothing is emitted until this
+    # many pending docs/chunks accumulate (except the end-of-stream flush),
+    # and the group is sorted each pack cycle — keep it modest.
+    packing_group_docs: int = 512
+    # Require full per-document state isolation (attention, RoPE, CEMA,
+    # TimestepNorm) whenever documents are packed together — applies to both
+    # bin and multipack modes. False = explicit opt-in to cross-document
+    # state bleed.
+    packing_strict_segments: bool = True
 
     # Packed-doc loss behavior
     mask_boundary_loss: bool = True
     train_on_eos: bool = True
 
-    # Grain pipeline settings.
-    grain_prefetch: int = 0
+    # Raw packed-token payload budget for window shuffling before batch
+    # assembly. Derived rows are aligned down to batch_size * grad_accum; 0
+    # disables.
+    window_shuffle_tokens: int = 8_388_608
+    # Hard cap on packed row objects Grain materializes before yielding each window.
+    window_shuffle_max_rows: int = 4_096
 
-    # Validation set creation (first N examples from validation or train fallback)
+    # Grain pipeline settings.
+    grain_prefetch: int = 2
+
+    # Validation set creation from the explicitly selected split/source.
     max_eval_samples: int = 1000
 
     # Tokenizer
     tokenizer: TokenizerConfig = TokenizerConfig()
-
-    # Simple performance toggle: if True, device_put batches in the iterator.
-    # For now, leave False and device_put in the training loop.
-    device_put: bool = False
 
 
 @dataclass(frozen=True)
@@ -279,18 +341,14 @@ class OptimConfig:
 
 @dataclass(frozen=True)
 class CheckpointConfig:
-    """Orbax checkpointing configuration (Phase 3).
-
-    chomp treats resume correctness as a contract.
-    """
+    """Orbax checkpointing and resume configuration."""
 
     enabled: bool = True
-    # If None, checkpoints live under <run_dir>/checkpoints
-    root_dir: str | None = None
 
     save_every: int = 5000
     max_to_keep: int = 3
     async_save: bool = True
+    resume_compat: ResumeCompat = "warn"
 
 
 @dataclass(frozen=True)
@@ -301,7 +359,7 @@ class WandbConfig:
     project: str | None = None
     entity: str | None = None
     run_name: str | None = None
-    mode: Literal["online", "offline", "disabled"] = "online"
+    mode: Literal["online", "offline"] = "online"
     tags: tuple[str, ...] = ()
 
 
@@ -320,10 +378,9 @@ class LoggingConfig:
 
 @dataclass(frozen=True)
 class DebugConfig:
-    """Debug configuration for NaN checks and device assertions."""
+    """Debug configuration for NaN checks."""
 
     nan_check: bool = True
-    check_device_every: int = 100
 
 
 @dataclass(frozen=True)
@@ -364,7 +421,7 @@ def _set_by_dotted_path(obj: Any, path: str, raw_value: str) -> Any:
     """
 
     parts = path.split(".")
-    if len(parts) < 1:
+    if any(not part for part in parts):
         raise ValueError(f"Invalid override path: {path!r}")
 
     # Walk to the parent
@@ -381,25 +438,16 @@ def _set_by_dotted_path(obj: Any, path: str, raw_value: str) -> Any:
         raise ValueError(f"Unknown config key: {path!r} (missing {leaf!r})")
 
     old = getattr(cur, leaf)
-    new = _cast_like(old, raw_value)
+    try:
+        new = _cast_like(old, raw_value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid override {path!r}: {exc}") from exc
 
     # Rebuild dataclasses from the bottom up (frozen dataclasses)
-    cur_new = _replace_dataclass(cur, **{leaf: new})
+    cur_new = replace(cur, **{leaf: new})
     for parent, field in reversed(parents):
-        cur_new = _replace_dataclass(parent, **{field: cur_new})
+        cur_new = replace(parent, **{field: cur_new})
     return cur_new
-
-
-def _replace_dataclass(obj: Any, **kwargs: Any) -> Any:
-    """Create a new dataclass instance with specified fields replaced.
-
-    :param Any obj: Frozen dataclass to copy.
-    :param kwargs: Field names and their new values.
-    :return Any: New dataclass instance with updated fields.
-    """
-    from dataclasses import replace
-
-    return replace(obj, **kwargs)
 
 
 def _cast_like(old: Any, raw: str) -> Any:
@@ -413,6 +461,10 @@ def _cast_like(old: Any, raw: str) -> Any:
     :return Any: Value cast to the type of `old`.
     """
 
+    if isinstance(old, tuple):
+        raise ValueError("list-valued overrides are not supported; set this value in YAML")
+    if raw.lower() in {"null", "none"}:
+        return None
     if isinstance(old, bool):
         if raw.lower() in {"true", "1", "yes", "y"}:
             return True
@@ -424,8 +476,6 @@ def _cast_like(old: Any, raw: str) -> Any:
     if isinstance(old, float):
         return float(raw)
     if old is None:
-        if raw.lower() in {"null", "none"}:
-            return None
         # When the default is None, parse YAML scalars to recover numeric/bool types.
         try:
             parsed = yaml.safe_load(raw)
@@ -438,23 +488,46 @@ def _cast_like(old: Any, raw: str) -> Any:
     return raw
 
 
-def load_config(path: str | Path, overrides: Iterable[str] | None = None) -> Config:
-    """Load YAML config file + apply dot-path overrides.
+def read_config_mapping(path: str | Path) -> dict[str, Any]:
+    """Read a YAML or JSON config mapping from disk.
 
-    Overrides format: "train.steps=2000".
+    :param path: Path to a YAML or JSON file.
+    :raises FileNotFoundError: If the path does not exist.
+    :raises ValueError: If parsing fails or the top-level value is not a mapping.
+    :return dict[str, Any]: Parsed top-level mapping.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+    try:
+        with path.open() as f:
+            if path.suffix == ".json":
+                data = json.load(f) or {}
+            else:
+                data = yaml.load(f, Loader=_UniqueKeySafeLoader) or {}
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in {path}: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid YAML in {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"Config file must be a mapping, got {type(data).__name__}")
+    return data
 
-    :param path: Path to the YAML config file.
+
+def build_config(data: dict[str, Any], overrides: Iterable[str] | None = None) -> Config:
+    """Build and validate a Config from a raw nested mapping.
+
+    Applies $variables resolution, dataclass parsing, optional dot-path
+    overrides, then validation — the same pipeline as load_config minus the
+    YAML file read. Use this to reconstruct configs from stored dicts
+    (checkpoint metadata, config_resolved.json).
+
+    :param dict[str, Any] data: Raw nested config mapping.
     :param overrides: Optional list of dot-path overrides (e.g., ["train.steps=2000"]).
-    :raises ValueError: If override format is invalid or path does not exist.
+    :raises ValueError: If override format is invalid.
     :return Config: Validated configuration object.
     """
-
-    path = Path(path)
-    with path.open("r") as f:
-        data = yaml.safe_load(f) or {}
-
     data = _resolve_variables(data)
-
     cfg = _from_nested_dict(data)
 
     if overrides:
@@ -466,6 +539,19 @@ def load_config(path: str | Path, overrides: Iterable[str] | None = None) -> Con
 
     validate_config(cfg)
     return cfg
+
+
+def load_config(path: str | Path, overrides: Iterable[str] | None = None) -> Config:
+    """Load YAML config file + apply dot-path overrides.
+
+    Overrides format: "train.steps=2000".
+
+    :param path: Path to the YAML config file.
+    :param overrides: Optional list of dot-path overrides (e.g., ["train.steps=2000"]).
+    :raises ValueError: If override format is invalid or config parsing fails.
+    :return Config: Validated configuration object.
+    """
+    return build_config(read_config_mapping(path), overrides)
 
 
 _VAR_INLINE_RE = re.compile(r"\{\$variables\.([A-Za-z0-9_.-]+)\}")
@@ -487,7 +573,7 @@ def _resolve_variables(data: dict[str, Any]) -> dict[str, Any]:
     :raises ValueError: If a variable reference is missing or circular.
     :return dict[str, Any]: Data with variables resolved (variables removed).
     """
-    raw_vars = data.get("variables") or {}
+    raw_vars = data.get("variables", {})
     if not isinstance(raw_vars, dict):
         raise ValueError("variables must be a mapping if provided")
 
@@ -565,6 +651,11 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
     :return Config: Fully constructed Config with all sub-configs.
     """
 
+    allowed = {"model", "data", "train", "optim", "checkpoint", "logging", "debug", "derived"}
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        _vfail(f"unknown top-level config section(s): {', '.join(unknown)}")
+
     model = ModelConfig(**(data.get("model") or {}))
     train = TrainConfig(**(data.get("train") or {}))
     optim_d = data.get("optim") or {}
@@ -575,7 +666,12 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
     optim_d = {k: v for k, v in optim_d.items() if k not in {"muon", "adam"}}
     optim = OptimConfig(muon=muon, adam=adam, **optim_d)
     logging_d = data.get("logging") or {}
-    wandb_d = logging_d.get("wandb") or {}
+    wandb_d = dict(logging_d.get("wandb") or {})
+    if "tags" in wandb_d:
+        tags = wandb_d["tags"]
+        if not isinstance(tags, (list, tuple)):
+            _vfail("logging.wandb.tags must be a YAML/JSON list of strings")
+        wandb_d["tags"] = tuple(tags)
     wandb = WandbConfig(**wandb_d)
     logging_d = {k: v for k, v in logging_d.items() if k != "wandb"}
     logging = LoggingConfig(wandb=wandb, **logging_d)
@@ -613,8 +709,54 @@ def _vfail(msg: str) -> None:
     raise ValueError(f"Config validation failed: {msg}")
 
 
+def _validate_field_types(obj: Any, prefix: str = "") -> None:
+    """Reject scalar fields whose runtime type doesn't match the annotation.
+
+    Catches YAML footguns like quoted booleans (the string "false" is truthy)
+    and non-finite numerics before they silently steer the pipeline. Literal
+    and container internals are left to the targeted checks below.
+
+    :param Any obj: Config dataclass to walk.
+    :param str prefix: Dotted path prefix for error messages.
+    :raises ValueError: If a scalar field has the wrong type or a non-finite value.
+    """
+    hints = get_type_hints(type(obj))
+    for f in dataclass_fields(obj):
+        value = getattr(obj, f.name)
+        path = f"{prefix}{f.name}"
+        if is_dataclass(value):
+            _validate_field_types(value, prefix=f"{path}.")
+            continue
+        tp = hints.get(f.name)
+        args = get_args(tp)
+        if type(None) in args:
+            if value is None:
+                continue
+            remaining = [a for a in args if a is not type(None)]
+            if len(remaining) != 1:
+                continue
+            tp = remaining[0]
+        if tp is None or tp is Any or get_origin(tp) is not None:
+            continue
+        if tp is bool:
+            if not isinstance(value, bool):
+                _vfail(f"{path} must be a boolean, got {value!r}")
+        elif tp is int:
+            if isinstance(value, bool) or not isinstance(value, int):
+                _vfail(f"{path} must be an integer, got {value!r}")
+        elif tp is float:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                _vfail(f"{path} must be a number, got {value!r}")
+            elif not math.isfinite(value):
+                _vfail(f"{path} must be finite, got {value!r}")
+        elif tp is str and not isinstance(value, str):
+            _vfail(f"{path} must be a string, got {value!r}")
+
+
 def _validate_train(cfg: Config) -> None:
     """Validate training-related config fields."""
+    if cfg.train.seed < 0:
+        _vfail(f"train.seed must be >= 0, got {cfg.train.seed}")
     if cfg.train.steps <= 0:
         _vfail(f"train.steps must be positive, got {cfg.train.steps}")
     if cfg.train.batch_size <= 0:
@@ -656,6 +798,8 @@ def _validate_train(cfg: Config) -> None:
         cfg.train.generate_top_p <= 0 or cfg.train.generate_top_p > 1
     ):
         _vfail(f"train.generate_top_p must be in (0, 1] when set, got {cfg.train.generate_top_p}")
+    if cfg.train.profile_dir is not None and not cfg.train.profile_dir.strip():
+        _vfail("train.profile_dir must be a non-empty string or null")
 
 
 def _validate_optim(cfg: Config) -> None:
@@ -664,6 +808,8 @@ def _validate_optim(cfg: Config) -> None:
         _vfail(f"optim.name must be 'adamw' or 'muon', got {cfg.optim.name!r}")
     if cfg.optim.lr <= 0:
         _vfail(f"optim.lr must be positive, got {cfg.optim.lr}")
+    if cfg.optim.weight_decay < 0:
+        _vfail(f"optim.weight_decay must be >= 0, got {cfg.optim.weight_decay}")
     if cfg.optim.grad_clip_norm < 0:
         _vfail(f"optim.grad_clip_norm must be >= 0, got {cfg.optim.grad_clip_norm}")
     if cfg.optim.warmup_steps < 0:
@@ -684,10 +830,9 @@ def _validate_optim(cfg: Config) -> None:
         _vfail(f"optim.muon.ns_steps must be positive, got {muon.ns_steps}")
     if muon.consistent_rms is not None and muon.consistent_rms < 0:
         _vfail(f"optim.muon.consistent_rms must be >= 0 or None, got {muon.consistent_rms}")
-    if adam.b1 <= 0 or adam.b1 >= 1:
-        _vfail(f"optim.adam.b1 must be in (0, 1), got {adam.b1}")
-    if adam.b2 <= 0 or adam.b2 >= 1:
-        _vfail(f"optim.adam.b2 must be in (0, 1), got {adam.b2}")
+    for name, value in (("b1", adam.b1), ("b2", adam.b2)):
+        if not 0 < value < 1:
+            _vfail(f"optim.adam.{name} must be in (0, 1), got {value}")
     if adam.eps <= 0:
         _vfail(f"optim.adam.eps must be positive, got {adam.eps}")
     if cfg.optim.warmup_steps >= cfg.train.steps:
@@ -699,6 +844,11 @@ def _validate_optim(cfg: Config) -> None:
 
 def _validate_checkpoint(cfg: Config) -> None:
     """Validate checkpoint-related config fields."""
+    if cfg.checkpoint.resume_compat not in ("strict", "warn"):
+        _vfail(
+            "checkpoint.resume_compat must be 'strict' or 'warn', got "
+            f"{cfg.checkpoint.resume_compat!r}"
+        )
     if cfg.checkpoint.enabled:
         if cfg.checkpoint.save_every <= 0:
             _vfail(f"checkpoint.save_every must be positive, got {cfg.checkpoint.save_every}")
@@ -708,22 +858,75 @@ def _validate_checkpoint(cfg: Config) -> None:
 
 def _validate_model(cfg: Config) -> None:
     """Validate model-related config fields."""
+    if cfg.model.backend not in ("dummy", "megalodon"):
+        _vfail(f"model.backend must be 'dummy' or 'megalodon', got {cfg.model.backend!r}")
+    if cfg.model.attention_dropout_mode not in ("post_softmax", "dropkey"):
+        _vfail(
+            "model.attention_dropout_mode must be 'post_softmax' or 'dropkey', got "
+            f"{cfg.model.attention_dropout_mode!r}"
+        )
+    if cfg.model.init_mode not in ("gaussian", "xavier", "he", "bert"):
+        _vfail(f"model.init_mode is unsupported: {cfg.model.init_mode!r}")
+    if cfg.model.param_dtype != "float32":
+        _vfail("model.param_dtype must be 'float32'")
+    if cfg.model.compute_dtype not in ("float32", "bfloat16"):
+        _vfail(f"model.compute_dtype is unsupported: {cfg.model.compute_dtype!r}")
+    if cfg.model.accum_dtype != "float32":
+        _vfail("model.accum_dtype must be 'float32'")
+    if cfg.model.attention_softmax_dtype not in ("float32", "bfloat16"):
+        _vfail(
+            f"model.attention_softmax_dtype is unsupported: {cfg.model.attention_softmax_dtype!r}"
+        )
+    if cfg.model.loss_softmax_dtype not in ("float32", "bfloat16"):
+        _vfail(f"model.loss_softmax_dtype is unsupported: {cfg.model.loss_softmax_dtype!r}")
     if cfg.model.vocab_size <= 0:
         _vfail(f"model.vocab_size must be positive, got {cfg.model.vocab_size}")
+    for name, token_id in (
+        ("pad_token_id", cfg.model.pad_token_id),
+        ("bos_token_id", cfg.model.bos_token_id),
+        ("eos_token_id", cfg.model.eos_token_id),
+    ):
+        if not 0 <= token_id < cfg.model.vocab_size:
+            _vfail(f"model.{name} must be in [0, {cfg.model.vocab_size}), got {token_id}")
+    if not 0 <= cfg.model.dropout < 1:
+        _vfail(f"model.dropout must be in [0, 1), got {cfg.model.dropout}")
     if cfg.model.backend == "dummy":
         if cfg.model.d_model <= 0:
             _vfail(f"model.d_model must be positive, got {cfg.model.d_model}")
-    elif cfg.model.backend == "megalodon":
-        if cfg.model.model_dim <= 0:
-            _vfail(f"model.model_dim must be positive, got {cfg.model.model_dim}")
-        if cfg.model.num_layers <= 0:
-            _vfail(f"model.num_layers must be positive, got {cfg.model.num_layers}")
-        if cfg.model.num_heads <= 0:
-            _vfail(f"model.num_heads must be positive, got {cfg.model.num_heads}")
-        if cfg.model.model_dim % cfg.model.num_heads != 0:
+        if cfg.model.loss_chunk_size is not None:
+            _vfail("model.loss_chunk_size is supported only when model.backend='megalodon'")
+    else:
+        positive_fields = {
+            "model_dim": cfg.model.model_dim,
+            "num_layers": cfg.model.num_layers,
+            "num_heads": cfg.model.num_heads,
+            "z_dim": cfg.model.z_dim,
+            "value_dim": cfg.model.value_dim,
+            "ffn_hidden_dim": cfg.model.ffn_hidden_dim,
+            "cema_ndim": cfg.model.cema_ndim,
+            "norm_num_groups": cfg.model.norm_num_groups,
+            "norm_eps": cfg.model.norm_eps,
+        }
+        for name, value in positive_fields.items():
+            if value <= 0:
+                _vfail(f"model.{name} must be positive, got {value}")
+        for name in ("model_dim", "z_dim", "value_dim"):
+            value = getattr(cfg.model, name)
+            if value % cfg.model.num_heads != 0:
+                _vfail(
+                    f"model.{name} ({value}) must be divisible by "
+                    f"model.num_heads ({cfg.model.num_heads})"
+                )
+        if cfg.model.model_dim % cfg.model.norm_num_groups != 0:
             _vfail(
                 f"model.model_dim ({cfg.model.model_dim}) must be divisible by "
-                f"model.num_heads ({cfg.model.num_heads})"
+                f"model.norm_num_groups ({cfg.model.norm_num_groups})"
+            )
+        if cfg.model.norm_num_groups == cfg.model.model_dim:
+            _vfail(
+                "model.norm_num_groups must be smaller than model.model_dim: "
+                "Megalodon featurewise TimestepNorm requires a learned prior that "
+                "the training model does not configure"
             )
         if cfg.model.chunk_size <= 0:
             _vfail(f"model.chunk_size must be positive, got {cfg.model.chunk_size}")
@@ -736,8 +939,38 @@ def _validate_model(cfg: Config) -> None:
                 f"train.seq_len ({cfg.train.seq_len}) must be divisible by "
                 f"model.chunk_size ({cfg.model.chunk_size})"
             )
-    else:
-        _vfail(f"model.backend must be 'dummy' or 'megalodon', got {cfg.model.backend!r}")
+        if cfg.model.attention_window is not None and cfg.model.attention_window <= 0:
+            _vfail(
+                "model.attention_window must be positive when set, got "
+                f"{cfg.model.attention_window}"
+            )
+        if cfg.model.rope_base is not None and cfg.model.rope_base <= 0:
+            _vfail(f"model.rope_base must be positive when set, got {cfg.model.rope_base}")
+        head_dim = cfg.model.z_dim // cfg.model.num_heads
+        if head_dim % 2 != 0:
+            _vfail(f"model.z_dim / model.num_heads must be even for RoPE, got {head_dim}")
+        if not 0 <= cfg.model.attention_dropout < 1:
+            _vfail(f"model.attention_dropout must be in [0, 1), got {cfg.model.attention_dropout}")
+        if not 0 <= cfg.model.hidden_dropout < 1:
+            _vfail(f"model.hidden_dropout must be in [0, 1), got {cfg.model.hidden_dropout}")
+        if cfg.model.loss_chunk_size is not None and cfg.model.loss_chunk_size <= 0:
+            _vfail(
+                f"model.loss_chunk_size must be positive when set, got {cfg.model.loss_chunk_size}"
+            )
+    if cfg.model.output_size != -1 and cfg.model.output_size <= 0:
+        _vfail(f"model.output_size must be -1 or positive, got {cfg.model.output_size}")
+    if cfg.model.share_emb and cfg.model.output_size not in (-1, cfg.model.vocab_size):
+        _vfail("model.share_emb=true requires model.output_size to be -1 or equal model.vocab_size")
+    if (
+        cfg.model.backend == "megalodon"
+        and not cfg.model.share_emb
+        and cfg.model.output_size != -1
+        and cfg.model.output_size < cfg.model.vocab_size
+    ):
+        _vfail(
+            "model.output_size must be >= model.vocab_size for an untied causal-LM head, "
+            f"got output_size={cfg.model.output_size} and vocab_size={cfg.model.vocab_size}"
+        )
 
     if cfg.model.pad_token_id == cfg.model.eos_token_id:
         warnings.warn(
@@ -749,13 +982,25 @@ def _validate_model(cfg: Config) -> None:
 
 def _validate_data(cfg: Config) -> None:
     """Validate data pipeline-related config fields."""
+    if cfg.data.seed < 0:
+        _vfail(f"data.seed must be >= 0, got {cfg.data.seed}")
     if cfg.data.backend == "hf":
         if not cfg.data.hf_dataset:
             _vfail("data.hf_dataset must be non-empty when data.backend='hf'")
-        if not cfg.data.hf_name:
-            _vfail("data.hf_name must be non-empty when data.backend='hf' (use named configs)")
+        if cfg.data.hf_name is not None and not cfg.data.hf_name.strip():
+            _vfail("data.hf_name must be null or non-empty when data.backend='hf'")
         if not cfg.data.hf_split:
             _vfail("data.hf_split must be non-empty when data.backend='hf'")
+        if cfg.data.hf_revision is not None and not cfg.data.hf_revision.strip():
+            _vfail("data.hf_revision must be null or a non-empty revision when data.backend='hf'")
+        if (
+            cfg.data.hf_requested_revision is not None
+            and not cfg.data.hf_requested_revision.strip()
+        ):
+            _vfail(
+                "data.hf_requested_revision must be null or a non-empty revision "
+                "when data.backend='hf'"
+            )
         if cfg.data.hf_eval_split is not None:
             if not isinstance(cfg.data.hf_eval_split, str):
                 _vfail(
@@ -765,6 +1010,16 @@ def _validate_data(cfg: Config) -> None:
                 _vfail(
                     "data.hf_eval_split must be null or a non-empty string when data.backend='hf'"
                 )
+            if cfg.data.max_eval_samples > 0 and cfg.data.hf_eval_split == cfg.data.hf_split:
+                _vfail(
+                    "data.hf_eval_split must differ from data.hf_split when evaluation is enabled; "
+                    "use null for a disjoint content-hash holdout"
+                )
+        if not 0.0 < cfg.data.hf_eval_holdout_fraction < 1.0:
+            _vfail(
+                "data.hf_eval_holdout_fraction must be between 0 and 1 exclusive, got "
+                f"{cfg.data.hf_eval_holdout_fraction}"
+            )
         if not cfg.data.text_key:
             _vfail("data.text_key must be non-empty")
         if cfg.data.shuffle and cfg.data.shuffle_buffer_size <= 0:
@@ -772,55 +1027,101 @@ def _validate_data(cfg: Config) -> None:
                 "data.shuffle_buffer_size must be positive when data.shuffle=true, "
                 f"got {cfg.data.shuffle_buffer_size}"
             )
+        if cfg.data.shuffle and cfg.data.shuffle_buffer_bytes <= 0:
+            _vfail(
+                "data.shuffle_buffer_bytes must be positive when data.shuffle=true, "
+                f"got {cfg.data.shuffle_buffer_bytes}"
+            )
     elif cfg.data.backend == "local_text":
         if not cfg.data.local_text:
             _vfail("data.local_text must be non-empty when data.backend='local_text'")
     else:
         _vfail(f"data.backend must be 'hf' or 'local_text', got {cfg.data.backend!r}")
+    if cfg.data.packing_mode not in ("sequential", "bin", "multipack"):
+        _vfail(
+            "data.packing_mode must be 'sequential', 'bin', or 'multipack', got "
+            f"{cfg.data.packing_mode!r}"
+        )
+    if (
+        cfg.data.packing_mode in ("bin", "multipack")
+        and cfg.data.packing_max_docs_per_bin is not None
+        and cfg.data.packing_max_docs_per_bin <= 0
+    ):
+        _vfail(
+            "data.packing_max_docs_per_bin must be positive when set, "
+            f"got {cfg.data.packing_max_docs_per_bin}"
+        )
+    if cfg.data.packing_mode == "bin" and cfg.data.packing_buffer_docs <= 0:
+        _vfail(
+            "data.packing_buffer_docs must be positive when packing_mode='bin', "
+            f"got {cfg.data.packing_buffer_docs}"
+        )
+    if cfg.data.packing_mode == "multipack" and cfg.data.packing_group_docs <= 0:
+        _vfail(
+            "data.packing_group_docs must be positive when packing_mode='multipack', "
+            f"got {cfg.data.packing_group_docs}"
+        )
+    if (
+        cfg.data.packing_mode in ("bin", "multipack")
+        and cfg.data.packing_strict_segments
+        and not cfg.data.mask_boundary_loss
+    ):
+        _vfail(
+            "data.mask_boundary_loss=false is incompatible with strict segment "
+            "isolation: the backend excludes cross-segment label pairs from the "
+            "loss whenever segment_ids are passed (megalodon-jax >= 0.2.1), "
+            "while host-side token counts would still include them — silently "
+            "changing token-weighted grad accumulation and loss_tokens. Keep "
+            "mask_boundary_loss=true, or set data.packing_strict_segments=false "
+            "for deliberate cross-document state bleed."
+        )
 
-    if cfg.data.packing_mode not in ("sequential", "bin"):
-        _vfail(f"data.packing_mode must be 'sequential' or 'bin', got {cfg.data.packing_mode!r}")
-    if cfg.data.packing_mode == "bin":
-        if cfg.data.packing_buffer_docs <= 0:
-            _vfail(
-                "data.packing_buffer_docs must be positive when packing_mode='bin', "
-                f"got {cfg.data.packing_buffer_docs}"
-            )
-        min_docs = cfg.train.batch_size * cfg.train.grad_accum
-        if cfg.data.packing_buffer_docs < min_docs:
-            _vfail(
-                "data.packing_buffer_docs must be >= train.batch_size * train.grad_accum "
-                f"({min_docs}), got {cfg.data.packing_buffer_docs}"
-            )
-        if cfg.data.packing_max_docs_per_bin is not None and cfg.data.packing_max_docs_per_bin <= 0:
-            _vfail(
-                "data.packing_max_docs_per_bin must be positive when set, "
-                f"got {cfg.data.packing_max_docs_per_bin}"
-            )
+    if cfg.data.window_shuffle_tokens < 0:
+        _vfail(f"data.window_shuffle_tokens must be >=0, got {cfg.data.window_shuffle_tokens}")
+    if cfg.data.window_shuffle_max_rows <= 0:
+        _vfail(
+            f"data.window_shuffle_max_rows must be positive, got {cfg.data.window_shuffle_max_rows}"
+        )
+    rows_per_step = cfg.train.batch_size * cfg.train.grad_accum
+    min_shuffle_tokens = cfg.train.seq_len * rows_per_step
+    if 0 < cfg.data.window_shuffle_tokens < min_shuffle_tokens:
+        _vfail(
+            "data.window_shuffle_tokens must be 0 or large enough for one complete batch "
+            f"({min_shuffle_tokens} tokens at the configured shape), got "
+            f"{cfg.data.window_shuffle_tokens}"
+        )
+    if cfg.data.window_shuffle_tokens > 0 and cfg.data.window_shuffle_max_rows < rows_per_step:
+        _vfail(
+            "data.window_shuffle_max_rows must fit at least one complete optimizer batch "
+            f"({rows_per_step} rows), got {cfg.data.window_shuffle_max_rows}"
+        )
 
     if cfg.data.grain_prefetch < 0:
         _vfail(f"data.grain_prefetch must be >=0, got {cfg.data.grain_prefetch}")
     if cfg.data.max_eval_samples < 0:
         _vfail(f"data.max_eval_samples must be >=0, got {cfg.data.max_eval_samples}")
 
-    # HF streaming robustness knobs
-    if cfg.data.max_retries < 0:
-        _vfail(f"data.max_retries must be >=0, got {cfg.data.max_retries}")
-    if cfg.data.retry_delay_sec < 0:
-        _vfail(f"data.retry_delay_sec must be >=0, got {cfg.data.retry_delay_sec}")
-    if cfg.data.state_update_interval <= 0:
-        _vfail(f"data.state_update_interval must be >0, got {cfg.data.state_update_interval}")
-
 
 def _validate_logging(cfg: Config) -> None:
     """Validate logging-related config fields."""
+    if cfg.logging.level not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+        _vfail(f"logging.level is unsupported: {cfg.logging.level!r}")
+    if not str(cfg.logging.project).strip():
+        _vfail("logging.project must be a non-empty string")
+    if cfg.logging.run_dir is not None and not cfg.logging.run_dir.strip():
+        _vfail("logging.run_dir must be a non-empty string or null")
+    if not str(cfg.logging.metrics_file).strip():
+        _vfail("logging.metrics_file must be a non-empty string")
     if cfg.logging.log_file is not None and not str(cfg.logging.log_file).strip():
         _vfail("logging.log_file must be a non-empty string or null")
-    if cfg.logging.wandb.mode not in ("online", "offline", "disabled"):
-        _vfail(
-            "logging.wandb.mode must be 'online', 'offline', or 'disabled', "
-            f"got {cfg.logging.wandb.mode!r}"
-        )
+    for name in ("project", "entity", "run_name"):
+        value = getattr(cfg.logging.wandb, name)
+        if value is not None and not value.strip():
+            _vfail(f"logging.wandb.{name} must be a non-empty string or null")
+    if cfg.logging.wandb.mode not in ("online", "offline"):
+        _vfail(f"logging.wandb.mode must be 'online' or 'offline', got {cfg.logging.wandb.mode!r}")
+    if any(not tag.strip() for tag in cfg.logging.wandb.tags):
+        _vfail("logging.wandb.tags entries must be non-empty strings")
 
 
 def _validate_tokenizer(cfg: Config) -> None:
@@ -856,23 +1157,15 @@ def _validate_tokenizer(cfg: Config) -> None:
                 )
     else:
         _vfail(f"data.tokenizer.kind must be 'byte' or 'hf', got {tok.kind!r}")
-
     if tok.vocab_size_multiple <= 0:
         _vfail(
             f"data.tokenizer.vocab_size_multiple must be positive, got {tok.vocab_size_multiple}"
         )
 
-    if tok.max_doc_tokens is not None and tok.max_doc_tokens == 0:
-        warnings.warn(
-            "data.tokenizer.max_doc_tokens=0 disables truncation; the tokenizer will be "
-            "resolved with no max_doc_tokens cap.",
-            stacklevel=2,
-        )
-    if tok.max_doc_tokens is not None and tok.max_doc_tokens < 0:
-        warnings.warn(
-            "data.tokenizer.max_doc_tokens < 0 disables truncation; the tokenizer will be "
-            "resolved with no max_doc_tokens cap.",
-            stacklevel=2,
+    if tok.max_doc_tokens is not None and tok.max_doc_tokens <= 0:
+        _vfail(
+            "data.tokenizer.max_doc_tokens must be null (no truncation) or a positive integer, "
+            f"got {tok.max_doc_tokens}"
         )
 
     # Special token ids must be in range if enabled
@@ -884,6 +1177,7 @@ def _validate_tokenizer(cfg: Config) -> None:
 
 def validate_config(cfg: Config) -> None:
     """Validate config with actionable error messages."""
+    _validate_field_types(cfg)
     _validate_train(cfg)
     _validate_optim(cfg)
     _validate_checkpoint(cfg)
@@ -915,18 +1209,59 @@ def derived_deterministic(cfg: Config) -> bool:
     )
 
 
-def resolve_decay_duration(cfg: Config) -> int:
-    """Resolve cosine decay duration (post-warmup) in steps.
-
-    If `optim.decay_steps` is unset, we default to `train.steps - optim.warmup_steps`
-    so the schedule ends at `train.steps`.
+def resolve_window_shuffle_rows(cfg: Config) -> int:
+    """Resolve a token- and row-bounded shuffle window to batch-aligned rows.
 
     :param Config cfg: Training configuration.
-    :return int: Decay duration in steps.
+    :return int: Window rows, or zero when shuffling is disabled.
     """
-    if cfg.optim.decay_steps is None:
-        return int(cfg.train.steps) - int(cfg.optim.warmup_steps)
-    return int(cfg.optim.decay_steps)
+    budget = int(cfg.data.window_shuffle_tokens)
+    if budget <= 0:
+        return 0
+    rows_per_step = int(cfg.train.batch_size) * int(cfg.train.grad_accum)
+    rows_by_tokens = budget // int(cfg.train.seq_len)
+    # Grain materializes each complete Python row window before yielding from
+    # it. The token limit alone does not bound object count or refill work.
+    bounded_rows = min(rows_by_tokens, int(cfg.data.window_shuffle_max_rows))
+    return (bounded_rows // rows_per_step) * rows_per_step
+
+
+def strict_packed_segments(cfg: Config) -> bool:
+    """True when packed sequences require full segment isolation in the backend.
+
+    Covers every mode that packs multiple unrelated documents into one
+    sequence (bin and multipack) — for a recurrent-state architecture,
+    cross-document bleed is CEMA/TimestepNorm contamination, not just
+    attention leakage. Sequential mode is excluded by design: it treats the
+    corpus as a continuous token stream, not as isolated packed documents.
+
+    :param Config cfg: Training configuration.
+    :return bool: True iff a multi-document packing mode is active with strict isolation.
+    """
+    return cfg.data.packing_mode in ("bin", "multipack") and cfg.data.packing_strict_segments
+
+
+def decay_horizon_from_values(
+    *, steps: int | None, warmup_steps: int | None, decay_steps: int | None
+) -> int | None:
+    """Total LR schedule horizon (warmup + decay) from raw config values.
+
+    If `decay_steps` is unset, decay defaults to `steps - warmup_steps` so the
+    schedule ends at `steps`. Returns None when underspecified — resume-compat
+    checks feed this partial metadata from old checkpoints.
+
+    :param steps: Total training steps, if known.
+    :param warmup_steps: Warmup steps, if known.
+    :param decay_steps: Post-warmup decay duration, if set.
+    :return int | None: Warmup + decay horizon, or None if underspecified.
+    """
+    if warmup_steps is None:
+        return None
+    if decay_steps is None:
+        if steps is None:
+            return None
+        decay_steps = int(steps) - int(warmup_steps)
+    return int(warmup_steps) + int(decay_steps)
 
 
 def resolve_decay_horizon(cfg: Config) -> int:
@@ -935,7 +1270,13 @@ def resolve_decay_horizon(cfg: Config) -> int:
     :param Config cfg: Training configuration.
     :return int: Total schedule steps (warmup + decay duration).
     """
-    return int(cfg.optim.warmup_steps) + resolve_decay_duration(cfg)
+    horizon = decay_horizon_from_values(
+        steps=cfg.train.steps,
+        warmup_steps=cfg.optim.warmup_steps,
+        decay_steps=cfg.optim.decay_steps,
+    )
+    # train.steps / optim.warmup_steps are always set on a validated Config.
+    return int(horizon)
 
 
 def dtype_from_str(name: str) -> jnp.dtype:

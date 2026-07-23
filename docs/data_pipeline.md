@@ -1,15 +1,8 @@
 # Data Pipeline
 
-This document describes the streaming data path and the fixed-shape batch
-contract that the trainer relies on.
+Streaming data path, eval-set construction, and the fixed-shape batch contract.
 
-## Scope
-
-This page is the home for stream-to-batch flow and eval-set construction.
-
-- For field-level defaults/types: [Config Reference](config-reference.md) (`data.*`)
-- For packing strategy and masking semantics: [Packing and Boundary Semantics](packing.md)
-- For how batches are consumed during training: [Training Loop](training.md)
+Related: [Config Reference](config-reference.yaml) (`data.*`), [Packing and Boundary Semantics](packing.md), [Training Loop](training.md).
 
 ## Overview
 
@@ -17,12 +10,11 @@ chomp always uses the same data path, even in debug mode:
 
 1) **HF streaming** (`datasets`) or `local_text` (debug)
 2) **Tokenizer** (`data.tokenizer.kind`)
-3) **Packer** (sequential or bin)
+3) **Packer** (sequential, bin, or multipack)
 4) **Grain iterator** (prefetch + checkpointable state)
 5) **Batch** tensors `[A, B, T]`
 
-The trainer only sees fixed-shape `Batch` objects and never handles ragged
-sequences.
+The trainer only sees fixed-shape `Batch` objects and never handles ragged sequences.
 
 ## Batch contract
 
@@ -30,84 +22,76 @@ All batches have **fixed shapes**:
 
 - `input_ids`: `[A, B, T]` int32
 - `labels`: `[A, B, T]` int32 (aligned with `input_ids`)
-- `attention_mask`: `[A, B, T]` bool
 - `segment_ids`: `[A, B, T]` int32
+
+The compiled model path derives the attention mask and segment-local positions from `segment_ids`. Keeping these deterministic arrays out of the batch avoids buffering and transferring duplicate data.
 
 Where:
 
 - `A = train.grad_accum`
 - `B = train.batch_size`
-- `T = train.seq_len` (single source of truth)
+- `T = train.seq_len`
 
-Inside the compiled train step, the batch is sliced along the microbatch axis
-to `[B, T]` views.
+Inside the compiled train step, the batch is sliced along the microbatch axis to `[B, T]` views.
 
 ## Tokenization
 
 `data.tokenizer.kind` selects the tokenizer:
 
-- `hf`: `transformers.AutoTokenizer` (default)
-- `byte`: a simple byte-level tokenizer for infrastructure bring-up
+- `hf` (default): `transformers.AutoTokenizer` for real pretraining
+- `byte`: a simple byte-level tokenizer for offline infrastructure bring-up
 
-When using `hf`, chomp resolves tokenizer-dependent model settings
-(`model.vocab_size`, special token IDs) before training starts.
-Tokenizer knobs are defined in [Config Reference](config-reference.md) under
-`data.tokenizer.*`.
+When using `hf`, chomp resolves tokenizer-dependent model settings (`model.vocab_size`, special token IDs) before training starts. Tokenizer knobs are defined in [Config Reference](config-reference.yaml) under `data.tokenizer.*`.
 
-chomp saves a tokenizer snapshot under `run_dir/tokenizer` and will prefer that
-snapshot on resume to keep tokenization reproducible.
+For Hugging Face tokenizers, chomp saves the tokenizer files under `run_dir/tokenizer` and loads them on resume. The built-in byte tokenizer has no external assets and is reconstructed from the resolved config.
+
+`data.tokenizer.max_doc_tokens: null` means no truncation. A positive cap is explicit data loss applied after tokenization and before BOS/EOS insertion; the iterator reports documents truncated, source tokens observed/retained/discarded, and discarded-token fraction. The cap does not reduce the tokenizer's peak work because the full document is encoded first.
 
 ## Packing
 
-The pipeline supports `sequential` and `bin` packing modes and always emits
-fixed windows of length `seq_len` before batching.
-Packing trade-offs and boundary-masking behavior are documented in
-[Packing and Boundary Semantics](packing.md).
+The pipeline supports `sequential`, `bin`, and `multipack` packing modes and always emits fixed windows of length `seq_len` before batching. Packing trade-offs and boundary-masking behavior are documented in [Packing and Boundary Semantics](packing.md).
+
+Between the packer and batch assembly, packed windows pass through a seeded, token- and row-bounded window shuffle (`data.window_shuffle_tokens` and `data.window_shuffle_max_rows`, train iterator only) so batches are decorrelated from raw stream order; see [Window shuffling](packing.md#window-shuffling-batch-decorrelation).
+
+The HF document shuffle ends each window at the first of `data.shuffle_buffer_size` documents or `data.shuffle_buffer_bytes` UTF-8 payload bytes. Runtime packing metrics expose current and peak document-window counts/bytes plus replay totals. The byte limit may be exceeded by one oversized document because reading ahead and carrying that document outside the compact checkpoint state would break exact replay.
 
 ## Grain iterator
 
-The Grain wrapper provides:
+The training pipeline is composed as: unshuffled HF source -> optional chomp-owned document-window shuffle -> tokenizer/packer -> optional Grain packed-window shuffle -> batch assembly -> optional prefetch. The wrapper provides:
 
 - deterministic iteration
 - optional threaded prefetch (`data.grain_prefetch`)
 - a checkpointable iterator state (`get_state` / `set_state`)
+- host-side packing diagnostics per emitted batch (`get_stats`)
+- an exact host loss-token count paired with the batch through prefetch and device transfer (`get_loss_tokens`)
 
-The packing iterator itself remains a small, explicit Python object; Grain only
-wraps it for performance and checkpoint integration.
+The packing iterator itself remains a small, explicit Python object; Grain only wraps it for performance and checkpoint integration.
+
+The iterator exposes packing utilization, exact host loss-token counts, and boundary/segment summaries. Their logged field names and meanings are listed under [Training metrics](training.md#metrics).
 
 ## Iterator state and resume
 
-The iterator exposes a JSON-serializable state dict containing:
+The iterator exposes checkpointable state containing the source cursor (HF or local text), document- and packed-window shuffle replay progress, packer buffered/ready queues, and enabled prefetch-wrapper state.
 
-- HF stream cursor (`datasets` state dict)
-- packer buffer contents
+Bin and multipack queue rows are checkpointed as flat int32 payloads with row offsets, not nested token lists. This changes serialization shape only; FIFO queue order and emitted rows are identical.
 
-This is checkpointed alongside the model so resume does not rely on `.skip()`
-or re-streaming.
+This is checkpointed alongside the model so resume does not rely on `.skip()` or re-streaming.
+
+Hugging Face's streaming shuffle omits the contents of its read-ahead buffer from `state_dict()`, so chomp never calls it in the checkpointed path. Chomp instead permutes disjoint document windows. State stores the unshuffled source position at the current window's start, its index, and the output cursor; a restore reconstructs the window deterministically without inflating the checkpoint with document text. Iterator state cannot compensate for an upstream repository changing beneath the same name, so checkpoint metadata records both the requested ref and the concrete commit used by the stream. Resume reuses that commit without querying the live ref only when the selected checkpoint has the same repository and requested ref; deliberate changes resolve normally and flow through resume compatibility checks.
+
+The configured `data.text_key` must exist in every selected row and contain a string. Missing fields and non-string values are deterministic schema failures: Chomp does not stringify them or retry them.
 
 ## Validation set
 
-chomp builds a fixed validation set at startup:
+chomp builds a fixed validation set when the run is created:
 
-- If `data.hf_eval_split` is set and the HF dataset has that split, it takes the
-  first `data.max_eval_samples` examples from that split.
-- Otherwise it takes the first `data.max_eval_samples` examples from the
-  (shuffled) training split.
-- Set `data.hf_eval_split: null` to skip eval-split lookup and always use train.
-- For train-split fallback, if `data.seed` is left at `0` and `train.seed` is
-  non-zero, the shuffle seed defaults to `train.seed`.
+- If `data.hf_eval_split` is set, it is authoritative and never falls back to training data. It must differ from `data.hf_split` while evaluation is enabled.
+- The selected split is read unshuffled in literal order (`data.shuffle` applies only to the training stream) and contributes at most `data.max_eval_samples` examples.
+- With `data.hf_eval_split: null`, a stable BLAKE2 content hash reserves `data.hf_eval_holdout_fraction` of identities for eval and removes them from the training stream. Duplicate content always lands on the same side. The sparse hash selection does not also fill a document-shuffle window; doing so would multiply startup reads by roughly the inverse holdout fraction.
+- A positive `data.max_eval_samples` that yields no documents, or any loading/authentication/schema/decoding failure, logs a warning and disables evaluation for that process. Training still starts.
 
-The selected texts are derived at run start (configured eval split preferred,
-fallback to train) and are not cached on disk.
+The selected documents are tokenized once when a process starts, then the resulting eval batches are reused for every evaluation in that process. For `bin` and `multipack`, evaluation's effective packing lookahead is the larger of the configured lookahead and `train.batch_size`; checkpoint compatibility tracks it separately from training's `train.batch_size * train.grad_accum` minimum.
 
-## Key config knobs
+After the first eval batch assembly, the original tokenized Python lists are released because the packed arrays own the payload. TODO: bound initial evaluation collection by tokens rather than only `data.max_eval_samples`, and replace the Python-list cache with a compact contiguous int32 ragged representation. This needs an explicit selection/fingerprint policy for the token budget.
 
-Use [Config Reference](config-reference.md) as the canonical source for `data.*` and related
-`train.*` shape knobs. The most operationally important fields for this page
-are:
-
-- `data.backend`, `data.hf_*`, `data.text_key`
-- `data.hf_eval_split`, `data.max_eval_samples`
-- `data.shuffle`, `data.shuffle_buffer_size`, `data.seed`, `data.repeat`
-- `data.packing_mode`, `data.packing_buffer_docs`, `data.packing_max_docs_per_bin`
-- `train.seq_len`, `train.batch_size`, `train.grad_accum`
+At end of stream the `bin`/`multipack` packers flush their remaining pending documents into padded windows, so an eval doc set below the pack threshold still emits windows. Eval uses `A=1` and pads missing final rows independently of `train.grad_accum`. If a scheduled pass yields no usable window, emits a zero-loss-token batch, or otherwise fails, chomp logs the failure and disables later evals. Training data assembly retains its strict zero-loss-token failure because advancing the optimizer without an objective would be invalid.

@@ -1,22 +1,22 @@
-# Larger 200M-parameter, 100k-step pretraining recipe on the pinned Zyda-2 sample. Use the 100M mixed-corpus recipe first when validating new changes.
+# Recommended 100M-parameter, 100k-step pretraining recipe on a shuffled 50% FinePDFs-Edu, 30% DCLM, and 20% FineWeb-Edu mixture.
 
 model:
   backend: megalodon
   vocab_size: 32128
-  model_dim: 1024
+  model_dim: 768
   num_layers: 12
-  num_heads: 1
-  z_dim: 256
-  value_dim: 2048
-  ffn_hidden_dim: 2560
+  num_heads: 2
+  z_dim: 384
+  value_dim: 768
+  ffn_hidden_dim: 3072
   cema_ndim: 16
-  chunk_size: 1024
+  chunk_size: 512
   use_checkpoint: true
 
 data:
   backend: hf
-  hf_dataset: Zyphra/Zyda-2
-  hf_name: sample-100BT
+  hf_dataset: HuggingFaceFW/finepdfs_edu_50BT-dclm_30BT-fineweb_edu_20BT-shuffled
+  hf_name: default
   hf_split: train
   hf_revision: main
   hf_eval_split: null

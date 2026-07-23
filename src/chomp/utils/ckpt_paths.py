@@ -1,0 +1,214 @@
+"""Checkpoint path and config resolution for CLI tools.
+
+Distinct from chomp.ckpt (training-loop Orbax save/restore): this module
+locates step directories on disk and reconstructs configs from stored
+artifacts (config_resolved.json, checkpoint metadata) without touching Orbax.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from chomp.config import Config, build_config, load_config, read_config_mapping
+
+
+def _is_step_dir(path: Path) -> bool:
+    """Return True if the path looks like a checkpoint step directory.
+
+    :param Path path: Path to inspect.
+    :return bool: True if the directory contains a train_state subdir.
+    """
+    return path.is_dir() and (path / "train_state").exists()
+
+
+def _latest_step_dir(root: Path) -> Path | None:
+    """Return the latest step dir with train_state, if any.
+
+    :param Path root: Checkpoint root directory.
+    :return Path | None: Latest step directory or None if not found.
+    """
+    if not root.is_dir():
+        return None
+    step_dirs = sorted(
+        (path for path in root.iterdir() if path.is_dir() and path.name.isdigit()),
+        key=lambda path: int(path.name),
+        reverse=True,
+    )
+    for step_dir in step_dirs:
+        if _is_step_dir(step_dir):
+            return step_dir
+    return None
+
+
+def _find_run_dir_upwards(start: Path) -> Path | None:
+    """Search upwards for a directory containing config_resolved.json.
+
+    :param Path start: Starting path to search from.
+    :return Path | None: First parent containing config_resolved.json, if any.
+    """
+    for parent in (start, *start.parents):
+        if (parent / "config_resolved.json").exists():
+            return parent
+    return None
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    """Read a JSON file into a dict.
+
+    :param Path path: Path to JSON file.
+    :return dict[str, Any]: Parsed JSON mapping.
+    """
+    with path.open() as f:
+        data = json.load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a JSON object in {path}")
+    return data
+
+
+def _read_run_dir_config(run_dir: Path) -> dict[str, Any]:
+    """Read config_resolved.json from a run directory.
+
+    :param Path run_dir: Run directory containing config_resolved.json.
+    :return dict[str, Any]: Parsed config mapping.
+    """
+    config_path = run_dir / "config_resolved.json"
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"config_resolved.json not found in {run_dir}. Use --config to provide a config file."
+        )
+    return read_config_mapping(config_path)
+
+
+def _read_meta_config(step_dir: Path) -> dict[str, Any] | None:
+    """Read the config snapshot from checkpoint metadata, if available.
+
+    :param Path step_dir: Checkpoint step directory.
+    :return dict[str, Any] | None: Config mapping if present, else None.
+    """
+    meta_dir = step_dir / "meta"
+    meta_path = meta_dir / "metadata" if meta_dir.is_dir() else meta_dir
+    if not meta_path.exists():
+        return None
+    meta = read_checkpoint_meta(step_dir)
+    cfg = meta.get("config")
+    if cfg is None:
+        return None
+    if not isinstance(cfg, dict):
+        raise ValueError(f"Checkpoint metadata config must be a mapping, got {type(cfg).__name__}")
+    return cfg
+
+
+def read_checkpoint_meta(step_dir: Path) -> dict[str, Any]:
+    """Read the JSON metadata belonging to one checkpoint step.
+
+    :param Path step_dir: Checkpoint step directory.
+    :raises FileNotFoundError: If the checkpoint has no metadata item.
+    :raises ValueError: If the metadata JSON is corrupted.
+    :return dict[str, Any]: Checkpoint metadata mapping.
+    """
+    meta_dir = step_dir / "meta"
+    meta_path = meta_dir / "metadata" if meta_dir.is_dir() else meta_dir
+    if not meta_path.exists():
+        raise FileNotFoundError(f"Checkpoint metadata not found in {step_dir}")
+    try:
+        return _read_json(meta_path)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Corrupted checkpoint metadata in {meta_path}: {exc}") from exc
+
+
+def load_config_for_checkpoint(
+    *, step_dir: Path, run_dir: Path | None, config_override: str | None
+) -> Config:
+    """Load config from an override, checkpoint metadata, or legacy run config.
+
+    :param Path step_dir: Checkpoint step directory.
+    :param Path | None run_dir: Run directory if known.
+    :param str | None config_override: Optional path to override config file.
+    :return Config: Loaded configuration.
+    :raises FileNotFoundError: If no config source can be found.
+    """
+    if config_override:
+        return load_config(config_override)
+
+    data = _read_meta_config(step_dir)
+    if data is not None:
+        # Static model semantics belong to the exact arrays being restored.
+        return build_config(data)
+
+    if run_dir is not None:
+        return build_config(_read_run_dir_config(run_dir))
+
+    raise FileNotFoundError(
+        f"No config found for checkpoint {step_dir}. Provide --config or use a "
+        "checkpoint containing config metadata."
+    )
+
+
+def _infer_run_dir_from_meta(step_dir: Path) -> Path | None:
+    """Return an existing run directory recorded in checkpoint metadata.
+
+    :param Path step_dir: Checkpoint step directory.
+    :return Path | None: Recorded run directory when it still exists.
+    """
+    data = _read_meta_config(step_dir)
+    if data is None:
+        return None
+    logging_cfg = data.get("logging")
+    if not isinstance(logging_cfg, dict):
+        return None
+    run_dir = logging_cfg.get("run_dir")
+    if not run_dir:
+        return None
+    path = Path(run_dir)
+    return path.resolve() if path.exists() else None
+
+
+def _latest_run_step(run_dir: Path) -> Path:
+    """Resolve the latest checkpoint beneath a run directory.
+
+    :param Path run_dir: Run directory containing ``checkpoints``.
+    :raises FileNotFoundError: If the run has no checkpoint steps.
+    :return Path: Latest valid checkpoint step directory.
+    """
+    ckpt_root = run_dir / "checkpoints"
+    step_dir = _latest_step_dir(ckpt_root)
+    if step_dir is None:
+        raise FileNotFoundError(f"No step directories found in {ckpt_root}")
+    return step_dir
+
+
+def resolve_checkpoint_path(checkpoint_path: str | Path) -> tuple[Path, Path | None]:
+    """Resolve a checkpoint path to a step directory and optional run_dir.
+
+    :param str | Path checkpoint_path: Path to a run dir, checkpoint root, or step dir.
+    :return tuple[Path, Path | None]: (step_dir, run_dir) where run_dir may be None.
+
+    Supports:
+    - Direct step directory: /path/to/ckpts/500
+    - Checkpoint root directory: /path/to/ckpts
+    - Run directory with config_resolved.json
+    """
+    path = Path(checkpoint_path).resolve()
+
+    if _is_step_dir(path):
+        run_dir = _find_run_dir_upwards(path)
+        if run_dir is None:
+            run_dir = _infer_run_dir_from_meta(path)
+        return path, run_dir
+
+    if (path / "config_resolved.json").exists():
+        run_dir = path
+        return _latest_run_step(run_dir), run_dir
+
+    step_dir = _latest_step_dir(path)
+    if step_dir is not None:
+        run_dir = _find_run_dir_upwards(path)
+        if run_dir is None:
+            run_dir = _infer_run_dir_from_meta(step_dir)
+        return step_dir, run_dir
+
+    raise FileNotFoundError(
+        f"Could not find checkpoint at {path}. Provide a run_dir, checkpoint root, or step dir."
+    )

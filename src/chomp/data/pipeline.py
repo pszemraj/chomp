@@ -22,20 +22,31 @@ This pipeline keeps debug sources (local_text) but *still* exercises tokenize+pa
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
 
-from chomp.config import Config, validate_config
+from chomp.config import Config, resolve_window_shuffle_rows, validate_config
 from chomp.types import IGNORE_INDEX, Batch
 
-from .hf import HFStreamingTextStream, HFStreamSpec, ListTokenStream, LocalTextStream
-from .pack import BinPacker, TokenPacker
+from .hf import ContentPartition, HFStreamingTextStream, HFStreamSpec, LocalTextStream
+from .pack import FFDPacker, TokenPacker
+
+_WINDOW_SHUFFLE_SEED_OFFSET = 104_729
+_UINT32_MODULUS = 2**32
+
+
+def effective_window_shuffle_seed(cfg: Config) -> int:
+    """Return the deterministic seed consumed by packed-window shuffling.
+
+    :param Config cfg: Training configuration.
+    :return int: Effective Grain window-shuffle seed.
+    """
+    return (int(cfg.data.seed) + _WINDOW_SHUFFLE_SEED_OFFSET) % _UINT32_MODULUS
 
 
 class Tokenizer(Protocol):
@@ -73,8 +84,16 @@ class TextStream(Protocol):
         """Restore stream state from a checkpoint."""
         ...
 
+    def close(self) -> None:
+        """Release resources owned by the stream."""
+        ...
+
 
 logger = logging.getLogger(__name__)
+
+
+class ZeroLossTokensError(RuntimeError):
+    """Raised when a complete batch contains no valid causal targets."""
 
 
 @dataclass
@@ -136,14 +155,8 @@ class HFTokenizer:
         :param str name_or_path: HuggingFace model name or local path.
         :param bool use_fast: Whether to use fast Rust tokenizer.
         :param bool trust_remote_code: Whether to allow custom tokenizer code.
-        :raises ImportError: If transformers is not installed.
         """
-        try:
-            from transformers import AutoTokenizer
-        except Exception as e:  # pragma: no cover
-            raise ImportError(
-                "HFTokenizer requires transformers. Install with: pip install transformers tokenizers"
-            ) from e
+        from transformers import AutoTokenizer
 
         self._tok = AutoTokenizer.from_pretrained(
             name_or_path,
@@ -232,36 +245,74 @@ def build_tokenizer(cfg: Config) -> Tokenizer:
     raise ValueError(f"Unknown tokenizer.kind: {tok.kind!r}")
 
 
+def _hf_source_fields(
+    cfg: Config,
+    *,
+    split: str,
+    repeat: bool,
+    content_partition: ContentPartition = "all",
+) -> dict[str, Any]:
+    """Resolve the effective HF source fields shared by runtime and artifacts.
+
+    :param Config cfg: Training configuration.
+    :param str split: Dataset split name.
+    :param bool repeat: Whether to repeat the stream when exhausted.
+    :param ContentPartition content_partition: All, training, or held-out documents.
+    :return dict[str, Any]: Fields accepted by :class:`HFStreamSpec`.
+    """
+    return {
+        "dataset": cfg.data.hf_dataset,
+        "name": cfg.data.hf_name,
+        "split": split,
+        "text_key": cfg.data.text_key,
+        "revision": cfg.data.hf_revision,
+        "shuffle": cfg.data.shuffle,
+        "shuffle_buffer_size": cfg.data.shuffle_buffer_size,
+        "shuffle_buffer_bytes": cfg.data.shuffle_buffer_bytes,
+        "seed": int(cfg.data.seed),
+        "repeat": repeat,
+        "content_partition": content_partition,
+        "eval_holdout_fraction": cfg.data.hf_eval_holdout_fraction,
+    }
+
+
+def _hf_source_identity(fields: dict[str, Any]) -> dict[str, Any]:
+    """Return only source fields that affect effective stream behavior.
+
+    :param dict[str, Any] fields: Resolved fields from :func:`_hf_source_fields`.
+    :return dict[str, Any]: Stable source identity for caches and checkpoints.
+    """
+    identity = dict(fields)
+    if not identity["shuffle"]:
+        for key in ("shuffle_buffer_size", "shuffle_buffer_bytes", "seed"):
+            identity.pop(key)
+    if identity["content_partition"] == "all":
+        identity.pop("eval_holdout_fraction")
+    return identity
+
+
 def _build_hf_stream(
     cfg: Config,
     *,
     split: str,
     repeat: bool,
-    seed_offset: int = 0,
-    seed_override: int | None = None,
+    content_partition: ContentPartition = "all",
 ) -> HFStreamingTextStream:
     """Build an HF streaming text stream from config.
 
     :param Config cfg: Training configuration.
     :param str split: Dataset split name.
     :param bool repeat: Whether to repeat the stream when exhausted.
-    :param int seed_offset: Optional seed offset for independent streams.
-    :param int | None seed_override: Optional base shuffle seed override.
+    :param ContentPartition content_partition: All, training, or held-out documents.
     :return HFStreamingTextStream: Streaming text stream wrapper.
     """
-    base_seed = int(cfg.data.seed) if seed_override is None else int(seed_override)
     spec = HFStreamSpec(
-        dataset=cfg.data.hf_dataset,
-        name=cfg.data.hf_name,
-        split=split,
-        text_key=cfg.data.text_key,
-        shuffle=cfg.data.shuffle,
-        shuffle_buffer_size=cfg.data.shuffle_buffer_size,
-        seed=base_seed + int(seed_offset),
-        repeat=repeat,
-        max_retries=cfg.data.max_retries,
-        retry_delay_sec=cfg.data.retry_delay_sec,
-        state_update_interval=cfg.data.state_update_interval,
+        **_hf_source_fields(
+            cfg,
+            split=split,
+            repeat=repeat,
+            content_partition=content_partition,
+        )
     )
     return HFStreamingTextStream(spec)
 
@@ -346,23 +397,14 @@ def resolve_tokenizer_config(cfg: Config, tok: Tokenizer) -> Config:
     if model_updates:
         updated_cfg = replace(updated_cfg, model=replace(updated_cfg.model, **model_updates))
 
-    tok_cfg = updated_cfg.data.tokenizer
-    if tok_cfg.max_doc_tokens is None:
-        default_max = int(updated_cfg.train.seq_len) * 4
-        logger.info(
-            "data.tokenizer.max_doc_tokens is null; defaulting to %d (4 * seq_len). "
-            "Set to 0 to disable truncation.",
-            default_max,
-        )
-        tok_cfg = replace(tok_cfg, max_doc_tokens=default_max)
-        updated_cfg = replace(updated_cfg, data=replace(updated_cfg.data, tokenizer=tok_cfg))
-    elif tok_cfg.max_doc_tokens <= 0:
-        logger.info(
-            "data.tokenizer.max_doc_tokens=%d disables truncation; storing as null.",
-            tok_cfg.max_doc_tokens,
-        )
-        tok_cfg = replace(tok_cfg, max_doc_tokens=None)
-        updated_cfg = replace(updated_cfg, data=replace(updated_cfg.data, tokenizer=tok_cfg))
+    effective_vocab = int(updated_cfg.model.vocab_size)
+    for field in ("pad_token_id", "bos_token_id", "eos_token_id"):
+        token_id = int(getattr(updated_cfg.model, field))
+        if not 0 <= token_id < effective_vocab:
+            raise ValueError(
+                f"model.{field} must be within [0, resolved vocab_size={effective_vocab}), "
+                f"got {token_id}"
+            )
 
     # Re-validate after tokenizer-derived updates (vocab rounding, special tokens).
     validate_config(updated_cfg)
@@ -387,97 +429,34 @@ def prepare_tokenizer_and_config(
 def save_tokenizer_snapshot(
     run_dir: Path, cfg: Config, tok: Tokenizer, *, allow_existing: bool
 ) -> None:
-    """Persist the tokenizer to disk for reproducible resumes.
+    """Persist a Hugging Face tokenizer with the run.
 
     :param Path run_dir: Run directory path.
     :param Config cfg: Training configuration.
     :param Tokenizer tok: Tokenizer instance to save.
-    :param bool allow_existing: If True, skip if snapshot already exists.
-    :raises RuntimeError: If snapshot exists and allow_existing=False.
+    :param bool allow_existing: Whether this is an existing run.
     """
+    if cfg.data.tokenizer.kind != "hf" or allow_existing:
+        return
 
     tok_dir = Path(run_dir) / "tokenizer"
-    if tok_dir.exists():
-        if allow_existing:
-            return
-        raise RuntimeError(f"Tokenizer snapshot already exists: {tok_dir}")
-
-    tok_dir.mkdir(parents=True, exist_ok=False)
-
-    if hasattr(tok, "save_pretrained"):
-        try:
-            tok.save_pretrained(tok_dir)  # type: ignore[call-arg]
-            return
-        except Exception as exc:
-            raise RuntimeError(f"Failed to save HF tokenizer to {tok_dir}") from exc
-
-    record = {
-        "kind": cfg.data.tokenizer.kind,
-        "vocab_size": int(cfg.model.vocab_size),
-        "byte_offset": cfg.data.tokenizer.byte_offset,
-        "add_bos": cfg.data.tokenizer.add_bos,
-        "add_eos": cfg.data.tokenizer.add_eos,
-        "bos_token_id": int(cfg.model.bos_token_id),
-        "eos_token_id": int(cfg.model.eos_token_id),
-        "pad_token_id": int(cfg.model.pad_token_id),
-    }
-    (tok_dir / "tokenizer.json").write_text(
-        json.dumps(record, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    tok_dir.mkdir()
+    tok.save_pretrained(tok_dir)  # type: ignore[attr-defined]
 
 
 def load_tokenizer_snapshot(run_dir: Path, cfg: Config) -> Tokenizer:
     """Load a tokenizer snapshot from a run directory.
 
     :param Path run_dir: Run directory containing tokenizer snapshot.
-    :param Config cfg: Training configuration (used to pick tokenizer kind).
-    :return Tokenizer: Restored tokenizer instance.
-    :raises FileNotFoundError: If tokenizer snapshot is missing.
-    :raises RuntimeError: If snapshot is invalid or incompatible.
+    :param Config cfg: Training configuration.
+    :return Tokenizer: Restored Hugging Face tokenizer instance.
     """
     tok_dir = Path(run_dir) / "tokenizer"
-    if not tok_dir.exists():
-        raise FileNotFoundError(f"Tokenizer snapshot not found at {tok_dir}")
-
-    tok_cfg = cfg.data.tokenizer
-    if tok_cfg.kind == "byte":
-        record_path = tok_dir / "tokenizer.json"
-        if not record_path.exists():
-            raise RuntimeError(f"Byte tokenizer snapshot missing {record_path}")
-        record = json.loads(record_path.read_text(encoding="utf-8") or "{}")
-        kind = record.get("kind")
-        if kind != "byte":
-            raise RuntimeError(f"Tokenizer snapshot kind mismatch: expected 'byte', found {kind!r}")
-        return ByteTokenizer(byte_offset=int(record.get("byte_offset", 0)))
-
-    if tok_cfg.kind == "hf":
-        return HFTokenizer(
-            str(tok_dir),
-            use_fast=tok_cfg.hf_use_fast,
-            trust_remote_code=tok_cfg.hf_trust_remote_code,
-        )
-
-    raise ValueError(f"Unknown tokenizer.kind: {tok_cfg.kind!r}")
-
-
-def tokenizer_snapshot_hash(run_dir: Path) -> str | None:
-    """Compute a stable hash of the tokenizer snapshot directory.
-
-    :param Path run_dir: Run directory containing tokenizer snapshot.
-    :return str | None: SHA256 hash hex digest, or None if snapshot missing.
-    """
-    tok_dir = Path(run_dir) / "tokenizer"
-    if not tok_dir.exists():
-        return None
-
-    digest = hashlib.sha256()
-    files = [p for p in tok_dir.rglob("*") if p.is_file()]
-    for path in sorted(files, key=lambda p: p.relative_to(tok_dir).as_posix()):
-        rel = path.relative_to(tok_dir).as_posix()
-        digest.update(rel.encode("utf-8"))
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
+    return HFTokenizer(
+        str(tok_dir),
+        use_fast=cfg.data.tokenizer.hf_use_fast,
+        trust_remote_code=cfg.data.tokenizer.hf_trust_remote_code,
+    )
 
 
 def _collect_texts(stream: TextStream, max_samples: int) -> list[str]:
@@ -488,26 +467,43 @@ def _collect_texts(stream: TextStream, max_samples: int) -> list[str]:
     :return list[str]: Collected text samples.
     """
     texts: list[str] = []
-    for _ in range(int(max_samples)):
-        try:
-            texts.append(next(stream))
-        except StopIteration:
-            break
-    return texts
+    try:
+        for _ in range(int(max_samples)):
+            try:
+                texts.append(next(stream))
+            except StopIteration:
+                break
+        return texts
+    finally:
+        stream.close()
 
 
-def _tokenize_eval_texts(texts: list[str], tok: Tokenizer) -> list[list[int]]:
-    """Tokenize eval texts once for reuse across eval runs.
+def _content_holdout_enabled(cfg: Config) -> bool:
+    """Return whether the HF training split is content-partitioned.
 
-    :param list[str] texts: Raw text samples.
-    :param Tokenizer tok: Tokenizer instance.
-    :return list[list[int]]: Tokenized documents.
+    :param Config cfg: Training configuration.
+    :return bool: True when evaluation consumes a hash holdout from the train split.
     """
-    return [tok.encode(text) for text in texts]
+    return (
+        cfg.data.backend == "hf"
+        and cfg.data.hf_eval_split is None
+        and cfg.data.max_eval_samples > 0
+    )
 
 
-def load_or_create_eval_texts(cfg: Config, *, tokenizer: Tokenizer) -> list[list[int]]:
-    """Create an evaluation set without on-disk caching.
+def _eval_source_split(cfg: Config) -> str:
+    """Resolve the exact source selector used to build evaluation documents.
+
+    :param Config cfg: Training configuration.
+    :return str: HF split name or the local-text source marker.
+    """
+    if cfg.data.backend == "local_text":
+        return "local_text"
+    return cfg.data.hf_eval_split or cfg.data.hf_split
+
+
+def load_or_create_eval_tokens(cfg: Config, *, tokenizer: Tokenizer) -> list[list[int]]:
+    """Build the evaluation token set from the configured source.
 
     :param Config cfg: Training configuration.
     :param Tokenizer tokenizer: Tokenizer used to pre-tokenize eval texts.
@@ -517,110 +513,132 @@ def load_or_create_eval_texts(cfg: Config, *, tokenizer: Tokenizer) -> list[list
     if max_samples <= 0:
         return []
 
-    texts: list[str] = []
-    split_used: str | None = None
-
     if cfg.data.backend == "hf":
-        split_candidates: list[str] = []
-        eval_split = cfg.data.hf_eval_split
-        if eval_split is not None and str(eval_split).strip():
-            split_candidates.append(str(eval_split))
-        if cfg.data.hf_split not in split_candidates:
-            split_candidates.append(cfg.data.hf_split)
-
-        split_errors: list[str] = []
-        for split in split_candidates:
-            try:
-                seed_override = None
-                if (
-                    split == cfg.data.hf_split
-                    and int(cfg.data.seed) == 0
-                    and int(cfg.train.seed) != 0
-                ):
-                    # Keep eval-train fallback deterministic across runs by defaulting
-                    # to train.seed when data.seed is left at its default 0.
-                    seed_override = int(cfg.train.seed)
-                    logger.info(
-                        "Using train.seed=%d for eval train-split shuffle (data.seed=0).",
-                        cfg.train.seed,
-                    )
-
-                stream = _build_hf_stream(
-                    cfg, split=split, repeat=False, seed_override=seed_override
-                )
-                texts = _collect_texts(stream, max_samples)
-                split_used = split
-                break
-            except Exception as exc:
-                split_errors.append(f"{split!r}: {type(exc).__name__}: {exc}")
-                logger.warning("Eval split %r unavailable: %s", split, exc)
-                continue
-        if split_used is None:
-            details = "; ".join(split_errors) if split_errors else "no split candidates"
-            raise RuntimeError(
-                "Failed to build eval dataset from HF streaming splits. "
-                f"Tried: {split_candidates}. Errors: {details}"
+        split = _eval_source_split(cfg)
+        content_partition: ContentPartition = "eval" if _content_holdout_enabled(cfg) else "all"
+        # Evaluation never shuffles, whichever source selection is active: the
+        # content-hash holdout already samples sparsely across the source
+        # (filling a document-shuffle window would scan roughly
+        # shuffle_buffer_size / holdout_fraction documents for no disjointness
+        # benefit), and an explicit split is consumed in literal order so the
+        # eval set is a pure function of source identity.
+        eval_cfg = replace(cfg, data=replace(cfg.data, shuffle=False))
+        try:
+            stream = _build_hf_stream(
+                eval_cfg,
+                split=split,
+                repeat=False,
+                content_partition=content_partition,
             )
+            texts = _collect_texts(stream, max_samples)
+        except Exception as exc:
+            selection = (
+                "data.hf_eval_split" if cfg.data.hf_eval_split is not None else "data.hf_split"
+            )
+            raise RuntimeError(
+                f"Failed to collect evaluation documents from {selection}={split!r}. "
+                "Evaluation never falls back after an error. Use a valid explicit split, "
+                "or set data.hf_eval_split=null for a disjoint content-hash holdout."
+            ) from exc
     elif cfg.data.backend == "local_text":
         texts = [cfg.data.local_text] * max_samples
-        split_used = "local_text"
     else:
         raise RuntimeError(f"Unknown data.backend for eval: {cfg.data.backend!r}")
 
     if not texts:
-        logger.warning("Eval text set is empty (max_eval_samples=%d).", max_samples)
+        raise RuntimeError(
+            "Evaluation collected zero documents while data.max_eval_samples is positive "
+            f"({max_samples}) from source {_eval_source_split(cfg)!r}. Refusing to silently "
+            "disable evaluation; fix the source/split or set data.max_eval_samples=0 explicitly."
+        )
 
-    return _tokenize_eval_texts(texts, tokenizer)
+    return [tokenizer.encode(text) for text in texts]
 
 
-def build_generation_text_stream(cfg: Config, *, seed_offset: int = 1) -> TextStream:
-    """Build a text stream for periodic generation prompts.
-
-    Uses the training split but with an optional seed offset so sampling stays
-    independent from the training iterator.
+def _build_backend_text_stream(cfg: Config) -> TextStream:
+    """Build the configured backend's text stream over the training split.
 
     :param Config cfg: Training configuration.
-    :param int seed_offset: Offset added to the dataset shuffle seed.
     :return TextStream: Streaming text iterator.
+    :raises ValueError: If data.backend is unknown.
     """
     if cfg.data.backend == "hf":
+        content_partition: ContentPartition = "train" if _content_holdout_enabled(cfg) else "all"
         return _build_hf_stream(
             cfg,
             split=cfg.data.hf_split,
             repeat=cfg.data.repeat,
-            seed_offset=seed_offset,
+            content_partition=content_partition,
         )
     if cfg.data.backend == "local_text":
         return LocalTextStream(text=cfg.data.local_text, repeat=cfg.data.repeat)
-    raise ValueError(f"Unknown data.backend for generation: {cfg.data.backend!r}")
+    raise ValueError(f"Unknown data.backend: {cfg.data.backend!r}")
 
 
-def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None) -> dict[str, Any]:
+def load_generation_prompt_tokens(
+    cfg: Config, *, tokenizer: Tokenizer, max_samples: int = 16
+) -> list[list[int]]:
+    """Load a small bounded prompt pool without a document-shuffle buffer.
+
+    Periodic generation is diagnostic and not checkpointed. Reading a bounded,
+    unshuffled pool avoids retaining a second production-sized HF shuffle
+    window for the lifetime of the run.
+
+    :param Config cfg: Training configuration.
+    :param Tokenizer tokenizer: Tokenizer for prompt documents.
+    :param int max_samples: Maximum prompt documents to retain.
+    :return list[list[int]]: Tokenized training-source prompts.
+    """
+    if max_samples <= 0:
+        return []
+    prompt_cfg = replace(
+        cfg,
+        data=replace(cfg.data, shuffle=False, repeat=False),
+    )
+    texts = _collect_texts(_build_backend_text_stream(prompt_cfg), max_samples)
+    return [tokenizer.encode(text) for text in texts]
+
+
+def resolve_ffd_lookahead(cfg: Config, *, rows_per_pack: int) -> int:
+    """Return the effective FFD candidate lookahead for one packing cycle.
+
+    :param Config cfg: Training configuration.
+    :param int rows_per_pack: Output rows emitted by each packing cycle.
+    :raises ValueError: If the configured packing mode is not FFD-based.
+    :return int: Effective candidate lookahead.
+    """
+    if cfg.data.packing_mode == "bin":
+        configured = cfg.data.packing_buffer_docs
+    elif cfg.data.packing_mode == "multipack":
+        configured = cfg.data.packing_group_docs
+    else:
+        raise ValueError(f"FFD lookahead requested for {cfg.data.packing_mode!r}")
+    return max(int(configured), int(rows_per_pack))
+
+
+def data_fingerprint(cfg: Config) -> dict[str, Any]:
     """A small, stable fingerprint that we store in checkpoint meta.
 
     :param Config cfg: Training configuration.
-    :param str | None tokenizer_snapshot_hash: Optional tokenizer snapshot hash for resume checks.
     :return dict[str, Any]: Fingerprint dict with source, tokenizer, and batch shape info.
     """
 
     d = cfg.data
     t = cfg.data.tokenizer
     if d.backend == "hf":
-        src = {
-            "backend": "hf",
-            "dataset": d.hf_dataset,
-            "name": d.hf_name,
-            "split": d.hf_split,
-            "text_key": d.text_key,
-            "shuffle": d.shuffle,
-            "shuffle_buffer_size": d.shuffle_buffer_size,
-            "seed": d.seed,
-        }
+        content_partition: ContentPartition = "train" if _content_holdout_enabled(cfg) else "all"
+        fields = _hf_source_fields(
+            cfg,
+            split=d.hf_split,
+            repeat=d.repeat,
+            content_partition=content_partition,
+        )
+        src = {"backend": "hf", **_hf_source_identity(fields)}
     else:
         src = {
             "backend": "local_text",
             "repeat": d.repeat,
-            "local_text_hash": hashlib.sha1(d.local_text.encode("utf-8")).hexdigest(),
+            "local_text": d.local_text,
         }
 
     tok = {
@@ -635,172 +653,313 @@ def data_fingerprint(cfg: Config, *, tokenizer_snapshot_hash: str | None = None)
         "vocab_size_multiple": t.vocab_size_multiple,
         "auto_set_special_tokens": t.auto_set_special_tokens,
     }
-    if tokenizer_snapshot_hash is not None:
-        tok["snapshot_sha256"] = tokenizer_snapshot_hash
-
+    # Record only active mode knobs and effective shuffle geometry so inert
+    # defaults and raw budgets cannot reject a behaviorally identical resume.
+    # Thread prefetch is deliberately absent: Grain serializes the parent
+    # state paired with the last consumer-delivered batch, not its queued rows.
+    window_shuffle_rows = resolve_window_shuffle_rows(cfg)
     packing = {
         "mode": d.packing_mode,
-        "buffer_docs": d.packing_buffer_docs,
-        "max_docs_per_bin": d.packing_max_docs_per_bin,
         "mask_boundary_loss": d.mask_boundary_loss,
         "train_on_eos": d.train_on_eos,
-        "grain_prefetch": d.grain_prefetch,
+        "window_shuffle_rows": window_shuffle_rows,
     }
-    eval_cfg = {
-        "max_eval_samples": d.max_eval_samples,
-        "hf_eval_split": d.hf_eval_split,
-    }
-
+    if window_shuffle_rows > 0:
+        # The shuffle reconstructs current and future windows from this seed
+        # after restore. Keep the fingerprint tied to the effective value used
+        # by Grain so changing either data.seed or the internal offset cannot
+        # silently change replay order.
+        packing["window_shuffle_seed"] = effective_window_shuffle_seed(cfg)
+    if d.packing_mode in ("bin", "multipack"):
+        packing["max_docs_per_bin"] = d.packing_max_docs_per_bin
+        packing["strict_segments"] = d.packing_strict_segments
+    if d.packing_mode == "bin":
+        packing["buffer_docs"] = resolve_ffd_lookahead(
+            cfg,
+            rows_per_pack=cfg.train.batch_size * cfg.train.grad_accum,
+        )
+    if d.packing_mode == "multipack":
+        packing["group_docs"] = resolve_ffd_lookahead(
+            cfg,
+            rows_per_pack=cfg.train.batch_size * cfg.train.grad_accum,
+        )
+    # Eval tokens are rebuilt from the live stream on every process start, so
+    # the knobs that select them must match for eval_loss to stay comparable
+    # across a resume. Selection knobs are inert while eval is disabled.
+    eval_fp: dict[str, Any] = {"max_eval_samples": d.max_eval_samples}
+    if d.max_eval_samples > 0:
+        eval_fp["split"] = _eval_source_split(cfg)
+        eval_fp["content_partition"] = "eval" if _content_holdout_enabled(cfg) else "all"
+        if d.packing_mode in ("bin", "multipack"):
+            # Evaluation emits B rows per cycle rather than training's A*B,
+            # so a raw lookahead change can be inert for train but active here.
+            eval_fp["packing_lookahead_docs"] = resolve_ffd_lookahead(
+                cfg,
+                rows_per_pack=cfg.train.batch_size,
+            )
     return {
         "source": src,
         "tokenizer": tok,
         "packing": packing,
-        "eval": eval_cfg,
+        "eval": eval_fp,
         "seq_len": cfg.train.seq_len,
         "batch_size": cfg.train.batch_size,
         "grad_accum": cfg.train.grad_accum,
     }
 
 
-class TrainBatchIterator:
-    """An iterator that yields fixed-shape `Batch` objects.
+def _mask_labels(
+    labels: np.ndarray,
+    segs: np.ndarray,
+    *,
+    mask_boundary_loss: bool,
+    train_on_eos: bool,
+    eos_id: int,
+) -> np.ndarray:
+    """Apply boundary and EOS masking to label array.
 
-    This is the data side of the compile-once contract:
-    - Every `__next__` yields arrays of exactly the same shape & dtype.
+    :param np.ndarray labels: Label array of length T.
+    :param np.ndarray segs: Segment IDs of length T.
+    :param bool mask_boundary_loss: Mask labels at segment transitions.
+    :param bool train_on_eos: Keep EOS positions in the loss.
+    :param int eos_id: EOS token id used when train_on_eos is False.
+    :return np.ndarray: Masked labels of length T.
+    """
+    if mask_boundary_loss:
+        same = (segs[1:] == segs[:-1]) & (segs[1:] > 0) & (segs[:-1] > 0)
+        labels[1:] = np.where(same, labels[1:], IGNORE_INDEX).astype(np.int32)
+    if not train_on_eos:
+        labels = np.where(labels == eos_id, IGNORE_INDEX, labels).astype(np.int32)
+    return labels
 
-    It also implements `get_state`/`set_state` for resume correctness.
+
+@dataclass(frozen=True)
+class _BatchAssemblySpec:
+    """Batch-assembly knobs extracted from a Config.
+
+    Single source of the config-to-assembly mapping shared by the Grain train
+    path and the eval iterator, so the two paths cannot drift apart.
     """
 
-    def __init__(self, cfg: Config, *, tokenizer: Tokenizer, text_stream: TextStream | None = None):
-        """Initialize the training batch iterator.
+    grad_accum: int
+    batch_size: int
+    seq_len: int
+    mask_boundary_loss: bool
+    train_on_eos: bool
+    eos_id: int
+    pad_id: int
+
+    @staticmethod
+    def from_config(cfg: Config, *, grad_accum: int | None = None) -> _BatchAssemblySpec:
+        """Extract the batch-assembly knobs from a training config.
 
         :param Config cfg: Training configuration.
-        :param Tokenizer tokenizer: Tokenizer for encoding text.
+        :param grad_accum: Optional assembly-only accumulation axis override.
+        :return _BatchAssemblySpec: Immutable assembly parameters.
+        """
+        return _BatchAssemblySpec(
+            grad_accum=int(cfg.train.grad_accum if grad_accum is None else grad_accum),
+            batch_size=int(cfg.train.batch_size),
+            seq_len=int(cfg.train.seq_len),
+            mask_boundary_loss=bool(cfg.data.mask_boundary_loss),
+            train_on_eos=bool(cfg.data.train_on_eos),
+            eos_id=int(cfg.model.eos_token_id),
+            pad_id=int(cfg.model.pad_token_id),
+        )
+
+
+def _assemble_batch(
+    next_window: Callable[[], tuple[np.ndarray, np.ndarray]],
+    spec: _BatchAssemblySpec,
+) -> tuple[Batch, int]:
+    """Assemble a fixed-shape batch and its exact valid-target count.
+
+    This is the single source for label masking, padding, zero-objective
+    rejection, and host loss-token accounting used by train and eval.
+
+    :param next_window: Callable yielding (tokens, segment_ids) [T] arrays.
+    :param _BatchAssemblySpec spec: Assembly knobs extracted from the config.
+    :return tuple[Batch, int]: Fixed-shape batch and valid shifted-target count.
+    """
+    grad_accum, batch_size, seq_len = spec.grad_accum, spec.batch_size, spec.seq_len
+    need = grad_accum * batch_size
+    inps = np.full((need, seq_len), spec.pad_id, dtype=np.int32)
+    labs = np.full((need, seq_len), IGNORE_INDEX, dtype=np.int32)
+    segs_out = np.zeros((need, seq_len), dtype=np.int32)
+
+    for idx in range(need):
+        try:
+            seq, segs = next_window()  # [T]
+        except StopIteration:
+            if idx == 0:
+                raise
+            break
+        # Labels align with input_ids; the model shifts internally.
+        inp = np.asarray(seq, dtype=np.int32)
+        labs[idx] = _mask_labels(
+            inp.copy(),
+            segs,
+            mask_boundary_loss=spec.mask_boundary_loss,
+            train_on_eos=spec.train_on_eos,
+            eos_id=spec.eos_id,
+        )
+        inps[idx] = inp
+        segs_out[idx] = np.asarray(segs, dtype=np.int32)
+
+    valid_targets = (labs[:, 1:] != IGNORE_INDEX) & (segs_out[:, 1:] > 0)
+    loss_tokens_host = int(np.count_nonzero(valid_targets))
+    if loss_tokens_host == 0:
+        raise ZeroLossTokensError(
+            "Batch contains zero valid loss tokens after causal shift, boundary/EOS masking, "
+            "and padding. Check for one-token documents, tokenizer special-token collisions, "
+            "or an over-restrictive masking configuration. Refusing to advance the optimizer, "
+            "schedule, RNG, or training step without an objective."
+        )
+
+    segs_abt = segs_out.reshape(grad_accum, batch_size, seq_len)
+    batch = Batch(
+        input_ids=inps.reshape(grad_accum, batch_size, seq_len),
+        labels=labs.reshape(grad_accum, batch_size, seq_len),
+        segment_ids=segs_abt,
+    )
+    return batch, loss_tokens_host
+
+
+def _build_packer(cfg: Config, *, rows_per_pack: int | None = None) -> TokenPacker | FFDPacker:
+    """Create the configured token packer.
+
+    :param Config cfg: Training configuration.
+    :param rows_per_pack: Optional FFD output-row count per packing cycle.
+    :return TokenPacker | FFDPacker: Configured packer.
+    """
+    bins_per_pack = (
+        int(cfg.train.grad_accum) * int(cfg.train.batch_size)
+        if rows_per_pack is None
+        else int(rows_per_pack)
+    )
+    common: dict[str, Any] = {
+        "seq_len": cfg.train.seq_len,
+        "add_bos": cfg.data.tokenizer.add_bos,
+        "add_eos": cfg.data.tokenizer.add_eos,
+        "bos_id": cfg.model.bos_token_id,
+        "eos_id": cfg.model.eos_token_id,
+        "max_doc_tokens": cfg.data.tokenizer.max_doc_tokens,
+        "pad_id": cfg.model.pad_token_id,
+    }
+    if cfg.data.packing_mode in ("bin", "multipack"):
+        if cfg.data.packing_mode == "bin":
+            lookahead_name = "packing_buffer_docs"
+            configured_lookahead = cfg.data.packing_buffer_docs
+        else:
+            lookahead_name = "packing_group_docs"
+            configured_lookahead = cfg.data.packing_group_docs
+        lookahead_docs = resolve_ffd_lookahead(cfg, rows_per_pack=bins_per_pack)
+        if lookahead_docs != configured_lookahead:
+            logger.info(
+                "Raising data.%s from %d to %d to fill one packing cycle.",
+                lookahead_name,
+                configured_lookahead,
+                lookahead_docs,
+            )
+        return FFDPacker(
+            **common,
+            mode=cfg.data.packing_mode,
+            bins_per_pack=bins_per_pack,
+            lookahead_docs=lookahead_docs,
+            max_docs_per_bin=cfg.data.packing_max_docs_per_bin,
+        )
+    if cfg.data.packing_mode == "sequential":
+        return TokenPacker(**common)
+    raise ValueError(f"Unsupported packing mode: {cfg.data.packing_mode!r}")
+
+
+class _SequenceProducer:
+    """Produces packed [T] windows from a text stream + packer.
+
+    This is the single source of data-order truth: one text stream feeding one
+    packer, popped one `[T]` window at a time. Batch assembly (and any window
+    shuffling between the two) lives elsewhere.
+
+    Implements `get_state`/`set_state` for resume correctness.
+    """
+
+    def __init__(
+        self,
+        cfg: Config,
+        *,
+        tokenizer: Tokenizer | None,
+        text_stream: Iterator[TextItem] | None = None,
+        rows_per_pack: int | None = None,
+    ):
+        """Initialize the sequence producer.
+
+        :param Config cfg: Training configuration.
+        :param Tokenizer | None tokenizer: Tokenizer for string items; None is
+            valid only for pre-tokenized streams.
         :param text_stream: Optional text stream override (used for eval datasets).
+        :param rows_per_pack: Optional FFD output-row count per packing cycle.
         :raises ValueError: If data.backend is unknown.
         """
-        self._cfg = cfg
         self._tok = tokenizer
 
         # Text stream
         if text_stream is not None:
             self._text_stream = text_stream
-        elif cfg.data.backend == "hf":
-            self._text_stream = _build_hf_stream(
-                cfg, split=cfg.data.hf_split, repeat=cfg.data.repeat
-            )
-        elif cfg.data.backend == "local_text":
-            self._text_stream = LocalTextStream(text=cfg.data.local_text, repeat=cfg.data.repeat)
         else:
-            raise ValueError(f"Unknown data.backend: {cfg.data.backend!r}")
+            self._text_stream = _build_backend_text_stream(cfg)
 
-        # Packer
-        if cfg.data.packing_mode == "bin":
-            self._packer = BinPacker(
-                seq_len=cfg.train.seq_len,
-                add_bos=cfg.data.tokenizer.add_bos,
-                add_eos=cfg.data.tokenizer.add_eos,
-                bos_id=cfg.model.bos_token_id,
-                eos_id=cfg.model.eos_token_id,
-                max_doc_tokens=cfg.data.tokenizer.max_doc_tokens,
-                bins_per_pack=int(cfg.train.grad_accum) * int(cfg.train.batch_size),
-                buffer_docs=cfg.data.packing_buffer_docs,
-                max_docs_per_bin=cfg.data.packing_max_docs_per_bin,
-                pad_id=cfg.model.pad_token_id,
-            )
-        else:
-            self._packer = TokenPacker(
-                seq_len=cfg.train.seq_len,
-                add_bos=cfg.data.tokenizer.add_bos,
-                add_eos=cfg.data.tokenizer.add_eos,
-                bos_id=cfg.model.bos_token_id,
-                eos_id=cfg.model.eos_token_id,
-                max_doc_tokens=cfg.data.tokenizer.max_doc_tokens,
-            )
-
-        # Batch shape
-        self._A = int(cfg.train.grad_accum)
-        self._B = int(cfg.train.batch_size)
-        self._T = int(cfg.train.seq_len)
-        self._device_put = bool(cfg.data.device_put)
-        self._mask_boundary_loss = bool(cfg.data.mask_boundary_loss)
-        self._train_on_eos = bool(cfg.data.train_on_eos)
-        self._eos_id = int(cfg.model.eos_token_id)
-
-    def __iter__(self) -> TrainBatchIterator:
-        return self
+        self._packer = _build_packer(cfg, rows_per_pack=rows_per_pack)
 
     def _push_next_document(self) -> None:
         """Fetch one item from the text stream and add it to the packer."""
         item = next(self._text_stream)
         if isinstance(item, str):
+            if self._tok is None:
+                raise RuntimeError("A tokenizer is required for string stream items")
             ids = self._tok.encode(item)
         elif isinstance(item, list):
             ids = item
         else:
-            ids = list(item)
+            raise TypeError(
+                f"Text stream yielded unsupported item type {type(item).__name__}; "
+                "expected str or list[int]."
+            )
         self._packer.add_document(ids)
 
-    def _next_sequence(self) -> tuple[np.ndarray, np.ndarray]:
-        """Pop the next [T] token/segment sequence from the packer.
+    def close(self) -> None:
+        """Release the producer's underlying text stream."""
+        close = getattr(self._text_stream, "close", None)
+        if callable(close):
+            close()
 
-        :return tuple[np.ndarray, np.ndarray]: Tokens and segment IDs (length T).
+    def next_window(self) -> tuple[np.ndarray, np.ndarray]:
+        """Pop the next [T] token and segment-ID arrays from the packer.
+
+        :raises StopIteration: When the text stream is exhausted and the
+            packer has nothing left to emit.
+        :return tuple[np.ndarray, np.ndarray]: Token and segment-ID arrays.
         """
         while not self._packer.can_pop():
-            self._push_next_document()
-        return self._packer.pop_seq_with_segments()
-
-    def _mask_labels(self, labels: np.ndarray, segs: np.ndarray) -> np.ndarray:
-        """Apply boundary and EOS masking to label array.
-
-        :param np.ndarray labels: Label array of length T.
-        :param np.ndarray segs: Segment IDs of length T.
-        :return np.ndarray: Masked labels of length T.
-        """
-        if self._mask_boundary_loss:
-            same = (segs[1:] == segs[:-1]) & (segs[1:] > 0) & (segs[:-1] > 0)
-            if labels.size > 1:
-                labels[1:] = np.where(same, labels[1:], IGNORE_INDEX).astype(np.int32)
-        if not self._train_on_eos:
-            labels = np.where(labels == self._eos_id, IGNORE_INDEX, labels).astype(np.int32)
-        return labels
-
-    def __next__(self) -> Batch:
-        need = self._A * self._B
-        inps = np.empty((need, self._T), dtype=np.int32)
-        labs = np.empty((need, self._T), dtype=np.int32)
-        segs_out = np.empty((need, self._T), dtype=np.int32)
-
-        idx = 0
-        while idx < need:
-            seq, segs = self._next_sequence()  # [T]
-            # Convert to input/labels [T]. Labels align with input_ids; model shifts internally.
-            inp = np.asarray(seq, dtype=np.int32)
-            lab = self._mask_labels(inp.copy(), segs)
-            seg = np.asarray(segs, dtype=np.int32)
-            inps[idx] = inp
-            labs[idx] = lab
-            segs_out[idx] = seg
-            idx += 1
-
-        # Reshape -> [A, B, T]
-        inps = inps.reshape(self._A, self._B, self._T)
-        labs = labs.reshape(self._A, self._B, self._T)
-        segs = segs_out.reshape(self._A, self._B, self._T)
-
-        attn = segs > 0
-
-        batch = Batch(input_ids=inps, labels=labs, attention_mask=attn, segment_ids=segs)
-        if self._device_put:
-            import jax  # imported lazily to keep iterator usable in non-JAX contexts
-
-            batch = jax.device_put(batch)
-        return batch
+            try:
+                self._push_next_document()
+            except StopIteration:
+                # Stream exhausted (data.repeat=false, or a finite eval doc
+                # set): let the packer flush partially filled buffers rather
+                # than silently dropping tail documents.
+                self._packer.finish()
+                if not self._packer.can_pop():
+                    raise
+                break
+        seq, segs = self._packer.pop_seq_with_segments()
+        return (
+            np.asarray(seq, dtype=np.int32),
+            np.asarray(segs, dtype=np.int32),
+        )
 
     # -------- checkpoint hooks --------
 
     def get_state(self) -> dict[str, Any]:
-        """Capture current iterator state for checkpointing.
+        """Capture current producer state for checkpointing.
 
         :return dict[str, Any]: State dict with text stream and packer state.
         """
@@ -810,23 +969,58 @@ class TrainBatchIterator:
         }
 
     def set_state(self, state: dict[str, Any]) -> None:
-        """Restore iterator state from a checkpoint.
+        """Restore producer state from a checkpoint.
 
         :param dict[str, Any] state: State dict from get_state().
         """
-        if "text" in state:
-            self._text_stream.set_state(state["text"])
-        if "packer" in state:
-            self._packer.set_state(state["packer"])
+        self._text_stream.set_state(state["text"])
+        self._packer.set_state(state["packer"])
 
-    def get_stats(self) -> dict[str, int]:
-        """Return packer-level document stats if available.
+    def get_stats(self) -> dict[str, int | float]:
+        """Return source- and packer-level document stats if available.
 
-        :return dict[str, int]: Stats like docs_seen/docs_truncated.
+        :return dict[str, int | float]: Stream memory/replay and packing counters.
         """
-        if hasattr(self._packer, "get_stats"):
-            return dict(self._packer.get_stats())
-        return {}
+        stats: dict[str, int | float] = {}
+        get_stream_stats = getattr(self._text_stream, "get_stats", None)
+        if callable(get_stream_stats):
+            stats.update(get_stream_stats())
+        stats.update(self._packer.get_stats())
+        return stats
+
+
+class _EvalBatchIterator:
+    """One-pass iterator that assembles fixed-shape evaluation batches.
+
+    This is the data side of the compile-once contract:
+    - Every `__next__` yields arrays of exactly the same shape & dtype.
+
+    Batches are assembled directly from pre-tokenized documents in source
+    order; evaluation is finite, unshuffled, and never checkpointed.
+    """
+
+    def __init__(self, cfg: Config, *, tokens: list[list[int]]):
+        """Initialize the evaluation batch iterator.
+
+        :param Config cfg: Training configuration.
+        :param list[list[int]] tokens: Ordered pre-tokenized documents.
+        """
+        self._producer = _SequenceProducer(
+            cfg,
+            tokenizer=None,
+            text_stream=iter(tokens),
+            rows_per_pack=int(cfg.train.batch_size),
+        )
+        # Evaluation has no optimizer accumulation requirement. Keeping A=1
+        # prevents train.grad_accum from changing which finite eval rows fit.
+        self._spec = _BatchAssemblySpec.from_config(cfg, grad_accum=1)
+
+    def __iter__(self) -> _EvalBatchIterator:
+        return self
+
+    def __next__(self) -> Batch:
+        batch, _loss_tokens_host = _assemble_batch(self._producer.next_window, self._spec)
+        return batch
 
 
 def build_train_iterator(cfg: Config, *, tokenizer: Tokenizer | None = None) -> Any:
@@ -844,13 +1038,11 @@ def build_train_iterator(cfg: Config, *, tokenizer: Tokenizer | None = None) -> 
     return build_grain_iterator(cfg, tokenizer=tokenizer)
 
 
-def build_eval_iterator(cfg: Config, *, tokens: list[list[int]], tokenizer: Tokenizer) -> Any:
+def build_eval_iterator(cfg: Config, *, tokens: list[list[int]]) -> Any:
     """Build a one-pass evaluation iterator from tokenized docs.
 
     :param Config cfg: Training configuration.
     :param list[list[int]] tokens: Tokenized evaluation documents.
-    :param Tokenizer tokenizer: Tokenizer instance.
     :return Any: Iterator yielding fixed-shape Batch objects.
     """
-    text_stream = ListTokenStream(tokens=tokens, repeat=False)
-    return TrainBatchIterator(cfg, tokenizer=tokenizer, text_stream=text_stream)
+    return _EvalBatchIterator(cfg, tokens=tokens)

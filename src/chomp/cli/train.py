@@ -9,10 +9,9 @@ from dataclasses import replace
 
 import click
 
-from chomp.cli.main import parse_resume, print_banner
+from chomp.cli.main import BANNER, parse_resume
 from chomp.config import load_config
 from chomp.utils.io import setup_python_logging
-from chomp.utils.xla import configure_blackwell_xla_env
 
 
 @click.command()
@@ -57,8 +56,11 @@ def train(
     :param str resume_raw: Resume mode: 'none', 'latest', or step number.
     :param bool dry_run: If True, compile one step then exit.
     """
-    print_banner()
-    cfg = load_config(config, overrides=list(overrides))
+    click.echo(BANNER)
+    try:
+        cfg = load_config(config, overrides=list(overrides))
+    except Exception as exc:
+        raise click.ClickException(f"Invalid config: {exc}") from exc
 
     if run_dir is not None:
         cfg = replace(cfg, logging=replace(cfg.logging, run_dir=run_dir))
@@ -68,15 +70,15 @@ def train(
     # Logging first so subsequent errors are readable
     setup_python_logging(cfg.logging.level, use_rich=cfg.logging.console_use_rich)
 
-    # Configure XLA env quirks before JAX backend init.
-    configure_blackwell_xla_env()
+    # Deferred import keeps config-only CLI startup from initializing JAX.
+    from chomp.train import TrainingPreempted, run
 
-    # Deferred import: chomp.train triggers JAX init, must run after XLA env config
-    from chomp.train import run
-    from chomp.utils.devices import validate_default_device
-
-    # Fail fast on CPU unless explicitly allowed
-    validate_default_device(allow_cpu=cfg.train.allow_cpu)
-
-    run_dir_path = run(cfg, config_path=config, resume=resume, dry_run=dry_run)  # type: ignore[arg-type]
+    try:
+        run_dir_path = run(  # type: ignore[arg-type]
+            cfg, config_path=config, resume=resume, dry_run=dry_run
+        )
+    except TrainingPreempted as exc:
+        click.echo(f"[chomp] run_dir: {exc.run_dir}")
+        click.echo(str(exc), err=True)
+        raise click.exceptions.Exit(exc.exit_code) from exc
     click.echo(f"[chomp] run_dir: {run_dir_path}")

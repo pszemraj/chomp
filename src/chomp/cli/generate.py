@@ -2,47 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
-
 import click
-
-from chomp.utils.checkpoints import load_config_for_checkpoint, resolve_checkpoint_path
-
-
-def _restore_params(step_dir: Path, abstract_params: Any) -> Any:
-    """Restore just the params from a checkpoint.
-
-    Uses PyTreeCheckpointer directly on the train_state directory to load only
-    the params subtree, skipping opt_state/rng/step.
-
-    :param Path step_dir: Checkpoint step directory.
-    :param Any abstract_params: Abstract tree for params (ShapeDtypeStruct).
-    :raises click.ClickException: If train_state directory not found.
-    :return Any: Restored params pytree.
-    """
-    import orbax.checkpoint as ocp
-
-    train_state_dir = step_dir / "train_state"
-    if not train_state_dir.exists():
-        raise click.ClickException(
-            f"train_state directory not found in {step_dir}. Is this a valid chomp checkpoint?"
-        )
-
-    # Build abstract structure with only params key
-    abstract_train_state = {"params": abstract_params}
-
-    # Use PyTreeCheckpointer directly on the train_state directory
-    ckptr = ocp.PyTreeCheckpointer()
-
-    restored = ckptr.restore(
-        train_state_dir,
-        item=abstract_train_state,
-        transforms={},
-        restore_args=ocp.checkpoint_utils.construct_restore_args(abstract_train_state),
-    )
-
-    return restored["params"]
 
 
 @click.command()
@@ -88,7 +48,10 @@ def _restore_params(step_dir: Path, abstract_params: Any) -> Any:
     "config_override",
     type=click.Path(exists=True),
     default=None,
-    help="Override config file (defaults to checkpoint's config_resolved.json).",
+    help=(
+        "Override config file (defaults to selected checkpoint metadata; "
+        "legacy checkpoints use the run config)."
+    ),
 )
 def generate(
     checkpoint: str,
@@ -111,22 +74,18 @@ def generate(
     :param int seed: Random seed for sampling.
     :param config_override: Path to override config file (optional).
     """
-    from chomp.utils.xla import configure_blackwell_xla_env
-
-    # Configure XLA env quirks before JAX backend init.
-    configure_blackwell_xla_env()
-
-    # Deferred imports: must run after XLA env config
-    import equinox as eqx
+    # Deferred imports keep CLI startup from initializing JAX before arguments are validated.
     import jax
-    import jax.numpy as jnp
 
-    from chomp.data.pipeline import build_tokenizer, resolve_tokenizer_config
-    from chomp.model import build_model
+    from chomp.ckpt import restore_params_only
+    from chomp.data.pipeline import load_tokenizer_snapshot, prepare_tokenizer_and_config
+    from chomp.model import build_model, generate_tokens
+    from chomp.utils.ckpt_paths import load_config_for_checkpoint, resolve_checkpoint_path
+    from chomp.utils.tree import abstractify_tree
 
     # Find checkpoint and load config
     try:
-        step_dir, run_dir = resolve_checkpoint_path(checkpoint, config_override=config_override)
+        step_dir, run_dir = resolve_checkpoint_path(checkpoint)
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Loading checkpoint from: {step_dir}")
@@ -144,70 +103,50 @@ def generate(
             f"Found {cfg.model.backend!r} in the checkpoint config."
         )
 
-    # Build tokenizer and resolve tokenizer-derived config fields
-    # (vocab_size rounding, special token IDs) before model build
-    tokenizer = build_tokenizer(cfg)
-    cfg = resolve_tokenizer_config(cfg, tokenizer)
+    # Prefer the run-pinned tokenizer so mutable upstream tokenizer revisions
+    # cannot reinterpret the restored embedding rows.
+    tokenizer = None
+    if run_dir is not None and (run_dir / "tokenizer").exists():
+        try:
+            tokenizer = load_tokenizer_snapshot(run_dir, cfg)
+        except Exception as exc:
+            raise click.ClickException(str(exc)) from exc
+    cfg, tokenizer = prepare_tokenizer_and_config(cfg, tokenizer=tokenizer)
 
     # Build model skeleton for abstract shapes
     key = jax.random.key(seed)
     model_key, gen_key = jax.random.split(key)
     params, static = build_model(cfg, key=model_key)
 
-    # Get abstract params for restoration
-    abstract_params = jax.tree.map(
-        lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=getattr(x, "sharding", None)),
-        params,
-    )
-
     # Restore params from checkpoint
     click.echo("Restoring model parameters...")
-    params = _restore_params(step_dir, abstract_params)
-
-    # Import generation function
     try:
-        from megalodon_jax import generate as mega_generate
-    except ImportError as e:
-        raise click.ClickException(
-            "megalodon_jax is required for generation. Install with: pip install megalodon-jax"
-        ) from e
+        params = restore_params_only(step_dir, abstractify_tree(params))
+    except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     # Tokenize prompt
     prompt_tokens = tokenizer.encode(prompt)
     if not prompt_tokens:
         raise click.ClickException("Prompt tokenized to empty sequence")
 
-    prompt_ids = jnp.asarray(prompt_tokens, dtype=jnp.int32)[None, :]
-
-    # Build generation kwargs
-    gen_kwargs: dict[str, Any] = {
-        "bos_token_id": int(cfg.model.bos_token_id),
-        "eos_token_id": int(cfg.model.eos_token_id),
-    }
-    gen_kwargs["temperature"] = temperature
-    if top_k is not None:
-        gen_kwargs["top_k"] = top_k
-    if top_p is not None:
-        gen_kwargs["top_p"] = top_p
-
-    # Combine model
-    model = eqx.combine(params, static)
-
     # Generate
     click.echo("Generating...")
-    needs_key = temperature > 0
-    output_ids, _cache, _next_key = mega_generate(
-        model,
-        prompt_ids,
-        max_tokens,
-        key=gen_key if needs_key else None,
-        **gen_kwargs,
-    )
-
-    # Decode output
-    output_host = jax.device_get(output_ids)
-    output_tokens = [int(x) for x in output_host[0].tolist()]
-    gen_tokens = output_tokens[len(prompt_tokens) :]
+    try:
+        gen_tokens, _next_key = generate_tokens(
+            params,
+            static,
+            prompt_tokens=prompt_tokens,
+            max_new_tokens=max_tokens,
+            bos_token_id=cfg.model.bos_token_id,
+            eos_token_id=cfg.model.eos_token_id,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            key=gen_key,
+        )
+    except Exception as exc:
+        raise click.ClickException(f"Generation failed: {exc}") from exc
 
     generated_text = tokenizer.decode(gen_tokens)
 

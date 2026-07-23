@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -14,42 +16,24 @@ import jax
 import pytest
 from click.testing import CliRunner
 
-from chomp.ckpt import default_ckpt_dir
 from chomp.cli import cli
-from chomp.cli.generate import _restore_params
-from chomp.cli.main import BANNER, parse_resume, print_banner
+from chomp.cli.main import parse_resume
 from chomp.config import Config
 from chomp.model import build_model
-from chomp.train import run
-from chomp.utils.checkpoints import resolve_checkpoint_path
-from chomp.utils.tree import abstractify_tree
-from tests.helpers.config_factories import make_small_run_cfg
+from tests.helpers.config_factories import make_tiny_megalodon_model
 
 
-@pytest.fixture(scope="module")
-def trained_small_run(tmp_path_factory: pytest.TempPathFactory) -> tuple[Config, Path]:
-    """Train one shared tiny run for CLI restore-path tests."""
-    tmp_path = tmp_path_factory.mktemp("cli_small_run")
-    cfg, config_src = make_small_run_cfg(
-        tmp_path,
-        local_text="hello from chomp test generate",
-    )
-    run_dir = run(cfg, config_path=str(config_src), resume="none", dry_run=False)
-    return cfg, run_dir
+def test_cli_import_does_not_initialize_jax() -> None:
+    """Importing command registration must leave XLA configuration mutable."""
+    code = "import sys; import chomp.cli.main; assert 'jax' not in sys.modules"
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
 
 
-def test_print_banner_outputs_expected_text(capsys: object) -> None:
-    """print_banner emits the banner once with a trailing newline."""
-    print_banner()
-    captured = capsys.readouterr()
-
-    assert captured.out.endswith("\n")
-    assert captured.out.rstrip("\n") == BANNER
-
-
-def test_parse_resume_accepts_valid_variants() -> None:
-    """parse_resume should normalize valid alias and numeric variants."""
-    for raw, expected in [
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
         ("none", "none"),
         ("no", "none"),
         ("false", "none"),
@@ -61,33 +45,39 @@ def test_parse_resume_accepts_valid_variants() -> None:
         ("100", 100),
         ("5000", 5000),
         ("  42  ", 42),
-    ]:
-        assert parse_resume(raw) == expected
+    ],
+)
+def test_parse_resume_accepts_valid_variants(raw: str, expected: object) -> None:
+    """parse_resume should normalize valid alias and numeric variants."""
+    assert parse_resume(raw) == expected
 
 
-def test_parse_resume_rejects_negative_step() -> None:
-    """parse_resume should reject negative step numbers."""
-    for raw in ["-1", "-100"]:
-        with pytest.raises(click.BadParameter, match="non-negative"):
-            parse_resume(raw)
-
-
-def test_parse_resume_rejects_invalid_strings() -> None:
+@pytest.mark.parametrize(
+    ("raw", "match"),
+    [
+        ("-1", "non-negative"),
+        ("-100", "non-negative"),
+        ("invalid", "Invalid resume value"),
+        ("step100", "Invalid resume value"),
+    ],
+)
+def test_parse_resume_rejects_invalid_values(raw: str, match: str) -> None:
     """parse_resume should reject unparseable resume values."""
-    for raw in ["invalid", "step100"]:
-        with pytest.raises(click.BadParameter, match="Invalid resume value"):
-            parse_resume(raw)
+    with pytest.raises(click.BadParameter, match=match):
+        parse_resume(raw)
 
 
-def test_resolve_checkpoint_with_run_dir(trained_small_run: tuple[Config, Path]) -> None:
-    """CLI integration smoke: run-dir input should resolve latest checkpoint."""
-    _, run_dir = trained_small_run
+def test_train_reports_nested_config_typos_without_a_traceback(tmp_path: Path) -> None:
+    """Dataclass construction errors should surface as concise CLI errors."""
+    config_path = tmp_path / "typo.yaml"
+    config_path.write_text("optim:\n  lrr: 0.001\n")
 
-    step_dir, found_run_dir = resolve_checkpoint_path(str(run_dir))
+    result = CliRunner().invoke(cli, ["train", str(config_path)])
 
-    assert found_run_dir == run_dir
-    assert step_dir.name == "2"
-    assert (step_dir / "train_state").exists()
+    assert result.exit_code != 0
+    assert "Error: Invalid config:" in result.output
+    assert "unexpected keyword argument 'lrr'" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_generate_rejects_non_megalodon_backend(tmp_path: Path) -> None:
@@ -109,50 +99,6 @@ def test_generate_rejects_non_megalodon_backend(tmp_path: Path) -> None:
     assert "model.backend" in result.output
 
 
-def test_restore_params_partial_restore(trained_small_run: tuple[Config, Path]) -> None:
-    """_restore_params should load only params from a full TrainState checkpoint."""
-    cfg, run_dir = trained_small_run
-
-    params, _static = build_model(cfg, key=jax.random.PRNGKey(0))
-    abstract_params = abstractify_tree(params)
-
-    step_dir = default_ckpt_dir(run_dir) / "2"
-    assert step_dir.exists()
-
-    restored_params = _restore_params(step_dir, abstract_params)
-
-    params_leaves = jax.tree_util.tree_leaves(params)
-    restored_leaves = jax.tree_util.tree_leaves(restored_params)
-    assert len(params_leaves) == len(restored_leaves)
-
-    for orig, restored in zip(params_leaves, restored_leaves, strict=True):
-        assert orig.shape == restored.shape
-        assert orig.dtype == restored.dtype
-
-
-def test_restore_params_values_differ_from_init(trained_small_run: tuple[Config, Path]) -> None:
-    """Restored params should differ from fresh init after training."""
-    cfg, run_dir = trained_small_run
-
-    params_fresh, _static = build_model(cfg, key=jax.random.PRNGKey(0))
-    abstract_params = abstractify_tree(params_fresh)
-
-    step_dir = default_ckpt_dir(run_dir) / "2"
-    restored_params = _restore_params(step_dir, abstract_params)
-
-    fresh_leaves = jax.tree_util.tree_leaves(params_fresh)
-    restored_leaves = jax.tree_util.tree_leaves(restored_params)
-
-    assert any(
-        not jax.numpy.allclose(fresh, restored)
-        for fresh, restored in zip(fresh_leaves, restored_leaves, strict=True)
-    ), "Restored params should differ from fresh init after training"
-
-
-@pytest.mark.skipif(
-    os.environ.get("JAX_PLATFORMS") == "cpu",
-    reason="Generate requires megalodon_jax.generate which needs full model",
-)
 def test_generate_cli_produces_output(tmp_path: Path) -> None:
     """End-to-end test of the generate CLI command."""
     import orbax.checkpoint as ocp
@@ -163,25 +109,14 @@ def test_generate_cli_produces_output(tmp_path: Path) -> None:
     cfg = Config()
     cfg = replace(
         cfg,
-        model=replace(
-            cfg.model,
-            backend="megalodon",
+        model=make_tiny_megalodon_model(
             vocab_size=256,
-            model_dim=32,
-            num_layers=1,
-            num_heads=1,
-            z_dim=16,
-            value_dim=32,
-            ffn_hidden_dim=64,
             cema_ndim=16,
-            chunk_size=8,
-            dropout=0.0,
-            attention_dropout=0.0,
-            hidden_dropout=0.0,
             param_dtype="float32",
             compute_dtype="float32",
             accum_dtype="float32",
-            softmax_dtype="float32",
+            attention_softmax_dtype="float32",
+            loss_softmax_dtype="float32",
         ),
         data=replace(
             cfg.data,
@@ -218,7 +153,6 @@ def test_generate_cli_produces_output(tmp_path: Path) -> None:
 
     config_resolved = run_dir / "config_resolved.json"
     config_resolved.write_text(json.dumps(cfg.to_dict(), indent=2))
-
     params, _static = build_model(cfg, key=jax.random.PRNGKey(0))
     ckpt_dir = run_dir / "checkpoints" / "1" / "train_state"
     ckpt_dir.parent.mkdir(parents=True, exist_ok=True)

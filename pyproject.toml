@@ -20,35 +20,42 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-# NOTE:
-# - JAX wheels (jaxlib) are platform/CUDA specific. See README.
-# - We pin Orbax to avoid silent API drift.
+# Stateful data/checkpoint dependencies stay pinned where their behavior is
+# part of the harness. Other packages follow compatible release lines.
 dependencies = [
-  "jax>=0.7.0",
-  "equinox>=0.12.0",
-  "megalodon-jax @ git+https://github.com/pszemraj/megalodon-jax.git",
-  "optax @ git+https://github.com/google-deepmind/optax.git@141c8d5e3746540163da8c7edf5a0072369a27c8",
+  # Chomp is a Linux/NVIDIA training harness. JAX's CUDA extra installs the
+  # matching jaxlib, CUDA plugin, and pip-managed CUDA 13 runtime libraries.
+  "jax[cuda13]>=0.10.2,<0.11",
+  "equinox>=0.13.8,<0.14",
+  # 0.2.1 is the first published release with the model/config contract used here.
+  "megalodon-jax>=0.2.1,<0.3",
+  "optax>=0.2.8,<0.3",
   "orbax-checkpoint==0.11.31",
   "PyYAML>=6.0",
-  "tqdm",
+  "tqdm>=4.67",
   "rich>=13.0",
-  "wandb>=0.16.0",
-  "grain>=0.2.15",
-  "datasets>=3.0.0",
-  # transformers (tokenizers)
-  "transformers>=4.40.0",
+  "wandb>=0.16",
+  # Exact pin is deliberate: the window-shuffle resume-exactness fix
+  # (_ResumeSafeWindowShuffleIterDataset in chomp.data.grain) patches grain's
+  # private _WindowShuffleDatasetIterator._init flag. There is no runtime
+  # guard: if a newer grain drops the attribute the patch becomes a silent
+  # no-op, so any bump must re-verify the workaround and the full
+  # interrupted-versus-continuous resume tests.
+  "grain==0.2.15",
+  # 5.0.0 is the first release with the remote-Parquet thread-shutdown fix
+  # for apache/arrow#45214. Earlier releases can abort a successful run at
+  # interpreter exit after a partially consumed streaming shard.
+  "datasets==5.0.0",
+  "transformers>=4.57,<5",
   # CLI
   "click>=8.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.4", "ruff>=0.4.0"]
+dev = ["pytest>=9.0", "ruff>=0.14"]
 
 [project.scripts]
 chomp = "chomp.cli.main:cli"
-
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.hatch.version]
 source = "vcs"
@@ -62,9 +69,6 @@ packages = ["src/chomp"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-markers = [
-  "slow: marks tests as slow (e.g., HF streaming state roundtrips)",
-]
 filterwarnings = [
   "ignore:Implicit conversion of an array to a dtype is deprecated.*:DeprecationWarning:chex._src.asserts",
 ]

@@ -31,10 +31,37 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import orbax.checkpoint as ocp
 
-from chomp.config import Config
-from chomp.data import data_fingerprint
+from chomp.config import Config, decay_horizon_from_values, derived_deterministic
 
 logger = logging.getLogger(__name__)
+
+_MISSING = object()
+
+
+def _effective_deterministic_from_mapping(config: dict[str, Any]) -> bool | None:
+    """Resolve stored dropout determinism when enough config fields exist.
+
+    :param dict[str, Any] config: Configuration mapping from checkpoint metadata.
+    :return bool | None: Effective determinism, or None for incomplete legacy metadata.
+    """
+    train = config.get("train")
+    model = config.get("model")
+    if not isinstance(train, dict) or not isinstance(model, dict):
+        return None
+    if "deterministic" not in train:
+        return None
+    configured = train["deterministic"]
+    if configured is not None:
+        return configured if isinstance(configured, bool) else None
+
+    dropout_fields = (
+        ("dropout",)
+        if model.get("backend") == "dummy"
+        else ("dropout", "attention_dropout", "hidden_dropout")
+    )
+    if any(field not in model for field in dropout_fields):
+        return None
+    return all(model[field] == 0.0 for field in dropout_fields)
 
 
 @dataclass(frozen=True)
@@ -44,18 +71,14 @@ class CheckpointMeta:
     Keep this JSON-serializable.
     """
 
+    # This is a semantic resume record, not an environment manifest. Source
+    # trees, package installations, devices, and XLA flags remain external.
+
     step: int
     timestamp: str
-    tokens_seen: int | None
+    tokens_seen: int
 
-    # Versions for debugging (not for strict gating in v0)
-    python: str
-    jax: str | None
-    orbax: str | None
-    chomp: str
-    megalodon_jax: str | None
-
-    # Repro snapshot
+    # Config snapshot used for semantic resume checks.
     config: dict[str, Any]
 
     # Minimal data fingerprint
@@ -69,46 +92,25 @@ class CheckpointMeta:
         return asdict(self)
 
 
-def _safe_version(pkg: str) -> str | None:
-    """Get package version string, returning None if not installed.
-
-    :param str pkg: Package name to look up.
-    :return str | None: Version string or None if unavailable.
-    """
-    try:
-        import importlib.metadata as im
-
-        return im.version(pkg)
-    except Exception:
-        return None
-
-
 def build_meta(
     *,
     step: int,
     config: dict[str, Any],
     data_fingerprint: dict[str, Any],
-    tokens_seen: int | None = None,
+    tokens_seen: int,
 ) -> CheckpointMeta:
     """Build checkpoint metadata with version info and config snapshot.
 
     :param int step: Current training step.
     :param dict[str, Any] config: Full config dict for reproducibility.
     :param dict[str, Any] data_fingerprint: Data pipeline fingerprint.
-    :param int | None tokens_seen: Optional cumulative token count for resume accounting.
+    :param int tokens_seen: Cumulative loss-token count for exact resume accounting.
     :return CheckpointMeta: Populated metadata object.
     """
-    import platform
-
     return CheckpointMeta(
         step=int(step),
         timestamp=datetime.now().isoformat(timespec="seconds"),
-        python=platform.python_version(),
-        jax=_safe_version("jax"),
-        orbax=_safe_version("orbax-checkpoint"),
-        chomp=_safe_version("chomp") or "0.0.0",
-        megalodon_jax=_safe_version("megalodon-jax"),
-        tokens_seen=int(tokens_seen) if tokens_seen is not None else None,
+        tokens_seen=int(tokens_seen),
         config=config,
         data_fingerprint=data_fingerprint,
     )
@@ -121,23 +123,6 @@ def default_ckpt_dir(run_dir: Path) -> Path:
     :return Path: Path to checkpoints subdirectory.
     """
     return run_dir / "checkpoints"
-
-
-def _dir_size_bytes(path: Path) -> int:
-    """Calculate total size of all files in a directory recursively.
-
-    :param Path path: Directory to measure.
-    :return int: Total size in bytes.
-    """
-    total = 0
-    for p in path.rglob("*"):
-        try:
-            if p.is_file():
-                total += p.stat().st_size
-        except FileNotFoundError:
-            # async / concurrent cleanup
-            pass
-    return total
 
 
 def make_manager(
@@ -175,15 +160,47 @@ def make_manager(
     return mgr
 
 
-def _checkpoint_target(data_iter: Any) -> Any:
-    """Return the iterator object to pass to Grain's checkpoint handler.
+def _train_state_step(train_state: Any) -> int:
+    """Read an integer step from a restored or live train state.
 
-    :param Any data_iter: Training data iterator.
-    :return Any: Iterator object compatible with Grain checkpointing.
+    :param Any train_state: Object or mapping containing ``step``.
+    :raises RuntimeError: If the step is missing or not scalar-convertible.
+    :return int: Scalar optimizer step.
     """
-    if hasattr(data_iter, "checkpoint_target"):
-        return data_iter.checkpoint_target()
-    return data_iter
+    try:
+        value = train_state["step"] if isinstance(train_state, dict) else train_state.step
+        import jax
+
+        return int(jax.device_get(value))
+    except Exception as exc:
+        raise RuntimeError("Checkpoint train_state has no valid scalar step") from exc
+
+
+def validate_checkpoint_steps(
+    *, directory_step: int, meta: dict[str, Any] | CheckpointMeta | None, train_state: Any | None
+) -> None:
+    """Require directory, metadata, and train-state steps to agree.
+
+    :param int directory_step: CheckpointManager step/directory selector.
+    :param meta: Restored metadata mapping or live CheckpointMeta.
+    :param train_state: Restored/live state, or None for metadata-only preflight.
+    :raises RuntimeError: If any required step is invalid or mismatched.
+    """
+    if meta is None:
+        raise RuntimeError("Checkpoint metadata is missing; cannot validate step consistency")
+    meta_step_raw = meta.step if isinstance(meta, CheckpointMeta) else meta.get("step")
+    if isinstance(meta_step_raw, bool) or not isinstance(meta_step_raw, int):
+        raise RuntimeError(f"Checkpoint metadata step is invalid: {meta_step_raw!r}")
+    state_step = None if train_state is None else _train_state_step(train_state)
+    mismatches = []
+    if int(meta_step_raw) != int(directory_step):
+        mismatches.append(f"metadata={meta_step_raw}")
+    if state_step is not None and state_step != int(directory_step):
+        mismatches.append(f"train_state={state_step}")
+    if mismatches:
+        raise RuntimeError(
+            f"Checkpoint step mismatch: directory={int(directory_step)}, " + ", ".join(mismatches)
+        )
 
 
 def save(
@@ -193,7 +210,6 @@ def save(
     train_state: Any,
     data_iter: Any,
     meta: CheckpointMeta,
-    enforce_size_gb: float | None = None,
     force: bool = False,
 ) -> None:
     """Save a checkpoint.
@@ -202,75 +218,36 @@ def save(
     - `data_state` via Grain's checkpoint handler
     - `meta` via JsonSave
 
-    `enforce_size_gb` is a guardrail to catch saving static graphs or duplicating tensors.
-    It's intentionally a blunt instrument.
+    Data-iterator state is serialized synchronously inside `manager.save()`:
+    Grain 0.2.15's CheckpointHandler is synchronous, so the composite handler
+    runs it in the blocking phase. Async checkpointing therefore cannot race
+    the training loop advancing the iterator.
 
     :param ocp.CheckpointManager manager: Orbax checkpoint manager.
     :param int step: Training step number.
     :param Any train_state: TrainState pytree (arrays only).
     :param Any data_iter: Data iterator to checkpoint via Grain's handler.
     :param CheckpointMeta meta: Checkpoint metadata.
-    :param enforce_size_gb: Optional max size in GB; raises if exceeded.
     :param bool force: If True, force a save even if the step is off-interval.
-    :raises RuntimeError: If checkpoint size exceeds enforce_size_gb.
     """
 
     import grain.checkpoint as gcp
     import orbax.checkpoint as ocp
 
-    step = int(step)
-
-    manager.save(
-        step,
+    validate_checkpoint_steps(directory_step=int(step), meta=meta, train_state=train_state)
+    accepted = manager.save(
+        int(step),
         args=ocp.args.Composite(
             train_state=ocp.args.StandardSave(train_state),
-            data_state=gcp.CheckpointSave(_checkpoint_target(data_iter)),
+            data_state=gcp.CheckpointSave(data_iter.checkpoint_target()),
             meta=ocp.args.JsonSave(meta.to_dict()),
         ),
         force=force,
     )
-
-    if enforce_size_gb is not None:
-        # Best-effort size check after save finishes.
-        manager.wait_until_finished()
-        ckpt_path = Path(manager.directory) / str(step)
-        size_gb = _dir_size_bytes(ckpt_path) / 1e9
-        if size_gb > enforce_size_gb:
-            raise RuntimeError(
-                f"Checkpoint at step {step} is {size_gb:.2f}GB, exceeding {enforce_size_gb:.2f}GB. "
-                "This usually means you're saving non-array static state or duplicating tensors."
-            )
-
-
-def restore_latest(
-    manager: ocp.CheckpointManager,
-    *,
-    abstract_train_state: Any,
-    data_iter: Any,
-) -> tuple[int, Any, dict[str, Any] | None]:
-    """Restore latest checkpoint.
-
-    Notes:
-    - `abstract_train_state` should be a tree of ShapeDtypeStruct matching TrainState.
-    - `data_state` is restored via Grain's checkpoint handler.
-
-    :param ocp.CheckpointManager manager: Orbax checkpoint manager.
-    :param Any abstract_train_state: ShapeDtypeStruct tree for restoration target.
-    :param Any data_iter: Data iterator to restore via Grain's handler.
-    :raises FileNotFoundError: If no checkpoints exist.
-    :return tuple: (step, train_state, meta).
-    """
-
-    latest = manager.latest_step()
-    if latest is None:
-        raise FileNotFoundError(f"No checkpoints found in {manager.directory}")
-
-    return _restore_step(
-        manager,
-        step=int(latest),
-        abstract_train_state=abstract_train_state,
-        data_iter=data_iter,
-    )
+    if accepted is not True:
+        raise RuntimeError(
+            f"CheckpointManager rejected save for step {int(step)} (returned {accepted!r})"
+        )
 
 
 def restore_at_step(
@@ -289,57 +266,145 @@ def restore_at_step(
     :return tuple: (step, train_state, meta).
     """
 
-    return _restore_step(
-        manager,
-        step=int(step),
-        abstract_train_state=abstract_train_state,
-        data_iter=data_iter,
-    )
-
-
-def _restore_step(
-    manager: ocp.CheckpointManager,
-    *,
-    step: int,
-    abstract_train_state: Any,
-    data_iter: Any,
-) -> tuple[int, Any, dict[str, Any] | None]:
-    """Restore checkpoint at the specified step.
-
-    :param ocp.CheckpointManager manager: Orbax checkpoint manager.
-    :param int step: Step number to restore.
-    :param Any abstract_train_state: ShapeDtypeStruct tree for restoration target.
-    :param Any data_iter: Data iterator to restore via Grain's handler.
-    :return tuple: (step, train_state, meta).
-    """
     import grain.checkpoint as gcp
     import orbax.checkpoint as ocp
 
+    step = int(step)
     restored = manager.restore(
         step,
         args=ocp.args.Composite(
             train_state=ocp.args.StandardRestore(abstract_train_state),
-            data_state=gcp.CheckpointRestore(_checkpoint_target(data_iter)),
+            data_state=gcp.CheckpointRestore(data_iter.checkpoint_target()),
             meta=ocp.args.JsonRestore(),
         ),
     )
 
-    # Orbax returns a dict-like mapping for Composite.
     train_state = restored["train_state"]
     meta = restored.get("meta")
+    validate_checkpoint_steps(directory_step=step, meta=meta, train_state=train_state)
     return step, train_state, meta
 
 
+def restore_train_state_at_step(
+    manager: ocp.CheckpointManager,
+    *,
+    step: int,
+    abstract_train_state: Any,
+) -> tuple[Any, dict[str, Any] | None]:
+    """Restore train state and metadata without touching the data iterator.
+
+    :param ocp.CheckpointManager manager: Checkpoint manager.
+    :param int step: Step number to restore.
+    :param Any abstract_train_state: Shape/dtype tree for the train state.
+    :return tuple[Any, dict[str, Any] | None]: Restored train state and metadata.
+    """
+    import orbax.checkpoint as ocp
+
+    step = int(step)
+    restored = manager.restore(
+        step,
+        args=ocp.args.Composite(
+            train_state=ocp.args.StandardRestore(abstract_train_state),
+            meta=ocp.args.JsonRestore(),
+        ),
+    )
+    train_state = restored["train_state"]
+    meta = restored.get("meta")
+    validate_checkpoint_steps(directory_step=step, meta=meta, train_state=train_state)
+    return train_state, meta
+
+
+def restore_data_state_at_step(
+    manager: ocp.CheckpointManager,
+    *,
+    step: int,
+    data_iter: Any,
+) -> None:
+    """Restore only the checkpointed data-iterator state.
+
+    :param ocp.CheckpointManager manager: Checkpoint manager.
+    :param int step: Step number to restore.
+    :param Any data_iter: Data iterator restored through Grain.
+    """
+    import grain.checkpoint as gcp
+    import orbax.checkpoint as ocp
+
+    manager.restore(
+        int(step),
+        args=ocp.args.Composite(
+            data_state=gcp.CheckpointRestore(data_iter.checkpoint_target()),
+        ),
+    )
+
+
+def restore_meta_at_step(manager: ocp.CheckpointManager, *, step: int) -> dict[str, Any] | None:
+    """Restore checkpoint metadata without loading model or data state.
+
+    :param ocp.CheckpointManager manager: Orbax checkpoint manager.
+    :param int step: Checkpoint step number.
+    :return dict[str, Any] | None: JSON checkpoint metadata.
+    """
+    import orbax.checkpoint as ocp
+
+    restored = manager.restore(
+        int(step),
+        args=ocp.args.Composite(meta=ocp.args.JsonRestore()),
+    )
+    meta = restored.get("meta")
+    validate_checkpoint_steps(directory_step=int(step), meta=meta, train_state=None)
+    return meta
+
+
+def restore_params_only(step_dir: Path, abstract_params: Any) -> Any:
+    """Restore only the params subtree from a checkpoint step directory.
+
+    Inference-side helper: loads train_state/params without opt_state/rng/step,
+    directly from a step dir (no CheckpointManager needed).
+
+    :param Path step_dir: Checkpoint step directory (contains train_state/).
+    :param Any abstract_params: ShapeDtypeStruct tree matching params.
+    :raises FileNotFoundError: If the step dir has no train_state.
+    :return Any: Restored params pytree.
+    """
+    import orbax.checkpoint as ocp
+
+    train_state_dir = Path(step_dir) / "train_state"
+    if not train_state_dir.exists():
+        raise FileNotFoundError(
+            f"train_state directory not found in {step_dir}. Is this a valid chomp checkpoint?"
+        )
+
+    # The caller's abstract params are the deliberate inference contract:
+    # training resumes use check_resume_compat, while generate may supply an
+    # explicit config override and incompatible parameter trees fail restore.
+    # transforms={} drops saved subtrees absent from item (opt_state/rng/step)
+    # without needing their structure; partial_restore=True cannot do that on
+    # this orbax version (0.11.31 chokes on the pruned tree metadata).
+    abstract_train_state = {"params": abstract_params}
+    with ocp.PyTreeCheckpointer() as ckptr:
+        restored = ckptr.restore(
+            train_state_dir,
+            args=ocp.args.PyTreeRestore(
+                item=abstract_train_state,
+                transforms={},
+                restore_args=ocp.checkpoint_utils.construct_restore_args(abstract_train_state),
+            ),
+        )
+    return restored["params"]
+
+
 def check_resume_compat(
-    cfg: Config, meta: dict[str, Any] | None, *, tokenizer_snapshot_hash: str | None = None
+    cfg: Config,
+    meta: dict[str, Any] | None,
 ) -> None:
     """Validate checkpoint metadata against current config.
 
     :param Config cfg: Current training configuration.
     :param meta: Checkpoint metadata dict (or None if missing).
-    :param str | None tokenizer_snapshot_hash: Optional tokenizer snapshot hash for strict checks.
     :raises RuntimeError: If meta is missing or config mismatches are found.
     """
+
+    from chomp.data import data_fingerprint
 
     if meta is None:
         raise RuntimeError("Checkpoint meta is missing; cannot verify resume compatibility.")
@@ -349,6 +414,11 @@ def check_resume_compat(
     if not isinstance(meta_cfg, dict) or not isinstance(meta_fp, dict):
         raise RuntimeError(
             "Checkpoint meta is missing config/data_fingerprint; cannot verify resume compatibility."
+        )
+    tokens_seen = meta.get("tokens_seen")
+    if isinstance(tokens_seen, bool) or not isinstance(tokens_seen, int) or tokens_seen < 0:
+        raise RuntimeError(
+            "Checkpoint meta has missing or invalid tokens_seen; cannot resume exact accounting."
         )
 
     errors: list[str] = []
@@ -363,223 +433,289 @@ def check_resume_compat(
         :param str severity: Either "error" or "warning".
         """
         if cur != prev:
-            msg = f"{path} mismatch (checkpoint={prev!r}, current={cur!r})"
+            prev_text = "<missing>" if prev is _MISSING else repr(prev)
+            cur_text = "<missing>" if cur is _MISSING else repr(cur)
+            msg = f"{path} mismatch (checkpoint={prev_text}, current={cur_text})"
             if severity == "error":
                 errors.append(msg)
             else:
                 warnings.append(msg)
 
-    cur_fp = data_fingerprint(cfg, tokenizer_snapshot_hash=tokenizer_snapshot_hash)
+    def _cmp_mapping(
+        prefix: str,
+        cur: dict[str, Any],
+        prev: dict[str, Any],
+        *,
+        keys: set[str] | None = None,
+        severity: str = "error",
+        labels: dict[str, str] | None = None,
+    ) -> None:
+        """Compare selected mapping keys with consistent missing-key handling.
 
-    # Data source comparisons.
+        :param str prefix: Default dotted path prefix.
+        :param dict[str, Any] cur: Current values.
+        :param dict[str, Any] prev: Checkpoint values.
+        :param set[str] | None keys: Active keys, or all current keys when omitted.
+        :param str severity: ``error`` or ``warning``.
+        :param dict[str, str] | None labels: Optional full path overrides by key.
+        """
+        selected = set(cur) if keys is None else keys
+        for key in sorted(selected):
+            path = (labels or {}).get(key, f"{prefix}.{key}" if prefix else key)
+            _cmp(
+                path,
+                cur.get(key, _MISSING),
+                prev.get(key, _MISSING),
+                severity=severity,
+            )
+
+    cur_fp = data_fingerprint(cfg)
+    semantic_severity = "error" if cfg.checkpoint.resume_compat == "strict" else "warning"
+
+    _cmp_mapping(
+        "",
+        cur_fp,
+        meta_fp,
+        keys={"seq_len", "batch_size", "grad_accum"},
+        labels={
+            "seq_len": "train.seq_len",
+            "batch_size": "train.batch_size",
+            "grad_accum": "train.grad_accum",
+        },
+        severity=semantic_severity,
+    )
+
+    # Fingerprint sections contain only active backend/mode keys. Every current
+    # key must be present because missing metadata cannot establish equality.
     src_prev = meta_fp.get("source") or {}
     src_cur = cur_fp.get("source") or {}
-    _cmp("data.source.backend", src_cur.get("backend"), src_prev.get("backend"), severity="error")
+    _cmp_mapping(
+        "data",
+        src_cur,
+        src_prev,
+        labels={
+            "backend": "data.source.backend",
+            "dataset": "data.hf_dataset",
+            "name": "data.hf_name",
+            "split": "data.hf_split",
+            "revision": "data.hf_revision",
+            "eval_holdout_fraction": "data.hf_eval_holdout_fraction",
+        },
+        severity=semantic_severity,
+    )
 
-    if src_cur.get("backend") == "hf":
-        _cmp("data.hf_dataset", src_cur.get("dataset"), src_prev.get("dataset"), severity="error")
-        _cmp("data.hf_name", src_cur.get("name"), src_prev.get("name"), severity="error")
-        _cmp("data.hf_split", src_cur.get("split"), src_prev.get("split"), severity="error")
-        _cmp("data.text_key", src_cur.get("text_key"), src_prev.get("text_key"), severity="error")
-        _cmp("data.shuffle", src_cur.get("shuffle"), src_prev.get("shuffle"), severity="error")
-        _cmp("data.seed", src_cur.get("seed"), src_prev.get("seed"), severity="error")
-        _cmp(
-            "data.shuffle_buffer_size",
-            src_cur.get("shuffle_buffer_size"),
-            src_prev.get("shuffle_buffer_size"),
-            severity="warning",
-        )
-    elif src_cur.get("backend") == "local_text":
-        _cmp(
-            "data.local_text_hash",
-            src_cur.get("local_text_hash"),
-            src_prev.get("local_text_hash"),
-            severity="error",
-        )
-        _cmp("data.repeat", src_cur.get("repeat"), src_prev.get("repeat"), severity="error")
-
-    # Tokenizer comparisons.
     tok_prev = meta_fp.get("tokenizer") or {}
     tok_cur = cur_fp.get("tokenizer") or {}
-    _cmp("tokenizer.kind", tok_cur.get("kind"), tok_prev.get("kind"), severity="error")
-
-    if tok_cur.get("kind") == "hf":
-        _cmp(
-            "tokenizer.hf_name_or_path",
-            tok_cur.get("hf_name_or_path"),
-            tok_prev.get("hf_name_or_path"),
-            severity="error",
-        )
-        _cmp(
-            "tokenizer.hf_use_fast",
-            tok_cur.get("hf_use_fast"),
-            tok_prev.get("hf_use_fast"),
-            severity="error",
-        )
-        _cmp(
-            "tokenizer.hf_trust_remote_code",
-            tok_cur.get("hf_trust_remote_code"),
-            tok_prev.get("hf_trust_remote_code"),
-            severity="error",
-        )
-    elif tok_cur.get("kind") == "byte":
-        _cmp(
-            "tokenizer.byte_offset",
-            tok_cur.get("byte_offset"),
-            tok_prev.get("byte_offset"),
-            severity="error",
-        )
-
-    _cmp("tokenizer.add_bos", tok_cur.get("add_bos"), tok_prev.get("add_bos"), severity="error")
-    _cmp("tokenizer.add_eos", tok_cur.get("add_eos"), tok_prev.get("add_eos"), severity="error")
-    _cmp(
-        "tokenizer.max_doc_tokens",
-        tok_cur.get("max_doc_tokens"),
-        tok_prev.get("max_doc_tokens"),
-        severity="error",
+    tokenizer_inert = {
+        "hf_name_or_path",
+        "hf_use_fast",
+        "hf_trust_remote_code",
+        "vocab_size_multiple",
+        "auto_set_special_tokens",
+    }
+    _cmp_mapping(
+        "tokenizer",
+        tok_cur,
+        tok_prev,
+        keys=set(tok_cur) - tokenizer_inert,
+        severity=semantic_severity,
     )
-    _cmp(
-        "tokenizer.vocab_size_multiple",
-        tok_cur.get("vocab_size_multiple"),
-        tok_prev.get("vocab_size_multiple"),
-        severity="error",
-    )
-    _cmp(
-        "tokenizer.auto_set_special_tokens",
-        tok_cur.get("auto_set_special_tokens"),
-        tok_prev.get("auto_set_special_tokens"),
-        severity="error",
-    )
-    snap_prev = tok_prev.get("snapshot_sha256")
-    snap_cur = tok_cur.get("snapshot_sha256")
-    if snap_prev is not None or snap_cur is not None:
-        _cmp(
-            "tokenizer.snapshot_sha256",
-            snap_cur,
-            snap_prev,
-            severity="error",
-        )
 
-    # Packing/loss behavior comparisons.
+    # Fingerprinted packing knobs change data order or the training objective.
     pack_prev = meta_fp.get("packing") or {}
     pack_cur = cur_fp.get("packing") or {}
-    _cmp(
-        "data.packing_mode",
-        pack_cur.get("mode"),
-        pack_prev.get("mode"),
-        severity="error",
-    )
-    _cmp(
-        "data.packing_buffer_docs",
-        pack_cur.get("buffer_docs"),
-        pack_prev.get("buffer_docs"),
-        severity="error",
-    )
-    _cmp(
-        "data.packing_max_docs_per_bin",
-        pack_cur.get("max_docs_per_bin"),
-        pack_prev.get("max_docs_per_bin"),
-        severity="error",
-    )
-    _cmp(
-        "data.grain_prefetch",
-        pack_cur.get("grain_prefetch"),
-        pack_prev.get("grain_prefetch"),
-        severity="warning",
-    )
-    _cmp(
-        "data.mask_boundary_loss",
-        pack_cur.get("mask_boundary_loss"),
-        pack_prev.get("mask_boundary_loss"),
-        severity="error",
-    )
-    _cmp(
-        "data.train_on_eos",
-        pack_cur.get("train_on_eos"),
-        pack_prev.get("train_on_eos"),
-        severity="error",
-    )
+    # Knobs whose DataConfig field carries the packing_ prefix; the rest are
+    # top-level data.* fields recorded in the fingerprint's packing section.
+    packing_prefixed = {"mode", "buffer_docs", "max_docs_per_bin", "group_docs", "strict_segments"}
+    for key in sorted(pack_cur):
+        label = f"data.packing_{key}" if key in packing_prefixed else f"data.{key}"
+        _cmp(
+            label,
+            pack_cur.get(key, _MISSING),
+            pack_prev.get(key, _MISSING),
+            severity=semantic_severity,
+        )
 
+    # Eval tokens are rebuilt from the live stream on every start; selection
+    # drift silently changes what eval_loss measures across the resume.
     eval_prev = meta_fp.get("eval") or {}
     eval_cur = cur_fp.get("eval") or {}
-    _cmp(
-        "data.max_eval_samples",
-        eval_cur.get("max_eval_samples"),
-        eval_prev.get("max_eval_samples"),
-        severity="error",
-    )
-    _cmp(
-        "data.hf_eval_split",
-        eval_cur.get("hf_eval_split"),
-        eval_prev.get("hf_eval_split"),
-        severity="error",
-    )
-
-    # Batch shape invariants.
-    _cmp("train.seq_len", cur_fp.get("seq_len"), meta_fp.get("seq_len"), severity="error")
-    _cmp(
-        "train.batch_size",
-        cur_fp.get("batch_size"),
-        meta_fp.get("batch_size"),
-        severity="error",
-    )
-    _cmp(
-        "train.grad_accum",
-        cur_fp.get("grad_accum"),
-        meta_fp.get("grad_accum"),
-        severity="error",
+    _cmp_mapping(
+        "data.eval",
+        eval_cur,
+        eval_prev,
+        labels={"max_eval_samples": "data.max_eval_samples"},
+        severity=semantic_severity,
     )
 
     # Model/optimizer comparisons.
     cur_cfg = cfg.to_dict()
     train_prev = meta_cfg.get("train") or {}
     train_cur = cur_cfg.get("train") or {}
+    # Compare the executed dropout behavior: null and true are equivalent
+    # when all active dropout rates are zero.
+    previous_deterministic = _effective_deterministic_from_mapping(meta_cfg)
+    _cmp(
+        "train.deterministic_effective",
+        derived_deterministic(cfg),
+        _MISSING if previous_deterministic is None else previous_deterministic,
+        severity=semantic_severity,
+    )
     model_prev = meta_cfg.get("model") or {}
     model_cur = cur_cfg.get("model") or {}
-    for key in sorted(set(model_prev) | set(model_cur)):
-        _cmp(f"model.{key}", model_cur.get(key), model_prev.get(key), severity="error")
+    model_active = set(model_cur)
+    if model_cur.get("backend") == "dummy":
+        model_active = {
+            "backend",
+            "vocab_size",
+            "d_model",
+            "dropout",
+            "pad_token_id",
+            "bos_token_id",
+            "eos_token_id",
+        }
+        model_structural = {"backend", "vocab_size", "d_model"}
+    else:
+        # Dummy-only width is inert under Megalodon. Fresh initialization and
+        # the two equivalent memory/scan implementations are inert after
+        # parameter restore and are intentionally absent from resume policy.
+        model_active -= {
+            "d_model",
+            "init_mode",
+            "use_checkpoint",
+            "use_associative_segment_scan",
+            "loss_chunk_size",
+        }
+        model_structural = {
+            "backend",
+            "vocab_size",
+            "model_dim",
+            "num_layers",
+            "z_dim",
+            "value_dim",
+            "ffn_hidden_dim",
+            "cema_ndim",
+            "swiglu",
+            "rescale_nffn",
+            "share_emb",
+            "norm_affine",
+            "output_size",
+            "param_dtype",
+        }
+    model_structural &= model_active
+    _cmp_mapping("model", model_cur, model_prev, keys=model_structural, severity="error")
+    _cmp_mapping(
+        "model",
+        model_cur,
+        model_prev,
+        keys=model_active - model_structural,
+        severity=semantic_severity,
+    )
 
     optim_prev = meta_cfg.get("optim") or {}
     optim_cur = cur_cfg.get("optim") or {}
-    optim_name_prev = optim_prev.get("name")
     optim_name_cur = optim_cur.get("name")
-    for key in sorted(set(optim_prev) | set(optim_cur)):
-        if key == "decay_steps":
-            continue
-        if key == "muon" and optim_name_prev != "muon" and optim_name_cur != "muon":
-            continue
-        _cmp(f"optim.{key}", optim_cur.get(key), optim_prev.get(key), severity="error")
+    _cmp_mapping("optim", optim_cur, optim_prev, keys={"name"}, severity="error")
 
-    def _effective_decay_horizon(
-        train_cfg: dict[str, Any], optim_cfg: dict[str, Any]
-    ) -> int | None:
-        """Return the effective LR schedule horizon in steps.
+    optim_value_keys = set(optim_cur) - {
+        "name",
+        "decay_steps",
+        "adam",
+        "muon",
+    }
+    _cmp_mapping(
+        "optim",
+        optim_cur,
+        optim_prev,
+        keys=optim_value_keys,
+        severity=semantic_severity,
+    )
 
-        :param dict[str, Any] train_cfg: Training config section.
-        :param dict[str, Any] optim_cfg: Optimizer config section.
-        :return int | None: Warmup + decay horizon, or None if unavailable.
-        """
-        warmup = optim_cfg.get("warmup_steps")
-        if warmup is None:
-            return None
-        decay = optim_cfg.get("decay_steps")
-        if decay is None:
-            steps = train_cfg.get("steps")
-            if steps is None:
-                return None
-            decay = int(steps) - int(warmup)
-        return int(warmup) + int(decay)
+    adam_prev = optim_prev.get("adam") or {}
+    adam_cur = optim_cur.get("adam") or {}
+    _cmp_mapping("optim.adam", adam_cur, adam_prev, severity=semantic_severity)
 
-    decay_prev = _effective_decay_horizon(train_prev, optim_prev)
-    decay_cur = _effective_decay_horizon(train_cur, optim_cur)
-    _cmp("optim.decay_steps_effective", decay_cur, decay_prev, severity="error")
-    if optim_prev.get("decay_steps") != optim_cur.get("decay_steps") and decay_cur == decay_prev:
-        warnings.append(
-            "optim.decay_steps changed but effective schedule horizon is unchanged "
-            f"(prev={optim_prev.get('decay_steps')!r}, cur={optim_cur.get('decay_steps')!r})"
+    if optim_name_cur == "muon":
+        muon_prev = optim_prev.get("muon") or {}
+        muon_cur = optim_cur.get("muon") or {}
+        muon_structural = {"allow_all_2d", "allow_tied_embed"}
+        _cmp_mapping(
+            "optim.muon",
+            muon_cur,
+            muon_prev,
+            keys=muon_structural,
+            severity="error",
+        )
+        consistent_rms_prev = muon_prev.get("consistent_rms", _MISSING)
+        consistent_rms_cur = muon_cur.get("consistent_rms", _MISSING)
+        if consistent_rms_prev is _MISSING or consistent_rms_cur is _MISSING:
+            _cmp(
+                "optim.muon.consistent_rms",
+                consistent_rms_cur,
+                consistent_rms_prev,
+                severity=semantic_severity,
+            )
+        else:
+            if (muon_prev["consistent_rms"] is None) != (muon_cur["consistent_rms"] is None):
+                _cmp(
+                    "optim.muon.consistent_rms",
+                    muon_cur["consistent_rms"],
+                    muon_prev["consistent_rms"],
+                    severity="error",
+                )
+            else:
+                _cmp(
+                    "optim.muon.consistent_rms",
+                    muon_cur["consistent_rms"],
+                    muon_prev["consistent_rms"],
+                    severity=semantic_severity,
+                )
+        _cmp_mapping(
+            "optim.muon",
+            muon_cur,
+            muon_prev,
+            keys=set(muon_cur) - muon_structural - {"consistent_rms"},
+            severity=semantic_severity,
         )
 
-    if train_cur.get("steps") != train_prev.get("steps"):
+    schedule_fields = (
+        ("train.steps", train_cur, train_prev, "steps"),
+        ("optim.warmup_steps", optim_cur, optim_prev, "warmup_steps"),
+        ("optim.decay_steps", optim_cur, optim_prev, "decay_steps"),
+    )
+    decay_keys_present = all(key in cur and key in prev for _, cur, prev, key in schedule_fields)
+    for path, cur, prev, key in (schedule_fields[0], schedule_fields[2]):
+        if key not in cur or key not in prev:
+            _cmp(
+                path,
+                cur.get(key, _MISSING),
+                prev.get(key, _MISSING),
+                severity=semantic_severity,
+            )
+    if decay_keys_present:
+        decay_prev = decay_horizon_from_values(
+            steps=train_prev["steps"],
+            warmup_steps=optim_prev["warmup_steps"],
+            decay_steps=optim_prev["decay_steps"],
+        )
+        decay_cur = decay_horizon_from_values(
+            steps=train_cur["steps"],
+            warmup_steps=optim_cur["warmup_steps"],
+            decay_steps=optim_cur["decay_steps"],
+        )
+        _cmp(
+            "optim.decay_steps_effective",
+            decay_cur,
+            decay_prev,
+            severity=semantic_severity,
+        )
+        if optim_prev["decay_steps"] != optim_cur["decay_steps"] and decay_cur == decay_prev:
+            warnings.append(
+                "optim.decay_steps changed but effective schedule horizon is unchanged "
+                f"(prev={optim_prev['decay_steps']!r}, cur={optim_cur['decay_steps']!r})"
+            )
+
+    if "steps" in train_cur and "steps" in train_prev and train_cur["steps"] != train_prev["steps"]:
         warnings.append(
             "train.steps mismatch (checkpoint="
             f"{train_prev.get('steps')!r}, current={train_cur.get('steps')!r})"

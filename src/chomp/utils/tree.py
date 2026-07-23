@@ -1,20 +1,29 @@
-"""Pytree helper functions.
-
-This is where you put the small utilities that you end up rewriting in every
-JAX training repo:
-- parameter counts
-- tree equality / closeness checks
-- shape/dtype summaries
-
-Keep it minimal: this is not a generic library.
-"""
+"""Runtime pytree helpers for model sizing and checkpoint restoration."""
 
 from __future__ import annotations
 
 from typing import Any
 
 import jax
-import jax.numpy as jnp
+
+
+def path_to_str(path: tuple[Any, ...]) -> str:
+    """Convert a JAX tree path to a stable dotted string.
+
+    :param tuple[Any, ...] path: Path elements from tree_flatten_with_path.
+    :return str: Dotted path string with list indices in brackets.
+    """
+    parts: list[str] = []
+    for key in path:
+        if hasattr(key, "name"):
+            parts.append(str(key.name))
+        elif hasattr(key, "key"):
+            parts.append(str(key.key))
+        elif hasattr(key, "idx"):
+            parts.append(f"[{key.idx}]")
+        else:
+            parts.append(str(key))
+    return ".".join(parts)
 
 
 def param_count(params: Any) -> int:
@@ -30,34 +39,6 @@ def param_count(params: Any) -> int:
         if hasattr(x, "size"):
             total += int(x.size)
     return total
-
-
-def tree_allclose(a: Any, b: Any, *, rtol: float = 1e-6, atol: float = 1e-6) -> bool:
-    """Tree-wise allclose for arrays.
-
-    :param Any a: First pytree.
-    :param Any b: Second pytree.
-    :param float rtol: Relative tolerance.
-    :param float atol: Absolute tolerance.
-    :return bool: True if all arrays are element-wise close.
-    """
-
-    la = jax.tree_util.tree_leaves(a)
-    lb = jax.tree_util.tree_leaves(b)
-    if len(la) != len(lb):
-        return False
-    for xa, xb in zip(la, lb, strict=True):
-        if hasattr(xa, "shape") and hasattr(xb, "shape"):
-            if xa.shape != xb.shape:
-                return False
-            if xa.dtype != xb.dtype:
-                return False
-            if not jnp.allclose(xa, xb, rtol=rtol, atol=atol):
-                return False
-        else:
-            if xa != xb:
-                return False
-    return True
 
 
 def abstractify_tree(tree: Any) -> Any:
