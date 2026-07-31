@@ -804,6 +804,44 @@ def test_run_enforces_device_before_artifact_setup(
     assert not run_dir.exists()
 
 
+def test_training_rejects_dense_attention_window_without_blocking_model_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sliding-window config remains usable for inference but not training.
+
+    :param Path tmp_path: Temporary directory for potential run artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Device-policy call guard.
+    """
+    cfg = make_small_run_cfg(tmp_path, run_subdir="dense_window")
+    cfg = replace(
+        cfg,
+        model=make_tiny_megalodon_model(
+            vocab_size=256,
+            chunk_size=8,
+            attention_window=8,
+        ),
+        train=replace(cfg.train, allow_cpu=False),
+    )
+    params, _ = build_model(cfg, key=jax.random.PRNGKey(0))
+    assert params is not None
+
+    def _unexpected_device_check(*, allow_cpu: bool) -> None:
+        """Fail if the training-only semantic guard runs too late."""
+        raise AssertionError(f"unexpected device validation: {allow_cpu}")
+
+    monkeypatch.setattr("chomp.train.validate_default_device", _unexpected_device_check)
+    run_dir = Path(cfg.logging.run_dir or "")
+    with pytest.raises(ValueError) as exc_info:
+        run(cfg, config_path=None, resume="none", dry_run=False)
+
+    message = str(exc_info.value)
+    assert "dense O(L²)" in message
+    assert "model.chunk_size" in message
+    assert "future upstream work" in message
+    assert not run_dir.exists()
+
+
 @pytest.mark.parametrize("grain_prefetch", [0, 1])
 def test_exact_eof_after_batch_boundary_saves_final_checkpoint(
     tmp_path: Path, grain_prefetch: int
@@ -1480,7 +1518,12 @@ def test_eval_collection_failure_disables_eval_without_stopping_training(
     cfg = replace(
         cfg,
         data=replace(cfg.data, max_eval_samples=2),
-        train=replace(cfg.train, steps=2, eval_every=1),
+        train=replace(
+            cfg.train,
+            steps=2,
+            eval_every=1,
+            eval_failure_policy="disable",
+        ),
     )
 
     def _fail_eval_setup(*args: Any, **kwargs: Any) -> list[list[int]]:
@@ -1493,6 +1536,12 @@ def test_eval_collection_failure_disables_eval_without_stopping_training(
 
     assert "disabling evaluation" in caplog.text
     assert _checkpoint_steps(run_dir) == {1, 2}
+    rows = read_jsonl(run_dir / cfg.logging.metrics_file)
+    assert all(row["eval_disabled"] is True for row in rows)
+    assert all(row["eval_failure_count"] == 1 for row in rows)
+    assert all(row["eval_last_failure_step"] == 0 for row in rows)
+    assert all(row["eval_last_failure_type"] == "RuntimeError" for row in rows)
+    assert all(row["eval_last_success_step"] is None for row in rows)
 
 
 def test_eval_batch_failure_disables_future_evals_without_stopping_training(
@@ -1505,8 +1554,19 @@ def test_eval_batch_failure_disables_future_evals_without_stopping_training(
     cfg = replace(
         cfg,
         data=replace(cfg.data, max_eval_samples=2),
-        train=replace(cfg.train, steps=2, eval_every=1),
+        train=replace(
+            cfg.train,
+            steps=2,
+            eval_every=1,
+            eval_failure_policy="disable",
+        ),
+        logging=replace(
+            cfg.logging,
+            wandb=replace(cfg.logging.wandb, enabled=True),
+        ),
     )
+    dummy_wandb = DummyWandbRun()
+    monkeypatch.setattr("chomp.train._maybe_init_wandb", lambda *args, **kwargs: dummy_wandb)
     real_build_eval_iterator = train_mod.build_eval_iterator
     build_calls = 0
 
@@ -1525,6 +1585,79 @@ def test_eval_batch_failure_disables_future_evals_without_stopping_training(
     assert build_calls == 1
     assert "Evaluation failed at step 1; disabling evaluation" in caplog.text
     assert _checkpoint_steps(run_dir) == {1, 2}
+    rows = read_jsonl(run_dir / cfg.logging.metrics_file)
+    assert all(row["eval_disabled"] is True for row in rows)
+    assert all(row["eval_failure_count"] == 1 for row in rows)
+    assert all(row["eval_last_failure_step"] == 1 for row in rows)
+    assert all(row["eval_last_failure_type"] == "ZeroLossTokensError" for row in rows)
+    assert all(row["eval_last_success_step"] is None for row in rows)
+    telemetry_rows = [row for _, row in dummy_wandb.logged if "eval_disabled" in row]
+    assert telemetry_rows
+    assert all(row["eval_disabled"] is True for row in telemetry_rows)
+    assert all(row["eval_failure_count"] == 1 for row in telemetry_rows)
+
+
+def test_eval_collection_failure_is_fatal_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default policy must fail before training when eval collection fails.
+
+    :param Path tmp_path: Temporary directory for run artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Eval-setup failure injection.
+    """
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_eval_setup_fatal")
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, max_eval_samples=2),
+        train=replace(cfg.train, eval_every=1),
+    )
+
+    def _fail_eval_setup(*args: Any, **kwargs: Any) -> list[list[int]]:
+        """Raise a deterministic evaluation initialization failure."""
+        raise RuntimeError("broken validation split")
+
+    monkeypatch.setattr("chomp.train.load_or_create_eval_tokens", _fail_eval_setup)
+
+    with pytest.raises(RuntimeError, match="broken validation split"):
+        run(cfg, config_path=None, resume="none", dry_run=False)
+
+
+def test_eval_runtime_failure_is_fatal_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default policy must propagate scheduled evaluation failures.
+
+    :param Path tmp_path: Temporary directory for run artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Eval-runtime failure injection.
+    """
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_eval_runtime_fatal")
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, max_eval_samples=2),
+        train=replace(cfg.train, steps=2, eval_every=1),
+    )
+
+    def _fail_eval_iterator(config: Config, *, tokens: list[list[int]]) -> Iterator[Batch]:
+        """Raise while assembling the scheduled evaluation pass."""
+        _ = (config, tokens)
+        raise RuntimeError("broken eval batch")
+
+    monkeypatch.setattr("chomp.train.build_eval_iterator", _fail_eval_iterator)
+
+    run_dir = Path(cfg.logging.run_dir or "")
+    with pytest.raises(RuntimeError, match="broken eval batch"):
+        run(cfg, config_path=None, resume="none", dry_run=False)
+
+    rows = read_jsonl(run_dir / cfg.logging.metrics_file)
+    crash = rows[-1]
+    assert crash["crash"] is True
+    assert crash["eval_disabled"] is False
+    assert crash["eval_failure_count"] == 1
+    assert crash["eval_last_failure_step"] == 1
+    assert crash["eval_last_failure_type"] == "RuntimeError"
+    assert crash["eval_last_success_step"] is None
 
 
 @pytest.mark.parametrize(

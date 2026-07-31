@@ -150,6 +150,10 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
         ),
         (lambda cfg: replace(cfg, train=replace(cfg.train, seed=-1)), "train.seed"),
         (lambda cfg: replace(cfg, train=replace(cfg.train, eval_every=-1)), "eval_every"),
+        (
+            lambda cfg: replace(cfg, train=replace(cfg.train, eval_failure_policy="ignore")),
+            "eval_failure_policy",
+        ),
         (lambda cfg: replace(cfg, train=replace(cfg.train, generate_every=-1)), "generate_every"),
         (
             lambda cfg: replace(cfg, train=replace(cfg.train, generate_input_len=0)),
@@ -243,9 +247,11 @@ def test_debug_smoke_config_loads() -> None:
     ["smoldata_mix_100m_2048.yaml", "zyda2_200m_2048.yaml"],
 )
 def test_maintained_training_recipes_require_strict_resume(name: str) -> None:
-    """Maintained long-run recipes should reject semantic resume drift."""
+    """Maintained long-run recipes should fail closed on resume and evaluation."""
     config_path = Path(__file__).parents[1] / "configs" / name
-    assert load_config(config_path).checkpoint.resume_compat == "strict"
+    cfg = load_config(config_path)
+    assert cfg.checkpoint.resume_compat == "strict"
+    assert cfg.train.eval_failure_policy == "fatal"
 
 
 def test_yaml_loader_rejects_duplicate_explicit_keys(tmp_path: Path) -> None:

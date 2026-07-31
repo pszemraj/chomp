@@ -45,10 +45,10 @@ model:
   # model.cema_ndim -- int; default: 16; > 0. CEMA components per channel; higher values add recurrent capacity and cost.
   cema_ndim: "<int>"
 
-  # model.chunk_size -- int; default: 128; > 0, <= train.seq_len, and must divide train.seq_len. Sets local attention chunk length unless attention_window is set, and always sets the default generation length.
+  # model.chunk_size -- int; default: 128; > 0, <= train.seq_len, and must divide train.seq_len. Supported efficient paper-faithful local-attention path for training; also sets the default generation length.
   chunk_size: "<int>"
 
-  # model.attention_window -- int | null; default: null, which keeps released chunk-local attention and cache capacity model.chunk_size. A positive value enables causal sliding-window attention and sets inference cache capacity. [Experimental]
+  # model.attention_window -- int | null; default: null, which keeps released chunk-local attention and cache capacity model.chunk_size. Positive values are inference-only: current noncached training is dense O(L²) attention with a window mask, so chomp train rejects them until an efficient upstream path exists. [Experimental]
   attention_window: "<int | null>"
 
   # model.norm_num_groups -- int; default: 32; > 0, smaller than model.model_dim, and must divide model.model_dim. Equality is unsupported because featurewise TimestepNorm needs an unconfigured learned prior.
@@ -267,6 +267,9 @@ train:
 
   # train.eval_every -- int; default: 2500; >= 0; zero disables scheduled evaluation. Evaluation also requires data.max_eval_samples > 0 and usable eval data; cadence may change on resume.
   eval_every: "<int>"
+
+  # train.eval_failure_policy -- string; default: fatal; one of: fatal | disable. Applies to evaluation-data initialization and scheduled passes. Fatal fails the run; disable stops future evaluation and persists failure/last-success status in later metrics and telemetry.
+  eval_failure_policy: "<fatal | disable>"
 
   # train.generate_every -- int; default: 5000; >= 0; zero disables. Periodic sampling runs only for non-dry Megalodon training; prompt/setup failures disable sampling, and generation RNGs restart on resume.
   generate_every: "<int>"

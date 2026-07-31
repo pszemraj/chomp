@@ -116,6 +116,9 @@ def test_eval_batches_assembled_once_and_reused(
     rows = read_jsonl(metrics_path)
     eval_rows = [row for row in rows if row.get("eval_loss") not in (None, "")]
     assert len(eval_rows) == 2  # both evals produced a loss from the cached batches
+    assert [row["eval_last_success_step"] for row in eval_rows] == [1, 2]
+    assert all(row["eval_disabled"] is False for row in eval_rows)
+    assert all(row["eval_failure_count"] == 0 for row in eval_rows)
 
 
 def test_nonfinite_eval_disables_eval_before_metric_logging(
@@ -124,6 +127,10 @@ def test_nonfinite_eval_disables_eval_before_metric_logging(
     """A non-finite eval reduction disables eval without logging NaN."""
     run_dir = tmp_path / "run_nonfinite_eval"
     cfg = _eval_cfg(run_dir)
+    cfg = replace(
+        cfg,
+        train=replace(cfg.train, eval_failure_policy="disable"),
+    )
 
     def _nonfinite_eval_step(_params: Any, _batch: Any) -> tuple[float, int]:
         """Return a poisoned loss with a nonzero denominator.
@@ -237,6 +244,10 @@ def test_eval_zero_valid_tokens_disables_eval(
 
     run_dir = tmp_path / "run_zero_tokens"
     cfg = _eval_cfg(run_dir, backend="hf", packing_mode="sequential", max_eval_samples=64)
+    cfg = replace(
+        cfg,
+        train=replace(cfg.train, eval_failure_policy="disable"),
+    )
 
     with caplog.at_level(logging.WARNING, logger="chomp.train"):
         run(cfg, config_path=None, resume="none")

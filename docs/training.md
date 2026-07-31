@@ -38,9 +38,11 @@ XLA kernel selection on GPU is nondeterministic by default. This is the fast pat
 
 ## Evaluation
 
-If `train.eval_every > 0` and `data.max_eval_samples > 0`, chomp runs a full pass over the process-local eval token set and logs `eval_loss`. Eval setup or execution failures warn and disable evaluation for that process without stopping training; this includes non-finite reductions and zero-loss-token tail batches. Eval text selection and packed flushing are documented in [Data Pipeline validation set](data_pipeline.md#validation-set).
+If `train.eval_every > 0` and `data.max_eval_samples > 0`, chomp runs a full pass over the process-local eval token set and logs `eval_loss`. `train.eval_failure_policy: fatal` is the default and maintained-recipe behavior: setup or runtime failures, including non-finite reductions and zero-loss-token tail batches, fail the run. `disable` logs the failure, disables future passes, and carries `eval_disabled`, `eval_failure_count`, `eval_last_failure_step`, `eval_last_failure_type`, and `eval_last_success_step` on every subsequent local and W&B metrics row. Eval text selection and packed flushing are documented in [Data Pipeline validation set](data_pipeline.md#validation-set).
 
 Eval batches are assembled once and cached host-side for the whole run; device transfer happens per batch each eval, so no device memory is held between evals.
+
+Training rejects `model.attention_window` because Megalodon-JAX's current noncached path still computes dense O(L²) attention and applies a window mask afterward. `model.chunk_size` is the supported efficient paper-faithful training path. Sliding-window inference remains available; efficient sliding-window training is future upstream work.
 
 ## Generation samples
 

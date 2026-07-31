@@ -305,6 +305,7 @@ def _setup_run_dir_and_tokenizer(
     Path,
     Path,
     list[list[int]],
+    dict[str, Any],
     GenerationSettings | None,
     list[list[int]] | None,
     jax.Array | None,
@@ -317,9 +318,9 @@ def _setup_run_dir_and_tokenizer(
     :param bool allow_existing: Whether to reuse an existing run directory.
     :param bool dry_run: If True, skip heavy data/generation setup.
     :param Path | None resume_step_dir: Selected checkpoint for compatibility preflight.
-    :return tuple[Config, Any, dict[str, Any], Path, Path, list[list[int]], GenerationSettings | None, list[list[int]] | None, jax.Array | None, random.Random | None]:
-        Updated config, tokenizer and identity, run/metrics paths, eval tokens,
-        generation settings, prompt pool, key, and RNG.
+    :return tuple[Config, Any, dict[str, Any], Path, Path, list[list[int]], dict[str, Any], GenerationSettings | None, list[list[int]] | None, jax.Array | None, random.Random | None]:
+        Updated config, tokenizer and identity, run/metrics paths, eval tokens
+        and status, generation settings, prompt pool, key, and RNG.
     """
     resume_meta = None
     if resume_step_dir is not None:
@@ -362,14 +363,31 @@ def _setup_run_dir_and_tokenizer(
         tokenizer, tokenizer_identity = save_tokenizer_snapshot(run_dir, cfg, tokenizer)
     assert tokenizer_identity is not None
 
-    if dry_run:
+    eval_status: dict[str, Any] = {
+        "eval_disabled": False,
+        "eval_failure_count": 0,
+        "eval_last_failure_step": None,
+        "eval_last_failure_type": None,
+        "eval_last_success_step": None,
+    }
+    if dry_run or cfg.train.eval_every <= 0 or cfg.data.max_eval_samples <= 0:
         eval_tokens = []
     else:
         try:
             eval_tokens = load_or_create_eval_tokens(cfg, tokenizer=tokenizer)
         except Exception as exc:
+            if cfg.train.eval_failure_policy == "fatal":
+                raise
             logger.warning("Failed to initialize evaluation data; disabling evaluation: %s", exc)
             eval_tokens = []
+            eval_status.update(
+                {
+                    "eval_disabled": True,
+                    "eval_failure_count": 1,
+                    "eval_last_failure_step": 0,
+                    "eval_last_failure_type": type(exc).__name__,
+                }
+            )
 
     gen_settings: GenerationSettings | None = None
     gen_prompts = None
@@ -401,6 +419,7 @@ def _setup_run_dir_and_tokenizer(
         run_dir,
         metrics_path,
         eval_tokens,
+        eval_status,
         gen_settings,
         gen_prompts,
         gen_key,
@@ -1319,11 +1338,20 @@ def run(
     :param config_path: Optional path to the source YAML config file.
     :param resume: Resume mode - "none" (fresh), "latest", or specific step number.
     :param bool dry_run: If True, compile and run a single step, then exit early.
+    :raises ValueError: If dense sliding-window attention is requested for training.
     :raises RuntimeError: If resume setup is invalid.
     :raises TrainingPreempted: After a signal-requested final checkpoint closes successfully.
     :return Path: Path to the run directory.
     """
 
+    if cfg.model.attention_window is not None:
+        raise ValueError(
+            "model.attention_window is not supported for Chomp training: "
+            "megalodon-jax's current noncached implementation uses dense O(L²) "
+            "attention with a window mask. Use model.chunk_size for the supported "
+            "efficient paper-faithful path. Efficient sliding-window training "
+            "remains future upstream work."
+        )
     validate_default_device(allow_cpu=cfg.train.allow_cpu)
     if dry_run and resume != "none":
         raise RuntimeError("dry_run does not support resume; use a fresh run.")
@@ -1411,6 +1439,7 @@ def _run_impl(
         run_dir,
         metrics_path,
         eval_tokens,
+        eval_status,
         gen_settings,
         gen_prompts,
         gen_key,
@@ -1561,6 +1590,7 @@ def _run_impl(
                 "tokens_seen": int(tokens_seen_count),
                 "wall_time_s": time.perf_counter() - t0,
             }
+            row.update(eval_status)
             mw.write(row)
             if wandb_run is not None:
                 with contextlib.suppress(Exception):
@@ -1732,6 +1762,7 @@ def _run_impl(
                             "tokens_seen": int(tokens_seen_host),
                             "wall_time_s": time.perf_counter() - t0,
                         }
+                        row.update(eval_status)
                         mw.write(row)
                         if wandb_run is not None:
                             wandb_run.log(row, step=step_i)
@@ -1816,12 +1847,25 @@ def _run_impl(
                         try:
                             eval_row = _run_eval(state.params)
                         except Exception as exc:
+                            eval_status.update(
+                                {
+                                    "eval_failure_count": int(eval_status["eval_failure_count"])
+                                    + 1,
+                                    "eval_last_failure_step": int(step_i),
+                                    "eval_last_failure_type": type(exc).__name__,
+                                }
+                            )
+                            if cfg.train.eval_failure_policy == "fatal":
+                                raise
                             logger.warning(
                                 "Evaluation failed at step %d; disabling evaluation: %s",
                                 step_i,
                                 exc,
                             )
+                            eval_status["eval_disabled"] = True
                             eval_step = None
+                        else:
+                            eval_status["eval_last_success_step"] = int(step_i)
 
                     if (
                         gen_settings is not None
@@ -1858,6 +1902,7 @@ def _run_impl(
                             row.update(mem_stats)
                         if step_i == (start_step + 1) and t_compile is not None:
                             row["first_step_compile_time_s"] = float(t_compile)
+                        row.update(eval_status)
 
                         mw.write(_project_metrics(row, drop=_METRICS_FILE_DROP))
                         if wandb_run is not None:
@@ -1898,6 +1943,7 @@ def _run_impl(
                     "wall_time_s": time.perf_counter() - t0,
                 }
                 row["tokens_seen"] = int(tokens_seen_count)
+                row.update(eval_status)
                 mw.write(row)
                 if wandb_run is not None:
                     with contextlib.suppress(Exception):
@@ -1906,6 +1952,7 @@ def _run_impl(
                                 "crash": True,
                                 "crash_type": crash_type,
                                 "crash_reason": crash_reason,
+                                **eval_status,
                             },
                             step=int(crash_step),
                         )

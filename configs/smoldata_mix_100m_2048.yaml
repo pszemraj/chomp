@@ -43,6 +43,7 @@ train:
   deterministic: false
   log_every: 25
   eval_every: 2500
+  eval_failure_policy: fatal
   generate_every: 5000
 
 optim:

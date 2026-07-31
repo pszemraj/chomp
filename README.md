@@ -131,6 +131,8 @@ optim:
 
 Save it as `my_experiment.yaml` and run `chomp train my_experiment.yaml --run-dir /tmp/my_experiment_dry --dry-run`; expect a parameter count, one finite update, and `[chomp] dry-run complete`. This exact example has been executed, not only parsed. See the annotated [Config Reference](docs/config-reference.yaml) for every remaining key and default.
 
+Evaluation failures are fatal by default; set `train.eval_failure_policy: disable` only when deliberately continuing without evaluation and monitoring its persisted disabled/failure fields. For efficient Megalodon training, use `model.chunk_size`: `chomp train` rejects `model.attention_window` because the current noncached upstream implementation remains dense O(L²), while standalone generation is not blocked.
+
 ## Generation and export
 
 Pass a run directory to generate from its latest retained checkpoint:

@@ -39,6 +39,7 @@ TokenizerKind = Literal["byte", "hf"]
 PackingMode = Literal["sequential", "bin", "multipack"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 ResumeCompat = Literal["strict", "warn"]
+EvalFailurePolicy = Literal["fatal", "disable"]
 
 
 class _UniqueKeySafeLoader(yaml.SafeLoader):
@@ -287,6 +288,7 @@ class TrainConfig:
     allow_cpu: bool = False
     log_every: int = 25
     eval_every: int = 2500
+    eval_failure_policy: EvalFailurePolicy = "fatal"
     generate_every: int = 5000
     generate_input_len: int | None = None
     generate_max_tokens: int | None = None
@@ -768,6 +770,11 @@ def _validate_train(cfg: Config) -> None:
         _vfail(f"train.log_every must be positive, got {cfg.train.log_every}")
     if cfg.train.eval_every < 0:
         _vfail(f"train.eval_every must be >= 0, got {cfg.train.eval_every}")
+    if cfg.train.eval_failure_policy not in ("fatal", "disable"):
+        _vfail(
+            "train.eval_failure_policy must be 'fatal' or 'disable', got "
+            f"{cfg.train.eval_failure_policy!r}"
+        )
     if cfg.train.generate_every < 0:
         _vfail(f"train.generate_every must be >= 0, got {cfg.train.generate_every}")
     if cfg.train.generate_input_len is not None:
