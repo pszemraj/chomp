@@ -43,7 +43,7 @@ from chomp.config import (
 logger = logging.getLogger(__name__)
 
 _MISSING = object()
-CHECKPOINT_META_SCHEMA_VERSION = 2
+CHECKPOINT_META_SCHEMA_VERSION = 3
 
 
 def megalodon_jax_identity() -> dict[str, Any]:
@@ -109,6 +109,7 @@ class CheckpointMeta:
     step: int
     timestamp: str
     tokens_seen: int
+    eval_status: dict[str, Any]
     megalodon_jax: dict[str, Any]
     tokenizer_identity: dict[str, Any]
 
@@ -132,6 +133,7 @@ def build_meta(
     config: dict[str, Any],
     data_fingerprint: dict[str, Any],
     tokens_seen: int,
+    eval_status: dict[str, Any],
     tokenizer_identity: dict[str, Any],
 ) -> CheckpointMeta:
     """Build checkpoint metadata with version info and config snapshot.
@@ -140,6 +142,7 @@ def build_meta(
     :param dict[str, Any] config: Full config dict for reproducibility.
     :param dict[str, Any] data_fingerprint: Data pipeline fingerprint.
     :param int tokens_seen: Cumulative loss-token count for exact resume accounting.
+    :param dict[str, Any] eval_status: Persistent evaluation failure-policy state.
     :param dict[str, Any] tokenizer_identity: Effective tokenizer manifest identity.
     :return CheckpointMeta: Populated metadata object.
     """
@@ -148,6 +151,7 @@ def build_meta(
         step=int(step),
         timestamp=datetime.now().isoformat(timespec="seconds"),
         tokens_seen=int(tokens_seen),
+        eval_status=dict(eval_status),
         megalodon_jax=megalodon_jax_identity(),
         tokenizer_identity=tokenizer_identity,
         config=config,
@@ -513,6 +517,13 @@ def check_resume_compat(
 
     cur_fp = data_fingerprint(cfg)
     semantic_severity = "error" if cfg.checkpoint.resume_compat == "strict" else "warning"
+
+    _cmp(
+        "checkpoint_meta.schema_version",
+        CHECKPOINT_META_SCHEMA_VERSION,
+        meta.get("schema_version", _MISSING),
+        severity=semantic_severity,
+    )
 
     if cfg.model.backend == "megalodon":
         _cmp(

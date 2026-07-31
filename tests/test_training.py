@@ -62,6 +62,7 @@ from chomp.train import (
     _WANDB_DROP,
     TrainingPreempted,
     _project_metrics,
+    _restore_eval_status,
     _StopSignalState,
     build_optimizer,
     init_train_state,
@@ -80,6 +81,13 @@ from tests.helpers.io import read_jsonl
 _TEST_TOKENIZER_IDENTITY = {
     "manifest_version": 1,
     "sha256": "test-tokenizer-identity",
+}
+_TEST_EVAL_STATUS = {
+    "eval_disabled": False,
+    "eval_failure_count": 0,
+    "eval_last_failure_step": None,
+    "eval_last_failure_type": None,
+    "eval_last_success_step": None,
 }
 
 
@@ -146,6 +154,7 @@ def _checkpoint_record(cfg: Config, *, step: int = 0, tokens_seen: int = 0) -> C
         config=cfg.to_dict(),
         data_fingerprint=data_fingerprint(cfg),
         tokens_seen=tokens_seen,
+        eval_status=_TEST_EVAL_STATUS,
         tokenizer_identity=_TEST_TOKENIZER_IDENTITY,
     )
 
@@ -224,8 +233,59 @@ def test_checkpoint_meta_records_schema_and_backend_identity(tmp_path: Path) -> 
     meta = _checkpoint_record(_base_cfg(tmp_path / "run_identity")).to_dict()
 
     assert meta["schema_version"] == CHECKPOINT_META_SCHEMA_VERSION
+    assert meta["eval_status"] == _TEST_EVAL_STATUS
     assert meta["megalodon_jax"] == megalodon_jax_identity()
     assert meta["tokenizer_identity"] == _TEST_TOKENIZER_IDENTITY
+
+
+@pytest.mark.parametrize("prior_schema", ["missing", CHECKPOINT_META_SCHEMA_VERSION + 1])
+def test_resume_requires_supported_checkpoint_meta_schema(
+    tmp_path: Path,
+    caplog: LogCaptureFixture,
+    prior_schema: str | int,
+) -> None:
+    """A missing or unknown metadata schema cannot establish strict compatibility.
+
+    :param Path tmp_path: Temporary run-directory root.
+    :param LogCaptureFixture caplog: Captured warn-mode compatibility log.
+    :param str | int prior_schema: Missing marker or unsupported schema version.
+    """
+    strict_cfg = replace(
+        _base_cfg(tmp_path / f"run_schema_{prior_schema}"),
+        checkpoint=replace(CheckpointConfig(), resume_compat="strict"),
+    )
+    meta = _checkpoint_record(strict_cfg).to_dict()
+    if prior_schema == "missing":
+        meta.pop("schema_version")
+    else:
+        meta["schema_version"] = prior_schema
+
+    with pytest.raises(RuntimeError, match=r"checkpoint_meta\.schema_version"):
+        check_resume_compat(strict_cfg, meta)
+
+    warn_cfg = replace(
+        strict_cfg,
+        checkpoint=replace(strict_cfg.checkpoint, resume_compat="warn"),
+    )
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+        check_resume_compat(warn_cfg, meta)
+    assert "checkpoint_meta.schema_version mismatch" in caplog.text
+
+
+def test_strict_resume_requires_persisted_eval_status(
+    caplog: LogCaptureFixture,
+) -> None:
+    """Missing evaluation policy state is unproven in strict and reset in warn mode.
+
+    :param LogCaptureFixture caplog: Captured warn-mode compatibility log.
+    """
+    with pytest.raises(RuntimeError, match="eval_status"):
+        _restore_eval_status({"step": 4}, resume_compat="strict")
+
+    with caplog.at_level(logging.WARNING, logger="chomp.train"):
+        status = _restore_eval_status({"step": 4}, resume_compat="warn")
+    assert status == _TEST_EVAL_STATUS
+    assert "eval_status is missing or invalid" in caplog.text
 
 
 def _make_state() -> TrainState:
@@ -1544,6 +1604,53 @@ def test_eval_collection_failure_disables_eval_without_stopping_training(
     assert all(row["eval_last_success_step"] is None for row in rows)
 
 
+def test_resumed_eval_setup_failure_records_and_persists_checkpoint_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setup disable state must use the resume step and prevent later retries.
+
+    :param Path tmp_path: Temporary directory for run artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Eval-setup failure injection.
+    """
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_eval_setup_resume", decay_steps=3)
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, max_eval_samples=2),
+        train=replace(
+            cfg.train,
+            steps=1,
+            eval_every=2,
+            eval_failure_policy="disable",
+        ),
+    )
+    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
+
+    setup_calls = 0
+
+    def _fail_eval_setup(*args: Any, **kwargs: Any) -> list[list[int]]:
+        """Count and fail evaluation initialization."""
+        nonlocal setup_calls
+        setup_calls += 1
+        raise RuntimeError("broken validation split after resume")
+
+    monkeypatch.setattr("chomp.train.load_or_create_eval_tokens", _fail_eval_setup)
+    resumed = replace(cfg, train=replace(cfg.train, steps=2))
+    run(resumed, config_path=None, resume="latest", dry_run=False)
+    continued = replace(cfg, train=replace(cfg.train, steps=3))
+    run(continued, config_path=None, resume="latest", dry_run=False)
+
+    assert setup_calls == 1
+    rows = read_jsonl(run_dir / cfg.logging.metrics_file)
+    resumed_rows = [row for row in rows if row["step"] >= 2]
+    assert resumed_rows
+    assert all(row["eval_disabled"] is True for row in resumed_rows)
+    assert all(row["eval_failure_count"] == 1 for row in resumed_rows)
+    assert all(row["eval_last_failure_step"] == 1 for row in resumed_rows)
+    assert all(row["eval_last_failure_type"] == "RuntimeError" for row in resumed_rows)
+    assert all(row["eval_last_success_step"] is None for row in resumed_rows)
+
+
 def test_eval_batch_failure_disables_future_evals_without_stopping_training(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: LogCaptureFixture
 ) -> None:
@@ -1595,6 +1702,14 @@ def test_eval_batch_failure_disables_future_evals_without_stopping_training(
     assert telemetry_rows
     assert all(row["eval_disabled"] is True for row in telemetry_rows)
     assert all(row["eval_failure_count"] == 1 for row in telemetry_rows)
+
+    resumed = replace(cfg, train=replace(cfg.train, steps=3))
+    run(resumed, config_path=None, resume="latest", dry_run=False)
+    assert build_calls == 1
+    resumed_rows = read_jsonl(run_dir / cfg.logging.metrics_file)
+    assert resumed_rows[-1]["eval_disabled"] is True
+    assert resumed_rows[-1]["eval_failure_count"] == 1
+    assert resumed_rows[-1]["eval_last_failure_step"] == 1
 
 
 def test_eval_collection_failure_is_fatal_by_default(

@@ -22,7 +22,7 @@ Each checkpoint stores three items:
 
 1) `train_state`: model parameters, optimizer state, step, RNG
 2) `data_state`: the checkpointable data path described in [Data Pipeline: iterator state and resume](data_pipeline.md#iterator-state-and-resume)
-3) `meta`: schema-versioned JSON metadata (config snapshot, data fingerprint, required non-negative `tokens_seen`, the executed Megalodon-JAX distribution identity, and the tokenizer-manifest identity)
+3) `meta`: schema-versioned JSON metadata (config snapshot, data fingerprint, required non-negative `tokens_seen`, evaluation failure-policy state, the executed Megalodon-JAX distribution identity, and the tokenizer-manifest identity)
 
 The per-step metadata is self-describing. The backend identity always includes the installed distribution version. When the installation has PEP 610 `direct_url.json` metadata, it also includes the URL, VCS kind, requested revision, and resolved commit. Standalone generation uses the selected checkpoint's config before considering the run-start config, while resume compares the requested config and installed backend against that selected step. A retained step therefore continues to mean the model semantics that produced it without preventing deliberate continuation changes.
 
@@ -77,7 +77,7 @@ Resume comparisons ignore settings that cannot affect restored execution, includ
 
 For Megalodon runs, strict resume rejects a changed or missing structured backend identity; warn mode reports it clearly. A legacy flat version or a checkpoint without this field is not treated as proven equal. The selected checkpoint is authoritative: `config_resolved.json` records the run-start identity for provenance but never fills a missing checkpoint field.
 
-Checkpoint metadata schema 2 adds the tokenizer identity. Strict resume rejects a changed or missing run manifest, saved-file record, effective implementation, canary output, or checkpoint digest. Warn mode reports that equality is unproven and continues with the observed local tokenizer identity; later checkpoints record that observed identity. Schema-1 checkpoints and older run directories without tokenizer identity are therefore not strictly resumable.
+Checkpoint metadata schema 2 adds the tokenizer identity. Schema 3 also persists whether evaluation was disabled, its failure count and last failure step/type, and the last successful evaluation step, so a resumed run does not silently re-enable evaluation or reset its telemetry history. Strict resume rejects a missing or unsupported schema marker and missing required schema-3 state. It also rejects a changed or missing run manifest, saved-file record, effective implementation, canary output, or checkpoint digest. Warn mode reports that equality is unproven, continues with the observed local tokenizer identity and fresh defaults for unavailable evaluation status, and records those observed values in later checkpoints. Schema-2 checkpoints and older run directories are therefore not strictly resumable.
 
 Checkpoint compatibility deliberately does not fingerprint source trees, dirty or untracked files, the rest of the package environment, devices, or XLA flags. Those remain external experiment provenance rather than saved-state alignment.
 

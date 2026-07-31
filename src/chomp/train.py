@@ -100,6 +100,14 @@ from chomp.utils.tree import abstractify_tree, param_count, path_to_str
 
 logger = logging.getLogger(__name__)
 
+_EMPTY_EVAL_STATUS: dict[str, Any] = {
+    "eval_disabled": False,
+    "eval_failure_count": 0,
+    "eval_last_failure_step": None,
+    "eval_last_failure_type": None,
+    "eval_last_success_step": None,
+}
+
 
 class TrainingPreempted(RuntimeError):
     """Training stopped cleanly after a scheduler/process signal."""
@@ -363,14 +371,16 @@ def _setup_run_dir_and_tokenizer(
         tokenizer, tokenizer_identity = save_tokenizer_snapshot(run_dir, cfg, tokenizer)
     assert tokenizer_identity is not None
 
-    eval_status: dict[str, Any] = {
-        "eval_disabled": False,
-        "eval_failure_count": 0,
-        "eval_last_failure_step": None,
-        "eval_last_failure_type": None,
-        "eval_last_success_step": None,
-    }
-    if dry_run or cfg.train.eval_every <= 0 or cfg.data.max_eval_samples <= 0:
+    eval_status = _restore_eval_status(
+        resume_meta,
+        resume_compat=cfg.checkpoint.resume_compat,
+    )
+    if (
+        dry_run
+        or cfg.train.eval_every <= 0
+        or cfg.data.max_eval_samples <= 0
+        or eval_status["eval_disabled"]
+    ):
         eval_tokens = []
     else:
         try:
@@ -383,8 +393,10 @@ def _setup_run_dir_and_tokenizer(
             eval_status.update(
                 {
                     "eval_disabled": True,
-                    "eval_failure_count": 1,
-                    "eval_last_failure_step": 0,
+                    "eval_failure_count": int(eval_status["eval_failure_count"]) + 1,
+                    "eval_last_failure_step": (
+                        0 if resume_meta is None else int(resume_meta["step"])
+                    ),
                     "eval_last_failure_type": type(exc).__name__,
                 }
             )
@@ -425,6 +437,63 @@ def _setup_run_dir_and_tokenizer(
         gen_key,
         gen_rng,
     )
+
+
+def _restore_eval_status(
+    resume_meta: dict[str, Any] | None,
+    *,
+    resume_compat: str,
+) -> dict[str, Any]:
+    """Restore evaluation failure-policy state from selected checkpoint metadata.
+
+    :param dict[str, Any] | None resume_meta: Selected checkpoint metadata, if resuming.
+    :param str resume_compat: Configured strict or warn compatibility policy.
+    :raises RuntimeError: If strict resume has missing or invalid evaluation status.
+    :return dict[str, Any]: Mutable evaluation status for the continuing run.
+    """
+    if resume_meta is None:
+        return dict(_EMPTY_EVAL_STATUS)
+
+    stored = resume_meta.get("eval_status")
+    valid = isinstance(stored, dict) and all(key in stored for key in _EMPTY_EVAL_STATUS)
+    if valid:
+        valid = (
+            isinstance(stored["eval_disabled"], bool)
+            and isinstance(stored["eval_failure_count"], int)
+            and not isinstance(stored["eval_failure_count"], bool)
+            and stored["eval_failure_count"] >= 0
+            and (
+                stored["eval_last_failure_step"] is None
+                or (
+                    isinstance(stored["eval_last_failure_step"], int)
+                    and not isinstance(stored["eval_last_failure_step"], bool)
+                    and stored["eval_last_failure_step"] >= 0
+                )
+            )
+            and (
+                stored["eval_last_failure_type"] is None
+                or isinstance(stored["eval_last_failure_type"], str)
+            )
+            and (
+                stored["eval_last_success_step"] is None
+                or (
+                    isinstance(stored["eval_last_success_step"], int)
+                    and not isinstance(stored["eval_last_success_step"], bool)
+                    and stored["eval_last_success_step"] >= 0
+                )
+            )
+        )
+    if not valid:
+        message = (
+            "Checkpoint eval_status is missing or invalid; evaluation failure-policy "
+            "state cannot be restored."
+        )
+        if resume_compat == "strict":
+            raise RuntimeError(message)
+        logger.warning("%s Continuing with fresh evaluation status in warn mode.", message)
+        return dict(_EMPTY_EVAL_STATUS)
+
+    return {key: stored[key] for key in _EMPTY_EVAL_STATUS}
 
 
 def _maybe_init_wandb(cfg: Config, *, run_dir: Path, dry_run: bool) -> Any | None:
@@ -607,6 +676,7 @@ def _save_training_checkpoint(
     cfg: Config,
     tokenizer_identity: dict[str, Any],
     tokens_seen: int,
+    eval_status: dict[str, Any],
     train_state: TrainState,
     data_iter: Any,
     force: bool = False,
@@ -618,6 +688,7 @@ def _save_training_checkpoint(
     :param Config cfg: Training configuration.
     :param dict[str, Any] tokenizer_identity: Effective tokenizer manifest identity.
     :param int tokens_seen: Cumulative exact loss-token count.
+    :param dict[str, Any] eval_status: Persistent evaluation failure-policy state.
     :param TrainState train_state: Train state to checkpoint.
     :param data_iter: Data iterator to checkpoint.
     :param bool force: Whether to force an off-cadence save.
@@ -627,6 +698,7 @@ def _save_training_checkpoint(
         config=cfg.to_dict(),
         data_fingerprint=data_fingerprint(cfg),
         tokens_seen=int(tokens_seen),
+        eval_status=eval_status,
         tokenizer_identity=tokenizer_identity,
     )
     save(
@@ -1827,21 +1899,6 @@ def _run_impl(
                         sync_interval_steps = 0
                         sync_interval_data_wait = 0.0
 
-                    # Checkpoint save (after state updated + finite-checked)
-                    if save_interval:
-                        if cfg.debug.nan_check:
-                            _check_finite_train_state(state, step=step_i)
-                        _save_training_checkpoint(
-                            manager,
-                            step=step_i,
-                            cfg=cfg,
-                            tokenizer_identity=tokenizer_identity,
-                            tokens_seen=int(tokens_seen_count),
-                            train_state=state,
-                            data_iter=data_it,
-                        )
-                        last_saved_step = step_i
-
                     eval_row: dict[str, Any] = {}
                     if should_eval:
                         try:
@@ -1866,6 +1923,23 @@ def _run_impl(
                             eval_step = None
                         else:
                             eval_status["eval_last_success_step"] = int(step_i)
+
+                    # Save after scheduled evaluation so the checkpoint carries
+                    # the failure-policy state produced at this step.
+                    if save_interval:
+                        if cfg.debug.nan_check:
+                            _check_finite_train_state(state, step=step_i)
+                        _save_training_checkpoint(
+                            manager,
+                            step=step_i,
+                            cfg=cfg,
+                            tokenizer_identity=tokenizer_identity,
+                            tokens_seen=int(tokens_seen_count),
+                            eval_status=eval_status,
+                            train_state=state,
+                            data_iter=data_it,
+                        )
+                        last_saved_step = step_i
 
                     if (
                         gen_settings is not None
@@ -2031,6 +2105,7 @@ def _run_impl(
                     cfg=cfg,
                     tokenizer_identity=tokenizer_identity,
                     tokens_seen=int(tokens_seen_count),
+                    eval_status=eval_status,
                     train_state=state,
                     data_iter=data_it,
                     force=True,
