@@ -61,6 +61,16 @@ Costs and notes:
 - Strict packed metadata is training-only upstream: passing segment_ids with a cache (generation/streaming) raises.
 - `data.mask_boundary_loss: true` is **required** in strict mode (config validation errors otherwise). The backend excludes boundary pairs and supplies the authoritative normalization count. Matching label masks keep asynchronous host token accounting equal to that device count, which Chomp verifies at synchronization points.
 
+A measured forward/backward comparison on 2026-07-31 used the shipped 113.85M model geometry (`seq_len=2048`, batch 2, accumulation 8, BF16, activation checkpointing), an RTX 5090, JAX 0.10.2, real streamed mixture data, and `XLA_PYTHON_CLIENT_PREALLOCATE=false`:
+
+| Model execution | Packing semantics | Warm step times | Valid tokens/s | Process allocator peak |
+| --- | --- | --- | --- | --- |
+| No segmented reset | `sequential` continuous-stream mode | 0.536 / 0.722 s | 61,097 / 45,374 | 4.735 GB |
+| Associative segmented CEMA | Strict `bin` | 1.175 / 1.349 s | 18,596 / 18,153 | 4.700 GB |
+| Sequential segmented CEMA | Strict `bin` | 4.593 / 4.802 s | 4,757 / 5,099 | 6.032 GB |
+
+The two strict-bin rows are the paired scan comparison: they consumed identical batches, valid-target counts, and packing statistics. At this shape the sequential scan was 3.56–3.91× slower and used 1.332 GB more process-lifetime allocator peak than the associative scan. The continuous-stream row has different recurrent boundary semantics and valid-target utilization, so it is a separate non-segmented execution reference rather than a scan-only control. These one-device measurements include forward, backward, and optimizer execution and establish the observed compiled training-step behavior for this recipe geometry; they do not isolate a backward-only allocation or prove a general memory complexity or performance ratio.
+
 ### Non-strict operation: CEMA/TimestepNorm state crosses boundaries
 
 Under `sequential`, and under `bin`/`multipack` with an explicit `data.packing_strict_segments: false`, no segment metadata reaches the model: recurrent/normalization state flows across packed document boundaries. For `sequential` this is the intended continuous-stream semantics. For the packed modes it is deliberate cross-document bleed that must be opted into; the default refuses to do it silently. Boundary loss masking still prevents cross-document next-token supervision in all cases.
