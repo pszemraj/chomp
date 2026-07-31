@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import subprocess
@@ -27,6 +28,8 @@ from chomp.data.grain import (
 from chomp.data.hf import HFStreamingTextStream, HFStreamSpec, resolve_dataset_revision
 from chomp.data.pack import FFDPacker, FFDPackerState, TokenPacker
 from chomp.data.pipeline import (
+    _TOKENIZER_CANARIES,
+    TOKENIZER_MANIFEST_FILENAME,
     ByteTokenizer,
     ZeroLossTokensError,
     _build_packer,
@@ -35,7 +38,12 @@ from chomp.data.pipeline import (
     build_train_iterator,
     data_fingerprint,
     effective_window_shuffle_seed,
+    load_tokenizer_snapshot,
+    load_tokenizer_snapshot_for_resume,
+    prepare_tokenizer_and_config,
     resolve_ffd_lookahead,
+    save_tokenizer_snapshot,
+    tokenizer_checkpoint_identity,
 )
 from tests.helpers.config_factories import make_pipeline_cfg
 
@@ -53,6 +61,182 @@ def _doc(token: int, length: int) -> list[int]:
     :return list[int]: Token list of length ``length``.
     """
     return [token] * length
+
+
+def _local_hf_cfg(
+    source: Path,
+    *,
+    use_fast: bool = True,
+    resume_compat: str = "strict",
+) -> Config:
+    """Build a local-only Hugging Face tokenizer test configuration.
+
+    :param Path source: Saved tokenizer source directory.
+    :param bool use_fast: Whether to request the fast implementation.
+    :param str resume_compat: Resume compatibility policy.
+    :return Config: Tokenizer test configuration.
+    """
+    cfg = make_pipeline_cfg(
+        vocab_size=32,
+        tokenizer=TokenizerConfig(
+            kind="hf",
+            hf_name_or_path=str(source),
+            hf_use_fast=use_fast,
+            hf_trust_remote_code=False,
+            vocab_size_multiple=1,
+            auto_set_special_tokens=True,
+            add_bos=False,
+            add_eos=False,
+        ),
+    )
+    return replace(
+        cfg,
+        checkpoint=replace(cfg.checkpoint, resume_compat=resume_compat),
+    )
+
+
+def test_tokenizer_manifest_records_local_execution_identity(
+    tmp_path: Path,
+    local_bert_tokenizer: Path,
+) -> None:
+    """The saved manifest must bind files, program, packages, and canary outputs.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :param Path local_bert_tokenizer: Deterministic local tokenizer source.
+    """
+    cfg, source_tok = prepare_tokenizer_and_config(_local_hf_cfg(local_bert_tokenizer))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    execution_tok, checkpoint_identity = save_tokenizer_snapshot(run_dir, cfg, source_tok)
+    tok_dir = run_dir / "tokenizer"
+    manifest = json.loads((tok_dir / TOKENIZER_MANIFEST_FILENAME).read_text())
+
+    actual_paths = sorted(
+        path.relative_to(tok_dir).as_posix()
+        for path in tok_dir.rglob("*")
+        if path.is_file() and path != tok_dir / TOKENIZER_MANIFEST_FILENAME
+    )
+    assert [record["path"] for record in manifest["files"]] == actual_paths
+    for record in manifest["files"]:
+        path = tok_dir / record["path"]
+        assert record["size"] == path.stat().st_size
+        assert record["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+    implementation = manifest["implementation"]
+    assert implementation["module"] == "transformers.models.bert.tokenization_bert_fast"
+    assert implementation["qualname"] == "BertTokenizerFast"
+    assert implementation["is_fast"] is True
+    assert {"transformers", "tokenizers"} <= manifest["packages"].keys()
+    assert manifest["canary"]["version"] == 1
+    for case in manifest["canary"]["cases"]:
+        assert case["ids"] == execution_tok.encode(case["text"])
+    assert checkpoint_identity == tokenizer_checkpoint_identity(manifest)
+
+
+def test_tokenizer_resume_rejects_snapshot_file_drift(
+    tmp_path: Path,
+    local_bert_tokenizer: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Resume policy must report an added file not present in the saved manifest.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :param Path local_bert_tokenizer: Deterministic local tokenizer source.
+    :param pytest.LogCaptureFixture caplog: Captured warn-mode log.
+    """
+    cfg, source_tok = prepare_tokenizer_and_config(_local_hf_cfg(local_bert_tokenizer))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    save_tokenizer_snapshot(run_dir, cfg, source_tok)
+    (run_dir / "tokenizer" / "unexpected.txt").write_text("drift")
+
+    with pytest.raises(RuntimeError, match="files"):
+        load_tokenizer_snapshot_for_resume(run_dir, cfg)
+
+    warn_cfg = replace(
+        cfg,
+        checkpoint=replace(cfg.checkpoint, resume_compat="warn"),
+    )
+    with caplog.at_level(logging.WARNING, logger="chomp.data.pipeline"):
+        load_tokenizer_snapshot_for_resume(run_dir, warn_cfg)
+    assert "Tokenizer identity mismatch in: files" in caplog.text
+
+
+def test_tokenizer_resume_requires_manifest(
+    tmp_path: Path,
+    local_bert_tokenizer: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A missing legacy manifest is unproven in strict and warn modes.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :param Path local_bert_tokenizer: Deterministic local tokenizer source.
+    :param pytest.LogCaptureFixture caplog: Captured warn-mode log.
+    """
+    cfg, source_tok = prepare_tokenizer_and_config(_local_hf_cfg(local_bert_tokenizer))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    save_tokenizer_snapshot(run_dir, cfg, source_tok)
+    manifest_path = run_dir / "tokenizer" / TOKENIZER_MANIFEST_FILENAME
+    manifest_path.unlink()
+
+    with pytest.raises(RuntimeError, match="manifest is missing"):
+        load_tokenizer_snapshot_for_resume(run_dir, cfg)
+
+    warn_cfg = replace(
+        cfg,
+        checkpoint=replace(cfg.checkpoint, resume_compat="warn"),
+    )
+    with caplog.at_level(logging.WARNING, logger="chomp.data.pipeline"):
+        load_tokenizer_snapshot_for_resume(run_dir, warn_cfg)
+    assert "cannot prove tokenizer execution equivalence" in caplog.text
+    assert manifest_path.exists()
+
+
+def test_tokenizer_resume_rejects_canary_drift(
+    tmp_path: Path,
+    local_bert_tokenizer: Path,
+) -> None:
+    """Strict resume must reject stored outputs that the tokenizer no longer produces.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :param Path local_bert_tokenizer: Deterministic local tokenizer source.
+    """
+    cfg, source_tok = prepare_tokenizer_and_config(_local_hf_cfg(local_bert_tokenizer))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    save_tokenizer_snapshot(run_dir, cfg, source_tok)
+    manifest_path = run_dir / "tokenizer" / TOKENIZER_MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest["canary"]["cases"][0]["ids"].append(999_999)
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(RuntimeError, match="canary"):
+        load_tokenizer_snapshot_for_resume(run_dir, cfg)
+
+
+def test_tokenizer_resume_rejects_fast_slow_program_drift(
+    tmp_path: Path,
+    local_bert_tokenizer: Path,
+) -> None:
+    """Identical files and outputs do not make fast and slow programs equivalent.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :param Path local_bert_tokenizer: Deterministic local tokenizer source.
+    """
+    fast_cfg, source_tok = prepare_tokenizer_and_config(_local_hf_cfg(local_bert_tokenizer))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    fast_tok, _ = save_tokenizer_snapshot(run_dir, fast_cfg, source_tok)
+    slow_cfg = _local_hf_cfg(local_bert_tokenizer, use_fast=False)
+    slow_tok = load_tokenizer_snapshot(run_dir, slow_cfg)
+    assert [fast_tok.encode(text) for _, text in _TOKENIZER_CANARIES] == [
+        slow_tok.encode(text) for _, text in _TOKENIZER_CANARIES
+    ]
+
+    with pytest.raises(RuntimeError, match="implementation"):
+        load_tokenizer_snapshot_for_resume(run_dir, slow_cfg)
 
 
 def test_window_shuffle_seed_normalizes_to_uint32() -> None:

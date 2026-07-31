@@ -77,6 +77,11 @@ from tests.helpers.config_factories import (
 )
 from tests.helpers.io import read_jsonl
 
+_TEST_TOKENIZER_IDENTITY = {
+    "manifest_version": 1,
+    "sha256": "test-tokenizer-identity",
+}
+
 
 class _FakeStopSignal:
     """Mutable signal state for deterministic preemption tests."""
@@ -116,13 +121,16 @@ def _base_cfg(run_dir: Path) -> Config:
 def check_resume_compat(
     cfg: Config,
     meta: dict[str, Any] | None,
+    *,
+    tokenizer_identity: dict[str, Any] = _TEST_TOKENIZER_IDENTITY,
 ) -> None:
     """Call resume validation for a test checkpoint.
 
     :param Config cfg: Current configuration.
     :param meta: Checkpoint metadata.
+    :param dict[str, Any] tokenizer_identity: Effective tokenizer identity.
     """
-    _check_resume_compat(cfg, meta)
+    _check_resume_compat(cfg, meta, tokenizer_identity=tokenizer_identity)
 
 
 def _checkpoint_record(cfg: Config, *, step: int = 0, tokens_seen: int = 0) -> CheckpointMeta:
@@ -138,6 +146,7 @@ def _checkpoint_record(cfg: Config, *, step: int = 0, tokens_seen: int = 0) -> C
         config=cfg.to_dict(),
         data_fingerprint=data_fingerprint(cfg),
         tokens_seen=tokens_seen,
+        tokenizer_identity=_TEST_TOKENIZER_IDENTITY,
     )
 
 
@@ -216,6 +225,7 @@ def test_checkpoint_meta_records_schema_and_backend_identity(tmp_path: Path) -> 
 
     assert meta["schema_version"] == CHECKPOINT_META_SCHEMA_VERSION
     assert meta["megalodon_jax"] == megalodon_jax_identity()
+    assert meta["tokenizer_identity"] == _TEST_TOKENIZER_IDENTITY
 
 
 def _make_state() -> TrainState:
@@ -1880,6 +1890,43 @@ def test_dummy_resume_does_not_require_megalodon_identity(tmp_path: Path) -> Non
     check_resume_compat(cfg, meta)
 
 
+@pytest.mark.parametrize("prior_identity", ["missing", "changed"])
+def test_resume_requires_checkpoint_bound_tokenizer_identity(
+    tmp_path: Path,
+    prior_identity: str,
+    caplog: LogCaptureFixture,
+) -> None:
+    """Missing or changed tokenizer identity is not proven equal.
+
+    :param Path tmp_path: Temporary run-directory root.
+    :param str prior_identity: Checkpoint identity shape to test.
+    :param LogCaptureFixture caplog: Captured warn-mode compatibility log.
+    """
+    strict_cfg = replace(
+        _base_cfg(tmp_path / f"run_tokenizer_{prior_identity}"),
+        checkpoint=replace(CheckpointConfig(), resume_compat="strict"),
+    )
+    meta = _checkpoint_record(strict_cfg).to_dict()
+    if prior_identity == "missing":
+        meta.pop("tokenizer_identity")
+    else:
+        meta["tokenizer_identity"] = {
+            **meta["tokenizer_identity"],
+            "sha256": "different",
+        }
+
+    with pytest.raises(RuntimeError, match="tokenizer_identity"):
+        check_resume_compat(strict_cfg, meta)
+
+    warn_cfg = replace(
+        strict_cfg,
+        checkpoint=replace(strict_cfg.checkpoint, resume_compat="warn"),
+    )
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+        check_resume_compat(warn_cfg, meta)
+    assert "tokenizer_identity mismatch" in caplog.text
+
+
 def test_segment_scan_resume_semantics_are_contextual(
     tmp_path: Path,
     caplog: LogCaptureFixture,
@@ -2697,6 +2744,38 @@ def test_resume_reuses_pinned_dataset_revision_without_hub_resolution(
     resumed = replace(cfg, train=replace(cfg.train, steps=2))
     assert run(resumed, config_path=None, resume="latest", dry_run=False) == run_dir
     assert resolve_calls == 1
+
+
+def test_resume_uses_tokenizer_snapshot_after_source_disappears(
+    tmp_path: Path,
+    local_bert_tokenizer: Path,
+) -> None:
+    """Resume must execute only the run-local tokenizer snapshot.
+
+    :param Path tmp_path: Temporary run-directory root.
+    :param Path local_bert_tokenizer: Deterministic local tokenizer source.
+    """
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_local_tokenizer", decay_steps=2)
+    tokenizer = TokenizerConfig(
+        kind="hf",
+        hf_name_or_path=str(local_bert_tokenizer),
+        hf_use_fast=True,
+        hf_trust_remote_code=False,
+        vocab_size_multiple=1,
+        auto_set_special_tokens=True,
+        add_bos=False,
+        add_eos=False,
+    )
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, tokenizer=tokenizer),
+        train=replace(cfg.train, steps=1),
+    )
+    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
+    local_bert_tokenizer.rename(tmp_path / "source-unavailable")
+
+    resumed = replace(cfg, train=replace(cfg.train, steps=2))
+    assert run(resumed, config_path=None, resume="latest", dry_run=False) == run_dir
 
 
 def test_warn_resume_honors_new_hf_ref_and_reuses_selected_identity(

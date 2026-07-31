@@ -68,7 +68,7 @@ from chomp.data import (
     data_fingerprint,
     load_generation_prompt_tokens,
     load_or_create_eval_tokens,
-    load_tokenizer_snapshot,
+    load_tokenizer_snapshot_for_resume,
     prepare_tokenizer_and_config,
     save_tokenizer_snapshot,
 )
@@ -301,6 +301,7 @@ def _setup_run_dir_and_tokenizer(
 ) -> tuple[
     Config,
     Any,
+    dict[str, Any],
     Path,
     Path,
     list[list[int]],
@@ -316,37 +317,50 @@ def _setup_run_dir_and_tokenizer(
     :param bool allow_existing: Whether to reuse an existing run directory.
     :param bool dry_run: If True, skip heavy data/generation setup.
     :param Path | None resume_step_dir: Selected checkpoint for compatibility preflight.
-    :return tuple[Config, Any, Path, Path, list[list[int]], GenerationSettings | None, list[list[int]] | None, jax.Array | None, random.Random | None]:
-        Updated config, tokenizer, run/metrics paths, eval tokens, generation
-        settings, prompt pool, key, and RNG.
+    :return tuple[Config, Any, dict[str, Any], Path, Path, list[list[int]], GenerationSettings | None, list[list[int]] | None, jax.Array | None, random.Random | None]:
+        Updated config, tokenizer and identity, run/metrics paths, eval tokens,
+        generation settings, prompt pool, key, and RNG.
     """
+    resume_meta = None
+    if resume_step_dir is not None:
+        # Read the selected checkpoint before any stream construction. The
+        # effective tokenizer identity is compared after its local snapshot is
+        # validated and loaded below.
+        resume_meta = read_checkpoint_meta(resume_step_dir)
+        validate_checkpoint_steps(
+            directory_step=int(resume_step_dir.name),
+            meta=resume_meta,
+            train_state=None,
+        )
+
     tokenizer = None
+    tokenizer_identity = None
     if allow_existing and cfg.logging.run_dir is not None:
         run_dir_hint = Path(cfg.logging.run_dir)
         if not run_dir_hint.exists():
             raise RuntimeError(f"Resume requested but run directory does not exist: {run_dir_hint}")
-        if cfg.data.tokenizer.kind == "hf":
-            tokenizer = load_tokenizer_snapshot(run_dir_hint, cfg)
+        tokenizer, tokenizer_identity = load_tokenizer_snapshot_for_resume(run_dir_hint, cfg)
 
     cfg, tokenizer = prepare_tokenizer_and_config(cfg, tokenizer=tokenizer)
 
-    if resume_step_dir is not None:
+    if resume_meta is not None:
         # Reject strict incompatibilities before constructing remote eval or
         # training streams. The later Orbax restore validates the same meta
         # against the restored train-state step.
-        meta = read_checkpoint_meta(resume_step_dir)
-        validate_checkpoint_steps(
-            directory_step=int(resume_step_dir.name),
-            meta=meta,
-            train_state=None,
+        assert tokenizer_identity is not None
+        check_resume_compat(
+            cfg,
+            resume_meta,
+            tokenizer_identity=tokenizer_identity,
         )
-        check_resume_compat(cfg, meta)
 
     run_dir = create_run_dir(cfg, config_path=config_path, allow_existing=allow_existing)
     if cfg.logging.log_file is not None:
         add_file_logging(run_dir / cfg.logging.log_file, level=cfg.logging.level)
     metrics_path = run_dir / cfg.logging.metrics_file
-    save_tokenizer_snapshot(run_dir, cfg, tokenizer, allow_existing=allow_existing)
+    if not allow_existing:
+        tokenizer, tokenizer_identity = save_tokenizer_snapshot(run_dir, cfg, tokenizer)
+    assert tokenizer_identity is not None
 
     if dry_run:
         eval_tokens = []
@@ -383,6 +397,7 @@ def _setup_run_dir_and_tokenizer(
     return (
         cfg,
         tokenizer,
+        tokenizer_identity,
         run_dir,
         metrics_path,
         eval_tokens,
@@ -571,6 +586,7 @@ def _save_training_checkpoint(
     *,
     step: int,
     cfg: Config,
+    tokenizer_identity: dict[str, Any],
     tokens_seen: int,
     train_state: TrainState,
     data_iter: Any,
@@ -581,6 +597,7 @@ def _save_training_checkpoint(
     :param manager: Checkpoint manager.
     :param int step: Completed training step to save.
     :param Config cfg: Training configuration.
+    :param dict[str, Any] tokenizer_identity: Effective tokenizer manifest identity.
     :param int tokens_seen: Cumulative exact loss-token count.
     :param TrainState train_state: Train state to checkpoint.
     :param data_iter: Data iterator to checkpoint.
@@ -591,6 +608,7 @@ def _save_training_checkpoint(
         config=cfg.to_dict(),
         data_fingerprint=data_fingerprint(cfg),
         tokens_seen=int(tokens_seen),
+        tokenizer_identity=tokenizer_identity,
     )
     save(
         manager,
@@ -1389,6 +1407,7 @@ def _run_impl(
     (
         cfg,
         tokenizer,
+        tokenizer_identity,
         run_dir,
         metrics_path,
         eval_tokens,
@@ -1785,6 +1804,7 @@ def _run_impl(
                             manager,
                             step=step_i,
                             cfg=cfg,
+                            tokenizer_identity=tokenizer_identity,
                             tokens_seen=int(tokens_seen_count),
                             train_state=state,
                             data_iter=data_it,
@@ -1962,6 +1982,7 @@ def _run_impl(
                     manager,
                     step=final_step,
                     cfg=cfg,
+                    tokenizer_identity=tokenizer_identity,
                     tokens_seen=int(tokens_seen_count),
                     train_state=state,
                     data_iter=data_it,

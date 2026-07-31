@@ -64,6 +64,8 @@ Use `chomp train <config.yaml> --dry-run` to validate config, build the tokenize
 
 `config_resolved.json` includes a small `derived` section. `derived.optim.decay_steps_effective` records the effective LR schedule horizon, and `derived.megalodon_jax` records the installed distribution version plus PEP 610 source identity when available.
 
+Training also binds the effective tokenizer program to `tokenizer/identity.json` and stores its digest in each checkpoint. Resume validates that local snapshot before it constructs evaluation/training streams, so it does not contact the configured tokenizer source.
+
 ## Metrics
 
 Metrics are written to `logging.metrics_file` on the first process-local training step, every `train.log_every` steps, and on eval steps. They include:

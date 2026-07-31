@@ -204,7 +204,7 @@ data:
   # data.max_eval_samples -- int; default: 1000; >= 0; zero disables eval data. Positive values collect up to this many documents when a run starts; local_text produces repeated copies of the same text.
   max_eval_samples: "<int>"
 
-  # data.tokenizer -- mapping | null; default: {}. Active tokenization semantics participate in resume compatibility; runtime-only loading knobs do not.
+  # data.tokenizer -- mapping | null; default: {}. Active tokenization semantics participate in resume compatibility. The saved effective class, package versions, files, and canary outputs contextually bind HF loading knobs.
   tokenizer:
     # data.tokenizer.kind -- string; default: hf; one of: byte | hf. Byte is an offline infrastructure tokenizer and must disable special insertion unless byte_offset reserves IDs for it.
     kind: "<byte | hf>"
@@ -212,10 +212,10 @@ data:
     # data.tokenizer.hf_name_or_path -- string | null; default: pszemraj/bytebpe-tokenizer-32k-mlm; nonempty when kind=hf. Fresh runs snapshot these assets; resume loads only the snapshot and fails if it is missing.
     hf_name_or_path: "<repository ID | local path | null>"
 
-    # data.tokenizer.hf_use_fast -- bool; default: true; HF-only. Keep true unless the selected tokenizer has no fast implementation.
+    # data.tokenizer.hf_use_fast -- bool; default: true; HF-only. Keep true unless the selected tokenizer has no fast implementation. Resume loads the local snapshot with this request and strict mode rejects a changed effective implementation or output.
     hf_use_fast: "<bool>"
 
-    # data.tokenizer.hf_trust_remote_code -- bool; default: false; HF-only. True executes custom Python from the tokenizer repository; enable only for reviewed, trusted code.
+    # data.tokenizer.hf_trust_remote_code -- bool; default: false; HF-only. True executes custom tokenizer Python; enable only for reviewed, trusted code. Resume never contacts the configured source, but strict mode rejects a changed effective implementation or output.
     hf_trust_remote_code: "<bool>"
 
     # data.tokenizer.vocab_size_multiple -- int; default: 128; > 0. Effective vocabulary is round_up(max(model.vocab_size, tokenizer length), this value); 128 is the maintained GPU alignment.

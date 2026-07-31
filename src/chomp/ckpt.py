@@ -43,7 +43,7 @@ from chomp.config import (
 logger = logging.getLogger(__name__)
 
 _MISSING = object()
-CHECKPOINT_META_SCHEMA_VERSION = 1
+CHECKPOINT_META_SCHEMA_VERSION = 2
 
 
 def megalodon_jax_identity() -> dict[str, Any]:
@@ -110,6 +110,7 @@ class CheckpointMeta:
     timestamp: str
     tokens_seen: int
     megalodon_jax: dict[str, Any]
+    tokenizer_identity: dict[str, Any]
 
     # Config snapshot used for semantic resume checks.
     config: dict[str, Any]
@@ -131,6 +132,7 @@ def build_meta(
     config: dict[str, Any],
     data_fingerprint: dict[str, Any],
     tokens_seen: int,
+    tokenizer_identity: dict[str, Any],
 ) -> CheckpointMeta:
     """Build checkpoint metadata with version info and config snapshot.
 
@@ -138,6 +140,7 @@ def build_meta(
     :param dict[str, Any] config: Full config dict for reproducibility.
     :param dict[str, Any] data_fingerprint: Data pipeline fingerprint.
     :param int tokens_seen: Cumulative loss-token count for exact resume accounting.
+    :param dict[str, Any] tokenizer_identity: Effective tokenizer manifest identity.
     :return CheckpointMeta: Populated metadata object.
     """
     return CheckpointMeta(
@@ -146,6 +149,7 @@ def build_meta(
         timestamp=datetime.now().isoformat(timespec="seconds"),
         tokens_seen=int(tokens_seen),
         megalodon_jax=megalodon_jax_identity(),
+        tokenizer_identity=tokenizer_identity,
         config=config,
         data_fingerprint=data_fingerprint,
     )
@@ -431,11 +435,14 @@ def restore_params_only(step_dir: Path, abstract_params: Any) -> Any:
 def check_resume_compat(
     cfg: Config,
     meta: dict[str, Any] | None,
+    *,
+    tokenizer_identity: dict[str, Any],
 ) -> None:
     """Validate checkpoint metadata against current config.
 
     :param Config cfg: Current training configuration.
     :param meta: Checkpoint metadata dict (or None if missing).
+    :param dict[str, Any] tokenizer_identity: Effective tokenizer identity for this process.
     :raises RuntimeError: If meta is missing or config mismatches are found.
     """
 
@@ -515,6 +522,13 @@ def check_resume_compat(
             severity=semantic_severity,
         )
 
+    _cmp(
+        "tokenizer_identity",
+        tokenizer_identity,
+        meta.get("tokenizer_identity", _MISSING),
+        severity=semantic_severity,
+    )
+
     _cmp_mapping(
         "",
         cur_fp,
@@ -549,7 +563,10 @@ def check_resume_compat(
 
     tok_prev = meta_fp.get("tokenizer") or {}
     tok_cur = cur_fp.get("tokenizer") or {}
-    tokenizer_inert = {
+    # Source/loading requests are contextual: the checkpoint-bound effective
+    # implementation, package versions, snapshot files, and canary outputs
+    # above decide compatibility.
+    tokenizer_contextual = {
         "hf_name_or_path",
         "hf_use_fast",
         "hf_trust_remote_code",
@@ -560,7 +577,7 @@ def check_resume_compat(
         "tokenizer",
         tok_cur,
         tok_prev,
-        keys=set(tok_cur) - tokenizer_inert,
+        keys=set(tok_cur) - tokenizer_contextual,
         severity=semantic_severity,
     )
 

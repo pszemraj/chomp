@@ -92,12 +92,12 @@ runs/my_run/
 ├── config_resolved.json       # resolved config plus executed Megalodon-JAX identity
 ├── metrics.jsonl              # append-only training/eval/event rows
 ├── train.log                  # Python and dependency logs
-├── tokenizer/                 # run-pinned Hugging Face tokenizer
+├── tokenizer/                 # run-pinned tokenizer files and execution manifest
 └── checkpoints/
     └── 2500/
         ├── train_state/       # parameters, optimizer state, RNG, step
         ├── data_state/        # exact iterator position
-        └── meta/              # schema, config/data, tokens_seen, backend identity
+        └── meta/              # schema, config/data, tokens_seen, backend/tokenizer identities
 ```
 
 Checkpoint cadence, retention, disk behavior, and resume policy are documented in [Checkpointing](docs/checkpointing.md). W&B is optional; after `wandb login`, enable it with `-o logging.wandb.enabled=true` while retaining `metrics.jsonl` locally.

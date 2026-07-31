@@ -43,7 +43,9 @@ Inside the compiled train step, the batch is sliced along the microbatch axis to
 
 When using `hf`, chomp resolves tokenizer-dependent model settings (`model.vocab_size`, special token IDs) before training starts. Tokenizer knobs are defined in [Config Reference](config-reference.yaml) under `data.tokenizer.*`.
 
-For Hugging Face tokenizers, chomp saves the tokenizer files under `run_dir/tokenizer` and loads them on resume. The built-in byte tokenizer has no external assets and is reconstructed from the resolved config.
+Every fresh run writes `run_dir/tokenizer/identity.json`. For Hugging Face tokenizers, chomp saves the tokenizer assets there, reloads them with `local_files_only=true`, and uses that reloaded instance for the run; resume never falls back to `hf_name_or_path`. The manifest records the effective class module and qualified name, fast/slow status, directly relevant package versions, SHA-256 and size for every saved asset, and outputs for versioned canaries covering ordinary text, whitespace, Unicode, byte-fallback-style text, newlines, and special-token-like strings. The byte tokenizer has no asset files but uses the same implementation/output manifest.
+
+Resume validates the saved-file set, effective implementation, and canary outputs before evaluation or training streams are built and before Grain iterator state is restored. Each checkpoint stores the manifest digest. Under `checkpoint.resume_compat: strict`, a missing or changed manifest/digest is an error; `warn` reports that equivalence is unproven and records the observed identity in subsequent checkpoints.
 
 `data.tokenizer.max_doc_tokens: null` means no truncation. A positive cap is explicit data loss applied after tokenization and before BOS/EOS insertion; the iterator reports documents truncated, source tokens observed/retained/discarded, and discarded-token fraction. The cap does not reduce the tokenizer's peak work because the full document is encoded first.
 

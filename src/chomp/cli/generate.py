@@ -106,7 +106,7 @@ def generate(
     # Prefer the run-pinned tokenizer so mutable upstream tokenizer revisions
     # cannot reinterpret the restored embedding rows.
     tokenizer = None
-    if run_dir is not None and (run_dir / "tokenizer").exists():
+    if cfg.data.tokenizer.kind == "hf" and run_dir is not None and (run_dir / "tokenizer").exists():
         try:
             tokenizer = load_tokenizer_snapshot(run_dir, cfg)
         except Exception as exc:

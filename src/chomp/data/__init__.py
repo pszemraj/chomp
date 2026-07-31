@@ -25,8 +25,10 @@ from .pipeline import (
     load_generation_prompt_tokens,
     load_or_create_eval_tokens,
     load_tokenizer_snapshot,
+    load_tokenizer_snapshot_for_resume,
     prepare_tokenizer_and_config,
     save_tokenizer_snapshot,
+    tokenizer_checkpoint_identity,
 )
 
 __all__ = [
@@ -38,6 +40,8 @@ __all__ = [
     "load_or_create_eval_tokens",
     "load_generation_prompt_tokens",
     "load_tokenizer_snapshot",
+    "load_tokenizer_snapshot_for_resume",
     "prepare_tokenizer_and_config",
     "save_tokenizer_snapshot",
+    "tokenizer_checkpoint_identity",
 ]
