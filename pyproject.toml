@@ -27,8 +27,8 @@ dependencies = [
   # matching jaxlib, CUDA plugin, and pip-managed CUDA 13 runtime libraries.
   "jax[cuda13]>=0.10.2,<0.11",
   "equinox>=0.13.8,<0.14",
-  # 0.2.1 is the first published release with the model/config contract used here.
-  "megalodon-jax>=0.2.1,<0.3",
+  # 0.2.2 exposes exact FP32 loss sums and integer valid-target counts.
+  "megalodon-jax>=0.2.2,<0.3",
   "optax>=0.2.8,<0.3",
   "orbax-checkpoint==0.11.31",
   "PyYAML>=6.0",

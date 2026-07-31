@@ -14,7 +14,7 @@ The project is alpha software. Correctness takes priority over backward compatib
 | Python | 3.11 or newer; 3.11 and 3.12 are declared project targets |
 | Accelerator | One NVIDIA CUDA GPU for real training; CPU is supported only by the offline debug config |
 | JAX | `0.10.x` with the pip-managed CUDA 13 runtime |
-| Megalodon-JAX | `0.2.x` |
+| Megalodon-JAX | `>=0.2.2,<0.3` |
 
 A 24 GB consumer GPU is the planning target for the shipped long-run recipes. Short measured probes use substantially less in-use memory, but a completed 24 GB / RTX 4090 baseline is still pending; the recipe table separates the measured fit checks from that target.
 

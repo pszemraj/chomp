@@ -19,15 +19,16 @@ from chomp.data.pipeline import build_train_iterator
 from chomp.model import (
     build_model,
     classify_model_array,
+    loss_sum_and_count,
     parameter_decay_mask,
     parameter_family_counts,
     parameter_optimizer_groups,
-    training_loss,
 )
 from chomp.train import (
     _muon_weight_dim_numbers,
     build_optimizer,
     init_train_state,
+    make_eval_step,
     make_train_step,
 )
 from chomp.types import Batch
@@ -87,9 +88,201 @@ def test_bounded_megalodon_loss_matches_full_logits(
         "key": None,
         "use_packed_segments": True,
     }
-    full = training_loss(params, static, **kwargs)
-    bounded = training_loss(params, static, loss_chunk_size=3, **kwargs)
-    assert jnp.allclose(full, bounded, rtol=1e-6, atol=1e-6)
+    full_sum, full_count = loss_sum_and_count(params, static, **kwargs)
+    bounded_sum, bounded_count = loss_sum_and_count(
+        params,
+        static,
+        loss_chunk_size=3,
+        **kwargs,
+    )
+    assert full_count == bounded_count
+    assert jnp.allclose(full_sum, bounded_sum, rtol=1e-6, atol=1e-6)
+
+
+def _packed_megalodon_rows() -> Batch:
+    """Return two packed rows with unequal exact valid-target counts.
+
+    :return Batch: Two physical rows shaped [B=2, T=8].
+    """
+    input_ids = jnp.array(
+        [
+            [5, 6, 7, 8, 9, 0, 0, 0],
+            [10, 11, 12, 13, 0, 0, 0, 0],
+        ],
+        dtype=jnp.int32,
+    )
+    labels = jnp.array(
+        [
+            [5, 6, 7, 8, 9, -100, -100, -100],
+            [10, 11, -100, 13, -100, -100, -100, -100],
+        ],
+        dtype=jnp.int32,
+    )
+    segment_ids = jnp.array(
+        [
+            [1, 1, 1, 2, 2, 0, 0, 0],
+            [3, 3, 3, 3, 0, 0, 0, 0],
+        ],
+        dtype=jnp.int32,
+    )
+    return Batch(input_ids=input_ids, labels=labels, segment_ids=segment_ids)
+
+
+def _megalodon_accum_cfg(*, grad_accum: int, loss_chunk_size: int | None) -> Config:
+    """Build a packed Megalodon config for accumulation regressions.
+
+    :param int grad_accum: Number of microbatches per optimizer step.
+    :param int | None loss_chunk_size: Optional loss-head projection chunk size.
+    :return Config: Tiny deterministic FP32 training configuration.
+    """
+    return Config(
+        model=make_tiny_megalodon_model(
+            vocab_size=64,
+            chunk_size=4,
+            compute_dtype="float32",
+            loss_chunk_size=loss_chunk_size,
+        ),
+        data=DataConfig(
+            backend="local_text",
+            local_text="unused",
+            packing_mode="bin",
+            packing_strict_segments=True,
+            window_shuffle_tokens=0,
+            tokenizer=TokenizerConfig(
+                kind="byte",
+                byte_offset=0,
+                add_bos=False,
+                add_eos=False,
+            ),
+        ),
+        train=TrainConfig(
+            seed=0,
+            steps=1,
+            batch_size=2 // grad_accum,
+            seq_len=8,
+            grad_accum=grad_accum,
+            jit=False,
+            allow_cpu=True,
+            deterministic=True,
+        ),
+        optim=OptimConfig(
+            lr=1e-3,
+            weight_decay=0.0,
+            grad_clip_norm=0.0,
+            warmup_steps=0,
+        ),
+    )
+
+
+def test_megalodon_accumulation_matches_full_batch_and_loss_projection() -> None:
+    """Exact sums/counts preserve Megalodon updates across both partitions.
+
+    The two physical rows contribute three and two targets respectively after
+    padding, one ignored label, and packed boundaries are applied.
+    """
+    rows = _packed_megalodon_rows()
+    accumulated = Batch(
+        input_ids=rows.input_ids[:, None, :],
+        labels=rows.labels[:, None, :],
+        segment_ids=rows.segment_ids[:, None, :],
+    )
+    full_batch = Batch(
+        input_ids=rows.input_ids[None, :, :],
+        labels=rows.labels[None, :, :],
+        segment_ids=rows.segment_ids[None, :, :],
+    )
+
+    init_cfg = _megalodon_accum_cfg(grad_accum=2, loss_chunk_size=None)
+    key, model_key = jax.random.split(jax.random.PRNGKey(17))
+    params, static = build_model(init_cfg, key=model_key)
+    tx, schedule = build_optimizer(init_cfg, params)
+    state0 = init_train_state(params=params, tx=tx, key=key)
+
+    results: dict[tuple[int, int | None], tuple[Any, dict[str, jax.Array]]] = {}
+    for grad_accum, batch in ((1, full_batch), (2, accumulated)):
+        for loss_chunk_size in (None, 3):
+            cfg = _megalodon_accum_cfg(
+                grad_accum=grad_accum,
+                loss_chunk_size=loss_chunk_size,
+            )
+            step = make_train_step(cfg, static=static, tx=tx, lr_schedule=schedule)
+            results[(grad_accum, loss_chunk_size)] = step(state0, batch)
+
+    reference_state, reference_metrics = results[(1, None)]
+    assert reference_metrics["token_sum"] == 5
+    for state, metrics in results.values():
+        assert metrics["token_sum"] == 5
+        assert jnp.allclose(metrics["loss"], reference_metrics["loss"], rtol=2e-5, atol=2e-6)
+        assert jnp.allclose(
+            metrics["grad_norm"],
+            reference_metrics["grad_norm"],
+            rtol=2e-5,
+            atol=2e-6,
+        )
+        assert eqx.tree_equal(state.params, reference_state.params, rtol=2e-5, atol=2e-6)
+
+    for loss_chunk_size in (None, 3):
+        cfg = _megalodon_accum_cfg(
+            grad_accum=1,
+            loss_chunk_size=loss_chunk_size,
+        )
+        eval_sum, eval_count = make_eval_step(cfg, static=static)(params, full_batch)
+        direct_sum, direct_count = loss_sum_and_count(
+            params,
+            static,
+            batch=rows,
+            deterministic=True,
+            key=None,
+            use_packed_segments=True,
+            loss_chunk_size=loss_chunk_size,
+        )
+        assert eval_count == direct_count == 5
+        assert jnp.allclose(eval_sum, direct_sum, rtol=1e-6, atol=1e-6)
+
+
+def test_megalodon_bf16_compute_returns_fp32_full_and_chunked_loss_sums() -> None:
+    """BF16 model math still exposes FP32 sum/count loss semantics."""
+    cfg = _megalodon_accum_cfg(grad_accum=2, loss_chunk_size=None)
+    cfg = replace(
+        cfg,
+        model=replace(
+            cfg.model,
+            compute_dtype="bfloat16",
+            attention_softmax_dtype="bfloat16",
+        ),
+    )
+    params, static = build_model(cfg, key=jax.random.PRNGKey(23))
+    rows = _packed_megalodon_rows()
+    kwargs = {
+        "batch": rows,
+        "deterministic": True,
+        "key": None,
+        "use_packed_segments": True,
+    }
+
+    full_sum, full_count = loss_sum_and_count(params, static, **kwargs)
+    chunked_sum, chunked_count = loss_sum_and_count(
+        params,
+        static,
+        loss_chunk_size=3,
+        **kwargs,
+    )
+
+    assert full_sum.dtype == jnp.float32
+    assert chunked_sum.dtype == jnp.float32
+    assert full_count.dtype == jnp.int32
+    assert full_count == chunked_count == 5
+    assert jnp.allclose(full_sum, chunked_sum, rtol=2e-4, atol=2e-4)
+
+    full_grad = eqx.filter_grad(
+        lambda p: loss_sum_and_count(p, static, loss_chunk_size=None, **kwargs)[0]
+    )(params)
+    chunked_grad = eqx.filter_grad(
+        lambda p: loss_sum_and_count(p, static, loss_chunk_size=3, **kwargs)[0]
+    )(params)
+    # BF16 projection matmuls may differ at BF16 scale when the token axis is
+    # partitioned, while the public numerator and gradient accumulation remain FP32.
+    assert eqx.tree_equal(full_grad, chunked_grad, rtol=6e-3, atol=1.5e-2)
 
 
 def test_parameter_decay_policy_is_model_aware(

@@ -12,9 +12,9 @@ The compiled `train_step`:
 - performs gradient accumulation inside `jax.lax.scan`
 - applies exactly one optimizer update per outer step
 
-Grad accumulation is **token-weighted**: microbatch losses are scaled by the count of valid (non-masked) tokens to keep updates correct with padding or boundary masks.
+Grad accumulation is **token-weighted** without reconstructing numerators from rounded means. Each backend returns an FP32 loss sum and exact integer valid-target count. Chomp differentiates and accumulates those sums in FP32, adds the integer counts, then divides the logical-batch loss and gradients once by the total count.
 
-Batch assembly computes the same shifted valid-target count on the host and pairs it with the batch through prefetch/device transfer. The trainer updates `tokens_seen` from that Python integer without synchronizing every optimizer step. Logging, evaluation, checkpoint, first-compile, and finite-check cadences synchronize queued work and verify the current host count against the compiled int32 counter. At save and final boundaries, the finite check also covers the post-update parameters and optimizer state. Evaluation likewise accumulates all batch totals on device and synchronizes once per pass.
+Batch assembly computes the corresponding shifted valid-target count on the host and pairs it with the batch through prefetch/device transfer. The model-provided count is authoritative for loss and gradient normalization; the host count supports asynchronous accounting and a consistency check. The trainer updates `tokens_seen` from that Python integer without synchronizing every optimizer step. Logging, evaluation, checkpoint, first-compile, and finite-check cadences synchronize queued work and verify the current host count against the compiled int32 counter. At save and final boundaries, the finite check also covers the post-update parameters and optimizer state. Evaluation aggregates the same backend FP32 sums and integer counts on device and synchronizes once per pass.
 
 Full packing diagnostics scan segment arrays only for batches whose global step will log or evaluate. Non-observable steps still compute the exact shifted loss-token count required for accounting, but skip the redundant Python-side diagnostic scan.
 

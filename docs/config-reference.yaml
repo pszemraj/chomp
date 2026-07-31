@@ -117,10 +117,7 @@ model:
   # model.attention_softmax_dtype -- string; default: float32; one of: float32 | bfloat16. Keep FP32 for numerical stability; BF16 is an explicit lower-precision reduction.
   attention_softmax_dtype: "<float32 | bfloat16>"
 
-  # model.loss_softmax_dtype -- string; default: float32; one of: float32 | bfloat16. Keep FP32 for stable causal-loss reduction.
-  loss_softmax_dtype: "<float32 | bfloat16>"
-
-  # model.loss_chunk_size -- int | null; default: null; null or > 0; Megalodon-only. A positive static value chunks vocabulary projection during train/eval loss, reducing peak memory without changing loss math but rematerializing work in backward.
+  # model.loss_chunk_size -- int | null; default: null; null or > 0; Megalodon-only. Megalodon-JAX 0.2.2 always evaluates loss log-softmax and scalar reductions in FP32. A positive static value chunks vocabulary projection during train/eval loss, reducing peak memory without changing loss math but rematerializing work in backward.
   # Full-logit storage is about batch_size * seq_len * vocab_size * 4 bytes per microbatch. For memory-bound 32K-vocabulary long-context runs, start at 256 and choose the largest value that fits; null is fastest.
   loss_chunk_size: "<int | null>"
 

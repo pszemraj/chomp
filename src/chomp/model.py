@@ -6,7 +6,7 @@ This file is intentionally the *only* place that knows about the model backend.
 The rest of the codebase talks in terms of:
 - params pytree (arrays)
 - static pytree (non-arrays)
-- `training_loss(params, static, batch, ...) -> scalar`
+- `loss_sum_and_count(params, static, batch, ...) -> (fp32 numerator, integer count)`
 
 Design intent (senior-engineer hat on):
 - You do NOT want random parts of the codebase reaching into Megalodon internals.
@@ -20,7 +20,7 @@ Backends:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import equinox as eqx
 import jax
@@ -38,9 +38,10 @@ from chomp.types import IGNORE_INDEX
 # ------------------------------ Dummy backend ------------------------------
 
 
-def causal_loss_mask(
+def _dummy_causal_loss_mask(
     labels: jax.Array,
     attention_mask: jax.Array | None,
+    segment_ids: jax.Array | None = None,
     *,
     ignore_index: int = IGNORE_INDEX,
 ) -> jax.Array:
@@ -48,12 +49,15 @@ def causal_loss_mask(
 
     :param jax.Array labels: Label IDs of shape [B, T].
     :param jax.Array | None attention_mask: Optional attention mask [B, T].
+    :param jax.Array | None segment_ids: Optional packed segment IDs [B, T].
     :param int ignore_index: Label value excluded from loss.
     :return jax.Array: Boolean validity mask of shape [B, T - 1].
     """
     valid = labels[:, 1:] != ignore_index
     if attention_mask is not None:
         valid = valid & attention_mask[:, 1:].astype(bool)
+    if segment_ids is not None:
+        valid = valid & (segment_ids[:, :-1] == segment_ids[:, 1:]) & (segment_ids[:, 1:] > 0)
     return valid
 
 
@@ -117,7 +121,9 @@ class DummyLM(eqx.Module):
         ignore_index: int = IGNORE_INDEX,
         deterministic: bool = True,
         key: jax.Array | None = None,
-    ) -> jax.Array:
+        reduction: Literal["mean", "sum", "none"] = "mean",
+        return_valid_count: bool = False,
+    ) -> jax.Array | tuple[jax.Array, jax.Array]:
         """Compute cross-entropy loss with causal shift.
 
         :param jax.Array input_ids: Input token IDs of shape [B, T].
@@ -127,27 +133,45 @@ class DummyLM(eqx.Module):
         :param int ignore_index: Label value to ignore in loss.
         :param bool deterministic: If False, apply dropout.
         :param key: PRNG key required when deterministic=False.
-        :return jax.Array: Scalar mean cross-entropy loss.
+        :param Literal["mean", "sum", "none"] reduction: Loss reduction.
+        :param bool return_valid_count: Whether to return the exact valid-target count.
+        :raises ValueError: If reduction is unsupported.
+        :return jax.Array | tuple[jax.Array, jax.Array]: FP32 loss, optionally with count.
         """
-        del segment_ids
+        if reduction not in ("mean", "sum", "none"):
+            raise ValueError(f"reduction must be 'mean', 'sum', or 'none', got {reduction!r}")
         logits = self(input_ids, attention_mask, deterministic=deterministic, key=key)
 
         # Shift for causal LM
         shift_logits = logits[:, :-1, :]
         shift_labels = labels[:, 1:]
 
-        if shift_labels.shape[1] == 0:
-            return jnp.zeros((), dtype=jnp.float32)
-
         # Build mask for valid positions
-        valid = causal_loss_mask(labels, attention_mask, ignore_index=ignore_index)
+        valid = _dummy_causal_loss_mask(
+            labels,
+            attention_mask,
+            segment_ids,
+            ignore_index=ignore_index,
+        )
+        valid_count = jnp.sum(valid, dtype=jnp.int32)
 
         # Compute cross-entropy
-        per_pos = optax.softmax_cross_entropy_with_integer_labels(shift_logits, shift_labels)
+        safe_labels = jnp.where(valid, shift_labels, 0)
+        per_pos = optax.softmax_cross_entropy_with_integer_labels(shift_logits, safe_labels)
         per_pos = per_pos.astype(jnp.float32)
+        token_loss = jnp.where(valid, per_pos, jnp.zeros((), dtype=jnp.float32))
 
-        denom = jnp.maximum(jnp.sum(valid), 1)
-        return jnp.sum(jnp.where(valid, per_pos, 0.0)) / denom
+        if reduction == "none":
+            loss = token_loss
+        else:
+            loss_sum = jnp.sum(token_loss, dtype=jnp.float32)
+            if reduction == "sum":
+                loss = loss_sum
+            else:
+                loss = loss_sum / jnp.maximum(valid_count.astype(jnp.float32), 1.0)
+        if return_valid_count:
+            return loss, valid_count
+        return loss
 
 
 # ------------------------------ Builders -----------------------------------
@@ -360,7 +384,6 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
             compute_dtype=dtype_from_str(cfg.model.compute_dtype),
             accum_dtype=dtype_from_str(cfg.model.accum_dtype),
             attention_softmax_dtype=dtype_from_str(cfg.model.attention_softmax_dtype),
-            loss_softmax_dtype=dtype_from_str(cfg.model.loss_softmax_dtype),
         )
 
         model = MegalodonForCausalLM(mcfg, key=key)
@@ -374,7 +397,7 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
 # ------------------------------ Forward/loss wrappers ----------------------
 
 
-def training_loss(
+def loss_sum_and_count(
     params: Any,
     static: Any,
     *,
@@ -383,8 +406,8 @@ def training_loss(
     key: jax.Array | None,
     use_packed_segments: bool = False,
     loss_chunk_size: int | None = None,
-) -> jax.Array:
-    """Compute training loss.
+) -> tuple[jax.Array, jax.Array]:
+    """Return the backend's FP32 loss numerator and exact valid-target count.
 
     Guardrail: this function **does not accept** cache arguments.
     Training should never enable cache; it is an inference concern.
@@ -398,13 +421,12 @@ def training_loss(
     :param key: PRNG key required when deterministic=False.
     :param bool use_packed_segments: Whether to pass segment IDs to backend loss.
     :param int | None loss_chunk_size: Maximum token states projected per loss-head chunk.
-    :return jax.Array: Scalar loss value.
+    :return tuple[jax.Array, jax.Array]: FP32 loss sum and integer valid-target count.
     """
 
     model = eqx.combine(params, static)
 
-    # Batch tensors come in as [A, B, T]. We compute loss per microbatch and average.
-    # The compiled train_step calls this on each microbatch slice (shape [B, T]).
+    # The compiled train/eval scans call this on one [B, T] microbatch.
     kwargs: dict[str, Any] = {
         "attention_mask": batch.segment_ids > 0,
         "deterministic": deterministic,
@@ -414,11 +436,14 @@ def training_loss(
         kwargs["segment_ids"] = batch.segment_ids
     if loss_chunk_size is not None:
         kwargs["loss_chunk_size"] = loss_chunk_size
-    return model.compute_loss(  # type: ignore[attr-defined]
+    loss_sum, valid_count = model.compute_loss(  # type: ignore[attr-defined]
         batch.input_ids,
         batch.labels,
+        reduction="sum",
+        return_valid_count=True,
         **kwargs,
     )
+    return loss_sum.astype(jnp.float32), valid_count.astype(jnp.int32)
 
 
 def generate_tokens(

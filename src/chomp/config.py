@@ -139,7 +139,6 @@ class ModelConfig:
     # megalodon-jax); both it and harness gradient accumulation stay fp32.
     accum_dtype: Literal["float32"] = "float32"
     attention_softmax_dtype: Literal["float32", "bfloat16"] = "float32"
-    loss_softmax_dtype: Literal["float32", "bfloat16"] = "float32"
     loss_chunk_size: int | None = None
 
 
@@ -877,8 +876,6 @@ def _validate_model(cfg: Config) -> None:
         _vfail(
             f"model.attention_softmax_dtype is unsupported: {cfg.model.attention_softmax_dtype!r}"
         )
-    if cfg.model.loss_softmax_dtype not in ("float32", "bfloat16"):
-        _vfail(f"model.loss_softmax_dtype is unsupported: {cfg.model.loss_softmax_dtype!r}")
     if cfg.model.vocab_size <= 0:
         _vfail(f"model.vocab_size must be positive, got {cfg.model.vocab_size}")
     for name, token_id in (
@@ -1069,9 +1066,9 @@ def _validate_data(cfg: Config) -> None:
         _vfail(
             "data.mask_boundary_loss=false is incompatible with strict segment "
             "isolation: the backend excludes cross-segment label pairs from the "
-            "loss whenever segment_ids are passed (megalodon-jax >= 0.2.1), "
-            "while host-side token counts would still include them — silently "
-            "changing token-weighted grad accumulation and loss_tokens. Keep "
+            "loss whenever segment_ids are passed (megalodon-jax >= 0.2.2), "
+            "while asynchronous host token accounting would still include them. "
+            "Keep "
             "mask_boundary_loss=true, or set data.packing_strict_segments=false "
             "for deliberate cross-document state bleed."
         )

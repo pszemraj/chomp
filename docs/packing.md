@@ -44,7 +44,7 @@ Shared by both packed modes:
 
 `sequential` keeps stream semantics: the corpus is treated as one continuous token stream, no segment metadata reaches the model, and segment IDs are used only for loss masking and diagnostics.
 
-`bin` and `multipack` with `data.packing_strict_segments: true` (the default) enable strict packed semantics. Both modes place multiple unrelated documents in one sequence, and for a recurrent-state architecture cross-document bleed means CEMA/TimestepNorm contamination, not just attention leakage, so isolation is required by default wherever documents are packed. With megalodon-jax >= 0.2.1 this is **full state isolation**: each packed document computes as if it were run alone:
+`bin` and `multipack` with `data.packing_strict_segments: true` (the default) enable strict packed semantics. Both modes place multiple unrelated documents in one sequence, and for a recurrent-state architecture cross-document bleed means CEMA/TimestepNorm contamination, not just attention leakage, so isolation is required by default wherever documents are packed. With megalodon-jax >= 0.2.2 this is **full state isolation**: each packed document computes as if it were run alone:
 
 - segment-isolated attention (masked by contiguous segment *runs*, so a reused segment id cannot attend back to an earlier same-id document),
 - per-segment RoPE position resets derived from `segment_ids`,
@@ -52,14 +52,14 @@ Shared by both packed modes:
 - TimestepNorm running statistics (count/mean/M2) restarted at every boundary,
 - cross-segment label pairs and pairs targeting padding excluded from the loss by the backend automatically.
 
-chomp gates this path on the backend's `supports_segment_reset` capability flag and fails fast at startup if the installed megalodon-jax does not support it. The package dependency requires megalodon-jax >= 0.2.1.
+chomp gates this path on the backend's `supports_segment_reset` capability flag and fails fast at startup if the installed megalodon-jax does not support it. The package dependency requires megalodon-jax >= 0.2.2.
 
 Costs and notes:
 
 - Strict mode bypasses the FFT CEMA path (it cannot express resets) and adds ~2x attention FLOPs on packed rows (per-document chunk re-anchoring), so it trades throughput for correctness.
 - `model.use_associative_segment_scan` selects the segmented CEMA implementation: `true` (default) is a parallel associative scan; `false` is a sequential low-memory fallback if the associative path OOMs.
 - Strict packed metadata is training-only upstream: passing segment_ids with a cache (generation/streaming) raises.
-- `data.mask_boundary_loss: true` is **required** in strict mode (config validation errors otherwise). The backend masks boundary pairs regardless, but chomp's token-weighted grad accumulation and `loss_tokens` counting happen host-side from the labels; unmasked labels would silently change the gradient normalization denominator.
+- `data.mask_boundary_loss: true` is **required** in strict mode (config validation errors otherwise). The backend excludes boundary pairs and supplies the authoritative normalization count. Matching label masks keep asynchronous host token accounting equal to that device count, which Chomp verifies at synchronization points.
 
 ### Non-strict operation: CEMA/TimestepNorm state crosses boundaries
 

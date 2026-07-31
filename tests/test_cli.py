@@ -116,7 +116,6 @@ def test_generate_cli_produces_output(tmp_path: Path) -> None:
             compute_dtype="float32",
             accum_dtype="float32",
             attention_softmax_dtype="float32",
-            loss_softmax_dtype="float32",
         ),
         data=replace(
             cfg.data,

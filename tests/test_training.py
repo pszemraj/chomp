@@ -54,7 +54,7 @@ from chomp.data import (
     data_fingerprint,
     prepare_tokenizer_and_config,
 )
-from chomp.model import build_model, supports_packed_segments, training_loss
+from chomp.model import build_model, loss_sum_and_count, supports_packed_segments
 from chomp.train import (
     _METRICS_FILE_DROP,
     _WANDB_DROP,
@@ -2325,7 +2325,7 @@ def test_strict_packed_segments_covers_multi_document_modes(tmp_path: Path) -> N
     assert not strict_packed_segments(_mode("multipack", strict=False))
 
 
-def test_training_loss_passes_segments_iff_packed() -> None:
+def test_loss_sum_adapter_passes_segments_iff_packed() -> None:
     """Strict packing passes segments and lets the backend derive positions."""
     calls: dict[str, Any] = {}
 
@@ -2344,13 +2344,19 @@ def test_training_loss_passes_segments_iff_packed() -> None:
             key: jax.Array | None = None,
             segment_ids: jax.Array | None = None,
             position_ids: jax.Array | None = None,
+            reduction: str = "mean",
+            return_valid_count: bool = False,
             loss_chunk_size: int | None = None,
-        ) -> jax.Array:
+        ) -> jax.Array | tuple[jax.Array, jax.Array]:
             _ = (input_ids, labels, attention_mask, deterministic, key)
             calls["segment_ids"] = segment_ids
             calls["position_ids"] = position_ids
+            calls["reduction"] = reduction
+            calls["return_valid_count"] = return_valid_count
             calls["loss_chunk_size"] = loss_chunk_size
-            return jnp.zeros(())
+            loss = jnp.zeros((), dtype=jnp.float32)
+            count = jnp.array(7, dtype=jnp.int32)
+            return (loss, count) if return_valid_count else loss
 
     params, static = eqx.partition(_SpyLM(w=jnp.zeros(1)), eqx.is_array)
     micro = Batch(
@@ -2359,7 +2365,7 @@ def test_training_loss_passes_segments_iff_packed() -> None:
         segment_ids=jnp.ones((1, 8), dtype=jnp.int32),
     )
 
-    training_loss(
+    loss_sum_and_count(
         params,
         static,
         batch=micro,
@@ -2370,9 +2376,11 @@ def test_training_loss_passes_segments_iff_packed() -> None:
     )
     assert calls["segment_ids"] is not None
     assert calls["position_ids"] is None
+    assert calls["reduction"] == "sum"
+    assert calls["return_valid_count"] is True
     assert calls["loss_chunk_size"] == 7
 
-    training_loss(
+    loss_sum_and_count(
         params, static, batch=micro, deterministic=True, key=None, use_packed_segments=False
     )
     assert calls["segment_ids"] is None
@@ -2380,7 +2388,7 @@ def test_training_loss_passes_segments_iff_packed() -> None:
     assert calls["loss_chunk_size"] is None
 
     with pytest.raises(TypeError, match="unexpected keyword argument 'cache'"):
-        training_loss(  # type: ignore[call-arg]
+        loss_sum_and_count(  # type: ignore[call-arg]
             params,
             static,
             batch=micro,

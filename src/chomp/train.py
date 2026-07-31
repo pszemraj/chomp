@@ -75,15 +75,14 @@ from chomp.data import (
 from chomp.data.hf import resolve_dataset_revision
 from chomp.model import (
     build_model,
-    causal_loss_mask,
     generate_tokens,
+    loss_sum_and_count,
     parameter_decay_mask,
     parameter_family_counts,
     parameter_optimizer_groups,
     supports_packed_segments,
-    training_loss,
 )
-from chomp.types import IGNORE_INDEX, Batch, TrainState
+from chomp.types import Batch, TrainState
 from chomp.utils.ckpt_paths import (
     load_config_for_checkpoint,
     read_checkpoint_meta,
@@ -175,20 +174,6 @@ class _StopSignalState:
         for signum, previous in self._previous.items():
             signal.signal(signum, previous)
         self._previous.clear()
-
-
-def _count_tokens(labels: jax.Array, segment_ids: jax.Array) -> jax.Array:
-    """Count valid tokens after the causal shift (for correct GA normalization).
-
-    :param jax.Array labels: Label tensor of shape [B, T].
-    :param jax.Array segment_ids: Segment IDs of shape [B, T], with zero padding.
-    :return jax.Array: Scalar count of valid (non-ignored, non-masked) tokens.
-    """
-
-    return jnp.sum(
-        causal_loss_mask(labels, segment_ids > 0, ignore_index=IGNORE_INDEX),
-        dtype=jnp.int32,
-    )
 
 
 def _check_finite_metrics(metrics: dict[str, Any], *, step: int) -> None:
@@ -710,7 +695,7 @@ def _validate_packing_capabilities(cfg: Config, *, params: Any, static: Any) -> 
         f"Strict segment isolation (packing_mode={cfg.data.packing_mode!r}) was "
         "requested but the model backend does not "
         "advertise full segment isolation (supports_segment_reset capability flag, "
-        "megalodon-jax >= 0.2.1: attention + ComplexEMA + TimestepNorm reset at "
+        "megalodon-jax >= 0.2.2: attention + ComplexEMA + TimestepNorm reset at "
         "packed document boundaries). Set data.packing_strict_segments=false to "
         "run in non-strict mode or upgrade megalodon-jax."
     )
@@ -1110,20 +1095,18 @@ def make_train_step(
         labels: jax.Array,
         segs: jax.Array,
         key: jax.Array | None,
-        token_count: jax.Array,
-    ) -> jax.Array:
-        """Compute token-weighted loss for a single micro-batch.
+    ) -> tuple[jax.Array, jax.Array]:
+        """Compute the loss numerator and valid count for one micro-batch.
 
         :param Any params: Model parameters.
         :param jax.Array input_ids: Input token IDs [B, T].
         :param jax.Array labels: Label token IDs [B, T].
         :param jax.Array segs: Segment IDs [B, T].
         :param key: PRNG key for dropout, or None if deterministic.
-        :param jax.Array token_count: Number of valid tokens for weighting.
-        :return jax.Array: Weighted loss scalar.
+        :return tuple[jax.Array, jax.Array]: FP32 loss sum and exact integer count.
         """
         micro = _micro_batch(input_ids, labels, segs)
-        loss = training_loss(
+        return loss_sum_and_count(
             params,
             static,
             batch=micro,
@@ -1132,9 +1115,8 @@ def make_train_step(
             use_packed_segments=use_packed_segments,
             loss_chunk_size=loss_chunk_size,
         )
-        return loss * token_count
 
-    loss_and_grad = eqx.filter_value_and_grad(micro_loss)
+    loss_and_grad = eqx.filter_value_and_grad(micro_loss, has_aux=True)
 
     def train_step(state: TrainState, batch: Batch) -> tuple[TrainState, dict[str, jax.Array]]:
         """Execute one training step with scan-based gradient accumulation.
@@ -1173,12 +1155,16 @@ def make_train_step(
             """
             loss_sum, grad_sum, token_sum = carry
             in_ids, labs, segs, k = inputs
-            token_count_int = _count_tokens(labs, segs).astype(jnp.int32)
-            token_count = token_count_int.astype(jnp.float32)
-            loss, grads = loss_and_grad(state.params, in_ids, labs, segs, k, token_count)
+            (loss, token_count_int), grads = loss_and_grad(
+                state.params,
+                in_ids,
+                labs,
+                segs,
+                k,
+            )
             loss_sum = loss_sum + loss.astype(jnp.float32)
             grad_sum = jax.tree_util.tree_map(lambda a, b: a + b.astype(a.dtype), grad_sum, grads)
-            token_sum = token_sum + token_count_int
+            token_sum = token_sum + token_count_int.astype(jnp.int32)
             return (loss_sum, grad_sum, token_sum), None
 
         (loss_sum, grad_sum, token_sum), _ = jax.lax.scan(
@@ -1268,8 +1254,7 @@ def make_eval_step(
             loss_sum, token_sum = carry
             input_ids, labels, segs = xs
             micro = _micro_batch(input_ids, labels, segs)
-            token_count = _count_tokens(labels, segs).astype(jnp.int32)
-            loss = training_loss(
+            loss, token_count = loss_sum_and_count(
                 params,
                 static,
                 batch=micro,
@@ -1279,8 +1264,8 @@ def make_eval_step(
                 loss_chunk_size=loss_chunk_size,
             )
             return (
-                loss_sum + loss * token_count.astype(jnp.float32),
-                token_sum + token_count,
+                loss_sum + loss.astype(jnp.float32),
+                token_sum + token_count.astype(jnp.int32),
             ), None
 
         (loss_sum, token_sum), _ = jax.lax.scan(

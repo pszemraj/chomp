@@ -124,10 +124,6 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
             "attention_softmax_dtype",
         ),
         (
-            lambda cfg: replace(cfg, model=replace(cfg.model, loss_softmax_dtype="float16")),
-            "loss_softmax_dtype",
-        ),
-        (
             lambda cfg: replace(cfg, model=replace(cfg.model, loss_chunk_size=0)),
             "loss_chunk_size",
         ),
@@ -567,9 +563,8 @@ def test_strict_packed_rejects_disabled_boundary_masking(mode: str) -> None:
     """Strict packing with mask_boundary_loss=false must fail validation.
 
     The backend excludes cross-segment label pairs whenever segment_ids are
-    passed (megalodon-jax >= 0.2.1), so disabling chomp's pre-masking desyncs
-    host-side token counts from the model's loss denominator — a silent change
-    to gradient normalization, not a preference.
+    passed (megalodon-jax >= 0.2.2), so disabling chomp's pre-masking desyncs
+    asynchronous host token accounting from the backend's authoritative count.
     """
     cfg = _base_cfg()
     cfg = replace(
