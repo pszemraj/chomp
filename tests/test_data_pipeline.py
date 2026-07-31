@@ -194,6 +194,40 @@ def test_tokenizer_resume_requires_manifest(
     assert manifest_path.exists()
 
 
+@pytest.mark.parametrize("manifest_payload", [b"{invalid", b"\xff"])
+def test_tokenizer_resume_handles_invalid_manifest_json(
+    tmp_path: Path,
+    local_bert_tokenizer: Path,
+    caplog: pytest.LogCaptureFixture,
+    manifest_payload: bytes,
+) -> None:
+    """Malformed identity JSON is unproven in strict and rebuilt in warn mode.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :param Path local_bert_tokenizer: Deterministic local tokenizer source.
+    :param pytest.LogCaptureFixture caplog: Captured warn-mode log.
+    :param bytes manifest_payload: Invalid JSON or non-UTF-8 manifest payload.
+    """
+    cfg, source_tok = prepare_tokenizer_and_config(_local_hf_cfg(local_bert_tokenizer))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    save_tokenizer_snapshot(run_dir, cfg, source_tok)
+    manifest_path = run_dir / "tokenizer" / TOKENIZER_MANIFEST_FILENAME
+    manifest_path.write_bytes(manifest_payload)
+
+    with pytest.raises(RuntimeError, match="manifest is unreadable or invalid JSON"):
+        load_tokenizer_snapshot_for_resume(run_dir, cfg)
+
+    warn_cfg = replace(
+        cfg,
+        checkpoint=replace(cfg.checkpoint, resume_compat="warn"),
+    )
+    with caplog.at_level(logging.WARNING, logger="chomp.data.pipeline"):
+        load_tokenizer_snapshot_for_resume(run_dir, warn_cfg)
+    assert "manifest is unreadable or invalid JSON" in caplog.text
+    assert isinstance(json.loads(manifest_path.read_text()), dict)
+
+
 def test_tokenizer_resume_rejects_canary_drift(
     tmp_path: Path,
     local_bert_tokenizer: Path,

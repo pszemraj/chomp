@@ -620,7 +620,16 @@ def load_tokenizer_snapshot_for_resume(
     severity = cfg.checkpoint.resume_compat
     expected = None
     if manifest_path.exists():
-        expected = json.loads(manifest_path.read_text())
+        try:
+            expected = json.loads(manifest_path.read_text())
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            message = (
+                "Tokenizer identity manifest is unreadable or invalid JSON; "
+                "resume cannot prove tokenizer execution equivalence."
+            )
+            if severity == "strict":
+                raise RuntimeError(message) from exc
+            logger.warning("%s Continuing because checkpoint.resume_compat='warn'.", message)
     elif severity == "strict":
         raise RuntimeError(
             "Tokenizer identity manifest is missing; strict resume cannot prove "
