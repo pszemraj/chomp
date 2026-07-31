@@ -7,10 +7,10 @@
 # variables -- mapping[str, value]; default: {}. Values may be nested. A full `$variables.path` reference preserves type; `{$variables.path}` and `${variables.path}` interpolate into strings. Missing or circular references fail.
 variables: "<mapping[str, value]>"
 
-# derived -- mapping; default: {}. Internal use only: resolved snapshots record computed fields here, and authored values are ignored.
+# derived -- mapping; default: {}. Internal use only: resolved snapshots record the effective optimizer horizon and installed Megalodon-JAX identity here; authored values are ignored.
 derived: "<mapping>"
 
-# model -- mapping | null; default: {}. Fields other than the shared vocabulary/dropout and DummyLM width are Megalodon-only. Every raw model field is a hard resume invariant, including backend-inactive fields.
+# model -- mapping | null; default: {}. Fields other than the shared vocabulary/dropout and DummyLM width are Megalodon-only. Structural fields are hard resume invariants; active runtime fields follow checkpoint.resume_compat, while backend-inactive fields are ignored.
 model:
   # model.backend -- string; default: megalodon; one of: megalodon | dummy. `dummy` is a debug-only MLP using vocab_size, d_model, and dropout.
   backend: "<megalodon | dummy>"
@@ -102,7 +102,7 @@ model:
   # model.output_size -- int; default: -1, computed as effective vocab_size; otherwise > 0. With share_emb=true it must be -1 or model.vocab_size; an untied Megalodon head must be at least model.vocab_size. Keep -1 for causal-LM training.
   output_size: "<-1 | positive int>"
 
-  # model.use_associative_segment_scan -- bool; default: true. Used only for strict bin/multipack batches: true is the faster parallel CEMA reset path; false uses a compact sequential forward carry, but compiled backward-memory savings are not guaranteed. [Experimental]
+  # model.use_associative_segment_scan -- bool; default: true. Used only for strict bin/multipack batches: true is the faster parallel CEMA reset path; false uses a compact sequential forward carry, but compiled backward peak memory must still be measured. Active resume semantics under strict packed execution; inert otherwise. [Experimental]
   use_associative_segment_scan: "<bool>"
 
   # model.param_dtype -- string; default and only valid value: float32. Chomp has no FP32 master-parameter path, so lower-precision parameters and optimizer state are unsupported.

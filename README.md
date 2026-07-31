@@ -2,7 +2,7 @@
 
 Chomp is a compact, single-GPU JAX/Equinox pretraining harness for [Megalodon-JAX](https://github.com/pszemraj/megalodon-jax). [Megalodon](https://arxiv.org/abs/2404.08801) combines recurrent CEMA memory with gated attention for efficient long-context sequence modeling.
 
-Chomp sits between a toy training script and a distributed framework: it keeps the readable, hackable shape of nanoGPT-style code while adding resumable Hugging Face streaming, document packing, checkpointed iterator position, evaluation, generation, and the Megalodon-JAX model adapter. It deliberately does not provide multi-host training, distributed orchestration, environment attestation, or a Transformers export stack; use a distributed trainer such as [Levanter](https://github.com/stanford-crfm/levanter) when those are the actual requirements.
+Chomp sits between a toy training script and a distributed framework: it keeps the readable, hackable shape of nanoGPT-style code while adding resumable Hugging Face streaming, document packing, checkpointed iterator position, evaluation, generation, and the Megalodon-JAX model adapter. It deliberately does not provide multi-host training, distributed orchestration, general environment attestation, or a Transformers export stack; use a distributed trainer such as [Levanter](https://github.com/stanford-crfm/levanter) when those are the actual requirements.
 
 The project is alpha software. Correctness takes priority over backward compatibility until the first stable release, so older configs and checkpoints may occasionally require migration.
 
@@ -89,7 +89,7 @@ A typical run directory is:
 ```text
 runs/my_run/
 ├── config_original.yaml       # authored input config
-├── config_resolved.json       # resolved run-start config and derived values
+├── config_resolved.json       # resolved config plus executed Megalodon-JAX identity
 ├── metrics.jsonl              # append-only training/eval/event rows
 ├── train.log                  # Python and dependency logs
 ├── tokenizer/                 # run-pinned Hugging Face tokenizer
@@ -97,7 +97,7 @@ runs/my_run/
     └── 2500/
         ├── train_state/       # parameters, optimizer state, RNG, step
         ├── data_state/        # exact iterator position
-        └── meta/              # config, data fingerprint, tokens_seen
+        └── meta/              # schema, config/data, tokens_seen, backend identity
 ```
 
 Checkpoint cadence, retention, disk behavior, and resume policy are documented in [Checkpointing](docs/checkpointing.md). W&B is optional; after `wandb login`, enable it with `-o logging.wandb.enabled=true` while retaining `metrics.jsonl` locally.

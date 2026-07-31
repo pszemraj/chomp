@@ -57,7 +57,7 @@ chomp gates this path on the backend's `supports_segment_reset` capability flag 
 Costs and notes:
 
 - Strict mode bypasses the FFT CEMA path (it cannot express resets) and adds ~2x attention FLOPs on packed rows (per-document chunk re-anchoring), so it trades throughput for correctness.
-- `model.use_associative_segment_scan` selects the segmented CEMA implementation: `true` (default) is a parallel associative scan; `false` is a sequential low-memory fallback if the associative path OOMs.
+- `model.use_associative_segment_scan` selects the segmented CEMA implementation: `true` (default) is a parallel associative scan; `false` uses a compact sequential forward carry. Compiled backward peak memory must still be measured. This choice is resume-significant while strict packed segment resets execute.
 - Strict packed metadata is training-only upstream: passing segment_ids with a cache (generation/streaming) raises.
 - `data.mask_boundary_loss: true` is **required** in strict mode (config validation errors otherwise). The backend excludes boundary pairs and supplies the authoritative normalization count. Matching label masks keep asynchronous host token accounting equal to that device count, which Chomp verifies at synchronization points.
 

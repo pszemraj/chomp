@@ -22,20 +22,51 @@ Orbax notes:
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from importlib import metadata
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import orbax.checkpoint as ocp
 
-from chomp.config import Config, decay_horizon_from_values, derived_deterministic
+from chomp.config import (
+    Config,
+    decay_horizon_from_values,
+    derived_deterministic,
+    strict_packed_segments,
+)
 
 logger = logging.getLogger(__name__)
 
 _MISSING = object()
+CHECKPOINT_META_SCHEMA_VERSION = 1
+
+
+def megalodon_jax_identity() -> dict[str, Any]:
+    """Return the installed Megalodon-JAX distribution identity.
+
+    :return dict[str, Any]: Distribution version and optional PEP 610 source identity.
+    """
+    dist = metadata.distribution("megalodon-jax")
+    identity: dict[str, Any] = {
+        "distribution": "megalodon-jax",
+        "version": dist.version,
+    }
+    direct_url_text = dist.read_text("direct_url.json")
+    if direct_url_text is not None:
+        direct_url = json.loads(direct_url_text)
+        vcs_info = direct_url.get("vcs_info") or {}
+        identity["direct_url"] = {
+            "url": direct_url.get("url"),
+            "vcs": vcs_info.get("vcs"),
+            "requested_revision": vcs_info.get("requested_revision"),
+            "commit_id": vcs_info.get("commit_id"),
+        }
+    return identity
 
 
 def _effective_deterministic_from_mapping(config: dict[str, Any]) -> bool | None:
@@ -71,12 +102,14 @@ class CheckpointMeta:
     Keep this JSON-serializable.
     """
 
-    # This is a semantic resume record, not an environment manifest. Source
-    # trees, package installations, devices, and XLA flags remain external.
+    # This is a semantic resume record, not a general environment manifest.
+    # Source trees, other packages, devices, and XLA flags remain external.
 
+    schema_version: int
     step: int
     timestamp: str
     tokens_seen: int
+    megalodon_jax: dict[str, Any]
 
     # Config snapshot used for semantic resume checks.
     config: dict[str, Any]
@@ -108,9 +141,11 @@ def build_meta(
     :return CheckpointMeta: Populated metadata object.
     """
     return CheckpointMeta(
+        schema_version=CHECKPOINT_META_SCHEMA_VERSION,
         step=int(step),
         timestamp=datetime.now().isoformat(timespec="seconds"),
         tokens_seen=int(tokens_seen),
+        megalodon_jax=megalodon_jax_identity(),
         config=config,
         data_fingerprint=data_fingerprint,
     )
@@ -472,6 +507,14 @@ def check_resume_compat(
     cur_fp = data_fingerprint(cfg)
     semantic_severity = "error" if cfg.checkpoint.resume_compat == "strict" else "warning"
 
+    if cfg.model.backend == "megalodon":
+        _cmp(
+            "megalodon_jax",
+            megalodon_jax_identity(),
+            meta.get("megalodon_jax", _MISSING),
+            severity=semantic_severity,
+        )
+
     _cmp_mapping(
         "",
         cur_fp,
@@ -576,16 +619,16 @@ def check_resume_compat(
         }
         model_structural = {"backend", "vocab_size", "d_model"}
     else:
-        # Dummy-only width is inert under Megalodon. Fresh initialization and
-        # the two equivalent memory/scan implementations are inert after
-        # parameter restore and are intentionally absent from resume policy.
+        # Dummy-only width and fresh initialization/checkpoint implementation
+        # are inert after parameter restore.
         model_active -= {
             "d_model",
             "init_mode",
             "use_checkpoint",
-            "use_associative_segment_scan",
             "loss_chunk_size",
         }
+        if not strict_packed_segments(cfg):
+            model_active.discard("use_associative_segment_scan")
         model_structural = {
             "backend",
             "vocab_size",

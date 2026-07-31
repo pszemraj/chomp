@@ -23,7 +23,7 @@ The [checkpoint design intent](checkpointing.md#design-intent) is part of the pr
 
 - Hard-fail when model/optimizer/data state cannot form one coherent continuation.
 - Keep known, shape-compatible research changes visible and usable through the default `warn` policy; use `strict` for unchanged config/data experiments.
-- Do not reinterpret `strict` as source-tree, dependency, device, or kernel attestation, and do not add those hard gates without an explicit project-scope change.
+- Do not reinterpret `strict` as general source-tree, dependency, device, or kernel attestation. Megalodon-JAX is the narrow exception: its recorded distribution identity is active model semantics. Do not add broader hard gates without an explicit project-scope change.
 - Do not restore automatic fresh-stream fallback after train-state restore. A deliberate branch uses a separate run directory.
 - Assume one researcher-controlled writer per run directory rather than adding distributed locking or ownership machinery.
 

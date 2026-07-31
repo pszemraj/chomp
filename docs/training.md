@@ -62,7 +62,7 @@ Optional sampling controls (`train.generate_temperature`, `train.generate_top_k`
 
 Use `chomp train <config.yaml> --dry-run` to validate config, build the tokenizer/model/data pipeline, and execute one step before exiting. The step compiles when `train.jit` is enabled. When `debug.nan_check` is enabled, success also requires finite loss, gradient norm, learning rate, post-update parameters, and optimizer state. W&B logging is skipped in dry-run mode.
 
-`config_resolved.json` includes a small `derived` section; for example `derived.optim.decay_steps_effective` records the effective LR schedule horizon.
+`config_resolved.json` includes a small `derived` section. `derived.optim.decay_steps_effective` records the effective LR schedule horizon, and `derived.megalodon_jax` records the installed distribution version plus PEP 610 source identity when available.
 
 ## Metrics
 

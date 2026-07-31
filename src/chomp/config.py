@@ -123,9 +123,9 @@ class ModelConfig:
     use_checkpoint: bool = False
     output_size: int = -1
     # Segmented CEMA path selection for strict packed training (megalodon-jax
-    # >= 0.2.1). True = parallel associative scan (fast, higher peak memory);
-    # False = sequential lax.scan fallback (O(1) memory). Ignored unless
-    # segment_ids reach the model (bin/multipack + packing_strict_segments).
+    # >= 0.2.2). True = parallel associative scan; false = sequential scan
+    # with a compact forward carry. Compiled backward peak memory must be
+    # measured. Ignored unless segment_ids reach the model.
     use_associative_segment_scan: bool = True
 
     # Dtype policy (strings so YAML is clean; converted at runtime).

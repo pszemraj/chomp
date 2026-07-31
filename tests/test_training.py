@@ -21,10 +21,12 @@ import pytest
 from _pytest.logging import LogCaptureFixture
 
 from chomp.ckpt import (
+    CHECKPOINT_META_SCHEMA_VERSION,
     CheckpointMeta,
     build_meta,
     default_ckpt_dir,
     make_manager,
+    megalodon_jax_identity,
     restore_at_step,
     restore_params_only,
     save,
@@ -137,6 +139,83 @@ def _checkpoint_record(cfg: Config, *, step: int = 0, tokens_seen: int = 0) -> C
         data_fingerprint=data_fingerprint(cfg),
         tokens_seen=tokens_seen,
     )
+
+
+@pytest.mark.parametrize(
+    ("direct_url", "expected_direct_url"),
+    [
+        (None, None),
+        (
+            {
+                "url": "https://github.com/example/megalodon-jax.git",
+                "vcs_info": {
+                    "vcs": "git",
+                    "requested_revision": "correct-loss-sums",
+                    "commit_id": "a" * 40,
+                },
+            },
+            {
+                "url": "https://github.com/example/megalodon-jax.git",
+                "vcs": "git",
+                "requested_revision": "correct-loss-sums",
+                "commit_id": "a" * 40,
+            },
+        ),
+    ],
+    ids=["pypi", "vcs"],
+)
+def test_megalodon_jax_identity_reads_distribution_and_pep610(
+    monkeypatch: pytest.MonkeyPatch,
+    direct_url: dict[str, Any] | None,
+    expected_direct_url: dict[str, Any] | None,
+) -> None:
+    """Distribution identity includes exact version and available PEP 610 VCS fields.
+
+    :param pytest.MonkeyPatch monkeypatch: Importlib metadata patch fixture.
+    :param dict[str, Any] | None direct_url: Simulated PEP 610 payload.
+    :param dict[str, Any] | None expected_direct_url: Expected normalized source fields.
+    """
+
+    class _Distribution:
+        """Minimal installed-distribution metadata stub."""
+
+        version = "0.2.2"
+
+        def read_text(self, filename: str) -> str | None:
+            """Return the simulated direct URL metadata.
+
+            :param str filename: Requested distribution metadata filename.
+            :return str | None: Serialized PEP 610 payload when configured.
+            """
+            assert filename == "direct_url.json"
+            return None if direct_url is None else json.dumps(direct_url)
+
+    def _distribution(name: str) -> _Distribution:
+        """Return the simulated Megalodon-JAX distribution.
+
+        :param str name: Requested distribution name.
+        :return _Distribution: Metadata stub.
+        """
+        assert name == "megalodon-jax"
+        return _Distribution()
+
+    monkeypatch.setattr("chomp.ckpt.metadata.distribution", _distribution)
+    identity = megalodon_jax_identity()
+
+    assert identity["distribution"] == "megalodon-jax"
+    assert identity["version"] == "0.2.2"
+    if expected_direct_url is None:
+        assert "direct_url" not in identity
+    else:
+        assert identity["direct_url"] == expected_direct_url
+
+
+def test_checkpoint_meta_records_schema_and_backend_identity(tmp_path: Path) -> None:
+    """Every new checkpoint record carries its schema and installed backend identity."""
+    meta = _checkpoint_record(_base_cfg(tmp_path / "run_identity")).to_dict()
+
+    assert meta["schema_version"] == CHECKPOINT_META_SCHEMA_VERSION
+    assert meta["megalodon_jax"] == megalodon_jax_identity()
 
 
 def _make_state() -> TrainState:
@@ -1379,6 +1458,7 @@ def test_dry_run_compiles_single_step(tmp_path: Path, monkeypatch: pytest.Monkey
 
     data = json.loads((run_dir / "config_resolved.json").read_text())
     assert data["derived"]["optim"]["decay_steps_effective"] == cfg.train.steps
+    assert data["derived"]["megalodon_jax"] == megalodon_jax_identity()
     assert len(close_calls) == 1
 
 
@@ -1724,6 +1804,139 @@ def test_strict_packed_guard_raises_when_backend_unsupported(
     monkeypatch.setattr("chomp.train.supports_packed_segments", lambda params, static: False)
     with pytest.raises(RuntimeError, match="Strict segment isolation"):
         run(cfg, config_path=None, resume="none")
+
+
+def _megalodon_resume_cfg(
+    run_dir: Path,
+    *,
+    packing_mode: str = "sequential",
+    packing_strict_segments: bool = True,
+    resume_compat: str = "strict",
+) -> Config:
+    """Build a tiny Megalodon config for resume-identity tests.
+
+    :param Path run_dir: Run directory recorded in the config.
+    :param str packing_mode: Active data packing mode.
+    :param bool packing_strict_segments: Whether packed segment resets execute.
+    :param str resume_compat: Resume comparison policy.
+    :return Config: Tiny Megalodon resume configuration.
+    """
+    cfg = _base_cfg(run_dir)
+    return replace(
+        cfg,
+        model=make_tiny_megalodon_model(vocab_size=256, chunk_size=8),
+        data=replace(
+            cfg.data,
+            packing_mode=packing_mode,
+            packing_strict_segments=packing_strict_segments,
+        ),
+        checkpoint=replace(cfg.checkpoint, resume_compat=resume_compat),
+    )
+
+
+@pytest.mark.parametrize("prior_identity", ["missing", "flat", "changed"])
+def test_megalodon_strict_resume_requires_structured_backend_identity(
+    tmp_path: Path,
+    prior_identity: str,
+    caplog: LogCaptureFixture,
+) -> None:
+    """Missing, legacy-flat, or changed backend identity is never proven equal.
+
+    :param Path tmp_path: Temporary run-directory root.
+    :param str prior_identity: Checkpoint identity shape to test.
+    :param LogCaptureFixture caplog: Captured warn-mode compatibility log.
+    """
+    strict_cfg = _megalodon_resume_cfg(tmp_path / f"run_backend_{prior_identity}")
+    meta = _checkpoint_record(strict_cfg).to_dict()
+    if prior_identity == "missing":
+        meta.pop("megalodon_jax")
+    elif prior_identity == "flat":
+        meta["megalodon_jax"] = "0.2.2"
+    else:
+        meta["megalodon_jax"] = {
+            **meta["megalodon_jax"],
+            "version": "0.2.1",
+        }
+
+    with pytest.raises(RuntimeError, match="megalodon_jax"):
+        check_resume_compat(strict_cfg, meta)
+
+    warn_cfg = replace(
+        strict_cfg,
+        checkpoint=replace(strict_cfg.checkpoint, resume_compat="warn"),
+    )
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+        check_resume_compat(warn_cfg, meta)
+    assert "megalodon_jax mismatch" in caplog.text
+
+
+def test_dummy_resume_does_not_require_megalodon_identity(tmp_path: Path) -> None:
+    """Backend identity is enforced only when Megalodon will execute."""
+    cfg = _base_cfg(tmp_path / "run_dummy_backend_identity")
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, resume_compat="strict"))
+    meta = _checkpoint_record(cfg).to_dict()
+    meta.pop("megalodon_jax")
+
+    check_resume_compat(cfg, meta)
+
+
+def test_segment_scan_resume_semantics_are_contextual(
+    tmp_path: Path,
+    caplog: LogCaptureFixture,
+) -> None:
+    """Segmented CEMA implementation matters exactly when reset execution is active.
+
+    :param Path tmp_path: Temporary run-directory root.
+    :param LogCaptureFixture caplog: Captured warn-mode compatibility log.
+    """
+    for mode in ("bin", "multipack"):
+        strict_cfg = _megalodon_resume_cfg(
+            tmp_path / f"run_scan_{mode}",
+            packing_mode=mode,
+        )
+        meta = _checkpoint_record(strict_cfg).to_dict()
+        drifted = replace(
+            strict_cfg,
+            model=replace(
+                strict_cfg.model,
+                use_associative_segment_scan=not strict_cfg.model.use_associative_segment_scan,
+            ),
+        )
+        with pytest.raises(RuntimeError, match="use_associative_segment_scan"):
+            check_resume_compat(drifted, meta)
+
+        missing = _checkpoint_record(strict_cfg).to_dict()
+        del missing["config"]["model"]["use_associative_segment_scan"]
+        with pytest.raises(RuntimeError, match="use_associative_segment_scan"):
+            check_resume_compat(strict_cfg, missing)
+
+        warn_cfg = replace(
+            drifted,
+            checkpoint=replace(drifted.checkpoint, resume_compat="warn"),
+        )
+        with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+            check_resume_compat(warn_cfg, meta)
+        assert "use_associative_segment_scan" in caplog.text
+        caplog.clear()
+
+    inert_configs = (
+        _megalodon_resume_cfg(tmp_path / "run_scan_sequential"),
+        _megalodon_resume_cfg(
+            tmp_path / "run_scan_nonstrict",
+            packing_mode="bin",
+            packing_strict_segments=False,
+        ),
+    )
+    for cfg in inert_configs:
+        meta = _checkpoint_record(cfg).to_dict()
+        drifted = replace(
+            cfg,
+            model=replace(
+                cfg.model,
+                use_associative_segment_scan=not cfg.model.use_associative_segment_scan,
+            ),
+        )
+        check_resume_compat(drifted, meta)
 
 
 def test_resume_compat_warns_for_multipack_knob_changes(
