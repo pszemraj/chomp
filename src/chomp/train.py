@@ -520,6 +520,19 @@ def _restore_eval_status(
     return {key: stored[key] for key in _EMPTY_EVAL_STATUS}
 
 
+def _has_pending_eval_failure(eval_status: dict[str, Any]) -> bool:
+    """Return whether a fatal evaluation failure still needs a successful retry.
+
+    :param dict[str, Any] eval_status: Restored evaluation status.
+    :return bool: True when the latest evaluation attempt failed and evaluation remains enabled.
+    """
+    if eval_status["eval_disabled"]:
+        return False
+    failure_step = eval_status["eval_last_failure_step"]
+    success_step = eval_status["eval_last_success_step"]
+    return failure_step is not None and (success_step is None or failure_step > success_step)
+
+
 def _maybe_init_wandb(cfg: Config, *, run_dir: Path, dry_run: bool) -> Any | None:
     """Initialize W&B if enabled, otherwise return None.
 
@@ -1765,6 +1778,37 @@ def _run_impl(
             "eval_tokens": int(total_tokens_host),
         }
 
+    def _run_eval_with_policy(*, step: int) -> dict[str, Any]:
+        """Run evaluation and apply the configured persistent failure policy.
+
+        :param int step: Train-state step being evaluated.
+        :return dict[str, Any]: Successful evaluation metrics, or an empty row when disabled.
+        """
+        nonlocal eval_step
+        try:
+            eval_row = _run_eval(state.params)
+        except Exception as exc:
+            eval_status.update(
+                {
+                    "eval_failure_count": int(eval_status["eval_failure_count"]) + 1,
+                    "eval_last_failure_step": int(step),
+                    "eval_last_failure_type": type(exc).__name__,
+                }
+            )
+            if cfg.train.eval_failure_policy == "fatal":
+                raise
+            logger.warning(
+                "Evaluation failed at step %d; disabling evaluation: %s",
+                step,
+                exc,
+            )
+            eval_status["eval_disabled"] = True
+            eval_step = None
+            return {}
+
+        eval_status["eval_last_success_step"] = int(step)
+        return eval_row
+
     def _run_generation_sample(step: int, params: Any) -> None:
         """Sample a prompt and run generation.
 
@@ -1832,6 +1876,28 @@ def _run_impl(
     try:
         with MetricsWriter(metrics_path) as mw:
             try:
+                if _has_pending_eval_failure(eval_status):
+                    if eval_step is None:
+                        raise RuntimeError(
+                            "Checkpoint records an unresolved fatal evaluation failure at step "
+                            f"{eval_status['eval_last_failure_step']}, but evaluation is disabled "
+                            "by the current configuration. Re-enable evaluation and resume again."
+                        )
+                    eval_row = _run_eval_with_policy(step=int(start_step))
+                    row = {
+                        "step": int(start_step),
+                        "tokens_seen": int(tokens_seen_count),
+                        "wall_time_s": time.perf_counter() - t0,
+                    }
+                    row.update(eval_row)
+                    row.update(eval_status)
+                    mw.write(_project_metrics(row, drop=_METRICS_FILE_DROP))
+                    if wandb_run is not None:
+                        wandb_run.log(
+                            _project_metrics(row, drop=_WANDB_DROP),
+                            step=int(start_step),
+                        )
+
                 for _ in tqdm(range(start_step, target_steps), desc="train", dynamic_ncols=True):
                     if _record_stop_if_requested(mw):
                         break
@@ -1931,28 +1997,7 @@ def _run_impl(
 
                     eval_row: dict[str, Any] = {}
                     if should_eval:
-                        try:
-                            eval_row = _run_eval(state.params)
-                        except Exception as exc:
-                            eval_status.update(
-                                {
-                                    "eval_failure_count": int(eval_status["eval_failure_count"])
-                                    + 1,
-                                    "eval_last_failure_step": int(step_i),
-                                    "eval_last_failure_type": type(exc).__name__,
-                                }
-                            )
-                            if cfg.train.eval_failure_policy == "fatal":
-                                raise
-                            logger.warning(
-                                "Evaluation failed at step %d; disabling evaluation: %s",
-                                step_i,
-                                exc,
-                            )
-                            eval_status["eval_disabled"] = True
-                            eval_step = None
-                        else:
-                            eval_status["eval_last_success_step"] = int(step_i)
+                        eval_row = _run_eval_with_policy(step=step_i)
 
                     # Save after scheduled evaluation so the checkpoint carries
                     # the failure-policy state produced at this step.

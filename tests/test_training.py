@@ -1849,6 +1849,79 @@ def test_eval_runtime_failure_is_fatal_by_default(
     assert crash["eval_last_success_step"] is None
 
 
+def test_fatal_eval_failure_must_succeed_before_resume_can_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checkpointed fatal eval failure remains owed on same-target resume.
+
+    :param Path tmp_path: Temporary directory for run artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Eval failure injection fixture.
+    """
+    import chomp.train as train_mod
+
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_eval_fatal_resume")
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, max_eval_samples=2),
+        train=replace(cfg.train, steps=1, eval_every=1),
+    )
+    real_build_eval_iterator = train_mod.build_eval_iterator
+    real_make_train_step = train_mod.make_train_step
+    eval_attempts = 0
+    events: list[str] = []
+
+    def _fail_first_eval(config: Config, *, tokens: list[list[int]]) -> Iterator[Batch]:
+        """Fail the original attempt and serve the identical resumed evaluation."""
+        nonlocal eval_attempts
+        eval_attempts += 1
+        events.append("eval")
+        if eval_attempts == 1:
+            raise RuntimeError("injected fatal eval failure")
+        yield from real_build_eval_iterator(config, tokens=tokens)
+
+    def _tracking_make_train_step(cfg: Config, **kwargs: Any) -> Any:
+        """Record optimizer calls so resume ordering is observable."""
+        step_fn = real_make_train_step(cfg, **kwargs)
+
+        def wrapped(state: TrainState, batch: Batch) -> tuple[TrainState, dict[str, Any]]:
+            events.append("train")
+            return step_fn(state, batch)
+
+        return wrapped
+
+    monkeypatch.setattr(train_mod, "build_eval_iterator", _fail_first_eval)
+    monkeypatch.setattr(train_mod, "make_train_step", _tracking_make_train_step)
+
+    with pytest.raises(RuntimeError, match="injected fatal eval failure"):
+        run(cfg, config_path=None, resume="none", dry_run=False)
+
+    run_dir = Path(cfg.logging.run_dir or "")
+    assert _checkpoint_steps(run_dir) == {1}
+
+    # The selected checkpoint is already at the target. Returning without
+    # retrying here would silently turn the failed logical run into success.
+    events.clear()
+    run(cfg, config_path=None, resume="latest", dry_run=False)
+
+    assert eval_attempts == 2
+    assert events == ["eval"]
+    recovered = read_jsonl(run_dir / cfg.logging.metrics_file)[-1]
+    assert recovered["step"] == 1
+    assert recovered["eval_loss"] > 0.0
+    assert recovered["eval_failure_count"] == 1
+    assert recovered["eval_last_failure_step"] == 1
+    assert recovered["eval_last_success_step"] == 1
+
+    # The checkpoint still conservatively records the owed attempt, so an
+    # extended resume repeats eval before consuming its next training batch.
+    events.clear()
+    extended = replace(cfg, train=replace(cfg.train, steps=2))
+    run(extended, config_path=None, resume="latest", dry_run=False)
+    assert eval_attempts == 3
+    assert events == ["eval", "train"]
+
+
 @pytest.mark.parametrize(
     ("field", "match"),
     [
@@ -2308,6 +2381,105 @@ def test_segment_scan_resume_semantics_are_contextual(
         check_resume_compat(drifted, meta)
 
 
+@pytest.mark.parametrize(
+    ("field", "changed_value", "deterministic"),
+    [("loss_chunk_size", 4, True), ("use_checkpoint", True, False)],
+)
+def test_megalodon_runtime_resume_semantics_are_active(
+    tmp_path: Path,
+    caplog: LogCaptureFixture,
+    field: str,
+    changed_value: Any,
+    deterministic: bool,
+) -> None:
+    """Active Megalodon runtime choices follow strict/warn resume policy.
+
+    :param Path tmp_path: Temporary run-directory root.
+    :param LogCaptureFixture caplog: Captured warn-mode compatibility log.
+    :param str field: Megalodon runtime field to change.
+    :param Any changed_value: Value that differs from the checkpoint config.
+    :param bool deterministic: Effective deterministic execution setting.
+    """
+    strict_cfg = _megalodon_resume_cfg(tmp_path / f"run_runtime_{field}")
+    strict_cfg = replace(
+        strict_cfg,
+        train=replace(strict_cfg.train, deterministic=deterministic),
+    )
+    meta = _checkpoint_record(strict_cfg).to_dict()
+    drifted = replace(
+        strict_cfg,
+        model=replace(strict_cfg.model, **{field: changed_value}),
+    )
+
+    with pytest.raises(RuntimeError, match=field):
+        check_resume_compat(drifted, meta)
+
+    missing = _checkpoint_record(strict_cfg).to_dict()
+    del missing["config"]["model"][field]
+    with pytest.raises(RuntimeError, match=field):
+        check_resume_compat(strict_cfg, missing)
+
+    warn_cfg = replace(
+        drifted,
+        checkpoint=replace(drifted.checkpoint, resume_compat="warn"),
+    )
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+        check_resume_compat(warn_cfg, meta)
+    assert field in caplog.text
+
+
+def test_use_checkpoint_resume_semantics_are_inert_when_disabled(
+    tmp_path: Path,
+) -> None:
+    """Rematerialization choice is inert when deterministic execution disables it.
+
+    :param Path tmp_path: Temporary run-directory root.
+    """
+    cfg = _megalodon_resume_cfg(tmp_path / "run_checkpoint_inert")
+    cfg = replace(cfg, train=replace(cfg.train, deterministic=True))
+    meta = _checkpoint_record(cfg).to_dict()
+    drifted = replace(
+        cfg,
+        model=replace(cfg.model, use_checkpoint=not cfg.model.use_checkpoint),
+    )
+    missing = _checkpoint_record(cfg).to_dict()
+    del missing["config"]["model"]["use_checkpoint"]
+
+    check_resume_compat(drifted, meta)
+    check_resume_compat(cfg, missing)
+
+
+def test_eval_failure_policy_follows_resume_compatibility(
+    tmp_path: Path,
+    caplog: LogCaptureFixture,
+) -> None:
+    """Evaluation failure policy changes reject in strict and warn otherwise.
+
+    :param Path tmp_path: Temporary run-directory root.
+    :param LogCaptureFixture caplog: Captured warn-mode compatibility log.
+    """
+    strict_cfg = replace(
+        _base_cfg(tmp_path / "run_eval_failure_policy"),
+        checkpoint=replace(CheckpointConfig(), resume_compat="strict"),
+    )
+    meta = _checkpoint_record(strict_cfg).to_dict()
+    drifted = replace(
+        strict_cfg,
+        train=replace(strict_cfg.train, eval_failure_policy="disable"),
+    )
+
+    with pytest.raises(RuntimeError, match="train.eval_failure_policy"):
+        check_resume_compat(drifted, meta)
+
+    warn_cfg = replace(
+        drifted,
+        checkpoint=replace(drifted.checkpoint, resume_compat="warn"),
+    )
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+        check_resume_compat(warn_cfg, meta)
+    assert "train.eval_failure_policy mismatch" in caplog.text
+
+
 def test_resume_compat_warns_for_multipack_knob_changes(
     tmp_path: Path, caplog: LogCaptureFixture
 ) -> None:
@@ -2606,6 +2778,7 @@ def test_resume_compat_ignores_inert_fields(tmp_path: Path, caplog: LogCaptureFi
         (("config", "optim", "lr"), "optim.lr"),
         (("config", "optim", "adam", "b1"), "optim.adam.b1"),
         (("config", "train", "deterministic"), "train.deterministic_effective"),
+        (("config", "train", "eval_failure_policy"), "train.eval_failure_policy"),
         (("config", "train", "steps"), "train.steps"),
         (("config", "optim", "decay_steps"), "optim.decay_steps"),
     ],
@@ -2618,6 +2791,7 @@ def test_resume_compat_ignores_inert_fields(tmp_path: Path, caplog: LogCaptureFi
         "optimizer",
         "adam",
         "determinism",
+        "eval_failure_policy",
         "steps",
         "schedule",
     ],

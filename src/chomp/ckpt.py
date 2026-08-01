@@ -625,11 +625,18 @@ def check_resume_compat(
     train_cur = cur_cfg.get("train") or {}
     # Compare the executed dropout behavior: null and true are equivalent
     # when all active dropout rates are zero.
+    current_deterministic = derived_deterministic(cfg)
     previous_deterministic = _effective_deterministic_from_mapping(meta_cfg)
     _cmp(
         "train.deterministic_effective",
-        derived_deterministic(cfg),
+        current_deterministic,
         _MISSING if previous_deterministic is None else previous_deterministic,
+        severity=semantic_severity,
+    )
+    _cmp(
+        "train.eval_failure_policy",
+        train_cur.get("eval_failure_policy", _MISSING),
+        train_prev.get("eval_failure_policy", _MISSING),
         severity=semantic_severity,
     )
     model_prev = meta_cfg.get("model") or {}
@@ -647,14 +654,15 @@ def check_resume_compat(
         }
         model_structural = {"backend", "vocab_size", "d_model"}
     else:
-        # Dummy-only width and fresh initialization/checkpoint implementation
-        # are inert after parameter restore.
+        # Dummy-only width and fresh initialization are inert after parameter
+        # restore. Upstream rematerialization is also inert when effective
+        # deterministic execution disables it.
         model_active -= {
             "d_model",
             "init_mode",
-            "use_checkpoint",
-            "loss_chunk_size",
         }
+        if current_deterministic:
+            model_active.discard("use_checkpoint")
         if not strict_packed_segments(cfg):
             model_active.discard("use_associative_segment_scan")
         model_structural = {

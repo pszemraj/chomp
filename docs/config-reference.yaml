@@ -96,7 +96,7 @@ model:
   # model.init_mode -- string; default: he; one of: gaussian | xavier | he | bert. Used only for fresh Megalodon initialization; restored parameters replace it, but the raw value remains a resume invariant. `he` is recommended.
   init_mode: "<gaussian | xavier | he | bert>"
 
-  # model.use_checkpoint -- bool; default: false. Trades compute for activation memory. Effective train.deterministic=true disables it, so the full recipes set deterministic=false even with zero dropout.
+  # model.use_checkpoint -- bool; default: false. Trades compute for activation memory. Effective train.deterministic=true disables it, making the value resume-inert in that context; otherwise it is active resume semantics. The full recipes set deterministic=false even with zero dropout.
   use_checkpoint: "<bool>"
 
   # model.output_size -- int; default: -1, computed as effective vocab_size; otherwise > 0. With share_emb=true it must be -1 or model.vocab_size; an untied Megalodon head must be at least model.vocab_size. Keep -1 for causal-LM training.
@@ -117,7 +117,7 @@ model:
   # model.attention_softmax_dtype -- string; default: float32; one of: float32 | bfloat16. Keep FP32 for numerical stability; BF16 is an explicit lower-precision reduction.
   attention_softmax_dtype: "<float32 | bfloat16>"
 
-  # model.loss_chunk_size -- int | null; default: null; null or > 0; Megalodon-only. Megalodon-JAX 0.2.2 always evaluates loss log-softmax and scalar reductions in FP32. A positive static value chunks vocabulary projection during train/eval loss, reducing peak memory without changing loss math but rematerializing work in backward.
+  # model.loss_chunk_size -- int | null; default: null; null or > 0; Megalodon-only and active resume semantics. Megalodon-JAX 0.2.2 always evaluates loss log-softmax and scalar reductions in FP32. A positive static value chunks vocabulary projection during train/eval loss and reduces peak memory, but BF16 projection partitioning can change gradients at BF16 scale and rematerializes work in backward.
   # Full-logit storage is about batch_size * seq_len * vocab_size * 4 bytes per microbatch. For memory-bound 32K-vocabulary long-context runs, start at 256 and choose the largest value that fits; null is fastest.
   loss_chunk_size: "<int | null>"
 
@@ -268,7 +268,7 @@ train:
   # train.eval_every -- int; default: 2500; >= 0; zero disables scheduled evaluation. Evaluation also requires data.max_eval_samples > 0 and usable eval data; cadence may change on resume.
   eval_every: "<int>"
 
-  # train.eval_failure_policy -- string; default: fatal; one of: fatal | disable. Applies to evaluation-data initialization and scheduled passes. Fatal fails the run; disable stops future evaluation and persists failure/last-success status in later metrics and telemetry.
+  # train.eval_failure_policy -- string; default: fatal; one of: fatal | disable. Applies to evaluation-data initialization and scheduled passes. Fatal fails the run and an aligned failure checkpoint must pass the same-step evaluation before resumed training or success; disable stops future evaluation and persists failure/last-success status in later metrics and telemetry. Changes follow checkpoint.resume_compat warn/strict semantics.
   eval_failure_policy: "<fatal | disable>"
 
   # train.generate_every -- int; default: 5000; >= 0; zero disables. Periodic sampling runs only for non-dry Megalodon training; prompt/setup failures disable sampling, and generation RNGs restart on resume.
