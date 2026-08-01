@@ -1709,6 +1709,10 @@ def test_resumed_eval_setup_failure_records_and_persists_checkpoint_step(
         raise RuntimeError("broken validation split after resume")
 
     monkeypatch.setattr("chomp.train.load_or_create_eval_tokens", _fail_eval_setup)
+    run(cfg, config_path=None, resume="latest", dry_run=False)
+    run(cfg, config_path=None, resume="latest", dry_run=False)
+    assert setup_calls == 0
+
     resumed = replace(cfg, train=replace(cfg.train, steps=2))
     run(resumed, config_path=None, resume="latest", dry_run=False)
     continued = replace(cfg, train=replace(cfg.train, steps=3))

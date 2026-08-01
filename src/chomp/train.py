@@ -399,11 +399,18 @@ def _setup_run_dir_and_tokenizer(
         resume_meta,
         resume_compat=cfg.checkpoint.resume_compat,
     )
+    resume_has_no_work = resume_meta is not None and int(resume_meta["step"]) >= int(
+        cfg.train.steps
+    )
     if (
         dry_run
         or cfg.train.eval_every <= 0
         or cfg.data.max_eval_samples <= 0
         or eval_status["eval_disabled"]
+        # A no-op resume has no scheduled evaluation to initialize. The one
+        # exception is a pending fatal failure recorded by the selected
+        # checkpoint, which must be retried before returning success.
+        or (resume_has_no_work and not _has_pending_eval_failure(eval_status))
     ):
         eval_tokens = []
     else:
