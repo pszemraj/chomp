@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import logging
@@ -10,7 +11,6 @@ import sys
 import weakref
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -1115,42 +1115,84 @@ def test_hf_schema_errors_fail(
 def test_hf_close_orders_two_phase_remote_parquet_shutdown(
     patch_hf_load_dataset: Callable[..., dict[str, int]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Flagged sources receive one grace before and one after reference release."""
+    """Flagged sources collect released owners between the two shutdown graces."""
     from datasets import config as datasets_config
 
     record: dict[str, Any] = {}
     patch_hf_load_dataset([{"text": "alpha"}], record=record)
     stream = HFStreamingTextStream(_hf_stream_spec())
     next(stream)
-    stream._ds._ex_iterable = SimpleNamespace(sleep_on_threads_shutdown=True)
+
+    class _ArrowGraph:
+        """Weak-referenceable stand-in for a cyclic Datasets/Arrow graph."""
+
+        sleep_on_threads_shutdown = True
+
+    arrow_graph = _ArrowGraph()
+    arrow_graph.cycle = arrow_graph
+    stream._ds._ex_iterable = arrow_graph
     dataset_ref = weakref.ref(stream._ds)
     iterator_ref = weakref.ref(stream._it)
-    sleeps: list[tuple[float, int, bool, bool]] = []
+    arrow_ref = weakref.ref(arrow_graph)
+    del arrow_graph
+    events: list[tuple[str, float | None, int, bool, bool, bool]] = []
+    real_collect = gc.collect
 
     def _record_sleep(duration: float) -> None:
         """Record close count and source ownership at each requested grace."""
-        sleeps.append(
+        events.append(
             (
+                "sleep",
                 duration,
                 int(record.get("close_calls", 0)),
                 iterator_ref() is None,
                 dataset_ref() is None,
+                arrow_ref() is None,
             )
         )
 
+    def _record_collect() -> int:
+        """Record that cyclic collection runs only after source release."""
+        events.append(
+            (
+                "collect-before",
+                None,
+                int(record.get("close_calls", 0)),
+                iterator_ref() is None,
+                dataset_ref() is None,
+                arrow_ref() is None,
+            )
+        )
+        collected = real_collect()
+        events.append(
+            (
+                "collect-after",
+                None,
+                int(record.get("close_calls", 0)),
+                iterator_ref() is None,
+                dataset_ref() is None,
+                arrow_ref() is None,
+            )
+        )
+        return collected
+
     monkeypatch.setattr("chomp.data.hf.time.sleep", _record_sleep)
+    monkeypatch.setattr("chomp.data.hf.gc.collect", _record_collect)
 
     stream.close()
     stream.close()
 
     assert record["close_calls"] == 1
     grace = datasets_config.SLEEP_TIME_ON_THREADS_SHUTDOWN
-    assert sleeps == [
-        (grace, 1, False, False),
-        (grace, 1, True, True),
+    assert events == [
+        ("sleep", grace, 1, False, False, False),
+        ("collect-before", None, 1, True, True, False),
+        ("collect-after", None, 1, True, True, True),
+        ("sleep", grace, 1, True, True, True),
     ]
     assert dataset_ref() is None
     assert iterator_ref() is None
+    assert arrow_ref() is None
     with pytest.raises(ValueError, match="closed HF streaming iterator"):
         next(stream)
 

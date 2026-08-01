@@ -44,8 +44,9 @@ dependencies = [
   "grain==0.2.15",
   # 5.0.0 is the first release with the remote-Parquet thread-shutdown
   # workaround for apache/arrow#45214. Chomp also releases single-source
-  # Arrow references after the advertised grace, then repeats that bounded
-  # wait for native destructors initiated by the release.
+  # Arrow references after the advertised grace, forces collection as the
+  # upstream workaround does, then repeats that bounded wait for native
+  # destructors initiated by the release.
   "datasets==5.0.0",
   "transformers>=4.57,<5",
   # CLI
