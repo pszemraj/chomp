@@ -238,6 +238,11 @@ class HFStreamingTextStream:
         # interpreter finalization even after the Grain chain has been closed.
         del self._it
         del self._ds
+        if wait_for_arrow:
+            # Releasing the final Python owners can initiate additional native
+            # destruction. Give those callbacks the same bounded grace before
+            # the process is allowed to enter interpreter finalization.
+            time.sleep(config.SLEEP_TIME_ON_THREADS_SHUTDOWN)
         self._source_started = False
         self._closed = True
 

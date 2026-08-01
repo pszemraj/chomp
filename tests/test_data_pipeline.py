@@ -1112,10 +1112,10 @@ def test_hf_schema_errors_fail(
         next(stream)
 
 
-def test_hf_close_honors_remote_parquet_shutdown_grace(
+def test_hf_close_orders_two_phase_remote_parquet_shutdown(
     patch_hf_load_dataset: Callable[..., dict[str, int]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Sources flagged by Datasets must receive its Arrow shutdown grace."""
+    """Flagged sources receive one grace before and one after reference release."""
     from datasets import config as datasets_config
 
     record: dict[str, Any] = {}
@@ -1125,14 +1125,30 @@ def test_hf_close_honors_remote_parquet_shutdown_grace(
     stream._ds._ex_iterable = SimpleNamespace(sleep_on_threads_shutdown=True)
     dataset_ref = weakref.ref(stream._ds)
     iterator_ref = weakref.ref(stream._it)
-    sleeps: list[float] = []
-    monkeypatch.setattr("chomp.data.hf.time.sleep", sleeps.append)
+    sleeps: list[tuple[float, int, bool, bool]] = []
+
+    def _record_sleep(duration: float) -> None:
+        """Record close count and source ownership at each requested grace."""
+        sleeps.append(
+            (
+                duration,
+                int(record.get("close_calls", 0)),
+                iterator_ref() is None,
+                dataset_ref() is None,
+            )
+        )
+
+    monkeypatch.setattr("chomp.data.hf.time.sleep", _record_sleep)
 
     stream.close()
     stream.close()
 
     assert record["close_calls"] == 1
-    assert sleeps == [datasets_config.SLEEP_TIME_ON_THREADS_SHUTDOWN]
+    grace = datasets_config.SLEEP_TIME_ON_THREADS_SHUTDOWN
+    assert sleeps == [
+        (grace, 1, False, False),
+        (grace, 1, True, True),
+    ]
     assert dataset_ref() is None
     assert iterator_ref() is None
     with pytest.raises(ValueError, match="closed HF streaming iterator"):
