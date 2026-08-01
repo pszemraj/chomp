@@ -14,7 +14,7 @@ The compiled `train_step`:
 
 Grad accumulation is **token-weighted** without reconstructing numerators from rounded means. Each backend returns an FP32 loss sum and exact integer valid-target count. Chomp differentiates and accumulates those sums in FP32, adds the integer counts, then divides the logical-batch loss and gradients once by the total count.
 
-Batch assembly computes the corresponding shifted valid-target count on the host and pairs it with the batch through prefetch/device transfer. The model-provided count is authoritative for loss and gradient normalization; the host count supports exact accounting and a consistency check. Every optimizer step synchronizes the compiled int32 counter and requires it to equal that logical batch's host count before treating the train state and iterator as aligned. Logging, evaluation, checkpoint, first-compile, and finite-check cadences synchronize the remaining metrics. At save and final boundaries, the finite check also covers the post-update parameters and optimizer state. Evaluation aggregates the same backend FP32 sums and integer counts on device and synchronizes once per pass.
+Batch assembly computes the corresponding shifted valid-target count on the host and pairs it with the batch through prefetch/device transfer. The model-provided count is authoritative for loss and gradient normalization; the host count supports exact accounting and a consistency check. Every optimizer step queues its compiled int32 counter without forcing a device barrier. At logging, evaluation, checkpoint, first-compile, and final boundaries, the trainer synchronizes and requires every queued logical-batch count to equal its paired host count. At save and final boundaries, the finite check also covers the post-update parameters and optimizer state. Evaluation aggregates the same backend FP32 sums and integer counts on device and synchronizes once per pass.
 
 Full packing diagnostics scan segment arrays only for batches whose global step will log or evaluate. Non-observable steps still compute the exact shifted loss-token count required for accounting, but skip the redundant Python-side diagnostic scan.
 
@@ -75,7 +75,7 @@ Metrics are written to `logging.metrics_file` on the first process-local trainin
 - `loss`
 - `grad_norm`
 - `lr`
-- `loss_tokens` (exact host count, checked against compiled `token_sum` at sync points)
+- `loss_tokens` (exact host count; every queued logical-batch count is checked against compiled `token_sum` at sync points)
 - `tokens_seen` (cumulative exact host count)
 - `step_time_s`, `data_wait_s` (per-step averages over the last sync interval)
 - `tokens_per_sec` (end-to-end throughput over the last sync interval)

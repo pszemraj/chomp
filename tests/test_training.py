@@ -1341,11 +1341,11 @@ def _shift_reported_loss_tokens(
     monkeypatch.setattr(train_mod, "make_train_step", _shifted_make)
 
 
-def test_loss_token_check_runs_between_metric_syncs(
+def test_loss_token_check_covers_each_step_between_syncs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An intermediate count mismatch fails before the next metric sync.
+    """Opposite intermediate count errors cannot cancel inside a sync interval.
 
     :param Path tmp_path: Temporary directory for run artifacts.
     :param pytest.MonkeyPatch monkeypatch: Device-count injection fixture.
@@ -1356,17 +1356,17 @@ def test_loss_token_check_runs_between_metric_syncs(
         train=replace(cfg.train, steps=4, log_every=4, eval_every=0),
         checkpoint=replace(cfg.checkpoint, enabled=False),
     )
-    _shift_reported_loss_tokens(monkeypatch, {2: 1})
+    _shift_reported_loss_tokens(monkeypatch, {2: 1, 3: -1})
 
     with pytest.raises(RuntimeError, match="loss-token count mismatch at step 2"):
         run(cfg, config_path=None, resume="none", dry_run=False)
 
 
-def test_loss_token_mismatch_prevents_final_checkpoint(
+def test_loss_token_check_drains_partial_interval_before_final_save(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A mismatched logical batch cannot become the final checkpoint.
+    """Finalization rejects an unchecked intermediate count and its checkpoint.
 
     :param Path tmp_path: Temporary directory for run artifacts.
     :param pytest.MonkeyPatch monkeypatch: Device-count injection fixture.
@@ -2114,8 +2114,27 @@ def test_training_crash_marks_wandb_failed_and_logs(
     assert "Training crashed" in log_text
 
 
-def test_tokens_seen_matches_host_counts_between_sync_points(tmp_path: Path) -> None:
-    """Host counts stay exact while intermediate optimizer steps remain asynchronous."""
+def test_tokens_seen_matches_host_counts_between_sync_points(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Host counts stay exact while intermediate optimizer steps remain asynchronous.
+
+    :param Path tmp_path: Temporary directory for run artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Sync-boundary recorder fixture.
+    """
+    import chomp.train as train_mod
+
+    real_sync = train_mod._sync_metrics_and_validate_loss_tokens
+    queued_step_groups: list[list[int]] = []
+
+    def _record_sync(metrics: dict[str, Any], checks: list[tuple[int, int, Any]]) -> dict[str, Any]:
+        """Record queued step groups before delegating to the real synchronization."""
+        if checks:
+            queued_step_groups.append([step for step, _, _ in checks])
+        return real_sync(metrics, checks)
+
+    monkeypatch.setattr(train_mod, "_sync_metrics_and_validate_loss_tokens", _record_sync)
     cfg = Config(
         model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
         data=DataConfig(
@@ -2168,6 +2187,7 @@ def test_tokens_seen_matches_host_counts_between_sync_points(tmp_path: Path) -> 
         expected_counts[0],
         sum(expected_counts),
     ]
+    assert queued_step_groups == [[1], [2, 3, 4]]
 
 
 @pytest.mark.parametrize("mode", ["bin", "multipack"])
