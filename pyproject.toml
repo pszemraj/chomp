@@ -42,9 +42,9 @@ dependencies = [
   # no-op, so any bump must re-verify the workaround and the full
   # interrupted-versus-continuous resume tests.
   "grain==0.2.15",
-  # 5.0.0 is the first release with the remote-Parquet thread-shutdown fix
-  # for apache/arrow#45214. Earlier releases can abort a successful run at
-  # interpreter exit after a partially consumed streaming shard.
+  # 5.0.0 is the first release with the remote-Parquet thread-shutdown
+  # workaround for apache/arrow#45214. Chomp also releases single-source
+  # Arrow references before applying the advertised shutdown grace.
   "datasets==5.0.0",
   "transformers>=4.57,<5",
   # CLI

@@ -232,6 +232,12 @@ class HFStreamingTextStream:
             from datasets import config
 
             time.sleep(config.SLEEP_TIME_ON_THREADS_SHUTDOWN)
+        # Release Arrow-backed objects after native readers receive their
+        # shutdown grace but while CPython is still fully alive. Async
+        # checkpoint machinery can otherwise retain this stream object until
+        # interpreter finalization even after the Grain chain has been closed.
+        del self._it
+        del self._ds
         self._source_started = False
         self._closed = True
 

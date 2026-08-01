@@ -7,6 +7,7 @@ import json
 import logging
 import subprocess
 import sys
+import weakref
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -1122,6 +1123,8 @@ def test_hf_close_honors_remote_parquet_shutdown_grace(
     stream = HFStreamingTextStream(_hf_stream_spec())
     next(stream)
     stream._ds._ex_iterable = SimpleNamespace(sleep_on_threads_shutdown=True)
+    dataset_ref = weakref.ref(stream._ds)
+    iterator_ref = weakref.ref(stream._it)
     sleeps: list[float] = []
     monkeypatch.setattr("chomp.data.hf.time.sleep", sleeps.append)
 
@@ -1130,6 +1133,8 @@ def test_hf_close_honors_remote_parquet_shutdown_grace(
 
     assert record["close_calls"] == 1
     assert sleeps == [datasets_config.SLEEP_TIME_ON_THREADS_SHUTDOWN]
+    assert dataset_ref() is None
+    assert iterator_ref() is None
     with pytest.raises(ValueError, match="closed HF streaming iterator"):
         next(stream)
 
