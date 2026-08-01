@@ -198,6 +198,30 @@ def _check_finite_metrics(metrics: dict[str, Any], *, step: int) -> None:
             raise RuntimeError(f"Non-finite {name} at step {step}: {value}")
 
 
+def _sync_metrics_and_validate_loss_tokens(
+    metrics: dict[str, Any],
+    checks: list[tuple[int, int, Any]],
+) -> dict[str, Any]:
+    """Synchronize metrics and validate every queued host/device target count.
+
+    :param dict[str, Any] metrics: Metrics from the latest completed train step.
+    :param list[tuple[int, int, Any]] checks: Step, host count, and device count records.
+    :raises RuntimeError: If any completed step has inconsistent target counts.
+    :return dict[str, Any]: Host copy of the latest metrics.
+    """
+    metrics_host, device_counts = jax.device_get(
+        (metrics, tuple(device_count for _, _, device_count in checks))
+    )
+    for (step, host_count, _), device_count in zip(checks, device_counts, strict=True):
+        device_count = int(device_count)
+        if device_count != host_count:
+            raise RuntimeError(
+                "Host/device loss-token count mismatch at step "
+                f"{step}: host={host_count}, device={device_count}"
+            )
+    return metrics_host
+
+
 def _tree_all_finite(tree: Any) -> jax.Array:
     """Reduce all inexact array leaves in a pytree to one device boolean.
 
@@ -1572,12 +1596,16 @@ def _run_impl(
                 batch = next(data_it)
             except StopIteration as exc:
                 raise RuntimeError("dry_run: data iterator exhausted before first batch") from exc
+            step_loss_tokens = data_it.get_loss_tokens()
             data_stats = data_it.get_stats()
             batch = jax.device_put(batch)
 
             t1 = time.perf_counter()
             state, metrics = train_step(state, batch)
-            metrics_host = jax.device_get(metrics)
+            metrics_host = _sync_metrics_and_validate_loss_tokens(
+                metrics,
+                [(1, step_loss_tokens, metrics.get("token_sum", -1))],
+            )
             t2 = time.perf_counter()
             step_time_s = t2 - t1
 
@@ -1799,6 +1827,7 @@ def _run_impl(
     sync_interval_tokens = 0
     sync_interval_steps = 0
     sync_interval_data_wait = 0.0
+    sync_interval_loss_token_checks: list[tuple[int, int, Any]] = []
 
     try:
         with MetricsWriter(metrics_path) as mw:
@@ -1855,6 +1884,9 @@ def _run_impl(
                         sync_interval_tokens += step_loss_tokens
                         sync_interval_steps += 1
                         sync_interval_data_wait += data_wait_s
+                        sync_interval_loss_token_checks.append(
+                            (step_i, step_loss_tokens, metrics.get("token_sum", -1))
+                        )
 
                     host_step = int(step_i)
                     data_state_aligned = True
@@ -1876,7 +1908,10 @@ def _run_impl(
                     tokens_per_sec = 0.0
 
                     if should_sync:
-                        metrics_host = jax.device_get(metrics)
+                        metrics_host = _sync_metrics_and_validate_loss_tokens(
+                            metrics,
+                            sync_interval_loss_token_checks,
+                        )
                         t2 = time.perf_counter()
                         sync_elapsed = t2 - sync_started
                         step_time_s = sync_elapsed / sync_interval_steps
@@ -1885,12 +1920,6 @@ def _run_impl(
                             t_compile = t2 - t1
                         if cfg.debug.nan_check:
                             _check_finite_metrics(metrics_host, step=step_i)
-                        device_loss_tokens = int(metrics_host.get("token_sum", -1))
-                        if device_loss_tokens != step_loss_tokens:
-                            raise RuntimeError(
-                                "Host/device loss-token count mismatch at step "
-                                f"{step_i}: host={step_loss_tokens}, device={device_loss_tokens}"
-                            )
                         tokens_per_sec = (
                             sync_interval_tokens / sync_elapsed if sync_elapsed > 0 else 0.0
                         )
@@ -1898,6 +1927,7 @@ def _run_impl(
                         sync_interval_tokens = 0
                         sync_interval_steps = 0
                         sync_interval_data_wait = 0.0
+                        sync_interval_loss_token_checks.clear()
 
                     eval_row: dict[str, Any] = {}
                     if should_eval:
@@ -2062,12 +2092,17 @@ def _run_impl(
         if (
             final_step is not None
             and final_step > start_step
-            and cfg.debug.nan_check
             and metrics is not None
+            and (cfg.debug.nan_check or sync_interval_loss_token_checks)
         ):
             try:
-                _check_finite_metrics(jax.device_get(metrics), step=final_step)
-                _check_finite_train_state(state, step=final_step)
+                metrics_host = _sync_metrics_and_validate_loss_tokens(
+                    metrics,
+                    sync_interval_loss_token_checks,
+                )
+                if cfg.debug.nan_check:
+                    _check_finite_metrics(metrics_host, step=final_step)
+                    _check_finite_train_state(state, step=final_step)
             except Exception as exc:
                 final_state_valid = False
                 if manager is not None:

@@ -1311,6 +1311,80 @@ def _poison_loss_at_step(monkeypatch: pytest.MonkeyPatch, poison_step: int) -> N
     monkeypatch.setattr("chomp.train.make_train_step", _poisoned_make)
 
 
+def _shift_reported_loss_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+    shifts: dict[int, int],
+) -> None:
+    """Shift selected device token-count metrics without changing the update.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch chomp.train.
+    :param dict[int, int] shifts: Per-step integer changes to reported device counts.
+    """
+    import chomp.train as train_mod
+
+    real_make = train_mod.make_train_step
+
+    def _shifted_make(cfg: Config, **kwargs: Any) -> Any:
+        step_fn = real_make(cfg, **kwargs)
+
+        def wrapped(state: TrainState, batch: Batch) -> tuple[TrainState, dict[str, Any]]:
+            new_state, metrics = step_fn(state, batch)
+            shift = jnp.zeros_like(metrics["token_sum"])
+            for step, amount in shifts.items():
+                shift = jnp.where(new_state.step == step, amount, shift)
+            metrics = dict(metrics)
+            metrics["token_sum"] = metrics["token_sum"] + shift
+            return new_state, metrics
+
+        return wrapped
+
+    monkeypatch.setattr(train_mod, "make_train_step", _shifted_make)
+
+
+def test_loss_token_check_covers_each_step_between_syncs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opposite intermediate count errors cannot cancel inside a sync interval.
+
+    :param Path tmp_path: Temporary directory for run artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Device-count injection fixture.
+    """
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_token_check_interval", decay_steps=4)
+    cfg = replace(
+        cfg,
+        train=replace(cfg.train, steps=4, log_every=4, eval_every=0),
+        checkpoint=replace(cfg.checkpoint, enabled=False),
+    )
+    _shift_reported_loss_tokens(monkeypatch, {2: 1, 3: -1})
+
+    with pytest.raises(RuntimeError, match="loss-token count mismatch at step 2"):
+        run(cfg, config_path=None, resume="none", dry_run=False)
+
+
+def test_loss_token_check_drains_partial_interval_before_final_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finalization rejects an unchecked intermediate count and its checkpoint.
+
+    :param Path tmp_path: Temporary directory for run artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Device-count injection fixture.
+    """
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_token_check_final", decay_steps=3)
+    cfg = replace(
+        cfg,
+        train=replace(cfg.train, steps=3, log_every=1000, eval_every=0),
+        checkpoint=replace(cfg.checkpoint, save_every=100),
+    )
+    _shift_reported_loss_tokens(monkeypatch, {2: 1})
+
+    with pytest.raises(RuntimeError, match="loss-token count mismatch at step 2"):
+        run(cfg, config_path=None, resume="none", dry_run=False)
+
+    assert _checkpoint_steps(Path(cfg.logging.run_dir or "")) == set()
+
+
 def _poison_state_at_step(monkeypatch: pytest.MonkeyPatch, *, poison_step: int, field: str) -> None:
     """Inject NaNs into post-update parameters or optimizer state.
 
