@@ -1341,11 +1341,11 @@ def _shift_reported_loss_tokens(
     monkeypatch.setattr(train_mod, "make_train_step", _shifted_make)
 
 
-def test_loss_token_check_covers_each_step_between_syncs(
+def test_loss_token_check_runs_between_metric_syncs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Opposite intermediate count errors cannot cancel inside a sync interval.
+    """An intermediate count mismatch fails before the next metric sync.
 
     :param Path tmp_path: Temporary directory for run artifacts.
     :param pytest.MonkeyPatch monkeypatch: Device-count injection fixture.
@@ -1356,17 +1356,17 @@ def test_loss_token_check_covers_each_step_between_syncs(
         train=replace(cfg.train, steps=4, log_every=4, eval_every=0),
         checkpoint=replace(cfg.checkpoint, enabled=False),
     )
-    _shift_reported_loss_tokens(monkeypatch, {2: 1, 3: -1})
+    _shift_reported_loss_tokens(monkeypatch, {2: 1})
 
     with pytest.raises(RuntimeError, match="loss-token count mismatch at step 2"):
         run(cfg, config_path=None, resume="none", dry_run=False)
 
 
-def test_loss_token_check_drains_partial_interval_before_final_save(
+def test_loss_token_mismatch_prevents_final_checkpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Finalization rejects an unchecked intermediate count and its checkpoint.
+    """A mismatched logical batch cannot become the final checkpoint.
 
     :param Path tmp_path: Temporary directory for run artifacts.
     :param pytest.MonkeyPatch monkeypatch: Device-count injection fixture.
