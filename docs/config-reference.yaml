@@ -93,7 +93,7 @@ model:
   # model.eos_token_id -- int; default: 2; 0 <= value < effective vocab_size. HF auto-special-token setup may replace it; byte EOS insertion also requires it below data.tokenizer.byte_offset.
   eos_token_id: "<int>"
 
-  # model.init_mode -- string; default: he; one of: gaussian | xavier | he | bert. Used only for fresh Megalodon initialization; restored parameters replace it, but the raw value remains a resume invariant. `he` is recommended.
+  # model.init_mode -- string; default: he; one of: gaussian | xavier | he | bert. Used only for fresh Megalodon initialization and resume-inert because restored parameters replace it. `he` is recommended.
   init_mode: "<gaussian | xavier | he | bert>"
 
   # model.use_checkpoint -- bool; default: false. Trades compute for activation memory. Effective train.deterministic=true disables it, making the value resume-inert in that context; otherwise it is active resume semantics. The full recipes set deterministic=false even with zero dropout.
