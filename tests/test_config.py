@@ -253,7 +253,12 @@ def test_config_reference_matches_config_fields() -> None:
     def _assert_matching_keys(
         documented: dict[str, object], defaults: dict[str, object], path: str = ""
     ) -> None:
-        """Assert that one documented config mapping matches its dataclass mapping."""
+        """Assert that one documented config mapping matches its dataclass mapping.
+
+        :param dict[str, object] documented: Config-reference mapping to inspect.
+        :param dict[str, object] defaults: Runtime default mapping to compare.
+        :param str path: Nested field path for assertion messages, defaults to "".
+        """
         assert set(documented) == set(defaults), path or "config"
         for key, default in defaults.items():
             if isinstance(default, dict):
