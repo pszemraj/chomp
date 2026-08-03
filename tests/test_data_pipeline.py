@@ -135,6 +135,23 @@ def test_tokenizer_manifest_records_local_execution_identity(
     assert checkpoint_identity == tokenizer_checkpoint_identity(manifest)
 
 
+def test_byte_tokenizer_manifest_excludes_chomp_version(tmp_path: Path) -> None:
+    """Byte-tokenizer identity should not change with the harness package version.
+
+    :param Path tmp_path: Pytest temporary directory.
+    """
+    cfg = Config(
+        data=replace(Config().data, tokenizer=TokenizerConfig(kind="byte")),
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    save_tokenizer_snapshot(run_dir, cfg, ByteTokenizer())
+    manifest = json.loads((run_dir / "tokenizer" / TOKENIZER_MANIFEST_FILENAME).read_text())
+
+    assert manifest["packages"] == {}
+
+
 def test_tokenizer_resume_rejects_snapshot_file_drift(
     tmp_path: Path,
     local_bert_tokenizer: Path,
@@ -150,6 +167,8 @@ def test_tokenizer_resume_rejects_snapshot_file_drift(
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     save_tokenizer_snapshot(run_dir, cfg, source_tok)
+    manifest_path = run_dir / "tokenizer" / TOKENIZER_MANIFEST_FILENAME
+    saved_manifest = manifest_path.read_text()
     (run_dir / "tokenizer" / "unexpected.txt").write_text("drift")
 
     with pytest.raises(RuntimeError, match="files"):
@@ -162,6 +181,7 @@ def test_tokenizer_resume_rejects_snapshot_file_drift(
     with caplog.at_level(logging.WARNING, logger="chomp.data.pipeline"):
         load_tokenizer_snapshot_for_resume(run_dir, warn_cfg)
     assert "Tokenizer identity mismatch in: files" in caplog.text
+    assert manifest_path.read_text() == saved_manifest
 
 
 def test_tokenizer_resume_requires_manifest(

@@ -480,6 +480,9 @@ def _tokenizer_package_versions(tok: Tokenizer) -> dict[str, str]:
     :param Tokenizer tok: Effective tokenizer wrapper.
     :return dict[str, str]: Distribution names mapped to installed versions.
     """
+    if isinstance(tok, ByteTokenizer):
+        return {}
+
     implementation = getattr(tok, "_tok", tok)
     module_roots = {type(implementation).__module__.partition(".")[0]}
     if isinstance(tok, HFTokenizer):
@@ -656,7 +659,8 @@ def load_tokenizer_snapshot_for_resume(
         if severity == "strict":
             raise RuntimeError(message)
         logger.warning("%s; continuing because checkpoint.resume_compat='warn'.", message)
-        _write_tokenizer_manifest(tok_dir, observed)
+        if not isinstance(expected, dict):
+            _write_tokenizer_manifest(tok_dir, observed)
 
     return tokenizer, tokenizer_checkpoint_identity(observed)
 
