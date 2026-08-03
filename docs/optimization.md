@@ -13,7 +13,7 @@ Related: [Config Reference](config-reference.yaml) (`optim.*`), [Training Loop](
 
 The model adapter classifies known model arrays for optimizer routing and weight decay. Unrecognized arrays use AdamW without weight decay.
 
-Megalodon-JAX 0.2.1 derives RoPE frequencies from static dimension/base values during the model call, so no rotary array appears in the model tree, optimizer state, or checkpoint. Trainable CEMA coefficients remain parameters.
+Megalodon-JAX 0.2.2 derives RoPE frequencies from static dimension/base values during the model call, so no rotary array appears in the model tree, optimizer state, or checkpoint. Trainable CEMA coefficients remain parameters.
 
 For `optim.name=muon`, the harness uses explicit parameter partitioning:
 
@@ -34,6 +34,8 @@ Muon also typically operates in a very different step-size regime than AdamW. In
 - Muon's effective learning rate is `optim.lr * optim.muon.lr_scale`.
 - Muon-specific scaling options (like `optim.muon.consistent_rms`) can materially change what `optim.muon.lr_scale` values are stable.
 - When `optim.muon.consistent_rms=null`, we skip Muon shape scaling (`scale_by_shape`) to preserve the earlier Muon-only behavior.
+
+The maintained pretrain recipes make the measured policy explicit: `optim.lr=3e-4`, `optim.muon.lr_scale=100`, and `optim.muon.consistent_rms=null`. The 500M/1B configs inherit this policy as a documented starting point, not as evidence from a scale-specific sweep.
 
 ## Muon sweep: 10k-step comparison
 

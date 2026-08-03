@@ -4,6 +4,12 @@ Training step behavior and metrics written to `metrics.jsonl`.
 
 Related: [Config Reference](config-reference.yaml), [Optimization and Optimizers](optimization.md), [Data Pipeline](data_pipeline.md), [Packing and Boundary Semantics](packing.md), [Checkpointing and Resume](checkpointing.md).
 
+## Maintained recipes
+
+Checked-in scenarios are separated by intent. [`configs/dev/`](../configs/dev/) holds a deterministic offline CPU smoke and a narrow DummyLM smoke for the real Hub/tokenizer/GPU I/O path. [`configs/pretrain/`](../configs/pretrain/) holds four Megalodon recipes with exact constructed counts of 113.85M, 187.99M, 513.67M, and 974.62M parameters at the authored vocabulary. Every pretrain recipe uses strict packed-segment resets, boundary-loss masking, FP32 parameters/accumulation/softmax, BF16 compute, fixed 512-token attention chunks, active rematerialization, Muon, fatal evaluation, and strict resume. The 500M/1B files reduce the microbatch to one and enable chunked loss projection; exact dry runs fit the 32 GB RTX 5090 used for development, but sustained training and a 24 GB fit remain unmeasured, so repeat the dry run on the target GPU.
+
+The configured maximum target budget is `steps * grad_accum * batch_size * (seq_len - 1)`; boundary, EOS, and padding masks reduce the realized `tokens_seen`. The maintained schedules provide at least roughly 20 maximum target positions per parameter, but that is a starting budget rather than a claim of compute optimality for a specific corpus or research objective.
+
 ## Train step contract
 
 The compiled `train_step`:

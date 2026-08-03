@@ -81,7 +81,7 @@ Checkpoint metadata schema 2 adds the tokenizer identity. Schema 3 also persists
 
 Checkpoint compatibility deliberately does not fingerprint source trees, dirty or untracked files, the rest of the package environment, devices, or XLA flags. Those remain external experiment provenance rather than saved-state alignment.
 
-`train.deterministic` is compared by its effective dropout behavior, so an inferred `null` and explicit `true` are resume-equivalent when all active dropout rates are zero. The maintained 100k-step recipes select strict compatibility explicitly.
+`train.deterministic` is compared by its effective dropout behavior, so an inferred `null` and explicit `true` are resume-equivalent when all active dropout rates are zero. The maintained pretrain recipes select strict compatibility explicitly.
 
 For Hugging Face data, a checkpointed run records both the requested branch/tag and the immutable commit it resolved to. Resume reads that identity from the selected checkpoint metadata and reuses the commit without a Hub request only when the repository and requested ref still match. A deliberate new ref or commit is honored and then handled by the configured `warn` or `strict` compatibility policy.
 
@@ -89,10 +89,10 @@ For Hugging Face data, a checkpointed run records both the requested branch/tag 
 
 ```bash
 # Start a run
-chomp train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run
+chomp train configs/dev/offline_cpu_smoke.yaml --run-dir runs/chomp/debug_run
 
 # Resume latest
-chomp train configs/debug_smoke.yaml --run-dir runs/chomp/debug_run --resume latest
+chomp train configs/dev/offline_cpu_smoke.yaml --run-dir runs/chomp/debug_run --resume latest
 ```
 
 Add `-o checkpoint.resume_compat=strict` when unchanged config and data semantics are required.

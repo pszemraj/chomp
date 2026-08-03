@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import fields, replace
 from pathlib import Path
 
+import jax
 import pytest
 
 from chomp.config import (
@@ -16,13 +17,17 @@ from chomp.config import (
     TokenizerConfig,
     TrainConfig,
     build_config,
+    derived_deterministic,
     load_config,
     read_config_mapping,
     resolve_window_shuffle_rows,
+    strict_packed_segments,
     validate_config,
 )
 from chomp.data.pipeline import build_tokenizer, resolve_tokenizer_config
+from chomp.model import build_model
 from chomp.utils.ckpt_paths import load_config_for_checkpoint
+from chomp.utils.tree import param_count
 
 
 def _base_cfg() -> Config:
@@ -236,22 +241,74 @@ def test_config_reference_matches_config_fields() -> None:
     _assert_matching_keys(reference, Config().to_dict())
 
 
-def test_debug_smoke_config_loads() -> None:
-    """The checked-in quick-start configuration should remain loadable."""
-    config_path = Path(__file__).parents[1] / "configs/debug_smoke.yaml"
-    assert load_config(config_path).model.backend == "dummy"
+@pytest.mark.parametrize(
+    ("name", "data_backend", "allow_cpu"),
+    [
+        ("offline_cpu_smoke.yaml", "local_text", True),
+        ("hf_streaming_smoke.yaml", "hf", False),
+    ],
+)
+def test_dev_smoke_configs_load(name: str, data_backend: str, allow_cpu: bool) -> None:
+    """Checked-in smoke configs should select their intended I/O and device paths."""
+    config_path = Path(__file__).parents[1] / "configs/dev" / name
+    cfg = load_config(config_path)
+    assert cfg.model.backend == "dummy"
+    assert cfg.data.backend == data_backend
+    assert cfg.train.allow_cpu is allow_cpu
 
 
 @pytest.mark.parametrize(
-    "name",
-    ["smoldata_mix_100m_2048.yaml", "zyda2_200m_2048.yaml"],
+    ("name", "expected_parameters", "batch_size", "grad_accum", "loss_chunk_size"),
+    [
+        ("megalodon_100m_2048.yaml", 113_854_464, 2, 8, None),
+        ("megalodon_200m_2048.yaml", 187_991_040, 2, 8, None),
+        ("megalodon_500m_2048.yaml", 513_672_192, 1, 16, 256),
+        ("megalodon_1b_2048.yaml", 974_619_648, 1, 16, 256),
+    ],
 )
-def test_maintained_training_recipes_require_strict_resume(name: str) -> None:
-    """Maintained long-run recipes should fail closed on resume and evaluation."""
-    config_path = Path(__file__).parents[1] / "configs" / name
+def test_maintained_pretrain_recipe_contract(
+    name: str,
+    expected_parameters: int,
+    batch_size: int,
+    grad_accum: int,
+    loss_chunk_size: int | None,
+) -> None:
+    """Maintained recipes should preserve their labeled scale and correctness policy."""
+    config_path = Path(__file__).parents[1] / "configs/pretrain" / name
     cfg = load_config(config_path)
+    abstract_params = jax.eval_shape(
+        lambda key: build_model(cfg, key=key)[0],
+        jax.random.key(0),
+    )
+
+    assert param_count(abstract_params) == expected_parameters
+    assert cfg.model.backend == "megalodon"
+    assert cfg.model.share_emb is True
+    assert cfg.model.chunk_size == 512
+    assert cfg.model.attention_window is None
+    assert cfg.model.use_checkpoint is True
+    assert derived_deterministic(cfg) is False
+    assert cfg.model.param_dtype == "float32"
+    assert cfg.model.compute_dtype == "bfloat16"
+    assert cfg.model.accum_dtype == "float32"
+    assert cfg.model.attention_softmax_dtype == "float32"
+    assert cfg.model.loss_chunk_size == loss_chunk_size
+    assert cfg.data.packing_strict_segments is True
+    assert cfg.data.mask_boundary_loss is True
+    assert strict_packed_segments(cfg) is True
+    assert cfg.optim.name == "muon"
+    assert cfg.optim.muon.lr_scale == 100.0
+    assert cfg.optim.muon.consistent_rms is None
     assert cfg.checkpoint.resume_compat == "strict"
     assert cfg.train.eval_failure_policy == "fatal"
+    assert cfg.train.batch_size == batch_size
+    assert cfg.train.grad_accum == grad_accum
+    assert cfg.optim.warmup_steps * 100 == cfg.train.steps
+
+    max_target_positions = (
+        cfg.train.steps * cfg.train.grad_accum * cfg.train.batch_size * (cfg.train.seq_len - 1)
+    )
+    assert max_target_positions >= 20 * expected_parameters
 
 
 def test_yaml_loader_rejects_duplicate_explicit_keys(tmp_path: Path) -> None:

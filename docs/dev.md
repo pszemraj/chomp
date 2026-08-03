@@ -13,9 +13,15 @@ All project commands should run inside the `mega-jax` conda environment.
 conda run --name mega-jax <command>
 ```
 
-Grain, Datasets, and Orbax are pinned in [`pyproject.toml`](../pyproject.toml) because their iterator/checkpoint behavior is part of the harness. The model stack uses bounded compatible release lines starting at JAX 0.10.2, Equinox 0.13.8, Optax 0.2.8, and Megalodon-JAX 0.2.2. Other runtime and development packages use minimum versions rather than acting as a lockfile. The base JAX dependency includes its `cuda13` extra, which resolves matching jaxlib and CUDA plugin versions plus the pip-managed CUDA 13 runtime. CPU-only installations are unsupported.
+Grain, Datasets, and Orbax are pinned in [`pyproject.toml`](../pyproject.toml) because their iterator/checkpoint behavior is part of the harness. The model stack uses bounded compatible release lines starting at JAX 0.10.2, Equinox 0.13.8, Optax 0.2.8, and Megalodon-JAX 0.2.2. Other runtime and development packages use minimum versions rather than acting as a lockfile. The base JAX dependency includes its `cuda13` extra, which resolves matching jaxlib and CUDA plugin versions plus the pip-managed CUDA 13 runtime. CPU-only installations are unsupported for Megalodon training.
 
-Personal experiment configs belong under `configs/custom/`. That directory is recursively gitignored so local recipes do not enter commits accidentally.
+## Configuration layout
+
+- [`configs/dev/`](../configs/dev/) contains short smoke scenarios. `offline_cpu_smoke.yaml` is deterministic and network-free; `hf_streaming_smoke.yaml` deliberately exercises Hub streaming and the saved HF tokenizer path with a narrow DummyLM.
+- [`configs/pretrain/`](../configs/pretrain/) contains maintained Megalodon recipes from approximately 100M through 1B parameters. Their tests construct abstract model trees to keep the labeled parameter counts, dtypes, fixed-chunk attention, packing, optimizer, evaluation, and strict-resume policies synchronized.
+- `configs/custom/` is recursively gitignored for personal experiments so local recipes do not enter commits accidentally.
+
+Use a pretrain recipe with `--dry-run` for a real Megalodon compile and optimizer update; the Hub streaming smoke intentionally does not duplicate that expensive check.
 
 ## Reviewing checkpoint changes
 
