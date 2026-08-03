@@ -6,7 +6,7 @@ Related: [Config Reference](config-reference.yaml), [Optimization and Optimizers
 
 ## Maintained recipes
 
-Checked-in scenarios are separated by intent. [`configs/dev/`](../configs/dev/) holds a deterministic offline CPU smoke and a narrow DummyLM smoke for the real Hub/tokenizer/GPU I/O path. [`configs/pretrain/`](../configs/pretrain/) holds four Megalodon recipes with exact constructed counts of 113.85M, 187.99M, 513.67M, and 974.62M parameters at the authored vocabulary. Every pretrain recipe uses strict packed-segment resets, boundary-loss masking, FP32 parameters/accumulation/softmax, BF16 compute, fixed 512-token attention chunks, active rematerialization, Muon, fatal evaluation, and strict resume. The 500M/1B files reduce the microbatch to one and enable chunked loss projection; exact dry runs fit the 32 GB RTX 5090 used for development, but sustained training and a 24 GB fit remain unmeasured, so repeat the dry run on the target GPU.
+Checked-in scenarios are separated by intent. [`configs/dev/`](../configs/dev/) contains short infrastructure checks, while [`configs/pretrain/`](../configs/pretrain/) contains the four Megalodon scale recipes. Exact parameter counts, measurements, and fit qualifications are in the [README recipe table](../README.md#shipped-recipes-and-measured-expectations); the recipes are executable examples, and their per-field contracts live only in the [Config Reference](config-reference.yaml).
 
 The configured maximum target budget is `steps * grad_accum * batch_size * (seq_len - 1)`; boundary, EOS, and padding masks reduce the realized `tokens_seen`. The maintained schedules provide at least roughly 20 maximum target positions per parameter, but that is a starting budget rather than a claim of compute optimality for a specific corpus or research objective.
 
@@ -26,15 +26,11 @@ Full packing diagnostics scan segment arrays only for batches whose global step 
 
 `model.loss_chunk_size` optionally bounds Megalodon vocabulary-head intermediates in both training and evaluation. Its complete memory/throughput contract and starting recommendation are inline in the [Config Reference](config-reference.yaml).
 
+The canonical [`model.chunk_size` and `model.attention_window` contracts](config-reference.yaml) explain why chunk-local attention is the efficient training path and the current dense O(L²) sliding-window path is rejected only for training.
+
 ## Determinism
 
-`train.deterministic` controls dropout behavior:
-
-- `None`: derived from dropout rates (deterministic if all zero)
-- `True`: force deterministic
-- `False`: force stochastic
-
-Deterministic runs are recommended for resume and regression tests. Note that in `megalodon-jax`, activation checkpointing is disabled when `train.deterministic=true`. If you want checkpointing with deterministic math, set `train.deterministic=false` and keep all dropout rates at `0.0`. Enable activation checkpointing with `model.use_checkpoint`; it is orthogonal to gradient accumulation.
+[`train.deterministic` and `model.use_checkpoint`](config-reference.yaml) define dropout/rematerialization resolution and resume treatment. This model-level control is separate from GPU kernel determinism; maintained recipes use zero dropout with explicit stochastic mode so rematerialization remains active.
 
 ## GPU environment notes
 
@@ -44,23 +40,13 @@ XLA kernel selection on GPU is nondeterministic by default. This is the fast pat
 
 ## Evaluation
 
-If `train.eval_every > 0` and `data.max_eval_samples > 0`, chomp runs a full pass over the process-local eval token set and logs `eval_loss`. `train.eval_failure_policy: fatal` is the default and maintained-recipe behavior: setup or runtime failures, including non-finite reductions and zero-loss-token tail batches, fail the run. When the aligned post-update checkpoint records a fatal runtime failure, resume must successfully repeat that evaluation at the saved step before it can train another batch or return success. A same-target resume with no pending fatal evaluation skips eval-data initialization because it has no scheduled pass to execute. `disable` logs the failure, disables future passes, and carries `eval_disabled`, `eval_failure_count`, `eval_last_failure_step`, `eval_last_failure_type`, and `eval_last_success_step` on every subsequent local and W&B metrics row. That state is also checkpointed, so resume preserves the disabled evaluator and its history. Changes to the failure policy follow `checkpoint.resume_compat`: strict rejects them and warn reports them. Eval text selection and packed flushing are documented in [Data Pipeline validation set](data_pipeline.md#validation-set).
+Evaluation activation, cadence, failure policy, and persistent status are defined by [`train.eval_*` and `data.max_eval_samples`](config-reference.yaml). Operationally, a fatal evaluation recorded at an aligned checkpoint remains owed before resumed training, while deliberate disablement remains visible in later metrics and checkpoints. Eval text selection and packed flushing are documented under [Data Pipeline validation set](data_pipeline.md#validation-set).
 
 Eval batches are assembled once and cached host-side for the whole run; device transfer happens per batch each eval, so no device memory is held between evals.
 
-Training rejects `model.attention_window` because Megalodon-JAX's current noncached path still computes dense O(L²) attention and applies a window mask afterward. `model.chunk_size` is the supported efficient paper-faithful training path. Sliding-window inference remains available; efficient sliding-window training is future upstream work.
-
 ## Generation samples
 
-If `train.generate_every > 0`, chomp periodically samples a prompt from a bounded pool of up to 16 unshuffled training-split documents and runs `megalodon_jax.generate`, printing both the prompt and generated continuation to the console (Rich panels when enabled). The pool avoids retaining a second production-sized document-shuffle window during training.
-
-Default behaviors (when the `generate_*` fields are `null`):
-
-- `train.generate_input_len`: half of `train.seq_len`
-- `train.generate_max_tokens`: `model.chunk_size + 16`
-- prompt selection: if a sample is longer than `generate_input_len`, randomly use the first or last `generate_input_len` tokens; otherwise use the full sample (no EOS token appended)
-
-Optional sampling controls (`train.generate_temperature`, `train.generate_top_k`, `train.generate_top_p`) are passed through when set; otherwise the Megalodon defaults apply. Generation is currently only enabled for the `megalodon` backend (dummy runs skip it silently).
+Periodic Megalodon generation samples prompts from a bounded pool of up to 16 unshuffled training-split documents, avoiding a second production-sized shuffle window. Long prompts randomly use their first or last configured span, and no EOS is appended. Cadence, computed lengths, sampling controls, and backend applicability are canonical under [`train.generate_*`](config-reference.yaml).
 
 ### Standalone generation
 
@@ -100,6 +86,6 @@ Metrics are written to `logging.metrics_file` on the first process-local trainin
 
 Data exhaustion and crashes append event rows to the same file.
 
-If `logging.wandb.enabled=true`, Weights & Biases receives the training rows plus detailed wall-clock, packing-capacity, eval-token, and current-device-memory metrics. The local file instead retains the process peak-memory value and its explicit `step` field. When the run was started from a config file, chomp also uploads `config_original.yaml` as a W&B artifact. W&B logs go to the default `./wandb` directory (or `WANDB_DIR` if set). Set `logging.wandb.enabled=false` to disable W&B; `mode` selects online or offline logging only.
+When enabled, Weights & Biases receives the training rows plus detailed wall-clock, packing-capacity, eval-token, and current-device-memory metrics and uploads `config_original.yaml` for file-backed runs. Local metrics retain the process peak-memory value and explicit `step`; W&B enablement, mode, naming, and failure behavior are defined under [`logging.wandb.*`](config-reference.yaml).
 
-Console output is throttled by `train.log_every` and prints a compact one-line summary (loss, grad norm, LR, step time, throughput, optional eval loss, packing utilization, and best-effort device memory). Full logs from third-party libraries are written to `logging.log_file` under the run directory when that field is not `null`.
+Console output is a compact one-line summary of loss, gradient norm, LR, timing, throughput, optional evaluation, packing utilization, and best-effort device memory. Cadence and file destinations are defined under [`train.log_every` and `logging.*`](config-reference.yaml).

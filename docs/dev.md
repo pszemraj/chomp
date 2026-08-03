@@ -13,25 +13,19 @@ All project commands should run inside the `mega-jax` conda environment.
 conda run --name mega-jax <command>
 ```
 
-Grain, Datasets, and Orbax are pinned in [`pyproject.toml`](../pyproject.toml) because their iterator/checkpoint behavior is part of the harness. The model stack uses bounded compatible release lines starting at JAX 0.10.2, Equinox 0.13.8, Optax 0.2.8, and Megalodon-JAX 0.2.2. Other runtime and development packages use minimum versions rather than acting as a lockfile. The base JAX dependency includes its `cuda13` extra, which resolves matching jaxlib and CUDA plugin versions plus the pip-managed CUDA 13 runtime. CPU-only installations are unsupported for Megalodon training.
+Dependency declarations and supported release lines live in [`pyproject.toml`](../pyproject.toml); installation and accelerator expectations are in [Requirements and installation](../README.md#requirements-and-installation). Stateful iterator/checkpoint pins require behavior-specific review before they change. CPU-only execution is for tests and debugging, not Megalodon training.
 
 ## Configuration layout
 
 - [`configs/dev/`](../configs/dev/) contains short smoke scenarios. `offline_cpu_smoke.yaml` is deterministic and network-free; `hf_streaming_smoke.yaml` deliberately exercises Hub streaming and the saved HF tokenizer path with a narrow DummyLM.
-- [`configs/pretrain/`](../configs/pretrain/) contains maintained Megalodon recipes from approximately 100M through 1B parameters. Their tests construct abstract model trees to keep the labeled parameter counts, dtypes, fixed-chunk attention, packing, optimizer, evaluation, and strict-resume policies synchronized.
+- [`configs/pretrain/`](../configs/pretrain/) contains maintained Megalodon recipes from approximately 100M through 1B parameters. Scale choices and measured evidence are in the [recipe table](../README.md#shipped-recipes-and-measured-expectations); field defaults and interactions live in the [Config Reference](config-reference.yaml).
 - `configs/custom/` is recursively gitignored for personal experiments so local recipes do not enter commits accidentally.
 
 Use a pretrain recipe with `--dry-run` for a real Megalodon compile and optimizer update; the Hub streaming smoke intentionally does not duplicate that expensive check.
 
 ## Reviewing checkpoint changes
 
-The [checkpoint design intent](checkpointing.md#design-intent) is part of the project scope. Preserve the distinction between saved-state coherence and environment provenance:
-
-- Hard-fail when model/optimizer/data state cannot form one coherent continuation.
-- Keep known, shape-compatible research changes visible and usable through the default `warn` policy; use `strict` for unchanged config/data experiments.
-- Do not reinterpret `strict` as general source-tree, dependency, device, or kernel attestation. Megalodon-JAX is the narrow exception: its recorded distribution identity is active model semantics. Do not add broader hard gates without an explicit project-scope change.
-- Do not restore automatic fresh-stream fallback after train-state restore. A deliberate branch uses a separate run directory.
-- Assume one researcher-controlled writer per run directory rather than adding distributed locking or ownership machinery.
+Treat [checkpoint design intent](checkpointing.md#design-intent) and [resume compatibility](checkpointing.md#resume-compatibility-checks) as normative. Never pair restored train state with a fresh data stream, do not broaden strict resume into general environment attestation without a scope change, and retain the single-writer run-directory assumption.
 
 ## Lint and format
 
@@ -78,5 +72,3 @@ Shared helper modules:
 - [`tests/helpers/io.py`](../tests/helpers/io.py): test artifact readers
 
 GPU invariants remain isolated in [`tests/test_gpu_smoke.py`](../tests/test_gpu_smoke.py).
-
-Resume compatibility behavior is documented in [Checkpointing and Resume](checkpointing.md#resume-compatibility-checks). The default warns on semantic drift while structural train-state mismatches remain hard errors; strict config/data compatibility is opt-in.

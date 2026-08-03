@@ -70,7 +70,7 @@ Development checks live under `configs/dev/`; maintained training recipes live u
 | [`megalodon_500m_2048.yaml`](configs/pretrain/megalodon_500m_2048.yaml) | 513.67M | 10.4806B | 11.1 GB measured | First dry-run step 128.258s | 10.845 sanity-only | Same streamed mixture |
 | [`megalodon_1b_2048.yaml`](configs/pretrain/megalodon_1b_2048.yaml) | 974.62M | 19.6512B | 20.9 GB measured | First dry-run step 145.535s | 10.808 sanity-only | Same streamed mixture |
 
-The 200M model preserves the released `mega200M` depth and projection ratios. The 500M model scales those ratios to width 1,536 and 16 layers. The 1B model uses the released 1.3B widths and projection ratios with 18 rather than 24 layers. All four tie the input/output embedding and use 512-token fixed attention chunks, so their exact counts and local-attention geometry intentionally differ from the released untied 2,048-chunk presets. The 500M/1B templates also use `batch_size=1`, `grad_accum=16`, and `loss_chunk_size=256` to reduce peak memory; chunked loss projection can change BF16 execution-order roundoff and should not be toggled during strict resume.
+The 200M model preserves the released `mega200M` depth and projection ratios. The 500M model scales those ratios to width 1,536 and 16 layers. The 1B model uses the released 1.3B widths and projection ratios with 18 rather than 24 layers. All four tie the input/output embedding and use 512-token fixed attention chunks, so their exact counts and local-attention geometry intentionally differ from the released untied 2,048-chunk presets. The 500M/1B templates use the memory-saving settings shown in their linked configs; read the [`model.loss_chunk_size` contract](docs/config-reference.yaml) and [resume compatibility policy](docs/checkpointing.md#resume-compatibility-checks) before changing them.
 
 Measurements use JAX 0.10.2 and an RTX 5090; the offline smoke uses the development host CPU. The clean-exit 500-step 114M validation was measured on 2026-08-01 with the shipped `2048 × batch 2 × accumulation 8` model/data geometry, BF16 compute, FP32 parameters and accumulation, strict bin-packed segment resets, Muon, real streamed mixture data, scheduled 64-document evaluation, and schema-3 async checkpoints at steps 250 and 500. Only the duration, warmup, eval/checkpoint cadence, and eval sample cap were shortened. The source shuffle retained its production 200,000-document / 512 MiB limits and reached 64,503 documents / 536.9 MB; the packed-row shuffle retained 4,096 rows / 8.39M tokens. The first update took 120.2 seconds, including 85.5 seconds of compile/device work and 34.7 seconds of data wait. Steady steps had 1.100-second median wall time and 29,675 median valid tokens/s, process allocator peak was 4.657 GB, and host/device valid-target counts agreed through 16,318,387 targets. Training loss moved from 10.787 to 4.767 and eval loss from 5.563 at step 250 to 5.187 at step 500. The run exited cleanly and a strict same-target restore from step 500 also succeeded. Those losses belong to the deliberately compressed validation schedule, not the maintained 100M schedule.
 
@@ -84,7 +84,7 @@ Every checked-in HF scenario uses `datasets.load_dataset(..., streaming=True)`: 
 
 ## Monitoring and run directories
 
-Training prints a compact line to stdout at the first step, every `train.log_every` steps, and evaluation steps. The durable machine-readable record is append-only JSONL:
+Training prints compact progress to stdout and keeps an append-only JSONL record:
 
 ```bash
 tail -f runs/my_run/metrics.jsonl
@@ -139,7 +139,7 @@ optim:
 
 Save it as `my_experiment.yaml` and run `chomp train my_experiment.yaml --run-dir /tmp/my_experiment_dry --dry-run`; expect a parameter count, one finite update, and `[chomp] dry-run complete`. This exact example has been executed, not only parsed. See the annotated [Config Reference](docs/config-reference.yaml) for every remaining key and default.
 
-Evaluation failures are fatal by default; an aligned checkpoint carrying a fatal evaluation failure must pass that same-step evaluation before resume can train or return successfully. Set `train.eval_failure_policy: disable` only when deliberately continuing without evaluation and monitoring its persisted disabled/failure fields. For efficient Megalodon training, use `model.chunk_size`: `chomp train` rejects `model.attention_window` because the current noncached upstream implementation remains dense O(L²), while standalone generation is not blocked.
+Evaluation behavior is summarized under [Training evaluation](docs/training.md#evaluation), with continuation rules under [resume compatibility](docs/checkpointing.md#resume-compatibility-checks). Use the annotated [Config Reference](docs/config-reference.yaml) for the canonical evaluation and Megalodon attention contracts.
 
 ## Generation and export
 

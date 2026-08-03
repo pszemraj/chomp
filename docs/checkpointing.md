@@ -26,26 +26,21 @@ Each checkpoint stores three items:
 
 The per-step metadata is self-describing. The backend identity always includes the installed distribution version. When the installation has PEP 610 `direct_url.json` metadata, it also includes the URL, VCS kind, requested revision, and resolved commit. Standalone generation uses the selected checkpoint's config before considering the run-start config, while resume compares the requested config and installed backend against that selected step. A retained step therefore continues to mean the model semantics that produced it without preventing deliberate continuation changes.
 
-Every run writes `tokenizer/identity.json`. It records the effective tokenizer class, fast/slow status, directly relevant package versions, exact saved-file sizes and SHA-256 digests, and outputs for a versioned canary corpus. Hugging Face assets live beside it and are reloaded locally before fresh execution; resume loads only those run-pinned files with Hub access disabled. The byte tokenizer has no asset files, but its implementation and canary outputs are bound by the same manifest. Every checkpoint stores the canonical manifest digest so a selected checkpoint, rather than mutable run-start metadata, remains the semantic authority.
+Tokenizer snapshot construction and preflight validation are described under [Data Pipeline tokenization](data_pipeline.md#tokenization). Every checkpoint stores the canonical manifest digest, making the selected checkpoint rather than mutable run-start metadata authoritative.
 
-## Save cadence
+## Save and shutdown behavior
 
-Checkpoint frequency is controlled by:
+Enablement, cadence, retention, and asynchronous-save semantics are defined under [`checkpoint.*`](config-reference.yaml).
 
-- `checkpoint.enabled`
-- `checkpoint.save_every`
-- `checkpoint.max_to_keep`
-- `checkpoint.async_save`
-
-The manager and data iterator close on every exit path. Orbax waits for asynchronous writes and releases its checkpointer, metadata stores, and deleter; Grain stops prefetch workers and closes the underlying Hugging Face stream. Datasets 5.0.0 is pinned because it provides the remote-Parquet thread-shutdown workaround for successful processes that stop mid-shard. For a single-source Parquet stream, Chomp closes the generator and applies Datasets' bounded shutdown grace when the builder requests it, releases and collects its Arrow-backed dataset and iterator references while CPython is still live, then gives any native destructors initiated by that release the same bounded grace. Local and non-Parquet streams do not wait. Orbax enforces `checkpoint.max_to_keep` for retained checkpoints.
+The manager and data iterator close on every exit path. Orbax waits for asynchronous writes and releases its checkpointer, metadata stores, and deleter; Grain stops prefetch workers and closes the underlying Hugging Face stream. Datasets 5.0.0 is pinned because it provides the remote-Parquet thread-shutdown workaround for successful processes that stop mid-shard. For a single-source Parquet stream, Chomp closes the generator and applies Datasets' bounded shutdown grace when the builder requests it, releases and collects its Arrow-backed dataset and iterator references while CPython is still live, then gives any native destructors initiated by that release the same bounded grace. Local and non-Parquet streams do not wait.
 
 A save succeeds only when Orbax explicitly accepts it. Before save and after restore, Chomp requires the checkpoint directory step, metadata step, and `TrainState.step` to agree; any mismatch is treated as corruption.
 
 `--resume latest` continues the newest finalized checkpoint. An explicit step may select that newest step, but Chomp rejects an older retained step in the same checkpoint root because subsequent saves would collide with the already finalized future. To branch from an older step, copy it into a new run directory first.
 
-A run directory is single-writer: do not start concurrent training processes against the same `logging.run_dir`. Use a separate copied run directory when branching or running another continuation.
+A run directory is single-writer. Use a separate copied run directory when branching or running another continuation.
 
-When `debug.nan_check` is enabled, save steps force a metrics sync and validate loss, gradient norm, learning rate, post-update parameters, and optimizer state before the write. A non-finite step is rejected even when the save cadence does not land on a logging step.
+Save-time validity follows [`debug.nan_check`](config-reference.yaml). When active, a save forces metrics synchronization and rejects non-finite metrics, parameters, or optimizer state even off the normal logging cadence.
 
 ## Preemption
 
@@ -56,34 +51,29 @@ On `SIGTERM` or `SIGUSR1`, the main-thread handler records only a stop flag. The
 On exit (clean, crash, or Ctrl-C), a final checkpoint of the last completed step is written only when it is safe to resume from:
 
 - **Alignment**: the train state and data iterator must correspond to the same completed step. A crash between batch fetch and step completion leaves the iterator ahead of the train state, so the final save is skipped (loudly) and resume uses the last periodic checkpoint. Finite streams right-pad their final window and missing batch rows; after that batch completes, exact EOF is aligned and the final checkpoint is written.
-- **Validity**: when `debug.nan_check` is enabled, the last step's metrics, parameters, and optimizer state are re-checked for finiteness, so "latest" cannot become a NaN tombstone. Final validity is a run invariant even when checkpointing is disabled.
+- **Validity**: when configured finite-state checking is enabled, the last step is re-checked so "latest" cannot become a NaN tombstone. This final check applies even when checkpointing is disabled.
 
 A final save that fails on an otherwise clean exit fails the run; training never exits successfully with an unwritten checkpoint.
 
 ## Resume compatibility checks
 
-On resume, chomp compares the checkpoint metadata against the current config. `checkpoint.resume_compat` controls semantic mismatches:
+[`checkpoint.resume_compat`](config-reference.yaml) selects the contextual semantic-comparison policy. Its rationale is the distinction between coherent saved state and deliberate research changes described under [Design intent](#design-intent).
 
-- `warn` (default) logs each data, objective, batch-shape, model-runtime, optimizer-value, schedule, or eval-selection change and continues. This supports ordinary workflows such as extending `train.steps`, lowering the LR, or changing eval size.
-- `strict` rejects those semantic changes before restore when unchanged config and data semantics are required.
-
-Both modes always reject missing/invalid checkpoint metadata, invalid `tokens_seen`, model parameter-tree changes, and optimizer-state structure changes such as switching `optim.name`. Muon routing flags and enabling/disabling its optional `consistent_rms` transform are structural as well. These cannot consume the saved arrays.
+Both modes reject missing or invalid checkpoint metadata and any parameter-tree or optimizer-state structural incompatibility; those arrays cannot be restored coherently.
 
 The resume compatibility preflight validates the tokenizer snapshot and selected checkpoint metadata before evaluation or training datasets are constructed, so strict mismatches fail without opening the configured remote data or tokenizer source.
 
 After restoring model parameters, optimizer state, RNG, and step, chomp requires Grain to restore the matching iterator state. A data-state restore failure aborts resume in both compatibility modes; restarting the corpus behind a restored optimizer would produce a contradictory training history.
 
-Resume comparisons ignore settings that cannot affect restored execution, including fresh-model `model.init_mode` and vocab rounding once the resolved model vocabulary is already checked. `model.loss_chunk_size` is active Megalodon resume semantics. `model.use_checkpoint` is active when effective `train.deterministic=false` allows upstream rematerialization, and inert when deterministic execution disables it. `train.eval_failure_policy` follows the configured warn/strict resume policy. `data.tokenizer.hf_use_fast` and `data.tokenizer.hf_trust_remote_code` are evaluated through the effective tokenizer identity: changing a request is harmless only when the loaded implementation and canary outputs remain equal. `model.use_associative_segment_scan` is active resume semantics when strict bin/multipack segment resets execute, and inert when segment metadata does not reach the model. Every active field in the current canonical config and data fingerprint must be present in checkpoint metadata: absence is a compatibility mismatch, distinct from a recorded `null` value. Strict mode rejects that mismatch; warn mode reports it before restore.
+Comparisons use effective execution semantics: inactive or request-only settings may be equivalent when resolved behavior is unchanged, while active objective/runtime settings follow the configured policy. Per-key classifications live in the Config Reference. Every active current fingerprint field must be present in checkpoint metadata; missing is distinct from a recorded `null`.
 
 For Megalodon runs, strict resume rejects a changed or missing structured backend identity; warn mode reports it clearly. A legacy flat version or a checkpoint without this field is not treated as proven equal. The selected checkpoint is authoritative: `config_resolved.json` records the run-start identity for provenance but never fills a missing checkpoint field.
 
-Checkpoint metadata schema 2 adds the tokenizer identity. Schema 3 also persists whether evaluation was disabled, its failure count and last failure step/type, and the last successful evaluation step, so a resumed run does not silently re-enable evaluation or reset its telemetry history. An enabled evaluator whose latest recorded attempt failed is still pending: resume repeats that evaluation against the restored parameters before another optimizer step or a successful return. Strict resume rejects a missing or unsupported schema marker and missing required schema-3 state. It also rejects a changed or missing run manifest, saved-file record, effective implementation, canary output, or checkpoint digest. Warn mode reports that equality is unproven, continues with the observed local tokenizer identity and fresh defaults for unavailable evaluation status, and records those observed values in later checkpoints. Schema-2 checkpoints and older run directories are therefore not strictly resumable.
+Checkpoint metadata schema 2 adds tokenizer identity. Schema 3 also persists evaluation disablement and failure/success history, so resume cannot silently re-enable evaluation or erase telemetry. An enabled evaluator whose latest recorded attempt failed remains pending and must run against restored parameters before another optimizer step or successful return. Missing or unsupported schema state cannot prove strict equality; warn mode reports that fact, uses the observed local tokenizer identity and fresh defaults for unavailable evaluation status, then records them in later checkpoints. Schema-2 checkpoints and older run directories are therefore not strictly resumable.
 
 Checkpoint compatibility deliberately does not fingerprint source trees, dirty or untracked files, the rest of the package environment, devices, or XLA flags. Those remain external experiment provenance rather than saved-state alignment.
 
-`train.deterministic` is compared by its effective dropout behavior, so an inferred `null` and explicit `true` are resume-equivalent when all active dropout rates are zero. The maintained pretrain recipes select strict compatibility explicitly.
-
-For Hugging Face data, a checkpointed run records both the requested branch/tag and the immutable commit it resolved to. Resume reads that identity from the selected checkpoint metadata and reuses the commit without a Hub request only when the repository and requested ref still match. A deliberate new ref or commit is honored and then handled by the configured `warn` or `strict` compatibility policy.
+Hugging Face source identity is checkpoint-bound; source replay mechanics are documented under [Data Pipeline iterator state and resume](data_pipeline.md#iterator-state-and-resume), and field precedence is canonical in the Config Reference.
 
 ## Typical usage
 

@@ -6,10 +6,7 @@ Related: [Config Reference](config-reference.yaml) (`optim.*`), [Training Loop](
 
 ## Supported optimizers
 
-`optim.name` selects the optimizer:
-
-- `adamw` (default): standard AdamW on all parameters.
-- `muon`: Muon on a safe whitelist of projection weight matrices, AdamW on the rest.
+Chomp provides AdamW over all parameters or Muon over a safe projection whitelist with AdamW over the remainder. Selection, defaults, and structural-resume behavior are canonical under [`optim.*`](config-reference.yaml).
 
 The model adapter classifies known model arrays for optimizer routing and weight decay. Unrecognized arrays use AdamW without weight decay.
 
@@ -22,18 +19,13 @@ For `optim.name=muon`, the harness uses explicit parameter partitioning:
 
 AdamW decay is also path-aware. It applies to token embeddings and dense projection weights. Biases, norm/scale parameters, normalized-FFN residual scales, attention affine offsets, and all CEMA coefficients receive no decoupled weight decay.
 
-By default, the projection whitelist excludes embeddings and other non-matmul matrices. `optim.muon.allow_tied_embed` adds the token embedding only when `model.share_emb=true`. DummyLM is always untied, but its debug-only `share_emb` flag still controls this eligibility. `optim.muon.allow_all_2d` replaces the whitelist with every 2D tensor.
+The normal route excludes embeddings and non-matmul matrices. Experimental eligibility expansions, the DummyLM exception, and their structural-resume implications are defined under [`optim.muon.*`](config-reference.yaml).
 
 ## Why Muon needs special handling
 
 Optax's Muon lives in `optax.contrib` and is designed for matrix parameters. Megalodon includes several 2D tensors that are not matmul weights, so Muon selection must be path-aware rather than "all 2D tensors" by default.
 
-Muon also typically operates in a very different step-size regime than AdamW. In practice that means:
-
-- `optim.lr` is treated as the AdamW learning rate.
-- Muon's effective learning rate is `optim.lr * optim.muon.lr_scale`.
-- Muon-specific scaling options (like `optim.muon.consistent_rms`) can materially change what `optim.muon.lr_scale` values are stable.
-- When `optim.muon.consistent_rms=null`, we skip Muon shape scaling (`scale_by_shape`) to preserve the earlier Muon-only behavior.
+Muon operates in a different step-size regime from AdamW: its effective learning rate is `optim.lr * optim.muon.lr_scale`, and optional RMS/shape scaling can materially change the stable multiplier. Exact defaults, recommendations, and optimizer-structure implications live in the [Config Reference](config-reference.yaml).
 
 The maintained pretrain recipes make the measured policy explicit: `optim.lr=3e-4`, `optim.muon.lr_scale=100`, and `optim.muon.consistent_rms=null`. The 500M/1B configs inherit this policy as a documented starting point, not as evidence from a scale-specific sweep.
 
@@ -66,4 +58,4 @@ All values below are eval loss at step 10,000 (lower is better).
 
 - These are still short-horizon results (10k steps). They are useful for direction finding but are not definitive pretraining conclusions.
 - Optimizer behavior can change meaningfully when schedule horizons, packing policies, or parameter sharding strategies change.
-- If you resume from checkpoints, treat schedule horizons and effective optimizer settings as part of the run identity.
+- Schedule horizons and effective optimizer settings are run semantics; use their [per-key contracts](config-reference.yaml) together with [resume compatibility](checkpointing.md#resume-compatibility-checks).
