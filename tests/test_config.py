@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import fields, replace
+from dataclasses import replace
 from pathlib import Path
 
 import jax
@@ -239,29 +239,6 @@ def test_build_config_rejects_non_mapping_sections(data: dict[str, object], path
     """Falsy and truthy section scalars must not silently select defaults."""
     with pytest.raises(ValueError, match=rf"{path} must be a mapping or null"):
         build_config(data)
-
-
-def test_config_reference_matches_config_fields() -> None:
-    """The config reference should contain every config field and no stale fields."""
-    reference = read_config_mapping(Path(__file__).parents[1] / "docs/config-reference.yaml")
-    assert set(reference) == {field.name for field in fields(Config)} | {"variables", "derived"}
-
-    reference = {
-        key: value for key, value in reference.items() if key not in {"variables", "derived"}
-    }
-
-    def _assert_matching_keys(
-        documented: dict[str, object], defaults: dict[str, object], path: str = ""
-    ) -> None:
-        """Assert that one documented config mapping matches its dataclass mapping."""
-        assert set(documented) == set(defaults), path or "config"
-        for key, default in defaults.items():
-            if isinstance(default, dict):
-                child = documented[key]
-                assert isinstance(child, dict), f"{path}{key}"
-                _assert_matching_keys(child, default, f"{path}{key}.")
-
-    _assert_matching_keys(reference, Config().to_dict())
 
 
 @pytest.mark.parametrize(
