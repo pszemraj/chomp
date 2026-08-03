@@ -50,7 +50,7 @@ Periodic Megalodon generation samples prompts from a bounded pool of up to 16 un
 
 ### Standalone generation
 
-`chomp generate` accepts a run directory or checkpoint step directory, restores the stored parameters and resolved config, and uses the run-pinned tokenizer described in [Data Pipeline: tokenization](data_pipeline.md#tokenization) when available. Set `--temperature 0` for greedy decoding; seeded sampling is the default. Run `chomp generate --help` for the option list.
+`chomp generate` accepts a run directory or checkpoint step directory, restores the stored parameters and resolved config, and uses the run-pinned tokenizer described in [Data Pipeline: tokenization](data_pipeline.md#tokenization) when available. For schema-2+ checkpoints, generation recomputes that tokenizer's effective manifest identity and requires it to match the selected checkpoint before encoding the prompt; metadata-free legacy checkpoints retain the previous source/snapshot fallback. Set `--temperature 0` for greedy decoding; seeded sampling is the default. Run `chomp generate --help` for the option list.
 
 ## Dry run
 

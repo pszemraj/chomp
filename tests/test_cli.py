@@ -16,9 +16,11 @@ import jax
 import pytest
 from click.testing import CliRunner
 
+from chomp.ckpt import CHECKPOINT_META_SCHEMA_VERSION
 from chomp.cli import cli
 from chomp.cli.main import parse_resume
 from chomp.config import Config
+from chomp.data.pipeline import ByteTokenizer, save_tokenizer_snapshot
 from chomp.model import build_model
 from tests.helpers.config_factories import make_tiny_megalodon_model
 
@@ -110,8 +112,15 @@ def test_generate_rejects_non_megalodon_backend(tmp_path: Path) -> None:
     assert "model.backend" in result.output
 
 
-def test_generate_cli_produces_output(tmp_path: Path) -> None:
-    """End-to-end test of the generate CLI command."""
+def test_generate_cli_produces_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Generate with checkpoint-bound tokenizer identity and reject drift.
+
+    :param Path tmp_path: Temporary directory for checkpoint artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Tokenizer drift injection fixture.
+    """
     import orbax.checkpoint as ocp
 
     run_dir = tmp_path / "run"
@@ -163,11 +172,28 @@ def test_generate_cli_produces_output(tmp_path: Path) -> None:
 
     config_resolved = run_dir / "config_resolved.json"
     config_resolved.write_text(json.dumps(cfg.to_dict(), indent=2))
+    _tokenizer, tokenizer_identity = save_tokenizer_snapshot(
+        run_dir,
+        cfg,
+        ByteTokenizer(byte_offset=cfg.data.tokenizer.byte_offset),
+    )
     params, _static = build_model(cfg, key=jax.random.PRNGKey(0))
-    ckpt_dir = run_dir / "checkpoints" / "1" / "train_state"
-    ckpt_dir.parent.mkdir(parents=True, exist_ok=True)
+    step_dir = run_dir / "checkpoints" / "1"
+    ckpt_dir = step_dir / "train_state"
+    step_dir.mkdir(parents=True, exist_ok=True)
     ckptr = ocp.PyTreeCheckpointer()
     ckptr.save(ckpt_dir, {"params": params}, force=True)
+    meta_dir = step_dir / "meta"
+    meta_dir.mkdir()
+    (meta_dir / "metadata").write_text(
+        json.dumps(
+            {
+                "schema_version": CHECKPOINT_META_SCHEMA_VERSION,
+                "config": cfg.to_dict(),
+                "tokenizer_identity": tokenizer_identity,
+            }
+        )
+    )
 
     runner = CliRunner()
     result = runner.invoke(
@@ -188,3 +214,23 @@ def test_generate_cli_produces_output(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, f"CLI failed: {result.output}"
     assert "Generated:" in result.output
+
+    encode = ByteTokenizer.encode
+
+    def _drifted_encode(tokenizer: ByteTokenizer, text: str) -> list[int]:
+        """Change canary outputs without changing the saved manifest.
+
+        :param ByteTokenizer tokenizer: Byte tokenizer instance.
+        :param str text: Text to encode.
+        :return list[int]: Original token IDs plus one extra ID.
+        """
+        return [*encode(tokenizer, text), 0]
+
+    monkeypatch.setattr(ByteTokenizer, "encode", _drifted_encode)
+    drifted = runner.invoke(
+        cli,
+        ["generate", str(run_dir), "--prompt", "hello", "--max-tokens", "1"],
+    )
+
+    assert drifted.exit_code != 0
+    assert "Tokenizer identity does not match the selected checkpoint" in drifted.output
