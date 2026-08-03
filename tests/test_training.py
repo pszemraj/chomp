@@ -2610,6 +2610,29 @@ def test_resume_compat_ignores_inert_dummy_model_config(tmp_path: Path) -> None:
         check_resume_compat(active_drift, meta)
 
 
+def test_resume_compat_rejects_active_dummy_muon_routing_change(tmp_path: Path) -> None:
+    """Dummy embedding routing changes must fail before optimizer-state restore."""
+    cfg = _base_cfg(tmp_path / "run_dummy_muon_routing")
+    cfg = replace(
+        cfg,
+        model=replace(cfg.model, share_emb=False),
+        optim=replace(
+            cfg.optim,
+            name="muon",
+            muon=replace(
+                cfg.optim.muon,
+                allow_all_2d=False,
+                allow_tied_embed=True,
+            ),
+        ),
+    )
+    meta = _checkpoint_record(cfg).to_dict()
+    drifted = replace(cfg, model=replace(cfg.model, share_emb=True))
+
+    with pytest.raises(RuntimeError, match="model.share_emb"):
+        check_resume_compat(drifted, meta)
+
+
 def test_resume_compat_ignores_inert_packing_knobs(tmp_path: Path) -> None:
     """Editing a packing knob the active mode never consumes must not block resume.
 

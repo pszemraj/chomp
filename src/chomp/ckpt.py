@@ -653,6 +653,16 @@ def check_resume_compat(
             "eos_token_id",
         }
         model_structural = {"backend", "vocab_size", "d_model"}
+        if (
+            cfg.optim.name == "muon"
+            and cfg.optim.muon.allow_tied_embed
+            and not cfg.optim.muon.allow_all_2d
+        ):
+            # DummyLM never ties its weights, but the historical share_emb flag
+            # opts its embedding into Muon. Changing it therefore changes the
+            # optimizer-state tree even though the model pytree is unchanged.
+            model_active.add("share_emb")
+            model_structural.add("share_emb")
     else:
         # Dummy-only width and fresh initialization are inert after parameter
         # restore. Upstream rematerialization is also inert when effective

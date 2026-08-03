@@ -845,16 +845,22 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
 
     tok = {
         "kind": t.kind,
-        "hf_name_or_path": t.hf_name_or_path,
-        "hf_use_fast": t.hf_use_fast,
-        "hf_trust_remote_code": t.hf_trust_remote_code,
-        "byte_offset": t.byte_offset,
         "add_bos": t.add_bos,
         "add_eos": t.add_eos,
         "max_doc_tokens": t.max_doc_tokens,
         "vocab_size_multiple": t.vocab_size_multiple,
         "auto_set_special_tokens": t.auto_set_special_tokens,
     }
+    if t.kind == "hf":
+        tok.update(
+            {
+                "hf_name_or_path": t.hf_name_or_path,
+                "hf_use_fast": t.hf_use_fast,
+                "hf_trust_remote_code": t.hf_trust_remote_code,
+            }
+        )
+    else:
+        tok["byte_offset"] = t.byte_offset
     # Record only active mode knobs and effective shuffle geometry so inert
     # defaults and raw budgets cannot reject a behaviorally identical resume.
     # Thread prefetch is deliberately absent: Grain serializes the parent

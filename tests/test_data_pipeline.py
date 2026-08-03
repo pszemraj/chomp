@@ -434,6 +434,43 @@ def test_eval_fingerprint_tracks_effective_ffd_geometry(
     assert not np.array_equal(initial_batches[0].input_ids, changed_batches[0].input_ids)
 
 
+def test_tokenizer_fingerprint_omits_backend_inert_fields() -> None:
+    """Tokenizer identity should record only fields consumed by the selected backend."""
+    hf = make_pipeline_cfg(
+        backend="hf",
+        hf_dataset="owner/dataset",
+        hf_name=None,
+        tokenizer=TokenizerConfig(
+            kind="hf",
+            hf_name_or_path="owner/tokenizer",
+            byte_offset=0,
+            add_bos=False,
+            add_eos=False,
+        ),
+    )
+    hf_changed = replace(
+        hf,
+        data=replace(
+            hf.data,
+            tokenizer=replace(hf.data.tokenizer, byte_offset=17),
+        ),
+    )
+    assert data_fingerprint(hf)["tokenizer"] == data_fingerprint(hf_changed)["tokenizer"]
+    assert "byte_offset" not in data_fingerprint(hf)["tokenizer"]
+
+    byte = make_pipeline_cfg(
+        tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True)
+    )
+    byte_changed = replace(
+        byte,
+        data=replace(
+            byte.data,
+            tokenizer=replace(byte.data.tokenizer, byte_offset=8),
+        ),
+    )
+    assert data_fingerprint(byte)["tokenizer"] != data_fingerprint(byte_changed)["tokenizer"]
+
+
 @pytest.mark.parametrize("mode", ["bin", "multipack"])
 def test_ffd_leftover_requeue_preserves_arrival_order(mode: str) -> None:
     """Leftovers must requeue in arrival order, not FFD descending-size order.
