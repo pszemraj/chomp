@@ -675,6 +675,9 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
     # as a mapping and should not make arbitrary top-level values silently valid.
     _section(data.get("derived"), "derived")
 
+    # Deserialize against the current schema intentionally. Before the first
+    # stable release, removed config/checkpoint fields are neither translated
+    # nor ignored: failing here avoids silently reinterpreting old experiments.
     model = ModelConfig(**_section(data.get("model"), "model"))
     train = TrainConfig(**_section(data.get("train"), "train"))
     optim_d = _section(data.get("optim"), "optim")

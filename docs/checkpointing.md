@@ -59,6 +59,8 @@ A final save that fails on an otherwise clean exit fails the run; training never
 
 [`checkpoint.resume_compat`](config-reference.yaml) selects the contextual semantic-comparison policy. Its rationale is the distinction between coherent saved state and deliberate research changes described under [Design intent](#design-intent).
 
+The policy compares configurations that conform to the current schema; it is not a migration system. Before the first stable release, obsolete config or checkpoint fields are not translated or silently discarded, and snapshots containing removed keys fail deserialization in both modes.
+
 Both modes reject missing or invalid checkpoint metadata and any parameter-tree or optimizer-state structural incompatibility; those arrays cannot be restored coherently.
 
 The resume compatibility preflight validates the tokenizer snapshot and selected checkpoint metadata before evaluation or training datasets are constructed, so strict mismatches fail without opening the configured remote data or tokenizer source.
