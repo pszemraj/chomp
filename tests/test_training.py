@@ -1926,12 +1926,18 @@ def test_fatal_eval_failure_must_succeed_before_resume_can_return(
     assert recovered["eval_last_failure_step"] == 1
     assert recovered["eval_last_success_step"] == 1
 
-    # The checkpoint still conservatively records the owed attempt, so an
-    # extended resume repeats eval before consuming its next training batch.
+    # The checkpoint still conservatively records the owed attempt. A second
+    # no-op resume retries it again because no replacement checkpoint was saved.
+    events.clear()
+    run(cfg, config_path=None, resume="latest", dry_run=False)
+    assert eval_attempts == 3
+    assert events == ["eval"]
+
+    # An extended resume likewise repeats eval before its next training batch.
     events.clear()
     extended = replace(cfg, train=replace(cfg.train, steps=2))
     run(extended, config_path=None, resume="latest", dry_run=False)
-    assert eval_attempts == 3
+    assert eval_attempts == 4
     assert events == ["eval", "train"]
 
 
