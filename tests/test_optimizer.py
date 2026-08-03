@@ -174,6 +174,64 @@ def _megalodon_accum_cfg(*, grad_accum: int, loss_chunk_size: int | None) -> Con
     )
 
 
+def test_strict_packed_megalodon_matches_separate_documents() -> None:
+    """Strict segment resets preserve separate-document loss and gradients."""
+    cfg = _megalodon_accum_cfg(grad_accum=1, loss_chunk_size=None)
+    params, static = build_model(cfg, key=jax.random.PRNGKey(7))
+
+    packed_ids = jnp.array([[5, 6, 7, 8, 11, 12, 13, 14]], dtype=jnp.int32)
+    packed = Batch(
+        input_ids=packed_ids,
+        labels=packed_ids,
+        segment_ids=jnp.array([[1, 1, 1, 1, 2, 2, 2, 2]], dtype=jnp.int32),
+    )
+    separate_ids = jnp.array(
+        [
+            [5, 6, 7, 8, 0, 0, 0, 0],
+            [11, 12, 13, 14, 0, 0, 0, 0],
+        ],
+        dtype=jnp.int32,
+    )
+    separate = Batch(
+        input_ids=separate_ids,
+        labels=separate_ids.at[:, 4:].set(-100),
+        segment_ids=jnp.array(
+            [
+                [1, 1, 1, 1, 0, 0, 0, 0],
+                [1, 1, 1, 1, 0, 0, 0, 0],
+            ],
+            dtype=jnp.int32,
+        ),
+    )
+
+    def objective(model_params: Any, batch: Batch) -> tuple[jax.Array, jax.Array]:
+        """Return the strict packed loss contract for one physical layout.
+
+        :param Any model_params: Megalodon parameters shared by both layouts.
+        :param Batch batch: Packed or separate-document physical layout.
+        :return tuple[jax.Array, jax.Array]: FP32 loss sum and valid-target count.
+        """
+        return loss_sum_and_count(
+            model_params,
+            static,
+            batch=batch,
+            deterministic=True,
+            key=None,
+            use_packed_segments=True,
+        )
+
+    (packed_sum, packed_count), packed_grad = eqx.filter_value_and_grad(objective, has_aux=True)(
+        params, packed
+    )
+    (separate_sum, separate_count), separate_grad = eqx.filter_value_and_grad(
+        objective, has_aux=True
+    )(params, separate)
+
+    assert packed_count == separate_count == 6
+    assert jnp.allclose(packed_sum, separate_sum, rtol=1e-6, atol=1e-6)
+    assert eqx.tree_equal(packed_grad, separate_grad, rtol=2e-5, atol=2e-6)
+
+
 def test_megalodon_accumulation_matches_full_batch_and_loss_projection() -> None:
     """Exact sums/counts preserve Megalodon updates across both partitions.
 
