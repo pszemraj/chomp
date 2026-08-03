@@ -80,6 +80,17 @@ def test_train_reports_nested_config_typos_without_a_traceback(tmp_path: Path) -
     assert "Traceback" not in result.output
 
 
+def test_train_validates_run_dir_override(tmp_path: Path) -> None:
+    """The final CLI run-directory override must satisfy config validation."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}\n")
+
+    result = CliRunner().invoke(cli, ["train", str(config_path), "--run-dir", ""])
+
+    assert result.exit_code != 0
+    assert "logging.run_dir must be a non-empty string" in result.output
+
+
 def test_generate_rejects_non_megalodon_backend(tmp_path: Path) -> None:
     """generate should fail fast when model.backend is not megalodon."""
     run_dir = tmp_path / "run"

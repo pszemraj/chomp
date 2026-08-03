@@ -10,7 +10,7 @@ from dataclasses import replace
 import click
 
 from chomp.cli.main import BANNER, parse_resume
-from chomp.config import load_config
+from chomp.config import load_config, validate_config
 from chomp.utils.io import setup_python_logging
 
 
@@ -59,11 +59,11 @@ def train(
     click.echo(BANNER)
     try:
         cfg = load_config(config, overrides=list(overrides))
+        if run_dir is not None:
+            cfg = replace(cfg, logging=replace(cfg.logging, run_dir=run_dir))
+            validate_config(cfg)
     except Exception as exc:
         raise click.ClickException(f"Invalid config: {exc}") from exc
-
-    if run_dir is not None:
-        cfg = replace(cfg, logging=replace(cfg.logging, run_dir=run_dir))
 
     resume = parse_resume(resume_raw)
 

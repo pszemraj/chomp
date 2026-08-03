@@ -218,6 +218,29 @@ def test_build_config_allows_resolved_derived_section() -> None:
     assert cfg == _base_cfg()
 
 
+@pytest.mark.parametrize(
+    ("data", "path"),
+    [
+        ({"derived": []}, "derived"),
+        ({"model": False}, "model"),
+        ({"train": []}, "train"),
+        ({"optim": "adamw"}, "optim"),
+        ({"optim": {"muon": False}}, "optim.muon"),
+        ({"optim": {"adam": []}}, "optim.adam"),
+        ({"checkpoint": 0}, "checkpoint"),
+        ({"logging": "INFO"}, "logging"),
+        ({"logging": {"wandb": False}}, "logging.wandb"),
+        ({"debug": []}, "debug"),
+        ({"data": False}, "data"),
+        ({"data": {"tokenizer": []}}, "data.tokenizer"),
+    ],
+)
+def test_build_config_rejects_non_mapping_sections(data: dict[str, object], path: str) -> None:
+    """Falsy and truthy section scalars must not silently select defaults."""
+    with pytest.raises(ValueError, match=rf"{path} must be a mapping or null"):
+        build_config(data)
+
+
 def test_config_reference_matches_config_fields() -> None:
     """The config reference should contain every config field and no stale fields."""
     reference = read_config_mapping(Path(__file__).parents[1] / "docs/config-reference.yaml")
@@ -610,6 +633,10 @@ def test_wandb_tags_require_and_normalize_a_string_list() -> None:
     assert cfg.logging.wandb.tags == ("baseline", "smoke")
 
     data["logging"]["wandb"]["tags"] = "baseline,smoke"
+    with pytest.raises(ValueError, match="YAML/JSON list"):
+        build_config(data)
+
+    data["logging"]["wandb"]["tags"] = ["baseline", 1]
     with pytest.raises(ValueError, match="YAML/JSON list"):
         build_config(data)
 

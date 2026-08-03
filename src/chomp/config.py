@@ -657,31 +657,51 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
     if unknown:
         _vfail(f"unknown top-level config section(s): {', '.join(unknown)}")
 
-    model = ModelConfig(**(data.get("model") or {}))
-    train = TrainConfig(**(data.get("train") or {}))
-    optim_d = data.get("optim") or {}
-    muon_d = optim_d.get("muon") or {}
-    adam_d = optim_d.get("adam") or {}
+    def _section(value: Any, path: str) -> dict[str, Any]:
+        """Return an optional mapping section or reject its container type.
+
+        :param Any value: Raw section value.
+        :param str path: Dotted config path for errors.
+        :raises ValueError: If the value is neither a mapping nor null.
+        :return dict[str, Any]: Section mapping, or an empty mapping for null.
+        """
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            _vfail(f"{path} must be a mapping or null, got {type(value).__name__}")
+        return value
+
+    # ``derived`` is ignored as schema input, but resolved snapshots reserve it
+    # as a mapping and should not make arbitrary top-level values silently valid.
+    _section(data.get("derived"), "derived")
+
+    model = ModelConfig(**_section(data.get("model"), "model"))
+    train = TrainConfig(**_section(data.get("train"), "train"))
+    optim_d = _section(data.get("optim"), "optim")
+    muon_d = _section(optim_d.get("muon"), "optim.muon")
+    adam_d = _section(optim_d.get("adam"), "optim.adam")
     muon = MuonOptimConfig(**muon_d)
     adam = AdamOptimConfig(**adam_d)
     optim_d = {k: v for k, v in optim_d.items() if k not in {"muon", "adam"}}
     optim = OptimConfig(muon=muon, adam=adam, **optim_d)
-    logging_d = data.get("logging") or {}
-    wandb_d = dict(logging_d.get("wandb") or {})
+    logging_d = _section(data.get("logging"), "logging")
+    wandb_d = dict(_section(logging_d.get("wandb"), "logging.wandb"))
     if "tags" in wandb_d:
         tags = wandb_d["tags"]
         if not isinstance(tags, (list, tuple)):
+            _vfail("logging.wandb.tags must be a YAML/JSON list of strings")
+        if any(not isinstance(tag, str) for tag in tags):
             _vfail("logging.wandb.tags must be a YAML/JSON list of strings")
         wandb_d["tags"] = tuple(tags)
     wandb = WandbConfig(**wandb_d)
     logging_d = {k: v for k, v in logging_d.items() if k != "wandb"}
     logging = LoggingConfig(wandb=wandb, **logging_d)
-    debug = DebugConfig(**(data.get("debug") or {}))
-    checkpoint = CheckpointConfig(**(data.get("checkpoint") or {}))
+    debug = DebugConfig(**_section(data.get("debug"), "debug"))
+    checkpoint = CheckpointConfig(**_section(data.get("checkpoint"), "checkpoint"))
 
     # Data + nested tokenizer
-    data_d = data.get("data") or {}
-    tok_d = data_d.get("tokenizer") or {}
+    data_d = _section(data.get("data"), "data")
+    tok_d = _section(data_d.get("tokenizer"), "data.tokenizer")
     tok = TokenizerConfig(**tok_d)
     # remove tokenizer from dict before constructing
     data_d = {k: v for k, v in data_d.items() if k != "tokenizer"}
