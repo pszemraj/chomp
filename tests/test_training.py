@@ -64,6 +64,7 @@ from chomp.train import (
     _project_metrics,
     _restore_eval_status,
     _StopSignalState,
+    _sync_metrics_and_validate_loss_tokens,
     build_optimizer,
     init_train_state,
     make_train_step,
@@ -1360,6 +1361,14 @@ def test_loss_token_check_covers_each_step_between_syncs(
 
     with pytest.raises(RuntimeError, match="loss-token count mismatch at step 2"):
         run(cfg, config_path=None, resume="none", dry_run=False)
+
+
+def test_loss_token_check_reports_missing_device_metric() -> None:
+    """A missing compiled count should not masquerade as a numeric mismatch."""
+    with pytest.raises(
+        RuntimeError, match="Missing required training metric 'token_sum' at step 2"
+    ):
+        _sync_metrics_and_validate_loss_tokens({}, [(2, 10, None)])
 
 
 def test_loss_token_check_drains_partial_interval_before_final_save(

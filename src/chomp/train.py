@@ -209,6 +209,10 @@ def _sync_metrics_and_validate_loss_tokens(
     :raises RuntimeError: If any completed step has inconsistent target counts.
     :return dict[str, Any]: Host copy of the latest metrics.
     """
+    for step, _, device_count in checks:
+        if device_count is None:
+            raise RuntimeError(f"Missing required training metric 'token_sum' at step {step}")
+
     metrics_host, device_counts = jax.device_get(
         (metrics, tuple(device_count for _, _, device_count in checks))
     )
@@ -1624,7 +1628,7 @@ def _run_impl(
             state, metrics = train_step(state, batch)
             metrics_host = _sync_metrics_and_validate_loss_tokens(
                 metrics,
-                [(1, step_loss_tokens, metrics.get("token_sum", -1))],
+                [(1, step_loss_tokens, metrics.get("token_sum"))],
             )
             t2 = time.perf_counter()
             step_time_s = t2 - t1
@@ -1958,7 +1962,7 @@ def _run_impl(
                         sync_interval_steps += 1
                         sync_interval_data_wait += data_wait_s
                         sync_interval_loss_token_checks.append(
-                            (step_i, step_loss_tokens, metrics.get("token_sum", -1))
+                            (step_i, step_loss_tokens, metrics.get("token_sum"))
                         )
 
                     host_step = int(step_i)
