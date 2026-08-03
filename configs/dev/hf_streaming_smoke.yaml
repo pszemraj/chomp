@@ -1,7 +1,10 @@
 # Short GPU smoke test for the real Hugging Face streaming and tokenizer path.
+# DummyLM keeps this focused on I/O; use a pretrain recipe with --dry-run to
+# compile and update the real Megalodon backend.
 
 model:
   backend: dummy
+  d_model: 32
 
 data:
   backend: hf

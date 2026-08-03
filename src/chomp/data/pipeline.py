@@ -22,9 +22,12 @@ This pipeline keeps debug sources (local_text) but *still* exercises tokenize+pa
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
+from importlib import metadata
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -38,6 +41,17 @@ from .pack import FFDPacker, TokenPacker
 
 _WINDOW_SHUFFLE_SEED_OFFSET = 104_729
 _UINT32_MODULUS = 2**32
+TOKENIZER_MANIFEST_FILENAME = "identity.json"
+TOKENIZER_MANIFEST_VERSION = 1
+TOKENIZER_CANARY_VERSION = 1
+_TOKENIZER_CANARIES = (
+    ("ordinary", "The quick brown fox."),
+    ("whitespace", "  leading\tand  repeated whitespace  "),
+    ("unicode", "naïve café — Ελληνικά 中文 👩🏽‍💻 e\u0301"),
+    ("byte_fallback", "bytes: <0x00> <0xFF> \x00\u0080ÿ"),
+    ("newlines", "line one\nline two\r\n\nline four"),
+    ("special_like", "<s> [CLS] <|endoftext|> </s> [MASK]"),
+)
 
 
 def effective_window_shuffle_seed(cfg: Config) -> int:
@@ -149,12 +163,20 @@ class HFTokenizer:
     Requires `transformers` (included in default install).
     """
 
-    def __init__(self, name_or_path: str, *, use_fast: bool, trust_remote_code: bool):
+    def __init__(
+        self,
+        name_or_path: str,
+        *,
+        use_fast: bool,
+        trust_remote_code: bool,
+        local_files_only: bool = False,
+    ):
         """Initialize HuggingFace tokenizer from name or local path.
 
         :param str name_or_path: HuggingFace model name or local path.
         :param bool use_fast: Whether to use fast Rust tokenizer.
         :param bool trust_remote_code: Whether to allow custom tokenizer code.
+        :param bool local_files_only: Whether to forbid Hub access.
         """
         from transformers import AutoTokenizer
 
@@ -162,6 +184,7 @@ class HFTokenizer:
             name_or_path,
             use_fast=use_fast,
             trust_remote_code=trust_remote_code,
+            local_files_only=local_files_only,
         )
 
         # Ensure we have a pad token to avoid weirdness.
@@ -426,22 +449,143 @@ def prepare_tokenizer_and_config(
     return cfg, tok
 
 
+def _snapshot_file_records(tok_dir: Path) -> list[dict[str, Any]]:
+    """Return hashes and sizes for every tokenizer snapshot file.
+
+    :param Path tok_dir: Tokenizer snapshot directory.
+    :return list[dict[str, Any]]: Sorted file identity records.
+    """
+    records = []
+    manifest_path = tok_dir / TOKENIZER_MANIFEST_FILENAME
+    for path in sorted(tok_dir.rglob("*")):
+        if not path.is_file() or path == manifest_path:
+            continue
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        records.append(
+            {
+                "path": path.relative_to(tok_dir).as_posix(),
+                "size": path.stat().st_size,
+                "sha256": digest.hexdigest(),
+            }
+        )
+    return records
+
+
+def _tokenizer_package_versions(tok: Tokenizer) -> dict[str, str]:
+    """Return installed distributions used by the effective tokenizer.
+
+    :param Tokenizer tok: Effective tokenizer wrapper.
+    :return dict[str, str]: Distribution names mapped to installed versions.
+    """
+    if isinstance(tok, ByteTokenizer):
+        return {}
+
+    implementation = getattr(tok, "_tok", tok)
+    module_roots = {type(implementation).__module__.partition(".")[0]}
+    if isinstance(tok, HFTokenizer):
+        module_roots.add("transformers")
+    backend = getattr(implementation, "backend_tokenizer", None)
+    if backend is not None:
+        module_roots.add(type(backend).__module__.partition(".")[0])
+    sentencepiece_model = getattr(implementation, "sp_model", None)
+    if sentencepiece_model is not None:
+        module_roots.add(type(sentencepiece_model).__module__.partition(".")[0])
+
+    owners = metadata.packages_distributions()
+    distributions = {
+        distribution for module_root in module_roots for distribution in owners.get(module_root, ())
+    }
+    return {distribution: metadata.version(distribution) for distribution in sorted(distributions)}
+
+
+def _build_tokenizer_manifest(tok_dir: Path, tok: Tokenizer) -> dict[str, Any]:
+    """Build the full execution identity for a saved tokenizer.
+
+    :param Path tok_dir: Tokenizer snapshot directory.
+    :param Tokenizer tok: Tokenizer that will execute the run.
+    :return dict[str, Any]: Versioned tokenizer identity manifest.
+    """
+    implementation = getattr(tok, "_tok", tok)
+    return {
+        "format_version": TOKENIZER_MANIFEST_VERSION,
+        "implementation": {
+            "module": type(implementation).__module__,
+            "qualname": type(implementation).__qualname__,
+            "is_fast": bool(getattr(implementation, "is_fast", False)),
+        },
+        "packages": _tokenizer_package_versions(tok),
+        "files": _snapshot_file_records(tok_dir),
+        "canary": {
+            "version": TOKENIZER_CANARY_VERSION,
+            "cases": [
+                {
+                    "name": name,
+                    "text": text,
+                    "ids": [int(token_id) for token_id in tok.encode(text)],
+                }
+                for name, text in _TOKENIZER_CANARIES
+            ],
+        },
+    }
+
+
+def tokenizer_checkpoint_identity(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Return the compact tokenizer identity stored in every checkpoint.
+
+    :param dict[str, Any] manifest: Full tokenizer identity manifest.
+    :return dict[str, Any]: Manifest version and canonical SHA-256 digest.
+    """
+    encoded = json.dumps(
+        manifest,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "manifest_version": manifest.get("format_version"),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _write_tokenizer_manifest(tok_dir: Path, manifest: dict[str, Any]) -> None:
+    """Write a tokenizer identity manifest.
+
+    :param Path tok_dir: Tokenizer snapshot directory.
+    :param dict[str, Any] manifest: Manifest to persist.
+    """
+    (tok_dir / TOKENIZER_MANIFEST_FILENAME).write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    )
+
+
 def save_tokenizer_snapshot(
-    run_dir: Path, cfg: Config, tok: Tokenizer, *, allow_existing: bool
-) -> None:
-    """Persist a Hugging Face tokenizer with the run.
+    run_dir: Path,
+    cfg: Config,
+    tok: Tokenizer,
+) -> tuple[Tokenizer, dict[str, Any]]:
+    """Persist and bind the tokenizer used by a fresh run.
+
+    Hugging Face tokenizers are reloaded from the saved local snapshot so the
+    same effective program is used on fresh execution and resume.
 
     :param Path run_dir: Run directory path.
     :param Config cfg: Training configuration.
     :param Tokenizer tok: Tokenizer instance to save.
-    :param bool allow_existing: Whether this is an existing run.
+    :return tuple[Tokenizer, dict[str, Any]]: Execution tokenizer and checkpoint identity.
     """
-    if cfg.data.tokenizer.kind != "hf" or allow_existing:
-        return
-
     tok_dir = Path(run_dir) / "tokenizer"
     tok_dir.mkdir()
-    tok.save_pretrained(tok_dir)  # type: ignore[attr-defined]
+    execution_tok = tok
+    if cfg.data.tokenizer.kind == "hf":
+        tok.save_pretrained(tok_dir)  # type: ignore[attr-defined]
+        execution_tok = load_tokenizer_snapshot(run_dir, cfg)
+
+    manifest = _build_tokenizer_manifest(tok_dir, execution_tok)
+    _write_tokenizer_manifest(tok_dir, manifest)
+    return execution_tok, tokenizer_checkpoint_identity(manifest)
 
 
 def load_tokenizer_snapshot(run_dir: Path, cfg: Config) -> Tokenizer:
@@ -451,12 +595,74 @@ def load_tokenizer_snapshot(run_dir: Path, cfg: Config) -> Tokenizer:
     :param Config cfg: Training configuration.
     :return Tokenizer: Restored Hugging Face tokenizer instance.
     """
+    if cfg.data.tokenizer.kind == "byte":
+        return ByteTokenizer(byte_offset=cfg.data.tokenizer.byte_offset)
+
     tok_dir = Path(run_dir) / "tokenizer"
     return HFTokenizer(
         str(tok_dir),
         use_fast=cfg.data.tokenizer.hf_use_fast,
         trust_remote_code=cfg.data.tokenizer.hf_trust_remote_code,
+        local_files_only=True,
     )
+
+
+def load_tokenizer_snapshot_for_resume(
+    run_dir: Path,
+    cfg: Config,
+) -> tuple[Tokenizer, dict[str, Any]]:
+    """Load and validate the run-pinned tokenizer before resume.
+
+    :param Path run_dir: Existing run directory.
+    :param Config cfg: Current training configuration.
+    :raises RuntimeError: If strict resume cannot prove tokenizer identity.
+    :return tuple[Tokenizer, dict[str, Any]]: Execution tokenizer and checkpoint identity.
+    """
+    tok_dir = Path(run_dir) / "tokenizer"
+    manifest_path = tok_dir / TOKENIZER_MANIFEST_FILENAME
+    severity = cfg.checkpoint.resume_compat
+    expected = None
+    if manifest_path.exists():
+        try:
+            expected = json.loads(manifest_path.read_text())
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            message = (
+                "Tokenizer identity manifest is unreadable or invalid JSON; "
+                "resume cannot prove tokenizer execution equivalence."
+            )
+            if severity == "strict":
+                raise RuntimeError(message) from exc
+            logger.warning("%s Continuing because checkpoint.resume_compat='warn'.", message)
+    elif severity == "strict":
+        raise RuntimeError(
+            "Tokenizer identity manifest is missing; strict resume cannot prove "
+            "tokenizer execution equivalence."
+        )
+    else:
+        logger.warning(
+            "Tokenizer identity manifest is missing; warn-mode resume cannot prove "
+            "tokenizer execution equivalence."
+        )
+        tok_dir.mkdir(parents=True, exist_ok=True)
+
+    tokenizer = load_tokenizer_snapshot(run_dir, cfg)
+    observed = _build_tokenizer_manifest(tok_dir, tokenizer)
+    fields = ("format_version", "implementation", "packages", "files", "canary")
+    mismatches = [
+        field
+        for field in fields
+        if not isinstance(expected, dict) or expected.get(field) != observed[field]
+    ]
+    if mismatches:
+        detail = ", ".join(mismatches)
+        message = f"Tokenizer identity mismatch in: {detail}"
+        if severity == "strict":
+            raise RuntimeError(message)
+        logger.warning("%s; continuing because checkpoint.resume_compat='warn'.", message)
+        if not isinstance(expected, dict):
+            _write_tokenizer_manifest(tok_dir, observed)
+
+    return tokenizer, tokenizer_checkpoint_identity(observed)
 
 
 def _collect_texts(stream: TextStream, max_samples: int) -> list[str]:
@@ -643,16 +849,22 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
 
     tok = {
         "kind": t.kind,
-        "hf_name_or_path": t.hf_name_or_path,
-        "hf_use_fast": t.hf_use_fast,
-        "hf_trust_remote_code": t.hf_trust_remote_code,
-        "byte_offset": t.byte_offset,
         "add_bos": t.add_bos,
         "add_eos": t.add_eos,
         "max_doc_tokens": t.max_doc_tokens,
         "vocab_size_multiple": t.vocab_size_multiple,
         "auto_set_special_tokens": t.auto_set_special_tokens,
     }
+    if t.kind == "hf":
+        tok.update(
+            {
+                "hf_name_or_path": t.hf_name_or_path,
+                "hf_use_fast": t.hf_use_fast,
+                "hf_trust_remote_code": t.hf_trust_remote_code,
+            }
+        )
+    else:
+        tok["byte_offset"] = t.byte_offset
     # Record only active mode knobs and effective shuffle geometry so inert
     # defaults and raw budgets cannot reject a behaviorally identical resume.
     # Thread prefetch is deliberately absent: Grain serializes the parent

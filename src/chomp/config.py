@@ -39,6 +39,7 @@ TokenizerKind = Literal["byte", "hf"]
 PackingMode = Literal["sequential", "bin", "multipack"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 ResumeCompat = Literal["strict", "warn"]
+EvalFailurePolicy = Literal["fatal", "disable"]
 
 
 class _UniqueKeySafeLoader(yaml.SafeLoader):
@@ -123,9 +124,9 @@ class ModelConfig:
     use_checkpoint: bool = False
     output_size: int = -1
     # Segmented CEMA path selection for strict packed training (megalodon-jax
-    # >= 0.2.1). True = parallel associative scan (fast, higher peak memory);
-    # False = sequential lax.scan fallback (O(1) memory). Ignored unless
-    # segment_ids reach the model (bin/multipack + packing_strict_segments).
+    # >= 0.2.2). True = parallel associative scan; false = sequential scan
+    # with a compact forward carry. Compiled backward peak memory must be
+    # measured. Ignored unless segment_ids reach the model.
     use_associative_segment_scan: bool = True
 
     # Dtype policy (strings so YAML is clean; converted at runtime).
@@ -139,7 +140,6 @@ class ModelConfig:
     # megalodon-jax); both it and harness gradient accumulation stay fp32.
     accum_dtype: Literal["float32"] = "float32"
     attention_softmax_dtype: Literal["float32", "bfloat16"] = "float32"
-    loss_softmax_dtype: Literal["float32", "bfloat16"] = "float32"
     loss_chunk_size: int | None = None
 
 
@@ -288,6 +288,7 @@ class TrainConfig:
     allow_cpu: bool = False
     log_every: int = 25
     eval_every: int = 2500
+    eval_failure_policy: EvalFailurePolicy = "fatal"
     generate_every: int = 5000
     generate_input_len: int | None = None
     generate_max_tokens: int | None = None
@@ -656,31 +657,54 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
     if unknown:
         _vfail(f"unknown top-level config section(s): {', '.join(unknown)}")
 
-    model = ModelConfig(**(data.get("model") or {}))
-    train = TrainConfig(**(data.get("train") or {}))
-    optim_d = data.get("optim") or {}
-    muon_d = optim_d.get("muon") or {}
-    adam_d = optim_d.get("adam") or {}
+    def _section(value: Any, path: str) -> dict[str, Any]:
+        """Return an optional mapping section or reject its container type.
+
+        :param Any value: Raw section value.
+        :param str path: Dotted config path for errors.
+        :raises ValueError: If the value is neither a mapping nor null.
+        :return dict[str, Any]: Section mapping, or an empty mapping for null.
+        """
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            _vfail(f"{path} must be a mapping or null, got {type(value).__name__}")
+        return value
+
+    # ``derived`` is ignored as schema input, but resolved snapshots reserve it
+    # as a mapping and should not make arbitrary top-level values silently valid.
+    _section(data.get("derived"), "derived")
+
+    # Deserialize against the current schema intentionally. Before the first
+    # stable release, removed config/checkpoint fields are neither translated
+    # nor ignored: failing here avoids silently reinterpreting old experiments.
+    model = ModelConfig(**_section(data.get("model"), "model"))
+    train = TrainConfig(**_section(data.get("train"), "train"))
+    optim_d = _section(data.get("optim"), "optim")
+    muon_d = _section(optim_d.get("muon"), "optim.muon")
+    adam_d = _section(optim_d.get("adam"), "optim.adam")
     muon = MuonOptimConfig(**muon_d)
     adam = AdamOptimConfig(**adam_d)
     optim_d = {k: v for k, v in optim_d.items() if k not in {"muon", "adam"}}
     optim = OptimConfig(muon=muon, adam=adam, **optim_d)
-    logging_d = data.get("logging") or {}
-    wandb_d = dict(logging_d.get("wandb") or {})
+    logging_d = _section(data.get("logging"), "logging")
+    wandb_d = dict(_section(logging_d.get("wandb"), "logging.wandb"))
     if "tags" in wandb_d:
         tags = wandb_d["tags"]
         if not isinstance(tags, (list, tuple)):
+            _vfail("logging.wandb.tags must be a YAML/JSON list of strings")
+        if any(not isinstance(tag, str) for tag in tags):
             _vfail("logging.wandb.tags must be a YAML/JSON list of strings")
         wandb_d["tags"] = tuple(tags)
     wandb = WandbConfig(**wandb_d)
     logging_d = {k: v for k, v in logging_d.items() if k != "wandb"}
     logging = LoggingConfig(wandb=wandb, **logging_d)
-    debug = DebugConfig(**(data.get("debug") or {}))
-    checkpoint = CheckpointConfig(**(data.get("checkpoint") or {}))
+    debug = DebugConfig(**_section(data.get("debug"), "debug"))
+    checkpoint = CheckpointConfig(**_section(data.get("checkpoint"), "checkpoint"))
 
     # Data + nested tokenizer
-    data_d = data.get("data") or {}
-    tok_d = data_d.get("tokenizer") or {}
+    data_d = _section(data.get("data"), "data")
+    tok_d = _section(data_d.get("tokenizer"), "data.tokenizer")
     tok = TokenizerConfig(**tok_d)
     # remove tokenizer from dict before constructing
     data_d = {k: v for k, v in data_d.items() if k != "tokenizer"}
@@ -769,6 +793,11 @@ def _validate_train(cfg: Config) -> None:
         _vfail(f"train.log_every must be positive, got {cfg.train.log_every}")
     if cfg.train.eval_every < 0:
         _vfail(f"train.eval_every must be >= 0, got {cfg.train.eval_every}")
+    if cfg.train.eval_failure_policy not in ("fatal", "disable"):
+        _vfail(
+            "train.eval_failure_policy must be 'fatal' or 'disable', got "
+            f"{cfg.train.eval_failure_policy!r}"
+        )
     if cfg.train.generate_every < 0:
         _vfail(f"train.generate_every must be >= 0, got {cfg.train.generate_every}")
     if cfg.train.generate_input_len is not None:
@@ -877,8 +906,6 @@ def _validate_model(cfg: Config) -> None:
         _vfail(
             f"model.attention_softmax_dtype is unsupported: {cfg.model.attention_softmax_dtype!r}"
         )
-    if cfg.model.loss_softmax_dtype not in ("float32", "bfloat16"):
-        _vfail(f"model.loss_softmax_dtype is unsupported: {cfg.model.loss_softmax_dtype!r}")
     if cfg.model.vocab_size <= 0:
         _vfail(f"model.vocab_size must be positive, got {cfg.model.vocab_size}")
     for name, token_id in (
@@ -1069,9 +1096,9 @@ def _validate_data(cfg: Config) -> None:
         _vfail(
             "data.mask_boundary_loss=false is incompatible with strict segment "
             "isolation: the backend excludes cross-segment label pairs from the "
-            "loss whenever segment_ids are passed (megalodon-jax >= 0.2.1), "
-            "while host-side token counts would still include them — silently "
-            "changing token-weighted grad accumulation and loss_tokens. Keep "
+            "loss whenever segment_ids are passed (megalodon-jax >= 0.2.2), "
+            "while asynchronous host token accounting would still include them. "
+            "Keep "
             "mask_boundary_loss=true, or set data.packing_strict_segments=false "
             "for deliberate cross-document state bleed."
         )

@@ -78,9 +78,17 @@ def generate(
     import jax
 
     from chomp.ckpt import restore_params_only
-    from chomp.data.pipeline import load_tokenizer_snapshot, prepare_tokenizer_and_config
+    from chomp.data.pipeline import (
+        load_tokenizer_snapshot,
+        load_tokenizer_snapshot_for_resume,
+        prepare_tokenizer_and_config,
+    )
     from chomp.model import build_model, generate_tokens
-    from chomp.utils.ckpt_paths import load_config_for_checkpoint, resolve_checkpoint_path
+    from chomp.utils.ckpt_paths import (
+        load_config_for_checkpoint,
+        read_checkpoint_meta,
+        resolve_checkpoint_path,
+    )
     from chomp.utils.tree import abstractify_tree
 
     # Find checkpoint and load config
@@ -103,10 +111,46 @@ def generate(
             f"Found {cfg.model.backend!r} in the checkpoint config."
         )
 
+    try:
+        checkpoint_meta = read_checkpoint_meta(step_dir)
+    except FileNotFoundError:
+        checkpoint_meta = None
+    checkpoint_tokenizer_identity = (
+        None if checkpoint_meta is None else checkpoint_meta.get("tokenizer_identity")
+    )
+    if (
+        checkpoint_meta is not None
+        and checkpoint_meta.get("schema_version") in {2, 3}
+        and not isinstance(checkpoint_tokenizer_identity, dict)
+    ):
+        raise click.ClickException(
+            "Checkpoint metadata is missing tokenizer_identity; cannot verify generation tokens."
+        )
+
     # Prefer the run-pinned tokenizer so mutable upstream tokenizer revisions
     # cannot reinterpret the restored embedding rows.
     tokenizer = None
-    if run_dir is not None and (run_dir / "tokenizer").exists():
+    if isinstance(checkpoint_tokenizer_identity, dict):
+        if run_dir is None or not (run_dir / "tokenizer").exists():
+            raise click.ClickException(
+                "Checkpoint requires its run-pinned tokenizer snapshot for generation."
+            )
+        try:
+            tokenizer, observed_tokenizer_identity = load_tokenizer_snapshot_for_resume(
+                run_dir, cfg
+            )
+        except Exception as exc:
+            raise click.ClickException(str(exc)) from exc
+        # Token IDs directly index the restored embedding rows, so effective
+        # tokenizer drift is never a meaningful generation override.
+        if observed_tokenizer_identity != checkpoint_tokenizer_identity:
+            raise click.ClickException(
+                "Tokenizer identity does not match the selected checkpoint; refusing "
+                "generation because token IDs may not match its embedding rows."
+            )
+    elif (
+        cfg.data.tokenizer.kind == "hf" and run_dir is not None and (run_dir / "tokenizer").exists()
+    ):
         try:
             tokenizer = load_tokenizer_snapshot(run_dir, cfg)
         except Exception as exc:

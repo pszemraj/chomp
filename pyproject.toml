@@ -27,8 +27,8 @@ dependencies = [
   # matching jaxlib, CUDA plugin, and pip-managed CUDA 13 runtime libraries.
   "jax[cuda13]>=0.10.2,<0.11",
   "equinox>=0.13.8,<0.14",
-  # 0.2.1 is the first published release with the model/config contract used here.
-  "megalodon-jax>=0.2.1,<0.3",
+  # 0.2.2 exposes exact FP32 loss sums and integer valid-target counts.
+  "megalodon-jax>=0.2.2,<0.3",
   "optax>=0.2.8,<0.3",
   "orbax-checkpoint==0.11.31",
   "PyYAML>=6.0",
@@ -42,9 +42,11 @@ dependencies = [
   # no-op, so any bump must re-verify the workaround and the full
   # interrupted-versus-continuous resume tests.
   "grain==0.2.15",
-  # 5.0.0 is the first release with the remote-Parquet thread-shutdown fix
-  # for apache/arrow#45214. Earlier releases can abort a successful run at
-  # interpreter exit after a partially consumed streaming shard.
+  # 5.0.0 is the first release with the remote-Parquet thread-shutdown
+  # workaround for apache/arrow#45214. Chomp also releases single-source
+  # Arrow references after the advertised grace, forces collection as the
+  # upstream workaround does, then repeats that bounded wait for native
+  # destructors initiated by the release.
   "datasets==5.0.0",
   "transformers>=4.57,<5",
   # CLI

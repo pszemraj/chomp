@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import gc
+import hashlib
 import json
 import logging
 import subprocess
 import sys
+import weakref
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -27,6 +29,8 @@ from chomp.data.grain import (
 from chomp.data.hf import HFStreamingTextStream, HFStreamSpec, resolve_dataset_revision
 from chomp.data.pack import FFDPacker, FFDPackerState, TokenPacker
 from chomp.data.pipeline import (
+    _TOKENIZER_CANARIES,
+    TOKENIZER_MANIFEST_FILENAME,
     ByteTokenizer,
     ZeroLossTokensError,
     _build_packer,
@@ -35,7 +39,12 @@ from chomp.data.pipeline import (
     build_train_iterator,
     data_fingerprint,
     effective_window_shuffle_seed,
+    load_tokenizer_snapshot,
+    load_tokenizer_snapshot_for_resume,
+    prepare_tokenizer_and_config,
     resolve_ffd_lookahead,
+    save_tokenizer_snapshot,
+    tokenizer_checkpoint_identity,
 )
 from tests.helpers.config_factories import make_pipeline_cfg
 
@@ -53,6 +62,236 @@ def _doc(token: int, length: int) -> list[int]:
     :return list[int]: Token list of length ``length``.
     """
     return [token] * length
+
+
+def _local_hf_cfg(
+    source: Path,
+    *,
+    use_fast: bool = True,
+    resume_compat: str = "strict",
+) -> Config:
+    """Build a local-only Hugging Face tokenizer test configuration.
+
+    :param Path source: Saved tokenizer source directory.
+    :param bool use_fast: Whether to request the fast implementation.
+    :param str resume_compat: Resume compatibility policy.
+    :return Config: Tokenizer test configuration.
+    """
+    cfg = make_pipeline_cfg(
+        vocab_size=32,
+        tokenizer=TokenizerConfig(
+            kind="hf",
+            hf_name_or_path=str(source),
+            hf_use_fast=use_fast,
+            hf_trust_remote_code=False,
+            vocab_size_multiple=1,
+            auto_set_special_tokens=True,
+            add_bos=False,
+            add_eos=False,
+        ),
+    )
+    return replace(
+        cfg,
+        checkpoint=replace(cfg.checkpoint, resume_compat=resume_compat),
+    )
+
+
+def test_tokenizer_manifest_records_local_execution_identity(
+    tmp_path: Path,
+    local_bert_tokenizer: Path,
+) -> None:
+    """The saved manifest must bind files, program, packages, and canary outputs.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :param Path local_bert_tokenizer: Deterministic local tokenizer source.
+    """
+    cfg, source_tok = prepare_tokenizer_and_config(_local_hf_cfg(local_bert_tokenizer))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    execution_tok, checkpoint_identity = save_tokenizer_snapshot(run_dir, cfg, source_tok)
+    tok_dir = run_dir / "tokenizer"
+    manifest = json.loads((tok_dir / TOKENIZER_MANIFEST_FILENAME).read_text())
+
+    actual_paths = sorted(
+        path.relative_to(tok_dir).as_posix()
+        for path in tok_dir.rglob("*")
+        if path.is_file() and path != tok_dir / TOKENIZER_MANIFEST_FILENAME
+    )
+    assert [record["path"] for record in manifest["files"]] == actual_paths
+    for record in manifest["files"]:
+        path = tok_dir / record["path"]
+        assert record["size"] == path.stat().st_size
+        assert record["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+    implementation = manifest["implementation"]
+    assert implementation["module"] == "transformers.models.bert.tokenization_bert_fast"
+    assert implementation["qualname"] == "BertTokenizerFast"
+    assert implementation["is_fast"] is True
+    assert {"transformers", "tokenizers"} <= manifest["packages"].keys()
+    assert manifest["canary"]["version"] == 1
+    for case in manifest["canary"]["cases"]:
+        assert case["ids"] == execution_tok.encode(case["text"])
+    assert checkpoint_identity == tokenizer_checkpoint_identity(manifest)
+
+
+def test_byte_tokenizer_manifest_excludes_chomp_version(tmp_path: Path) -> None:
+    """Byte-tokenizer identity should not change with the harness package version.
+
+    :param Path tmp_path: Pytest temporary directory.
+    """
+    cfg = Config(
+        data=replace(Config().data, tokenizer=TokenizerConfig(kind="byte")),
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    save_tokenizer_snapshot(run_dir, cfg, ByteTokenizer())
+    manifest = json.loads((run_dir / "tokenizer" / TOKENIZER_MANIFEST_FILENAME).read_text())
+
+    assert manifest["packages"] == {}
+
+
+def test_tokenizer_resume_rejects_snapshot_file_drift(
+    tmp_path: Path,
+    local_bert_tokenizer: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Resume policy must report an added file not present in the saved manifest.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :param Path local_bert_tokenizer: Deterministic local tokenizer source.
+    :param pytest.LogCaptureFixture caplog: Captured warn-mode log.
+    """
+    cfg, source_tok = prepare_tokenizer_and_config(_local_hf_cfg(local_bert_tokenizer))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    save_tokenizer_snapshot(run_dir, cfg, source_tok)
+    manifest_path = run_dir / "tokenizer" / TOKENIZER_MANIFEST_FILENAME
+    saved_manifest = manifest_path.read_text()
+    (run_dir / "tokenizer" / "unexpected.txt").write_text("drift")
+
+    with pytest.raises(RuntimeError, match="files"):
+        load_tokenizer_snapshot_for_resume(run_dir, cfg)
+
+    warn_cfg = replace(
+        cfg,
+        checkpoint=replace(cfg.checkpoint, resume_compat="warn"),
+    )
+    with caplog.at_level(logging.WARNING, logger="chomp.data.pipeline"):
+        load_tokenizer_snapshot_for_resume(run_dir, warn_cfg)
+    assert "Tokenizer identity mismatch in: files" in caplog.text
+    assert manifest_path.read_text() == saved_manifest
+
+
+def test_tokenizer_resume_requires_manifest(
+    tmp_path: Path,
+    local_bert_tokenizer: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A missing legacy manifest is unproven in strict and warn modes.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :param Path local_bert_tokenizer: Deterministic local tokenizer source.
+    :param pytest.LogCaptureFixture caplog: Captured warn-mode log.
+    """
+    cfg, source_tok = prepare_tokenizer_and_config(_local_hf_cfg(local_bert_tokenizer))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    save_tokenizer_snapshot(run_dir, cfg, source_tok)
+    manifest_path = run_dir / "tokenizer" / TOKENIZER_MANIFEST_FILENAME
+    manifest_path.unlink()
+
+    with pytest.raises(RuntimeError, match="manifest is missing"):
+        load_tokenizer_snapshot_for_resume(run_dir, cfg)
+
+    warn_cfg = replace(
+        cfg,
+        checkpoint=replace(cfg.checkpoint, resume_compat="warn"),
+    )
+    with caplog.at_level(logging.WARNING, logger="chomp.data.pipeline"):
+        load_tokenizer_snapshot_for_resume(run_dir, warn_cfg)
+    assert "cannot prove tokenizer execution equivalence" in caplog.text
+    assert manifest_path.exists()
+
+
+@pytest.mark.parametrize("manifest_payload", [b"{invalid", b"\xff"])
+def test_tokenizer_resume_handles_invalid_manifest_json(
+    tmp_path: Path,
+    local_bert_tokenizer: Path,
+    caplog: pytest.LogCaptureFixture,
+    manifest_payload: bytes,
+) -> None:
+    """Malformed identity JSON is unproven in strict and rebuilt in warn mode.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :param Path local_bert_tokenizer: Deterministic local tokenizer source.
+    :param pytest.LogCaptureFixture caplog: Captured warn-mode log.
+    :param bytes manifest_payload: Invalid JSON or non-UTF-8 manifest payload.
+    """
+    cfg, source_tok = prepare_tokenizer_and_config(_local_hf_cfg(local_bert_tokenizer))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    save_tokenizer_snapshot(run_dir, cfg, source_tok)
+    manifest_path = run_dir / "tokenizer" / TOKENIZER_MANIFEST_FILENAME
+    manifest_path.write_bytes(manifest_payload)
+
+    with pytest.raises(RuntimeError, match="manifest is unreadable or invalid JSON"):
+        load_tokenizer_snapshot_for_resume(run_dir, cfg)
+
+    warn_cfg = replace(
+        cfg,
+        checkpoint=replace(cfg.checkpoint, resume_compat="warn"),
+    )
+    with caplog.at_level(logging.WARNING, logger="chomp.data.pipeline"):
+        load_tokenizer_snapshot_for_resume(run_dir, warn_cfg)
+    assert "manifest is unreadable or invalid JSON" in caplog.text
+    assert isinstance(json.loads(manifest_path.read_text()), dict)
+
+
+def test_tokenizer_resume_rejects_canary_drift(
+    tmp_path: Path,
+    local_bert_tokenizer: Path,
+) -> None:
+    """Strict resume must reject stored outputs that the tokenizer no longer produces.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :param Path local_bert_tokenizer: Deterministic local tokenizer source.
+    """
+    cfg, source_tok = prepare_tokenizer_and_config(_local_hf_cfg(local_bert_tokenizer))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    save_tokenizer_snapshot(run_dir, cfg, source_tok)
+    manifest_path = run_dir / "tokenizer" / TOKENIZER_MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest["canary"]["cases"][0]["ids"].append(999_999)
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(RuntimeError, match="canary"):
+        load_tokenizer_snapshot_for_resume(run_dir, cfg)
+
+
+def test_tokenizer_resume_rejects_fast_slow_program_drift(
+    tmp_path: Path,
+    local_bert_tokenizer: Path,
+) -> None:
+    """Identical files and outputs do not make fast and slow programs equivalent.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :param Path local_bert_tokenizer: Deterministic local tokenizer source.
+    """
+    fast_cfg, source_tok = prepare_tokenizer_and_config(_local_hf_cfg(local_bert_tokenizer))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    fast_tok, _ = save_tokenizer_snapshot(run_dir, fast_cfg, source_tok)
+    slow_cfg = _local_hf_cfg(local_bert_tokenizer, use_fast=False)
+    slow_tok = load_tokenizer_snapshot(run_dir, slow_cfg)
+    assert [fast_tok.encode(text) for _, text in _TOKENIZER_CANARIES] == [
+        slow_tok.encode(text) for _, text in _TOKENIZER_CANARIES
+    ]
+
+    with pytest.raises(RuntimeError, match="implementation"):
+        load_tokenizer_snapshot_for_resume(run_dir, slow_cfg)
 
 
 def test_window_shuffle_seed_normalizes_to_uint32() -> None:
@@ -213,6 +452,43 @@ def test_eval_fingerprint_tracks_effective_ffd_geometry(
     assert len(initial_batches) == 2
     assert len(changed_batches) == 1
     assert not np.array_equal(initial_batches[0].input_ids, changed_batches[0].input_ids)
+
+
+def test_tokenizer_fingerprint_omits_backend_inert_fields() -> None:
+    """Tokenizer identity should record only fields consumed by the selected backend."""
+    hf = make_pipeline_cfg(
+        backend="hf",
+        hf_dataset="owner/dataset",
+        hf_name=None,
+        tokenizer=TokenizerConfig(
+            kind="hf",
+            hf_name_or_path="owner/tokenizer",
+            byte_offset=0,
+            add_bos=False,
+            add_eos=False,
+        ),
+    )
+    hf_changed = replace(
+        hf,
+        data=replace(
+            hf.data,
+            tokenizer=replace(hf.data.tokenizer, byte_offset=17),
+        ),
+    )
+    assert data_fingerprint(hf)["tokenizer"] == data_fingerprint(hf_changed)["tokenizer"]
+    assert "byte_offset" not in data_fingerprint(hf)["tokenizer"]
+
+    byte = make_pipeline_cfg(
+        tokenizer=TokenizerConfig(kind="byte", byte_offset=4, add_bos=True, add_eos=True)
+    )
+    byte_changed = replace(
+        byte,
+        data=replace(
+            byte.data,
+            tokenizer=replace(byte.data.tokenizer, byte_offset=8),
+        ),
+    )
+    assert data_fingerprint(byte)["tokenizer"] != data_fingerprint(byte_changed)["tokenizer"]
 
 
 @pytest.mark.parametrize("mode", ["bin", "multipack"])
@@ -893,25 +1169,87 @@ def test_hf_schema_errors_fail(
         next(stream)
 
 
-def test_hf_close_honors_remote_parquet_shutdown_grace(
+def test_hf_close_orders_two_phase_remote_parquet_shutdown(
     patch_hf_load_dataset: Callable[..., dict[str, int]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Sources flagged by Datasets must receive its Arrow shutdown grace."""
+    """Flagged sources collect released owners between the two shutdown graces."""
     from datasets import config as datasets_config
 
     record: dict[str, Any] = {}
     patch_hf_load_dataset([{"text": "alpha"}], record=record)
     stream = HFStreamingTextStream(_hf_stream_spec())
     next(stream)
-    stream._ds._ex_iterable = SimpleNamespace(sleep_on_threads_shutdown=True)
-    sleeps: list[float] = []
-    monkeypatch.setattr("chomp.data.hf.time.sleep", sleeps.append)
+
+    class _ArrowGraph:
+        """Weak-referenceable stand-in for a cyclic Datasets/Arrow graph."""
+
+        sleep_on_threads_shutdown = True
+
+    arrow_graph = _ArrowGraph()
+    arrow_graph.cycle = arrow_graph
+    stream._ds._ex_iterable = arrow_graph
+    dataset_ref = weakref.ref(stream._ds)
+    iterator_ref = weakref.ref(stream._it)
+    arrow_ref = weakref.ref(arrow_graph)
+    del arrow_graph
+    events: list[tuple[str, float | None, int, bool, bool, bool]] = []
+    real_collect = gc.collect
+
+    def _record_sleep(duration: float) -> None:
+        """Record close count and source ownership at each requested grace."""
+        events.append(
+            (
+                "sleep",
+                duration,
+                int(record.get("close_calls", 0)),
+                iterator_ref() is None,
+                dataset_ref() is None,
+                arrow_ref() is None,
+            )
+        )
+
+    def _record_collect() -> int:
+        """Record that cyclic collection runs only after source release."""
+        events.append(
+            (
+                "collect-before",
+                None,
+                int(record.get("close_calls", 0)),
+                iterator_ref() is None,
+                dataset_ref() is None,
+                arrow_ref() is None,
+            )
+        )
+        collected = real_collect()
+        events.append(
+            (
+                "collect-after",
+                None,
+                int(record.get("close_calls", 0)),
+                iterator_ref() is None,
+                dataset_ref() is None,
+                arrow_ref() is None,
+            )
+        )
+        return collected
+
+    monkeypatch.setattr("chomp.data.hf.time.sleep", _record_sleep)
+    monkeypatch.setattr("chomp.data.hf.gc.collect", _record_collect)
 
     stream.close()
     stream.close()
 
     assert record["close_calls"] == 1
-    assert sleeps == [datasets_config.SLEEP_TIME_ON_THREADS_SHUTDOWN]
+    grace = datasets_config.SLEEP_TIME_ON_THREADS_SHUTDOWN
+    assert events == [
+        ("sleep", grace, 1, False, False, False),
+        ("collect-before", None, 1, True, True, False),
+        ("collect-after", None, 1, True, True, True),
+        ("sleep", grace, 1, True, True, True),
+    ]
+    assert dataset_ref() is None
+    assert iterator_ref() is None
+    assert arrow_ref() is None
     with pytest.raises(ValueError, match="closed HF streaming iterator"):
         next(stream)
 

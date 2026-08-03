@@ -13,6 +13,7 @@ Tokenization + packing happen elsewhere.
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import re
 import time
@@ -219,6 +220,9 @@ class HFStreamingTextStream:
         wait_for_arrow = self._source_started and bool(
             getattr(ex_iterable, "sleep_on_threads_shutdown", False)
         )
+        # Do not retain the nested Datasets/Arrow graph through the release
+        # and second grace below. This local is otherwise its final owner.
+        del ex_iterable
         self._close_source_iterator()
         self._window = []
         self._window_cursor = 0
@@ -231,6 +235,22 @@ class HFStreamingTextStream:
             # otherwise still call into CPython after interpreter finalization.
             from datasets import config
 
+            time.sleep(config.SLEEP_TIME_ON_THREADS_SHUTDOWN)
+        # Release Arrow-backed objects after native readers receive their
+        # shutdown grace but while CPython is still fully alive. Async
+        # checkpoint machinery can otherwise retain this stream object until
+        # interpreter finalization even after the Grain chain has been closed.
+        del self._it
+        del self._ds
+        if wait_for_arrow:
+            # Datasets' own Parquet workaround forces collection after
+            # releasing an unfinished fragment. Do the same at this outer
+            # ownership boundary so generator cycles cannot defer Arrow
+            # destruction until CPython finalization.
+            gc.collect()
+            # Releasing the final Python owners can initiate additional native
+            # destruction. Give those callbacks the same bounded grace before
+            # the process is allowed to enter interpreter finalization.
             time.sleep(config.SLEEP_TIME_ON_THREADS_SHUTDOWN)
         self._source_started = False
         self._closed = True

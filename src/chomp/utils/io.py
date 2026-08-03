@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from chomp.ckpt import megalodon_jax_identity
 from chomp.config import Config, resolve_decay_horizon
 
 _NOISY_CONSOLE_PREFIXES = ("orbax", "jax", "jaxlib", "absl")
@@ -158,8 +159,9 @@ def create_run_dir(
     resolved_cfg["derived"] = {
         "optim": {
             "decay_steps_effective": int(resolve_decay_horizon(cfg)),
-        }
+        },
     }
+    resolved_cfg["derived"]["megalodon_jax"] = megalodon_jax_identity()
     if not allow_existing:
         (run_dir / "config_resolved.json").write_text(
             json.dumps(resolved_cfg, indent=2, sort_keys=True)

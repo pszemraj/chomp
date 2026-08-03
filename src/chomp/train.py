@@ -68,22 +68,21 @@ from chomp.data import (
     data_fingerprint,
     load_generation_prompt_tokens,
     load_or_create_eval_tokens,
-    load_tokenizer_snapshot,
+    load_tokenizer_snapshot_for_resume,
     prepare_tokenizer_and_config,
     save_tokenizer_snapshot,
 )
 from chomp.data.hf import resolve_dataset_revision
 from chomp.model import (
     build_model,
-    causal_loss_mask,
     generate_tokens,
+    loss_sum_and_count,
     parameter_decay_mask,
     parameter_family_counts,
     parameter_optimizer_groups,
     supports_packed_segments,
-    training_loss,
 )
-from chomp.types import IGNORE_INDEX, Batch, TrainState
+from chomp.types import Batch, TrainState
 from chomp.utils.ckpt_paths import (
     load_config_for_checkpoint,
     read_checkpoint_meta,
@@ -100,6 +99,14 @@ from chomp.utils.profiling import start_trace, step_annotation, stop_trace
 from chomp.utils.tree import abstractify_tree, param_count, path_to_str
 
 logger = logging.getLogger(__name__)
+
+_EMPTY_EVAL_STATUS: dict[str, Any] = {
+    "eval_disabled": False,
+    "eval_failure_count": 0,
+    "eval_last_failure_step": None,
+    "eval_last_failure_type": None,
+    "eval_last_success_step": None,
+}
 
 
 class TrainingPreempted(RuntimeError):
@@ -177,20 +184,6 @@ class _StopSignalState:
         self._previous.clear()
 
 
-def _count_tokens(labels: jax.Array, segment_ids: jax.Array) -> jax.Array:
-    """Count valid tokens after the causal shift (for correct GA normalization).
-
-    :param jax.Array labels: Label tensor of shape [B, T].
-    :param jax.Array segment_ids: Segment IDs of shape [B, T], with zero padding.
-    :return jax.Array: Scalar count of valid (non-ignored, non-masked) tokens.
-    """
-
-    return jnp.sum(
-        causal_loss_mask(labels, segment_ids > 0, ignore_index=IGNORE_INDEX),
-        dtype=jnp.int32,
-    )
-
-
 def _check_finite_metrics(metrics: dict[str, Any], *, step: int) -> None:
     """Fail fast if synchronized training metrics are non-finite.
 
@@ -203,6 +196,34 @@ def _check_finite_metrics(metrics: dict[str, Any], *, step: int) -> None:
         value = float(metrics[name])
         if not math.isfinite(value):
             raise RuntimeError(f"Non-finite {name} at step {step}: {value}")
+
+
+def _sync_metrics_and_validate_loss_tokens(
+    metrics: dict[str, Any],
+    checks: list[tuple[int, int, Any]],
+) -> dict[str, Any]:
+    """Synchronize metrics and validate every queued host/device target count.
+
+    :param dict[str, Any] metrics: Metrics from the latest completed train step.
+    :param list[tuple[int, int, Any]] checks: Step, host count, and device count records.
+    :raises RuntimeError: If any completed step has inconsistent target counts.
+    :return dict[str, Any]: Host copy of the latest metrics.
+    """
+    for step, _, device_count in checks:
+        if device_count is None:
+            raise RuntimeError(f"Missing required training metric 'token_sum' at step {step}")
+
+    metrics_host, device_counts = jax.device_get(
+        (metrics, tuple(device_count for _, _, device_count in checks))
+    )
+    for (step, host_count, _), device_count in zip(checks, device_counts, strict=True):
+        device_count = int(device_count)
+        if device_count != host_count:
+            raise RuntimeError(
+                "Host/device loss-token count mismatch at step "
+                f"{step}: host={host_count}, device={device_count}"
+            )
+    return metrics_host
 
 
 def _tree_all_finite(tree: Any) -> jax.Array:
@@ -316,9 +337,11 @@ def _setup_run_dir_and_tokenizer(
 ) -> tuple[
     Config,
     Any,
+    dict[str, Any],
     Path,
     Path,
     list[list[int]],
+    dict[str, Any],
     GenerationSettings | None,
     list[list[int]] | None,
     jax.Array | None,
@@ -331,46 +354,87 @@ def _setup_run_dir_and_tokenizer(
     :param bool allow_existing: Whether to reuse an existing run directory.
     :param bool dry_run: If True, skip heavy data/generation setup.
     :param Path | None resume_step_dir: Selected checkpoint for compatibility preflight.
-    :return tuple[Config, Any, Path, Path, list[list[int]], GenerationSettings | None, list[list[int]] | None, jax.Array | None, random.Random | None]:
-        Updated config, tokenizer, run/metrics paths, eval tokens, generation
-        settings, prompt pool, key, and RNG.
+    :return tuple[Config, Any, dict[str, Any], Path, Path, list[list[int]], dict[str, Any], GenerationSettings | None, list[list[int]] | None, jax.Array | None, random.Random | None]:
+        Updated config, tokenizer and identity, run/metrics paths, eval tokens
+        and status, generation settings, prompt pool, key, and RNG.
     """
+    resume_meta = None
+    if resume_step_dir is not None:
+        # Read the selected checkpoint before any stream construction. The
+        # effective tokenizer identity is compared after its local snapshot is
+        # validated and loaded below.
+        resume_meta = read_checkpoint_meta(resume_step_dir)
+        validate_checkpoint_steps(
+            directory_step=int(resume_step_dir.name),
+            meta=resume_meta,
+            train_state=None,
+        )
+
     tokenizer = None
+    tokenizer_identity = None
     if allow_existing and cfg.logging.run_dir is not None:
         run_dir_hint = Path(cfg.logging.run_dir)
         if not run_dir_hint.exists():
             raise RuntimeError(f"Resume requested but run directory does not exist: {run_dir_hint}")
-        if cfg.data.tokenizer.kind == "hf":
-            tokenizer = load_tokenizer_snapshot(run_dir_hint, cfg)
+        tokenizer, tokenizer_identity = load_tokenizer_snapshot_for_resume(run_dir_hint, cfg)
 
     cfg, tokenizer = prepare_tokenizer_and_config(cfg, tokenizer=tokenizer)
 
-    if resume_step_dir is not None:
+    if resume_meta is not None:
         # Reject strict incompatibilities before constructing remote eval or
         # training streams. The later Orbax restore validates the same meta
         # against the restored train-state step.
-        meta = read_checkpoint_meta(resume_step_dir)
-        validate_checkpoint_steps(
-            directory_step=int(resume_step_dir.name),
-            meta=meta,
-            train_state=None,
+        assert tokenizer_identity is not None
+        check_resume_compat(
+            cfg,
+            resume_meta,
+            tokenizer_identity=tokenizer_identity,
         )
-        check_resume_compat(cfg, meta)
 
     run_dir = create_run_dir(cfg, config_path=config_path, allow_existing=allow_existing)
     if cfg.logging.log_file is not None:
         add_file_logging(run_dir / cfg.logging.log_file, level=cfg.logging.level)
     metrics_path = run_dir / cfg.logging.metrics_file
-    save_tokenizer_snapshot(run_dir, cfg, tokenizer, allow_existing=allow_existing)
+    if not allow_existing:
+        tokenizer, tokenizer_identity = save_tokenizer_snapshot(run_dir, cfg, tokenizer)
+    assert tokenizer_identity is not None
 
-    if dry_run:
+    eval_status = _restore_eval_status(
+        resume_meta,
+        resume_compat=cfg.checkpoint.resume_compat,
+    )
+    resume_has_no_work = resume_meta is not None and int(resume_meta["step"]) >= int(
+        cfg.train.steps
+    )
+    if (
+        dry_run
+        or cfg.train.eval_every <= 0
+        or cfg.data.max_eval_samples <= 0
+        or eval_status["eval_disabled"]
+        # A no-op resume has no scheduled evaluation to initialize. The one
+        # exception is a pending fatal failure recorded by the selected
+        # checkpoint, which must be retried before returning success.
+        or (resume_has_no_work and not _has_pending_eval_failure(eval_status))
+    ):
         eval_tokens = []
     else:
         try:
             eval_tokens = load_or_create_eval_tokens(cfg, tokenizer=tokenizer)
         except Exception as exc:
+            if cfg.train.eval_failure_policy == "fatal":
+                raise
             logger.warning("Failed to initialize evaluation data; disabling evaluation: %s", exc)
             eval_tokens = []
+            eval_status.update(
+                {
+                    "eval_disabled": True,
+                    "eval_failure_count": int(eval_status["eval_failure_count"]) + 1,
+                    "eval_last_failure_step": (
+                        0 if resume_meta is None else int(resume_meta["step"])
+                    ),
+                    "eval_last_failure_type": type(exc).__name__,
+                }
+            )
 
     gen_settings: GenerationSettings | None = None
     gen_prompts = None
@@ -398,14 +462,86 @@ def _setup_run_dir_and_tokenizer(
     return (
         cfg,
         tokenizer,
+        tokenizer_identity,
         run_dir,
         metrics_path,
         eval_tokens,
+        eval_status,
         gen_settings,
         gen_prompts,
         gen_key,
         gen_rng,
     )
+
+
+def _restore_eval_status(
+    resume_meta: dict[str, Any] | None,
+    *,
+    resume_compat: str,
+) -> dict[str, Any]:
+    """Restore evaluation failure-policy state from selected checkpoint metadata.
+
+    :param dict[str, Any] | None resume_meta: Selected checkpoint metadata, if resuming.
+    :param str resume_compat: Configured strict or warn compatibility policy.
+    :raises RuntimeError: If strict resume has missing or invalid evaluation status.
+    :return dict[str, Any]: Mutable evaluation status for the continuing run.
+    """
+    if resume_meta is None:
+        return dict(_EMPTY_EVAL_STATUS)
+
+    stored = resume_meta.get("eval_status")
+    valid = isinstance(stored, dict) and all(key in stored for key in _EMPTY_EVAL_STATUS)
+    if valid:
+        valid = (
+            isinstance(stored["eval_disabled"], bool)
+            and isinstance(stored["eval_failure_count"], int)
+            and not isinstance(stored["eval_failure_count"], bool)
+            and stored["eval_failure_count"] >= 0
+            and (
+                stored["eval_last_failure_step"] is None
+                or (
+                    isinstance(stored["eval_last_failure_step"], int)
+                    and not isinstance(stored["eval_last_failure_step"], bool)
+                    and stored["eval_last_failure_step"] >= 0
+                )
+            )
+            and (
+                stored["eval_last_failure_type"] is None
+                or isinstance(stored["eval_last_failure_type"], str)
+            )
+            and (
+                stored["eval_last_success_step"] is None
+                or (
+                    isinstance(stored["eval_last_success_step"], int)
+                    and not isinstance(stored["eval_last_success_step"], bool)
+                    and stored["eval_last_success_step"] >= 0
+                )
+            )
+        )
+    if not valid:
+        message = (
+            "Checkpoint eval_status is missing or invalid; evaluation failure-policy "
+            "state cannot be restored."
+        )
+        if resume_compat == "strict":
+            raise RuntimeError(message)
+        logger.warning("%s Continuing with fresh evaluation status in warn mode.", message)
+        return dict(_EMPTY_EVAL_STATUS)
+
+    return {key: stored[key] for key in _EMPTY_EVAL_STATUS}
+
+
+def _has_pending_eval_failure(eval_status: dict[str, Any]) -> bool:
+    """Return whether a fatal evaluation failure still needs a successful retry.
+
+    :param dict[str, Any] eval_status: Restored evaluation status.
+    :return bool: True when the latest evaluation attempt failed and evaluation remains enabled.
+    """
+    if eval_status["eval_disabled"]:
+        return False
+    failure_step = eval_status["eval_last_failure_step"]
+    success_step = eval_status["eval_last_success_step"]
+    return failure_step is not None and (success_step is None or failure_step > success_step)
 
 
 def _maybe_init_wandb(cfg: Config, *, run_dir: Path, dry_run: bool) -> Any | None:
@@ -586,7 +722,9 @@ def _save_training_checkpoint(
     *,
     step: int,
     cfg: Config,
+    tokenizer_identity: dict[str, Any],
     tokens_seen: int,
+    eval_status: dict[str, Any],
     train_state: TrainState,
     data_iter: Any,
     force: bool = False,
@@ -596,7 +734,9 @@ def _save_training_checkpoint(
     :param manager: Checkpoint manager.
     :param int step: Completed training step to save.
     :param Config cfg: Training configuration.
+    :param dict[str, Any] tokenizer_identity: Effective tokenizer manifest identity.
     :param int tokens_seen: Cumulative exact loss-token count.
+    :param dict[str, Any] eval_status: Persistent evaluation failure-policy state.
     :param TrainState train_state: Train state to checkpoint.
     :param data_iter: Data iterator to checkpoint.
     :param bool force: Whether to force an off-cadence save.
@@ -606,6 +746,8 @@ def _save_training_checkpoint(
         config=cfg.to_dict(),
         data_fingerprint=data_fingerprint(cfg),
         tokens_seen=int(tokens_seen),
+        eval_status=eval_status,
+        tokenizer_identity=tokenizer_identity,
     )
     save(
         manager,
@@ -710,7 +852,7 @@ def _validate_packing_capabilities(cfg: Config, *, params: Any, static: Any) -> 
         f"Strict segment isolation (packing_mode={cfg.data.packing_mode!r}) was "
         "requested but the model backend does not "
         "advertise full segment isolation (supports_segment_reset capability flag, "
-        "megalodon-jax >= 0.2.1: attention + ComplexEMA + TimestepNorm reset at "
+        "megalodon-jax >= 0.2.2: attention + ComplexEMA + TimestepNorm reset at "
         "packed document boundaries). Set data.packing_strict_segments=false to "
         "run in non-strict mode or upgrade megalodon-jax."
     )
@@ -1110,20 +1252,18 @@ def make_train_step(
         labels: jax.Array,
         segs: jax.Array,
         key: jax.Array | None,
-        token_count: jax.Array,
-    ) -> jax.Array:
-        """Compute token-weighted loss for a single micro-batch.
+    ) -> tuple[jax.Array, jax.Array]:
+        """Compute the loss numerator and valid count for one micro-batch.
 
         :param Any params: Model parameters.
         :param jax.Array input_ids: Input token IDs [B, T].
         :param jax.Array labels: Label token IDs [B, T].
         :param jax.Array segs: Segment IDs [B, T].
         :param key: PRNG key for dropout, or None if deterministic.
-        :param jax.Array token_count: Number of valid tokens for weighting.
-        :return jax.Array: Weighted loss scalar.
+        :return tuple[jax.Array, jax.Array]: FP32 loss sum and exact integer count.
         """
         micro = _micro_batch(input_ids, labels, segs)
-        loss = training_loss(
+        return loss_sum_and_count(
             params,
             static,
             batch=micro,
@@ -1132,9 +1272,8 @@ def make_train_step(
             use_packed_segments=use_packed_segments,
             loss_chunk_size=loss_chunk_size,
         )
-        return loss * token_count
 
-    loss_and_grad = eqx.filter_value_and_grad(micro_loss)
+    loss_and_grad = eqx.filter_value_and_grad(micro_loss, has_aux=True)
 
     def train_step(state: TrainState, batch: Batch) -> tuple[TrainState, dict[str, jax.Array]]:
         """Execute one training step with scan-based gradient accumulation.
@@ -1173,12 +1312,16 @@ def make_train_step(
             """
             loss_sum, grad_sum, token_sum = carry
             in_ids, labs, segs, k = inputs
-            token_count_int = _count_tokens(labs, segs).astype(jnp.int32)
-            token_count = token_count_int.astype(jnp.float32)
-            loss, grads = loss_and_grad(state.params, in_ids, labs, segs, k, token_count)
+            (loss, token_count_int), grads = loss_and_grad(
+                state.params,
+                in_ids,
+                labs,
+                segs,
+                k,
+            )
             loss_sum = loss_sum + loss.astype(jnp.float32)
             grad_sum = jax.tree_util.tree_map(lambda a, b: a + b.astype(a.dtype), grad_sum, grads)
-            token_sum = token_sum + token_count_int
+            token_sum = token_sum + token_count_int.astype(jnp.int32)
             return (loss_sum, grad_sum, token_sum), None
 
         (loss_sum, grad_sum, token_sum), _ = jax.lax.scan(
@@ -1268,8 +1411,7 @@ def make_eval_step(
             loss_sum, token_sum = carry
             input_ids, labels, segs = xs
             micro = _micro_batch(input_ids, labels, segs)
-            token_count = _count_tokens(labels, segs).astype(jnp.int32)
-            loss = training_loss(
+            loss, token_count = loss_sum_and_count(
                 params,
                 static,
                 batch=micro,
@@ -1279,8 +1421,8 @@ def make_eval_step(
                 loss_chunk_size=loss_chunk_size,
             )
             return (
-                loss_sum + loss * token_count.astype(jnp.float32),
-                token_sum + token_count,
+                loss_sum + loss.astype(jnp.float32),
+                token_sum + token_count.astype(jnp.int32),
             ), None
 
         (loss_sum, token_sum), _ = jax.lax.scan(
@@ -1316,11 +1458,20 @@ def run(
     :param config_path: Optional path to the source YAML config file.
     :param resume: Resume mode - "none" (fresh), "latest", or specific step number.
     :param bool dry_run: If True, compile and run a single step, then exit early.
+    :raises ValueError: If dense sliding-window attention is requested for training.
     :raises RuntimeError: If resume setup is invalid.
     :raises TrainingPreempted: After a signal-requested final checkpoint closes successfully.
     :return Path: Path to the run directory.
     """
 
+    if cfg.model.attention_window is not None:
+        raise ValueError(
+            "model.attention_window is not supported for Chomp training: "
+            "megalodon-jax's current noncached implementation uses dense O(L²) "
+            "attention with a window mask. Use model.chunk_size for the supported "
+            "efficient paper-faithful path. Efficient sliding-window training "
+            "remains future upstream work."
+        )
     validate_default_device(allow_cpu=cfg.train.allow_cpu)
     if dry_run and resume != "none":
         raise RuntimeError("dry_run does not support resume; use a fresh run.")
@@ -1404,9 +1555,11 @@ def _run_impl(
     (
         cfg,
         tokenizer,
+        tokenizer_identity,
         run_dir,
         metrics_path,
         eval_tokens,
+        eval_status,
         gen_settings,
         gen_prompts,
         gen_key,
@@ -1467,12 +1620,16 @@ def _run_impl(
                 batch = next(data_it)
             except StopIteration as exc:
                 raise RuntimeError("dry_run: data iterator exhausted before first batch") from exc
+            step_loss_tokens = data_it.get_loss_tokens()
             data_stats = data_it.get_stats()
             batch = jax.device_put(batch)
 
             t1 = time.perf_counter()
             state, metrics = train_step(state, batch)
-            metrics_host = jax.device_get(metrics)
+            metrics_host = _sync_metrics_and_validate_loss_tokens(
+                metrics,
+                [(1, step_loss_tokens, metrics.get("token_sum"))],
+            )
             t2 = time.perf_counter()
             step_time_s = t2 - t1
 
@@ -1557,6 +1714,7 @@ def _run_impl(
                 "tokens_seen": int(tokens_seen_count),
                 "wall_time_s": time.perf_counter() - t0,
             }
+            row.update(eval_status)
             mw.write(row)
             if wandb_run is not None:
                 with contextlib.suppress(Exception):
@@ -1631,6 +1789,37 @@ def _run_impl(
             "eval_tokens": int(total_tokens_host),
         }
 
+    def _run_eval_with_policy(*, step: int) -> dict[str, Any]:
+        """Run evaluation and apply the configured persistent failure policy.
+
+        :param int step: Train-state step being evaluated.
+        :return dict[str, Any]: Successful evaluation metrics, or an empty row when disabled.
+        """
+        nonlocal eval_step
+        try:
+            eval_row = _run_eval(state.params)
+        except Exception as exc:
+            eval_status.update(
+                {
+                    "eval_failure_count": int(eval_status["eval_failure_count"]) + 1,
+                    "eval_last_failure_step": int(step),
+                    "eval_last_failure_type": type(exc).__name__,
+                }
+            )
+            if cfg.train.eval_failure_policy == "fatal":
+                raise
+            logger.warning(
+                "Evaluation failed at step %d; disabling evaluation: %s",
+                step,
+                exc,
+            )
+            eval_status["eval_disabled"] = True
+            eval_step = None
+            return {}
+
+        eval_status["eval_last_success_step"] = int(step)
+        return eval_row
+
     def _run_generation_sample(step: int, params: Any) -> None:
         """Sample a prompt and run generation.
 
@@ -1693,10 +1882,33 @@ def _run_impl(
     sync_interval_tokens = 0
     sync_interval_steps = 0
     sync_interval_data_wait = 0.0
+    sync_interval_loss_token_checks: list[tuple[int, int, Any]] = []
 
     try:
         with MetricsWriter(metrics_path) as mw:
             try:
+                if _has_pending_eval_failure(eval_status):
+                    if eval_step is None:
+                        raise RuntimeError(
+                            "Checkpoint records an unresolved fatal evaluation failure at step "
+                            f"{eval_status['eval_last_failure_step']}, but evaluation is disabled "
+                            "by the current configuration. Re-enable evaluation and resume again."
+                        )
+                    eval_row = _run_eval_with_policy(step=int(start_step))
+                    row = {
+                        "step": int(start_step),
+                        "tokens_seen": int(tokens_seen_count),
+                        "wall_time_s": time.perf_counter() - t0,
+                    }
+                    row.update(eval_row)
+                    row.update(eval_status)
+                    mw.write(_project_metrics(row, drop=_METRICS_FILE_DROP))
+                    if wandb_run is not None:
+                        wandb_run.log(
+                            _project_metrics(row, drop=_WANDB_DROP),
+                            step=int(start_step),
+                        )
+
                 for _ in tqdm(range(start_step, target_steps), desc="train", dynamic_ncols=True):
                     if _record_stop_if_requested(mw):
                         break
@@ -1728,6 +1940,7 @@ def _run_impl(
                             "tokens_seen": int(tokens_seen_host),
                             "wall_time_s": time.perf_counter() - t0,
                         }
+                        row.update(eval_status)
                         mw.write(row)
                         if wandb_run is not None:
                             wandb_run.log(row, step=step_i)
@@ -1748,6 +1961,9 @@ def _run_impl(
                         sync_interval_tokens += step_loss_tokens
                         sync_interval_steps += 1
                         sync_interval_data_wait += data_wait_s
+                        sync_interval_loss_token_checks.append(
+                            (step_i, step_loss_tokens, metrics.get("token_sum"))
+                        )
 
                     host_step = int(step_i)
                     data_state_aligned = True
@@ -1769,7 +1985,10 @@ def _run_impl(
                     tokens_per_sec = 0.0
 
                     if should_sync:
-                        metrics_host = jax.device_get(metrics)
+                        metrics_host = _sync_metrics_and_validate_loss_tokens(
+                            metrics,
+                            sync_interval_loss_token_checks,
+                        )
                         t2 = time.perf_counter()
                         sync_elapsed = t2 - sync_started
                         step_time_s = sync_elapsed / sync_interval_steps
@@ -1778,12 +1997,6 @@ def _run_impl(
                             t_compile = t2 - t1
                         if cfg.debug.nan_check:
                             _check_finite_metrics(metrics_host, step=step_i)
-                        device_loss_tokens = int(metrics_host.get("token_sum", -1))
-                        if device_loss_tokens != step_loss_tokens:
-                            raise RuntimeError(
-                                "Host/device loss-token count mismatch at step "
-                                f"{step_i}: host={step_loss_tokens}, device={device_loss_tokens}"
-                            )
                         tokens_per_sec = (
                             sync_interval_tokens / sync_elapsed if sync_elapsed > 0 else 0.0
                         )
@@ -1791,8 +2004,14 @@ def _run_impl(
                         sync_interval_tokens = 0
                         sync_interval_steps = 0
                         sync_interval_data_wait = 0.0
+                        sync_interval_loss_token_checks.clear()
 
-                    # Checkpoint save (after state updated + finite-checked)
+                    eval_row: dict[str, Any] = {}
+                    if should_eval:
+                        eval_row = _run_eval_with_policy(step=step_i)
+
+                    # Save after scheduled evaluation so the checkpoint carries
+                    # the failure-policy state produced at this step.
                     if save_interval:
                         if cfg.debug.nan_check:
                             _check_finite_train_state(state, step=step_i)
@@ -1800,23 +2019,13 @@ def _run_impl(
                             manager,
                             step=step_i,
                             cfg=cfg,
+                            tokenizer_identity=tokenizer_identity,
                             tokens_seen=int(tokens_seen_count),
+                            eval_status=eval_status,
                             train_state=state,
                             data_iter=data_it,
                         )
                         last_saved_step = step_i
-
-                    eval_row: dict[str, Any] = {}
-                    if should_eval:
-                        try:
-                            eval_row = _run_eval(state.params)
-                        except Exception as exc:
-                            logger.warning(
-                                "Evaluation failed at step %d; disabling evaluation: %s",
-                                step_i,
-                                exc,
-                            )
-                            eval_step = None
 
                     if (
                         gen_settings is not None
@@ -1853,6 +2062,7 @@ def _run_impl(
                             row.update(mem_stats)
                         if step_i == (start_step + 1) and t_compile is not None:
                             row["first_step_compile_time_s"] = float(t_compile)
+                        row.update(eval_status)
 
                         mw.write(_project_metrics(row, drop=_METRICS_FILE_DROP))
                         if wandb_run is not None:
@@ -1893,6 +2103,7 @@ def _run_impl(
                     "wall_time_s": time.perf_counter() - t0,
                 }
                 row["tokens_seen"] = int(tokens_seen_count)
+                row.update(eval_status)
                 mw.write(row)
                 if wandb_run is not None:
                     with contextlib.suppress(Exception):
@@ -1901,6 +2112,7 @@ def _run_impl(
                                 "crash": True,
                                 "crash_type": crash_type,
                                 "crash_reason": crash_reason,
+                                **eval_status,
                             },
                             step=int(crash_step),
                         )
@@ -1936,12 +2148,17 @@ def _run_impl(
         if (
             final_step is not None
             and final_step > start_step
-            and cfg.debug.nan_check
             and metrics is not None
+            and (cfg.debug.nan_check or sync_interval_loss_token_checks)
         ):
             try:
-                _check_finite_metrics(jax.device_get(metrics), step=final_step)
-                _check_finite_train_state(state, step=final_step)
+                metrics_host = _sync_metrics_and_validate_loss_tokens(
+                    metrics,
+                    sync_interval_loss_token_checks,
+                )
+                if cfg.debug.nan_check:
+                    _check_finite_metrics(metrics_host, step=final_step)
+                    _check_finite_train_state(state, step=final_step)
             except Exception as exc:
                 final_state_valid = False
                 if manager is not None:
@@ -1977,7 +2194,9 @@ def _run_impl(
                     manager,
                     step=final_step,
                     cfg=cfg,
+                    tokenizer_identity=tokenizer_identity,
                     tokens_seen=int(tokens_seen_count),
+                    eval_status=eval_status,
                     train_state=state,
                     data_iter=data_it,
                     force=True,

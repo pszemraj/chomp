@@ -4,6 +4,12 @@ Training step behavior and metrics written to `metrics.jsonl`.
 
 Related: [Config Reference](config-reference.yaml), [Optimization and Optimizers](optimization.md), [Data Pipeline](data_pipeline.md), [Packing and Boundary Semantics](packing.md), [Checkpointing and Resume](checkpointing.md).
 
+## Maintained recipes
+
+Checked-in scenarios are separated by intent. [`configs/dev/`](../configs/dev/) contains short infrastructure checks, while [`configs/pretrain/`](../configs/pretrain/) contains the four Megalodon scale recipes. Exact parameter counts, measurements, and fit qualifications are in the [README recipe table](../README.md#shipped-recipes-and-measured-expectations); the recipes are executable examples, and their per-field contracts live only in the [Config Reference](config-reference.yaml).
+
+The configured maximum target budget is `steps * grad_accum * batch_size * (seq_len - 1)`; boundary, EOS, and padding masks reduce the realized `tokens_seen`. The maintained schedules provide at least roughly 20 maximum target positions per parameter, but that is a starting budget rather than a claim of compute optimality for a specific corpus or research objective.
+
 ## Train step contract
 
 The compiled `train_step`:
@@ -12,23 +18,19 @@ The compiled `train_step`:
 - performs gradient accumulation inside `jax.lax.scan`
 - applies exactly one optimizer update per outer step
 
-Grad accumulation is **token-weighted**: microbatch losses are scaled by the count of valid (non-masked) tokens to keep updates correct with padding or boundary masks.
+Grad accumulation is **token-weighted** without reconstructing numerators from rounded means. Each backend returns an FP32 loss sum and exact integer valid-target count. Chomp differentiates and accumulates those sums in FP32, adds the integer counts, then divides the logical-batch loss and gradients once by the total count.
 
-Batch assembly computes the same shifted valid-target count on the host and pairs it with the batch through prefetch/device transfer. The trainer updates `tokens_seen` from that Python integer without synchronizing every optimizer step. Logging, evaluation, checkpoint, first-compile, and finite-check cadences synchronize queued work and verify the current host count against the compiled int32 counter. At save and final boundaries, the finite check also covers the post-update parameters and optimizer state. Evaluation likewise accumulates all batch totals on device and synchronizes once per pass.
+Batch assembly computes the corresponding shifted valid-target count on the host and pairs it with the batch through prefetch/device transfer. The model-provided count is authoritative for loss and gradient normalization; the host count supports exact accounting and a consistency check. Every optimizer step queues its compiled int32 counter without forcing a device barrier. At logging, evaluation, checkpoint, first-compile, and final boundaries, the trainer synchronizes and requires every queued logical-batch count to equal its paired host count. At save and final boundaries, the finite check also covers the post-update parameters and optimizer state. Evaluation aggregates the same backend FP32 sums and integer counts on device and synchronizes once per pass.
 
 Full packing diagnostics scan segment arrays only for batches whose global step will log or evaluate. Non-observable steps still compute the exact shifted loss-token count required for accounting, but skip the redundant Python-side diagnostic scan.
 
 `model.loss_chunk_size` optionally bounds Megalodon vocabulary-head intermediates in both training and evaluation. Its complete memory/throughput contract and starting recommendation are inline in the [Config Reference](config-reference.yaml).
 
+The canonical [`model.chunk_size` and `model.attention_window` contracts](config-reference.yaml) explain why chunk-local attention is the efficient training path and the current dense O(L²) sliding-window path is rejected only for training.
+
 ## Determinism
 
-`train.deterministic` controls dropout behavior:
-
-- `None`: derived from dropout rates (deterministic if all zero)
-- `True`: force deterministic
-- `False`: force stochastic
-
-Deterministic runs are recommended for resume and regression tests. Note that in `megalodon-jax`, activation checkpointing is disabled when `train.deterministic=true`. If you want checkpointing with deterministic math, set `train.deterministic=false` and keep all dropout rates at `0.0`. Enable activation checkpointing with `model.use_checkpoint`; it is orthogonal to gradient accumulation.
+[`train.deterministic` and `model.use_checkpoint`](config-reference.yaml) define dropout/rematerialization resolution and resume treatment. This model-level control is separate from GPU kernel determinism; maintained recipes use zero dropout with explicit stochastic mode so rematerialization remains active.
 
 ## GPU environment notes
 
@@ -38,31 +40,25 @@ XLA kernel selection on GPU is nondeterministic by default. This is the fast pat
 
 ## Evaluation
 
-If `train.eval_every > 0` and `data.max_eval_samples > 0`, chomp runs a full pass over the process-local eval token set and logs `eval_loss`. Eval setup or execution failures warn and disable evaluation for that process without stopping training; this includes non-finite reductions and zero-loss-token tail batches. Eval text selection and packed flushing are documented in [Data Pipeline validation set](data_pipeline.md#validation-set).
+Evaluation activation, cadence, failure policy, and persistent status are defined by [`train.eval_*` and `data.max_eval_samples`](config-reference.yaml). Operationally, a fatal evaluation recorded at an aligned checkpoint remains owed before resumed training, while deliberate disablement remains visible in later metrics and checkpoints. Eval text selection and packed flushing are documented under [Data Pipeline validation set](data_pipeline.md#validation-set).
 
 Eval batches are assembled once and cached host-side for the whole run; device transfer happens per batch each eval, so no device memory is held between evals.
 
 ## Generation samples
 
-If `train.generate_every > 0`, chomp periodically samples a prompt from a bounded pool of up to 16 unshuffled training-split documents and runs `megalodon_jax.generate`, printing both the prompt and generated continuation to the console (Rich panels when enabled). The pool avoids retaining a second production-sized document-shuffle window during training.
-
-Default behaviors (when the `generate_*` fields are `null`):
-
-- `train.generate_input_len`: half of `train.seq_len`
-- `train.generate_max_tokens`: `model.chunk_size + 16`
-- prompt selection: if a sample is longer than `generate_input_len`, randomly use the first or last `generate_input_len` tokens; otherwise use the full sample (no EOS token appended)
-
-Optional sampling controls (`train.generate_temperature`, `train.generate_top_k`, `train.generate_top_p`) are passed through when set; otherwise the Megalodon defaults apply. Generation is currently only enabled for the `megalodon` backend (dummy runs skip it silently).
+Periodic Megalodon generation samples prompts from a bounded pool of up to 16 unshuffled training-split documents, avoiding a second production-sized shuffle window. Long prompts randomly use their first or last configured span, and no EOS is appended. Cadence, computed lengths, sampling controls, and backend applicability are canonical under [`train.generate_*`](config-reference.yaml).
 
 ### Standalone generation
 
-`chomp generate` accepts a run directory or checkpoint step directory, restores the stored parameters and resolved config, and uses the run-pinned tokenizer described in [Data Pipeline: tokenization](data_pipeline.md#tokenization) when available. Set `--temperature 0` for greedy decoding; seeded sampling is the default. Run `chomp generate --help` for the option list.
+`chomp generate` accepts a run directory or checkpoint step directory, restores the stored parameters and resolved config, and uses the run-pinned tokenizer described in [Data Pipeline: tokenization](data_pipeline.md#tokenization) when available. For schema-2+ checkpoints, generation recomputes that tokenizer's effective manifest identity and requires it to match the selected checkpoint before encoding the prompt; metadata-free legacy checkpoints retain the previous source/snapshot fallback. Set `--temperature 0` for greedy decoding; seeded sampling is the default. Run `chomp generate --help` for the option list.
 
 ## Dry run
 
 Use `chomp train <config.yaml> --dry-run` to validate config, build the tokenizer/model/data pipeline, and execute one step before exiting. The step compiles when `train.jit` is enabled. When `debug.nan_check` is enabled, success also requires finite loss, gradient norm, learning rate, post-update parameters, and optimizer state. W&B logging is skipped in dry-run mode.
 
-`config_resolved.json` includes a small `derived` section; for example `derived.optim.decay_steps_effective` records the effective LR schedule horizon.
+`config_resolved.json` includes a small `derived` section. `derived.optim.decay_steps_effective` records the effective LR schedule horizon, and `derived.megalodon_jax` records the installed distribution version plus PEP 610 source identity when available.
+
+Training also binds the effective tokenizer program to `tokenizer/identity.json` and stores its digest in each checkpoint. Resume validates that local snapshot before it constructs evaluation/training streams, so it does not contact the configured tokenizer source.
 
 ## Metrics
 
@@ -71,7 +67,7 @@ Metrics are written to `logging.metrics_file` on the first process-local trainin
 - `loss`
 - `grad_norm`
 - `lr`
-- `loss_tokens` (exact host count, checked against compiled `token_sum` at sync points)
+- `loss_tokens` (exact host count; every queued logical-batch count is checked against compiled `token_sum` at sync points)
 - `tokens_seen` (cumulative exact host count)
 - `step_time_s`, `data_wait_s` (per-step averages over the last sync interval)
 - `tokens_per_sec` (end-to-end throughput over the last sync interval)
@@ -90,6 +86,6 @@ Metrics are written to `logging.metrics_file` on the first process-local trainin
 
 Data exhaustion and crashes append event rows to the same file.
 
-If `logging.wandb.enabled=true`, Weights & Biases receives the training rows plus detailed wall-clock, packing-capacity, eval-token, and current-device-memory metrics. The local file instead retains the process peak-memory value and its explicit `step` field. When the run was started from a config file, chomp also uploads `config_original.yaml` as a W&B artifact. W&B logs go to the default `./wandb` directory (or `WANDB_DIR` if set). Set `logging.wandb.enabled=false` to disable W&B; `mode` selects online or offline logging only.
+When enabled, Weights & Biases receives the training rows plus detailed wall-clock, packing-capacity, eval-token, and current-device-memory metrics and uploads `config_original.yaml` for file-backed runs. Local metrics retain the process peak-memory value and explicit `step`; W&B enablement, mode, naming, and failure behavior are defined under [`logging.wandb.*`](config-reference.yaml).
 
-Console output is throttled by `train.log_every` and prints a compact one-line summary (loss, grad norm, LR, step time, throughput, optional eval loss, packing utilization, and best-effort device memory). Full logs from third-party libraries are written to `logging.log_file` under the run directory when that field is not `null`.
+Console output is a compact one-line summary of loss, gradient norm, LR, timing, throughput, optional evaluation, packing utilization, and best-effort device memory. Cadence and file destinations are defined under [`train.log_every` and `logging.*`](config-reference.yaml).

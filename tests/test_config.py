@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import fields, replace
 from pathlib import Path
 
+import jax
 import pytest
 
 from chomp.config import (
@@ -16,13 +17,17 @@ from chomp.config import (
     TokenizerConfig,
     TrainConfig,
     build_config,
+    derived_deterministic,
     load_config,
     read_config_mapping,
     resolve_window_shuffle_rows,
+    strict_packed_segments,
     validate_config,
 )
 from chomp.data.pipeline import build_tokenizer, resolve_tokenizer_config
+from chomp.model import build_model
 from chomp.utils.ckpt_paths import load_config_for_checkpoint
+from chomp.utils.tree import param_count
 
 
 def _base_cfg() -> Config:
@@ -124,10 +129,6 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
             "attention_softmax_dtype",
         ),
         (
-            lambda cfg: replace(cfg, model=replace(cfg.model, loss_softmax_dtype="float16")),
-            "loss_softmax_dtype",
-        ),
-        (
             lambda cfg: replace(cfg, model=replace(cfg.model, loss_chunk_size=0)),
             "loss_chunk_size",
         ),
@@ -154,6 +155,10 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
         ),
         (lambda cfg: replace(cfg, train=replace(cfg.train, seed=-1)), "train.seed"),
         (lambda cfg: replace(cfg, train=replace(cfg.train, eval_every=-1)), "eval_every"),
+        (
+            lambda cfg: replace(cfg, train=replace(cfg.train, eval_failure_policy="ignore")),
+            "eval_failure_policy",
+        ),
         (lambda cfg: replace(cfg, train=replace(cfg.train, generate_every=-1)), "generate_every"),
         (
             lambda cfg: replace(cfg, train=replace(cfg.train, generate_input_len=0)),
@@ -213,6 +218,29 @@ def test_build_config_allows_resolved_derived_section() -> None:
     assert cfg == _base_cfg()
 
 
+@pytest.mark.parametrize(
+    ("data", "path"),
+    [
+        ({"derived": []}, "derived"),
+        ({"model": False}, "model"),
+        ({"train": []}, "train"),
+        ({"optim": "adamw"}, "optim"),
+        ({"optim": {"muon": False}}, "optim.muon"),
+        ({"optim": {"adam": []}}, "optim.adam"),
+        ({"checkpoint": 0}, "checkpoint"),
+        ({"logging": "INFO"}, "logging"),
+        ({"logging": {"wandb": False}}, "logging.wandb"),
+        ({"debug": []}, "debug"),
+        ({"data": False}, "data"),
+        ({"data": {"tokenizer": []}}, "data.tokenizer"),
+    ],
+)
+def test_build_config_rejects_non_mapping_sections(data: dict[str, object], path: str) -> None:
+    """Falsy and truthy section scalars must not silently select defaults."""
+    with pytest.raises(ValueError, match=rf"{path} must be a mapping or null"):
+        build_config(data)
+
+
 def test_config_reference_matches_config_fields() -> None:
     """The config reference should contain every config field and no stale fields."""
     reference = read_config_mapping(Path(__file__).parents[1] / "docs/config-reference.yaml")
@@ -225,7 +253,12 @@ def test_config_reference_matches_config_fields() -> None:
     def _assert_matching_keys(
         documented: dict[str, object], defaults: dict[str, object], path: str = ""
     ) -> None:
-        """Assert that one documented config mapping matches its dataclass mapping."""
+        """Assert that one documented config mapping matches its dataclass mapping.
+
+        :param dict[str, object] documented: Config-reference mapping to inspect.
+        :param dict[str, object] defaults: Runtime default mapping to compare.
+        :param str path: Nested field path for assertion messages, defaults to "".
+        """
         assert set(documented) == set(defaults), path or "config"
         for key, default in defaults.items():
             if isinstance(default, dict):
@@ -236,20 +269,74 @@ def test_config_reference_matches_config_fields() -> None:
     _assert_matching_keys(reference, Config().to_dict())
 
 
-def test_debug_smoke_config_loads() -> None:
-    """The checked-in quick-start configuration should remain loadable."""
-    config_path = Path(__file__).parents[1] / "configs/debug_smoke.yaml"
-    assert load_config(config_path).model.backend == "dummy"
+@pytest.mark.parametrize(
+    ("name", "data_backend", "allow_cpu"),
+    [
+        ("offline_cpu_smoke.yaml", "local_text", True),
+        ("hf_streaming_smoke.yaml", "hf", False),
+    ],
+)
+def test_dev_smoke_configs_load(name: str, data_backend: str, allow_cpu: bool) -> None:
+    """Checked-in smoke configs should select their intended I/O and device paths."""
+    config_path = Path(__file__).parents[1] / "configs/dev" / name
+    cfg = load_config(config_path)
+    assert cfg.model.backend == "dummy"
+    assert cfg.data.backend == data_backend
+    assert cfg.train.allow_cpu is allow_cpu
 
 
 @pytest.mark.parametrize(
-    "name",
-    ["smoldata_mix_100m_2048.yaml", "zyda2_200m_2048.yaml"],
+    ("name", "expected_parameters", "batch_size", "grad_accum", "loss_chunk_size"),
+    [
+        ("megalodon_100m_2048.yaml", 113_854_464, 2, 8, None),
+        ("megalodon_200m_2048.yaml", 187_991_040, 2, 8, None),
+        ("megalodon_500m_2048.yaml", 513_672_192, 1, 16, 256),
+        ("megalodon_1b_2048.yaml", 974_619_648, 1, 16, 256),
+    ],
 )
-def test_maintained_training_recipes_require_strict_resume(name: str) -> None:
-    """Maintained long-run recipes should reject semantic resume drift."""
-    config_path = Path(__file__).parents[1] / "configs" / name
-    assert load_config(config_path).checkpoint.resume_compat == "strict"
+def test_maintained_pretrain_recipe_contract(
+    name: str,
+    expected_parameters: int,
+    batch_size: int,
+    grad_accum: int,
+    loss_chunk_size: int | None,
+) -> None:
+    """Maintained recipes should preserve their labeled scale and correctness policy."""
+    config_path = Path(__file__).parents[1] / "configs/pretrain" / name
+    cfg = load_config(config_path)
+    abstract_params = jax.eval_shape(
+        lambda key: build_model(cfg, key=key)[0],
+        jax.random.key(0),
+    )
+
+    assert param_count(abstract_params) == expected_parameters
+    assert cfg.model.backend == "megalodon"
+    assert cfg.model.share_emb is True
+    assert cfg.model.chunk_size == 512
+    assert cfg.model.attention_window is None
+    assert cfg.model.use_checkpoint is True
+    assert derived_deterministic(cfg) is False
+    assert cfg.model.param_dtype == "float32"
+    assert cfg.model.compute_dtype == "bfloat16"
+    assert cfg.model.accum_dtype == "float32"
+    assert cfg.model.attention_softmax_dtype == "float32"
+    assert cfg.model.loss_chunk_size == loss_chunk_size
+    assert cfg.data.packing_strict_segments is True
+    assert cfg.data.mask_boundary_loss is True
+    assert strict_packed_segments(cfg) is True
+    assert cfg.optim.name == "muon"
+    assert cfg.optim.muon.lr_scale == 100.0
+    assert cfg.optim.muon.consistent_rms is None
+    assert cfg.checkpoint.resume_compat == "strict"
+    assert cfg.train.eval_failure_policy == "fatal"
+    assert cfg.train.batch_size == batch_size
+    assert cfg.train.grad_accum == grad_accum
+    assert cfg.optim.warmup_steps * 100 == cfg.train.steps
+
+    max_target_positions = (
+        cfg.train.steps * cfg.train.grad_accum * cfg.train.batch_size * (cfg.train.seq_len - 1)
+    )
+    assert max_target_positions >= 20 * expected_parameters
 
 
 def test_yaml_loader_rejects_duplicate_explicit_keys(tmp_path: Path) -> None:
@@ -554,6 +641,10 @@ def test_wandb_tags_require_and_normalize_a_string_list() -> None:
     with pytest.raises(ValueError, match="YAML/JSON list"):
         build_config(data)
 
+    data["logging"]["wandb"]["tags"] = ["baseline", 1]
+    with pytest.raises(ValueError, match="YAML/JSON list"):
+        build_config(data)
+
     for raw in ("null", "baseline,smoke"):
         with pytest.raises(ValueError, match="logging.wandb.tags.*list-valued"):
             build_config(
@@ -567,9 +658,8 @@ def test_strict_packed_rejects_disabled_boundary_masking(mode: str) -> None:
     """Strict packing with mask_boundary_loss=false must fail validation.
 
     The backend excludes cross-segment label pairs whenever segment_ids are
-    passed (megalodon-jax >= 0.2.1), so disabling chomp's pre-masking desyncs
-    host-side token counts from the model's loss denominator — a silent change
-    to gradient normalization, not a preference.
+    passed (megalodon-jax >= 0.2.2), so disabling chomp's pre-masking desyncs
+    asynchronous host token accounting from the backend's authoritative count.
     """
     cfg = _base_cfg()
     cfg = replace(

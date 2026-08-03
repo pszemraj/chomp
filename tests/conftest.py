@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -29,6 +30,41 @@ _pin_deterministic_gpu_ops()
 
 # Tests should not rely on users exporting preallocation flags.
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
+
+@pytest.fixture
+def local_bert_tokenizer(tmp_path: Path) -> Path:
+    """Create a deterministic local fast/slow tokenizer fixture.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :return Path: Local tokenizer source directory.
+    """
+    from transformers import BertTokenizerFast
+
+    path = tmp_path / "bert-tokenizer"
+    path.mkdir()
+    vocab = [
+        "[PAD]",
+        "[UNK]",
+        "[CLS]",
+        "[SEP]",
+        "[MASK]",
+        "The",
+        "quick",
+        "brown",
+        "fox",
+        "hello",
+        "world",
+        ".",
+    ]
+    vocab_path = path / "vocab.txt"
+    vocab_path.write_text("\n".join(vocab) + "\n")
+    BertTokenizerFast(
+        vocab_file=str(vocab_path),
+        do_lower_case=False,
+        clean_up_tokenization_spaces=False,
+    ).save_pretrained(path)
+    return path
 
 
 @pytest.fixture

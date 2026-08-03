@@ -22,20 +22,51 @@ Orbax notes:
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from importlib import metadata
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import orbax.checkpoint as ocp
 
-from chomp.config import Config, decay_horizon_from_values, derived_deterministic
+from chomp.config import (
+    Config,
+    decay_horizon_from_values,
+    derived_deterministic,
+    strict_packed_segments,
+)
 
 logger = logging.getLogger(__name__)
 
 _MISSING = object()
+CHECKPOINT_META_SCHEMA_VERSION = 3
+
+
+def megalodon_jax_identity() -> dict[str, Any]:
+    """Return the installed Megalodon-JAX distribution identity.
+
+    :return dict[str, Any]: Distribution version and optional PEP 610 source identity.
+    """
+    dist = metadata.distribution("megalodon-jax")
+    identity: dict[str, Any] = {
+        "distribution": "megalodon-jax",
+        "version": dist.version,
+    }
+    direct_url_text = dist.read_text("direct_url.json")
+    if direct_url_text is not None:
+        direct_url = json.loads(direct_url_text)
+        vcs_info = direct_url.get("vcs_info") or {}
+        identity["direct_url"] = {
+            "url": direct_url.get("url"),
+            "vcs": vcs_info.get("vcs"),
+            "requested_revision": vcs_info.get("requested_revision"),
+            "commit_id": vcs_info.get("commit_id"),
+        }
+    return identity
 
 
 def _effective_deterministic_from_mapping(config: dict[str, Any]) -> bool | None:
@@ -71,12 +102,16 @@ class CheckpointMeta:
     Keep this JSON-serializable.
     """
 
-    # This is a semantic resume record, not an environment manifest. Source
-    # trees, package installations, devices, and XLA flags remain external.
+    # This is a semantic resume record, not a general environment manifest.
+    # Source trees, other packages, devices, and XLA flags remain external.
 
+    schema_version: int
     step: int
     timestamp: str
     tokens_seen: int
+    eval_status: dict[str, Any]
+    megalodon_jax: dict[str, Any]
+    tokenizer_identity: dict[str, Any]
 
     # Config snapshot used for semantic resume checks.
     config: dict[str, Any]
@@ -98,6 +133,8 @@ def build_meta(
     config: dict[str, Any],
     data_fingerprint: dict[str, Any],
     tokens_seen: int,
+    eval_status: dict[str, Any],
+    tokenizer_identity: dict[str, Any],
 ) -> CheckpointMeta:
     """Build checkpoint metadata with version info and config snapshot.
 
@@ -105,12 +142,18 @@ def build_meta(
     :param dict[str, Any] config: Full config dict for reproducibility.
     :param dict[str, Any] data_fingerprint: Data pipeline fingerprint.
     :param int tokens_seen: Cumulative loss-token count for exact resume accounting.
+    :param dict[str, Any] eval_status: Persistent evaluation failure-policy state.
+    :param dict[str, Any] tokenizer_identity: Effective tokenizer manifest identity.
     :return CheckpointMeta: Populated metadata object.
     """
     return CheckpointMeta(
+        schema_version=CHECKPOINT_META_SCHEMA_VERSION,
         step=int(step),
         timestamp=datetime.now().isoformat(timespec="seconds"),
         tokens_seen=int(tokens_seen),
+        eval_status=dict(eval_status),
+        megalodon_jax=megalodon_jax_identity(),
+        tokenizer_identity=tokenizer_identity,
         config=config,
         data_fingerprint=data_fingerprint,
     )
@@ -396,11 +439,14 @@ def restore_params_only(step_dir: Path, abstract_params: Any) -> Any:
 def check_resume_compat(
     cfg: Config,
     meta: dict[str, Any] | None,
+    *,
+    tokenizer_identity: dict[str, Any],
 ) -> None:
     """Validate checkpoint metadata against current config.
 
     :param Config cfg: Current training configuration.
     :param meta: Checkpoint metadata dict (or None if missing).
+    :param dict[str, Any] tokenizer_identity: Effective tokenizer identity for this process.
     :raises RuntimeError: If meta is missing or config mismatches are found.
     """
 
@@ -472,6 +518,28 @@ def check_resume_compat(
     cur_fp = data_fingerprint(cfg)
     semantic_severity = "error" if cfg.checkpoint.resume_compat == "strict" else "warning"
 
+    _cmp(
+        "checkpoint_meta.schema_version",
+        CHECKPOINT_META_SCHEMA_VERSION,
+        meta.get("schema_version", _MISSING),
+        severity=semantic_severity,
+    )
+
+    if cfg.model.backend == "megalodon":
+        _cmp(
+            "megalodon_jax",
+            megalodon_jax_identity(),
+            meta.get("megalodon_jax", _MISSING),
+            severity=semantic_severity,
+        )
+
+    _cmp(
+        "tokenizer_identity",
+        tokenizer_identity,
+        meta.get("tokenizer_identity", _MISSING),
+        severity=semantic_severity,
+    )
+
     _cmp_mapping(
         "",
         cur_fp,
@@ -506,7 +574,10 @@ def check_resume_compat(
 
     tok_prev = meta_fp.get("tokenizer") or {}
     tok_cur = cur_fp.get("tokenizer") or {}
-    tokenizer_inert = {
+    # Source/loading requests are contextual: the checkpoint-bound effective
+    # implementation, package versions, snapshot files, and canary outputs
+    # above decide compatibility.
+    tokenizer_contextual = {
         "hf_name_or_path",
         "hf_use_fast",
         "hf_trust_remote_code",
@@ -517,7 +588,7 @@ def check_resume_compat(
         "tokenizer",
         tok_cur,
         tok_prev,
-        keys=set(tok_cur) - tokenizer_inert,
+        keys=set(tok_cur) - tokenizer_contextual,
         severity=semantic_severity,
     )
 
@@ -554,11 +625,18 @@ def check_resume_compat(
     train_cur = cur_cfg.get("train") or {}
     # Compare the executed dropout behavior: null and true are equivalent
     # when all active dropout rates are zero.
+    current_deterministic = derived_deterministic(cfg)
     previous_deterministic = _effective_deterministic_from_mapping(meta_cfg)
     _cmp(
         "train.deterministic_effective",
-        derived_deterministic(cfg),
+        current_deterministic,
         _MISSING if previous_deterministic is None else previous_deterministic,
+        severity=semantic_severity,
+    )
+    _cmp(
+        "train.eval_failure_policy",
+        train_cur.get("eval_failure_policy", _MISSING),
+        train_prev.get("eval_failure_policy", _MISSING),
         severity=semantic_severity,
     )
     model_prev = meta_cfg.get("model") or {}
@@ -575,17 +653,28 @@ def check_resume_compat(
             "eos_token_id",
         }
         model_structural = {"backend", "vocab_size", "d_model"}
+        if (
+            cfg.optim.name == "muon"
+            and cfg.optim.muon.allow_tied_embed
+            and not cfg.optim.muon.allow_all_2d
+        ):
+            # DummyLM never ties its weights, but the historical share_emb flag
+            # opts its embedding into Muon. Changing it therefore changes the
+            # optimizer-state tree even though the model pytree is unchanged.
+            model_active.add("share_emb")
+            model_structural.add("share_emb")
     else:
-        # Dummy-only width is inert under Megalodon. Fresh initialization and
-        # the two equivalent memory/scan implementations are inert after
-        # parameter restore and are intentionally absent from resume policy.
+        # Dummy-only width and fresh initialization are inert after parameter
+        # restore. Upstream rematerialization is also inert when effective
+        # deterministic execution disables it.
         model_active -= {
             "d_model",
             "init_mode",
-            "use_checkpoint",
-            "use_associative_segment_scan",
-            "loss_chunk_size",
         }
+        if current_deterministic:
+            model_active.discard("use_checkpoint")
+        if not strict_packed_segments(cfg):
+            model_active.discard("use_associative_segment_scan")
         model_structural = {
             "backend",
             "vocab_size",

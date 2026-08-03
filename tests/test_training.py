@@ -21,10 +21,12 @@ import pytest
 from _pytest.logging import LogCaptureFixture
 
 from chomp.ckpt import (
+    CHECKPOINT_META_SCHEMA_VERSION,
     CheckpointMeta,
     build_meta,
     default_ckpt_dir,
     make_manager,
+    megalodon_jax_identity,
     restore_at_step,
     restore_params_only,
     save,
@@ -54,13 +56,15 @@ from chomp.data import (
     data_fingerprint,
     prepare_tokenizer_and_config,
 )
-from chomp.model import build_model, supports_packed_segments, training_loss
+from chomp.model import build_model, loss_sum_and_count, supports_packed_segments
 from chomp.train import (
     _METRICS_FILE_DROP,
     _WANDB_DROP,
     TrainingPreempted,
     _project_metrics,
+    _restore_eval_status,
     _StopSignalState,
+    _sync_metrics_and_validate_loss_tokens,
     build_optimizer,
     init_train_state,
     make_train_step,
@@ -74,6 +78,18 @@ from tests.helpers.config_factories import (
     make_tiny_megalodon_model,
 )
 from tests.helpers.io import read_jsonl
+
+_TEST_TOKENIZER_IDENTITY = {
+    "manifest_version": 1,
+    "sha256": "test-tokenizer-identity",
+}
+_TEST_EVAL_STATUS = {
+    "eval_disabled": False,
+    "eval_failure_count": 0,
+    "eval_last_failure_step": None,
+    "eval_last_failure_type": None,
+    "eval_last_success_step": None,
+}
 
 
 class _FakeStopSignal:
@@ -114,13 +130,16 @@ def _base_cfg(run_dir: Path) -> Config:
 def check_resume_compat(
     cfg: Config,
     meta: dict[str, Any] | None,
+    *,
+    tokenizer_identity: dict[str, Any] = _TEST_TOKENIZER_IDENTITY,
 ) -> None:
     """Call resume validation for a test checkpoint.
 
     :param Config cfg: Current configuration.
     :param meta: Checkpoint metadata.
+    :param dict[str, Any] tokenizer_identity: Effective tokenizer identity.
     """
-    _check_resume_compat(cfg, meta)
+    _check_resume_compat(cfg, meta, tokenizer_identity=tokenizer_identity)
 
 
 def _checkpoint_record(cfg: Config, *, step: int = 0, tokens_seen: int = 0) -> CheckpointMeta:
@@ -136,7 +155,138 @@ def _checkpoint_record(cfg: Config, *, step: int = 0, tokens_seen: int = 0) -> C
         config=cfg.to_dict(),
         data_fingerprint=data_fingerprint(cfg),
         tokens_seen=tokens_seen,
+        eval_status=_TEST_EVAL_STATUS,
+        tokenizer_identity=_TEST_TOKENIZER_IDENTITY,
     )
+
+
+@pytest.mark.parametrize(
+    ("direct_url", "expected_direct_url"),
+    [
+        (None, None),
+        (
+            {
+                "url": "https://github.com/example/megalodon-jax.git",
+                "vcs_info": {
+                    "vcs": "git",
+                    "requested_revision": "correct-loss-sums",
+                    "commit_id": "a" * 40,
+                },
+            },
+            {
+                "url": "https://github.com/example/megalodon-jax.git",
+                "vcs": "git",
+                "requested_revision": "correct-loss-sums",
+                "commit_id": "a" * 40,
+            },
+        ),
+    ],
+    ids=["pypi", "vcs"],
+)
+def test_megalodon_jax_identity_reads_distribution_and_pep610(
+    monkeypatch: pytest.MonkeyPatch,
+    direct_url: dict[str, Any] | None,
+    expected_direct_url: dict[str, Any] | None,
+) -> None:
+    """Distribution identity includes exact version and available PEP 610 VCS fields.
+
+    :param pytest.MonkeyPatch monkeypatch: Importlib metadata patch fixture.
+    :param dict[str, Any] | None direct_url: Simulated PEP 610 payload.
+    :param dict[str, Any] | None expected_direct_url: Expected normalized source fields.
+    """
+
+    class _Distribution:
+        """Minimal installed-distribution metadata stub."""
+
+        version = "0.2.2"
+
+        def read_text(self, filename: str) -> str | None:
+            """Return the simulated direct URL metadata.
+
+            :param str filename: Requested distribution metadata filename.
+            :return str | None: Serialized PEP 610 payload when configured.
+            """
+            assert filename == "direct_url.json"
+            return None if direct_url is None else json.dumps(direct_url)
+
+    def _distribution(name: str) -> _Distribution:
+        """Return the simulated Megalodon-JAX distribution.
+
+        :param str name: Requested distribution name.
+        :return _Distribution: Metadata stub.
+        """
+        assert name == "megalodon-jax"
+        return _Distribution()
+
+    monkeypatch.setattr("chomp.ckpt.metadata.distribution", _distribution)
+    identity = megalodon_jax_identity()
+
+    assert identity["distribution"] == "megalodon-jax"
+    assert identity["version"] == "0.2.2"
+    if expected_direct_url is None:
+        assert "direct_url" not in identity
+    else:
+        assert identity["direct_url"] == expected_direct_url
+
+
+def test_checkpoint_meta_records_schema_and_backend_identity(tmp_path: Path) -> None:
+    """Every new checkpoint record carries its schema and installed backend identity."""
+    meta = _checkpoint_record(_base_cfg(tmp_path / "run_identity")).to_dict()
+
+    assert meta["schema_version"] == CHECKPOINT_META_SCHEMA_VERSION
+    assert meta["eval_status"] == _TEST_EVAL_STATUS
+    assert meta["megalodon_jax"] == megalodon_jax_identity()
+    assert meta["tokenizer_identity"] == _TEST_TOKENIZER_IDENTITY
+
+
+@pytest.mark.parametrize("prior_schema", ["missing", CHECKPOINT_META_SCHEMA_VERSION + 1])
+def test_resume_requires_supported_checkpoint_meta_schema(
+    tmp_path: Path,
+    caplog: LogCaptureFixture,
+    prior_schema: str | int,
+) -> None:
+    """A missing or unknown metadata schema cannot establish strict compatibility.
+
+    :param Path tmp_path: Temporary run-directory root.
+    :param LogCaptureFixture caplog: Captured warn-mode compatibility log.
+    :param str | int prior_schema: Missing marker or unsupported schema version.
+    """
+    strict_cfg = replace(
+        _base_cfg(tmp_path / f"run_schema_{prior_schema}"),
+        checkpoint=replace(CheckpointConfig(), resume_compat="strict"),
+    )
+    meta = _checkpoint_record(strict_cfg).to_dict()
+    if prior_schema == "missing":
+        meta.pop("schema_version")
+    else:
+        meta["schema_version"] = prior_schema
+
+    with pytest.raises(RuntimeError, match=r"checkpoint_meta\.schema_version"):
+        check_resume_compat(strict_cfg, meta)
+
+    warn_cfg = replace(
+        strict_cfg,
+        checkpoint=replace(strict_cfg.checkpoint, resume_compat="warn"),
+    )
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+        check_resume_compat(warn_cfg, meta)
+    assert "checkpoint_meta.schema_version mismatch" in caplog.text
+
+
+def test_strict_resume_requires_persisted_eval_status(
+    caplog: LogCaptureFixture,
+) -> None:
+    """Missing evaluation policy state is unproven in strict and reset in warn mode.
+
+    :param LogCaptureFixture caplog: Captured warn-mode compatibility log.
+    """
+    with pytest.raises(RuntimeError, match="eval_status"):
+        _restore_eval_status({"step": 4}, resume_compat="strict")
+
+    with caplog.at_level(logging.WARNING, logger="chomp.train"):
+        status = _restore_eval_status({"step": 4}, resume_compat="warn")
+    assert status == _TEST_EVAL_STATUS
+    assert "eval_status is missing or invalid" in caplog.text
 
 
 def _make_state() -> TrainState:
@@ -715,6 +865,44 @@ def test_run_enforces_device_before_artifact_setup(
     assert not run_dir.exists()
 
 
+def test_training_rejects_dense_attention_window_without_blocking_model_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sliding-window config remains usable for inference but not training.
+
+    :param Path tmp_path: Temporary directory for potential run artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Device-policy call guard.
+    """
+    cfg = make_small_run_cfg(tmp_path, run_subdir="dense_window")
+    cfg = replace(
+        cfg,
+        model=make_tiny_megalodon_model(
+            vocab_size=256,
+            chunk_size=8,
+            attention_window=8,
+        ),
+        train=replace(cfg.train, allow_cpu=False),
+    )
+    params, _ = build_model(cfg, key=jax.random.PRNGKey(0))
+    assert params is not None
+
+    def _unexpected_device_check(*, allow_cpu: bool) -> None:
+        """Fail if the training-only semantic guard runs too late."""
+        raise AssertionError(f"unexpected device validation: {allow_cpu}")
+
+    monkeypatch.setattr("chomp.train.validate_default_device", _unexpected_device_check)
+    run_dir = Path(cfg.logging.run_dir or "")
+    with pytest.raises(ValueError) as exc_info:
+        run(cfg, config_path=None, resume="none", dry_run=False)
+
+    message = str(exc_info.value)
+    assert "dense O(L²)" in message
+    assert "model.chunk_size" in message
+    assert "future upstream work" in message
+    assert not run_dir.exists()
+
+
 @pytest.mark.parametrize("grain_prefetch", [0, 1])
 def test_exact_eof_after_batch_boundary_saves_final_checkpoint(
     tmp_path: Path, grain_prefetch: int
@@ -1124,6 +1312,88 @@ def _poison_loss_at_step(monkeypatch: pytest.MonkeyPatch, poison_step: int) -> N
     monkeypatch.setattr("chomp.train.make_train_step", _poisoned_make)
 
 
+def _shift_reported_loss_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+    shifts: dict[int, int],
+) -> None:
+    """Shift selected device token-count metrics without changing the update.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch chomp.train.
+    :param dict[int, int] shifts: Per-step integer changes to reported device counts.
+    """
+    import chomp.train as train_mod
+
+    real_make = train_mod.make_train_step
+
+    def _shifted_make(cfg: Config, **kwargs: Any) -> Any:
+        step_fn = real_make(cfg, **kwargs)
+
+        def wrapped(state: TrainState, batch: Batch) -> tuple[TrainState, dict[str, Any]]:
+            new_state, metrics = step_fn(state, batch)
+            shift = jnp.zeros_like(metrics["token_sum"])
+            for step, amount in shifts.items():
+                shift = jnp.where(new_state.step == step, amount, shift)
+            metrics = dict(metrics)
+            metrics["token_sum"] = metrics["token_sum"] + shift
+            return new_state, metrics
+
+        return wrapped
+
+    monkeypatch.setattr(train_mod, "make_train_step", _shifted_make)
+
+
+def test_loss_token_check_covers_each_step_between_syncs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opposite intermediate count errors cannot cancel inside a sync interval.
+
+    :param Path tmp_path: Temporary directory for run artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Device-count injection fixture.
+    """
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_token_check_interval", decay_steps=4)
+    cfg = replace(
+        cfg,
+        train=replace(cfg.train, steps=4, log_every=4, eval_every=0),
+        checkpoint=replace(cfg.checkpoint, enabled=False),
+    )
+    _shift_reported_loss_tokens(monkeypatch, {2: 1, 3: -1})
+
+    with pytest.raises(RuntimeError, match="loss-token count mismatch at step 2"):
+        run(cfg, config_path=None, resume="none", dry_run=False)
+
+
+def test_loss_token_check_reports_missing_device_metric() -> None:
+    """A missing compiled count should not masquerade as a numeric mismatch."""
+    with pytest.raises(
+        RuntimeError, match="Missing required training metric 'token_sum' at step 2"
+    ):
+        _sync_metrics_and_validate_loss_tokens({}, [(2, 10, None)])
+
+
+def test_loss_token_check_drains_partial_interval_before_final_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finalization rejects an unchecked intermediate count and its checkpoint.
+
+    :param Path tmp_path: Temporary directory for run artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Device-count injection fixture.
+    """
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_token_check_final", decay_steps=3)
+    cfg = replace(
+        cfg,
+        train=replace(cfg.train, steps=3, log_every=1000, eval_every=0),
+        checkpoint=replace(cfg.checkpoint, save_every=100),
+    )
+    _shift_reported_loss_tokens(monkeypatch, {2: 1})
+
+    with pytest.raises(RuntimeError, match="loss-token count mismatch at step 2"):
+        run(cfg, config_path=None, resume="none", dry_run=False)
+
+    assert _checkpoint_steps(Path(cfg.logging.run_dir or "")) == set()
+
+
 def _poison_state_at_step(monkeypatch: pytest.MonkeyPatch, *, poison_step: int, field: str) -> None:
     """Inject NaNs into post-update parameters or optimizer state.
 
@@ -1379,6 +1649,7 @@ def test_dry_run_compiles_single_step(tmp_path: Path, monkeypatch: pytest.Monkey
 
     data = json.loads((run_dir / "config_resolved.json").read_text())
     assert data["derived"]["optim"]["decay_steps_effective"] == cfg.train.steps
+    assert data["derived"]["megalodon_jax"] == megalodon_jax_identity()
     assert len(close_calls) == 1
 
 
@@ -1390,7 +1661,12 @@ def test_eval_collection_failure_disables_eval_without_stopping_training(
     cfg = replace(
         cfg,
         data=replace(cfg.data, max_eval_samples=2),
-        train=replace(cfg.train, steps=2, eval_every=1),
+        train=replace(
+            cfg.train,
+            steps=2,
+            eval_every=1,
+            eval_failure_policy="disable",
+        ),
     )
 
     def _fail_eval_setup(*args: Any, **kwargs: Any) -> list[list[int]]:
@@ -1403,6 +1679,63 @@ def test_eval_collection_failure_disables_eval_without_stopping_training(
 
     assert "disabling evaluation" in caplog.text
     assert _checkpoint_steps(run_dir) == {1, 2}
+    rows = read_jsonl(run_dir / cfg.logging.metrics_file)
+    assert all(row["eval_disabled"] is True for row in rows)
+    assert all(row["eval_failure_count"] == 1 for row in rows)
+    assert all(row["eval_last_failure_step"] == 0 for row in rows)
+    assert all(row["eval_last_failure_type"] == "RuntimeError" for row in rows)
+    assert all(row["eval_last_success_step"] is None for row in rows)
+
+
+def test_resumed_eval_setup_failure_records_and_persists_checkpoint_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setup disable state must use the resume step and prevent later retries.
+
+    :param Path tmp_path: Temporary directory for run artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Eval-setup failure injection.
+    """
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_eval_setup_resume", decay_steps=3)
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, max_eval_samples=2),
+        train=replace(
+            cfg.train,
+            steps=1,
+            eval_every=2,
+            eval_failure_policy="disable",
+        ),
+    )
+    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
+
+    setup_calls = 0
+
+    def _fail_eval_setup(*args: Any, **kwargs: Any) -> list[list[int]]:
+        """Count and fail evaluation initialization."""
+        nonlocal setup_calls
+        setup_calls += 1
+        raise RuntimeError("broken validation split after resume")
+
+    monkeypatch.setattr("chomp.train.load_or_create_eval_tokens", _fail_eval_setup)
+    run(cfg, config_path=None, resume="latest", dry_run=False)
+    run(cfg, config_path=None, resume="latest", dry_run=False)
+    assert setup_calls == 0
+
+    resumed = replace(cfg, train=replace(cfg.train, steps=2))
+    run(resumed, config_path=None, resume="latest", dry_run=False)
+    continued = replace(cfg, train=replace(cfg.train, steps=3))
+    run(continued, config_path=None, resume="latest", dry_run=False)
+
+    assert setup_calls == 1
+    rows = read_jsonl(run_dir / cfg.logging.metrics_file)
+    resumed_rows = [row for row in rows if row["step"] >= 2]
+    assert resumed_rows
+    assert all(row["eval_disabled"] is True for row in resumed_rows)
+    assert all(row["eval_failure_count"] == 1 for row in resumed_rows)
+    assert all(row["eval_last_failure_step"] == 1 for row in resumed_rows)
+    assert all(row["eval_last_failure_type"] == "RuntimeError" for row in resumed_rows)
+    assert all(row["eval_last_success_step"] is None for row in resumed_rows)
 
 
 def test_eval_batch_failure_disables_future_evals_without_stopping_training(
@@ -1415,8 +1748,19 @@ def test_eval_batch_failure_disables_future_evals_without_stopping_training(
     cfg = replace(
         cfg,
         data=replace(cfg.data, max_eval_samples=2),
-        train=replace(cfg.train, steps=2, eval_every=1),
+        train=replace(
+            cfg.train,
+            steps=2,
+            eval_every=1,
+            eval_failure_policy="disable",
+        ),
+        logging=replace(
+            cfg.logging,
+            wandb=replace(cfg.logging.wandb, enabled=True),
+        ),
     )
+    dummy_wandb = DummyWandbRun()
+    monkeypatch.setattr("chomp.train._maybe_init_wandb", lambda *args, **kwargs: dummy_wandb)
     real_build_eval_iterator = train_mod.build_eval_iterator
     build_calls = 0
 
@@ -1435,6 +1779,166 @@ def test_eval_batch_failure_disables_future_evals_without_stopping_training(
     assert build_calls == 1
     assert "Evaluation failed at step 1; disabling evaluation" in caplog.text
     assert _checkpoint_steps(run_dir) == {1, 2}
+    rows = read_jsonl(run_dir / cfg.logging.metrics_file)
+    assert all(row["eval_disabled"] is True for row in rows)
+    assert all(row["eval_failure_count"] == 1 for row in rows)
+    assert all(row["eval_last_failure_step"] == 1 for row in rows)
+    assert all(row["eval_last_failure_type"] == "ZeroLossTokensError" for row in rows)
+    assert all(row["eval_last_success_step"] is None for row in rows)
+    telemetry_rows = [row for _, row in dummy_wandb.logged if "eval_disabled" in row]
+    assert telemetry_rows
+    assert all(row["eval_disabled"] is True for row in telemetry_rows)
+    assert all(row["eval_failure_count"] == 1 for row in telemetry_rows)
+
+    resumed = replace(cfg, train=replace(cfg.train, steps=3))
+    run(resumed, config_path=None, resume="latest", dry_run=False)
+    assert build_calls == 1
+    resumed_rows = read_jsonl(run_dir / cfg.logging.metrics_file)
+    assert resumed_rows[-1]["eval_disabled"] is True
+    assert resumed_rows[-1]["eval_failure_count"] == 1
+    assert resumed_rows[-1]["eval_last_failure_step"] == 1
+
+
+def test_eval_collection_failure_is_fatal_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default policy must fail before training when eval collection fails.
+
+    :param Path tmp_path: Temporary directory for run artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Eval-setup failure injection.
+    """
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_eval_setup_fatal")
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, max_eval_samples=2),
+        train=replace(cfg.train, eval_every=1),
+    )
+
+    def _fail_eval_setup(*args: Any, **kwargs: Any) -> list[list[int]]:
+        """Raise a deterministic evaluation initialization failure."""
+        raise RuntimeError("broken validation split")
+
+    monkeypatch.setattr("chomp.train.load_or_create_eval_tokens", _fail_eval_setup)
+
+    with pytest.raises(RuntimeError, match="broken validation split"):
+        run(cfg, config_path=None, resume="none", dry_run=False)
+
+
+def test_eval_runtime_failure_is_fatal_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default policy must propagate scheduled evaluation failures.
+
+    :param Path tmp_path: Temporary directory for run artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Eval-runtime failure injection.
+    """
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_eval_runtime_fatal")
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, max_eval_samples=2),
+        train=replace(cfg.train, steps=2, eval_every=1),
+    )
+
+    def _fail_eval_iterator(config: Config, *, tokens: list[list[int]]) -> Iterator[Batch]:
+        """Raise while assembling the scheduled evaluation pass."""
+        _ = (config, tokens)
+        raise RuntimeError("broken eval batch")
+
+    monkeypatch.setattr("chomp.train.build_eval_iterator", _fail_eval_iterator)
+
+    run_dir = Path(cfg.logging.run_dir or "")
+    with pytest.raises(RuntimeError, match="broken eval batch"):
+        run(cfg, config_path=None, resume="none", dry_run=False)
+
+    rows = read_jsonl(run_dir / cfg.logging.metrics_file)
+    crash = rows[-1]
+    assert crash["crash"] is True
+    assert crash["eval_disabled"] is False
+    assert crash["eval_failure_count"] == 1
+    assert crash["eval_last_failure_step"] == 1
+    assert crash["eval_last_failure_type"] == "RuntimeError"
+    assert crash["eval_last_success_step"] is None
+
+
+def test_fatal_eval_failure_must_succeed_before_resume_can_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checkpointed fatal eval failure remains owed on same-target resume.
+
+    :param Path tmp_path: Temporary directory for run artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Eval failure injection fixture.
+    """
+    import chomp.train as train_mod
+
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_eval_fatal_resume")
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, max_eval_samples=2),
+        train=replace(cfg.train, steps=1, eval_every=1),
+    )
+    real_build_eval_iterator = train_mod.build_eval_iterator
+    real_make_train_step = train_mod.make_train_step
+    eval_attempts = 0
+    events: list[str] = []
+
+    def _fail_first_eval(config: Config, *, tokens: list[list[int]]) -> Iterator[Batch]:
+        """Fail the original attempt and serve the identical resumed evaluation."""
+        nonlocal eval_attempts
+        eval_attempts += 1
+        events.append("eval")
+        if eval_attempts == 1:
+            raise RuntimeError("injected fatal eval failure")
+        yield from real_build_eval_iterator(config, tokens=tokens)
+
+    def _tracking_make_train_step(cfg: Config, **kwargs: Any) -> Any:
+        """Record optimizer calls so resume ordering is observable."""
+        step_fn = real_make_train_step(cfg, **kwargs)
+
+        def wrapped(state: TrainState, batch: Batch) -> tuple[TrainState, dict[str, Any]]:
+            events.append("train")
+            return step_fn(state, batch)
+
+        return wrapped
+
+    monkeypatch.setattr(train_mod, "build_eval_iterator", _fail_first_eval)
+    monkeypatch.setattr(train_mod, "make_train_step", _tracking_make_train_step)
+
+    with pytest.raises(RuntimeError, match="injected fatal eval failure"):
+        run(cfg, config_path=None, resume="none", dry_run=False)
+
+    run_dir = Path(cfg.logging.run_dir or "")
+    assert _checkpoint_steps(run_dir) == {1}
+
+    # The selected checkpoint is already at the target. Returning without
+    # retrying here would silently turn the failed logical run into success.
+    events.clear()
+    run(cfg, config_path=None, resume="latest", dry_run=False)
+
+    assert eval_attempts == 2
+    assert events == ["eval"]
+    recovered = read_jsonl(run_dir / cfg.logging.metrics_file)[-1]
+    assert recovered["step"] == 1
+    assert recovered["eval_loss"] > 0.0
+    assert recovered["eval_failure_count"] == 1
+    assert recovered["eval_last_failure_step"] == 1
+    assert recovered["eval_last_success_step"] == 1
+
+    # The checkpoint still conservatively records the owed attempt. A second
+    # no-op resume retries it again because no replacement checkpoint was saved.
+    events.clear()
+    run(cfg, config_path=None, resume="latest", dry_run=False)
+    assert eval_attempts == 3
+    assert events == ["eval"]
+
+    # An extended resume likewise repeats eval before its next training batch.
+    events.clear()
+    extended = replace(cfg, train=replace(cfg.train, steps=2))
+    run(extended, config_path=None, resume="latest", dry_run=False)
+    assert eval_attempts == 4
+    assert events == ["eval", "train"]
 
 
 @pytest.mark.parametrize(
@@ -1629,8 +2133,27 @@ def test_training_crash_marks_wandb_failed_and_logs(
     assert "Training crashed" in log_text
 
 
-def test_tokens_seen_matches_host_counts_between_sync_points(tmp_path: Path) -> None:
-    """Host counts stay exact while intermediate optimizer steps remain asynchronous."""
+def test_tokens_seen_matches_host_counts_between_sync_points(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Host counts stay exact while intermediate optimizer steps remain asynchronous.
+
+    :param Path tmp_path: Temporary directory for run artifacts.
+    :param pytest.MonkeyPatch monkeypatch: Sync-boundary recorder fixture.
+    """
+    import chomp.train as train_mod
+
+    real_sync = train_mod._sync_metrics_and_validate_loss_tokens
+    queued_step_groups: list[list[int]] = []
+
+    def _record_sync(metrics: dict[str, Any], checks: list[tuple[int, int, Any]]) -> dict[str, Any]:
+        """Record queued step groups before delegating to the real synchronization."""
+        if checks:
+            queued_step_groups.append([step for step, _, _ in checks])
+        return real_sync(metrics, checks)
+
+    monkeypatch.setattr(train_mod, "_sync_metrics_and_validate_loss_tokens", _record_sync)
     cfg = Config(
         model=ModelConfig(backend="dummy", vocab_size=512, d_model=32, dropout=0.0),
         data=DataConfig(
@@ -1683,6 +2206,7 @@ def test_tokens_seen_matches_host_counts_between_sync_points(tmp_path: Path) -> 
         expected_counts[0],
         sum(expected_counts),
     ]
+    assert queued_step_groups == [[1], [2, 3, 4]]
 
 
 @pytest.mark.parametrize("mode", ["bin", "multipack"])
@@ -1724,6 +2248,275 @@ def test_strict_packed_guard_raises_when_backend_unsupported(
     monkeypatch.setattr("chomp.train.supports_packed_segments", lambda params, static: False)
     with pytest.raises(RuntimeError, match="Strict segment isolation"):
         run(cfg, config_path=None, resume="none")
+
+
+def _megalodon_resume_cfg(
+    run_dir: Path,
+    *,
+    packing_mode: str = "sequential",
+    packing_strict_segments: bool = True,
+    resume_compat: str = "strict",
+) -> Config:
+    """Build a tiny Megalodon config for resume-identity tests.
+
+    :param Path run_dir: Run directory recorded in the config.
+    :param str packing_mode: Active data packing mode.
+    :param bool packing_strict_segments: Whether packed segment resets execute.
+    :param str resume_compat: Resume comparison policy.
+    :return Config: Tiny Megalodon resume configuration.
+    """
+    cfg = _base_cfg(run_dir)
+    return replace(
+        cfg,
+        model=make_tiny_megalodon_model(vocab_size=256, chunk_size=8),
+        data=replace(
+            cfg.data,
+            packing_mode=packing_mode,
+            packing_strict_segments=packing_strict_segments,
+        ),
+        checkpoint=replace(cfg.checkpoint, resume_compat=resume_compat),
+    )
+
+
+@pytest.mark.parametrize("prior_identity", ["missing", "flat", "changed"])
+def test_megalodon_strict_resume_requires_structured_backend_identity(
+    tmp_path: Path,
+    prior_identity: str,
+    caplog: LogCaptureFixture,
+) -> None:
+    """Missing, legacy-flat, or changed backend identity is never proven equal.
+
+    :param Path tmp_path: Temporary run-directory root.
+    :param str prior_identity: Checkpoint identity shape to test.
+    :param LogCaptureFixture caplog: Captured warn-mode compatibility log.
+    """
+    strict_cfg = _megalodon_resume_cfg(tmp_path / f"run_backend_{prior_identity}")
+    meta = _checkpoint_record(strict_cfg).to_dict()
+    if prior_identity == "missing":
+        meta.pop("megalodon_jax")
+    elif prior_identity == "flat":
+        meta["megalodon_jax"] = "0.2.2"
+    else:
+        meta["megalodon_jax"] = {
+            **meta["megalodon_jax"],
+            "version": "0.2.1",
+        }
+
+    with pytest.raises(RuntimeError, match="megalodon_jax"):
+        check_resume_compat(strict_cfg, meta)
+
+    warn_cfg = replace(
+        strict_cfg,
+        checkpoint=replace(strict_cfg.checkpoint, resume_compat="warn"),
+    )
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+        check_resume_compat(warn_cfg, meta)
+    assert "megalodon_jax mismatch" in caplog.text
+
+
+def test_dummy_resume_does_not_require_megalodon_identity(tmp_path: Path) -> None:
+    """Backend identity is enforced only when Megalodon will execute."""
+    cfg = _base_cfg(tmp_path / "run_dummy_backend_identity")
+    cfg = replace(cfg, checkpoint=replace(cfg.checkpoint, resume_compat="strict"))
+    meta = _checkpoint_record(cfg).to_dict()
+    meta.pop("megalodon_jax")
+
+    check_resume_compat(cfg, meta)
+
+
+@pytest.mark.parametrize("prior_identity", ["missing", "changed"])
+def test_resume_requires_checkpoint_bound_tokenizer_identity(
+    tmp_path: Path,
+    prior_identity: str,
+    caplog: LogCaptureFixture,
+) -> None:
+    """Missing or changed tokenizer identity is not proven equal.
+
+    :param Path tmp_path: Temporary run-directory root.
+    :param str prior_identity: Checkpoint identity shape to test.
+    :param LogCaptureFixture caplog: Captured warn-mode compatibility log.
+    """
+    strict_cfg = replace(
+        _base_cfg(tmp_path / f"run_tokenizer_{prior_identity}"),
+        checkpoint=replace(CheckpointConfig(), resume_compat="strict"),
+    )
+    meta = _checkpoint_record(strict_cfg).to_dict()
+    if prior_identity == "missing":
+        meta.pop("tokenizer_identity")
+    else:
+        meta["tokenizer_identity"] = {
+            **meta["tokenizer_identity"],
+            "sha256": "different",
+        }
+
+    with pytest.raises(RuntimeError, match="tokenizer_identity"):
+        check_resume_compat(strict_cfg, meta)
+
+    warn_cfg = replace(
+        strict_cfg,
+        checkpoint=replace(strict_cfg.checkpoint, resume_compat="warn"),
+    )
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+        check_resume_compat(warn_cfg, meta)
+    assert "tokenizer_identity mismatch" in caplog.text
+
+
+def test_segment_scan_resume_semantics_are_contextual(
+    tmp_path: Path,
+    caplog: LogCaptureFixture,
+) -> None:
+    """Segmented CEMA implementation matters exactly when reset execution is active.
+
+    :param Path tmp_path: Temporary run-directory root.
+    :param LogCaptureFixture caplog: Captured warn-mode compatibility log.
+    """
+    for mode in ("bin", "multipack"):
+        strict_cfg = _megalodon_resume_cfg(
+            tmp_path / f"run_scan_{mode}",
+            packing_mode=mode,
+        )
+        meta = _checkpoint_record(strict_cfg).to_dict()
+        drifted = replace(
+            strict_cfg,
+            model=replace(
+                strict_cfg.model,
+                use_associative_segment_scan=not strict_cfg.model.use_associative_segment_scan,
+            ),
+        )
+        with pytest.raises(RuntimeError, match="use_associative_segment_scan"):
+            check_resume_compat(drifted, meta)
+
+        missing = _checkpoint_record(strict_cfg).to_dict()
+        del missing["config"]["model"]["use_associative_segment_scan"]
+        with pytest.raises(RuntimeError, match="use_associative_segment_scan"):
+            check_resume_compat(strict_cfg, missing)
+
+        warn_cfg = replace(
+            drifted,
+            checkpoint=replace(drifted.checkpoint, resume_compat="warn"),
+        )
+        with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+            check_resume_compat(warn_cfg, meta)
+        assert "use_associative_segment_scan" in caplog.text
+        caplog.clear()
+
+    inert_configs = (
+        _megalodon_resume_cfg(tmp_path / "run_scan_sequential"),
+        _megalodon_resume_cfg(
+            tmp_path / "run_scan_nonstrict",
+            packing_mode="bin",
+            packing_strict_segments=False,
+        ),
+    )
+    for cfg in inert_configs:
+        meta = _checkpoint_record(cfg).to_dict()
+        drifted = replace(
+            cfg,
+            model=replace(
+                cfg.model,
+                use_associative_segment_scan=not cfg.model.use_associative_segment_scan,
+            ),
+        )
+        check_resume_compat(drifted, meta)
+
+
+@pytest.mark.parametrize(
+    ("field", "changed_value", "deterministic"),
+    [("loss_chunk_size", 4, True), ("use_checkpoint", True, False)],
+)
+def test_megalodon_runtime_resume_semantics_are_active(
+    tmp_path: Path,
+    caplog: LogCaptureFixture,
+    field: str,
+    changed_value: Any,
+    deterministic: bool,
+) -> None:
+    """Active Megalodon runtime choices follow strict/warn resume policy.
+
+    :param Path tmp_path: Temporary run-directory root.
+    :param LogCaptureFixture caplog: Captured warn-mode compatibility log.
+    :param str field: Megalodon runtime field to change.
+    :param Any changed_value: Value that differs from the checkpoint config.
+    :param bool deterministic: Effective deterministic execution setting.
+    """
+    strict_cfg = _megalodon_resume_cfg(tmp_path / f"run_runtime_{field}")
+    strict_cfg = replace(
+        strict_cfg,
+        train=replace(strict_cfg.train, deterministic=deterministic),
+    )
+    meta = _checkpoint_record(strict_cfg).to_dict()
+    drifted = replace(
+        strict_cfg,
+        model=replace(strict_cfg.model, **{field: changed_value}),
+    )
+
+    with pytest.raises(RuntimeError, match=field):
+        check_resume_compat(drifted, meta)
+
+    missing = _checkpoint_record(strict_cfg).to_dict()
+    del missing["config"]["model"][field]
+    with pytest.raises(RuntimeError, match=field):
+        check_resume_compat(strict_cfg, missing)
+
+    warn_cfg = replace(
+        drifted,
+        checkpoint=replace(drifted.checkpoint, resume_compat="warn"),
+    )
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+        check_resume_compat(warn_cfg, meta)
+    assert field in caplog.text
+
+
+def test_use_checkpoint_resume_semantics_are_inert_when_disabled(
+    tmp_path: Path,
+) -> None:
+    """Rematerialization choice is inert when deterministic execution disables it.
+
+    :param Path tmp_path: Temporary run-directory root.
+    """
+    cfg = _megalodon_resume_cfg(tmp_path / "run_checkpoint_inert")
+    cfg = replace(cfg, train=replace(cfg.train, deterministic=True))
+    meta = _checkpoint_record(cfg).to_dict()
+    drifted = replace(
+        cfg,
+        model=replace(cfg.model, use_checkpoint=not cfg.model.use_checkpoint),
+    )
+    missing = _checkpoint_record(cfg).to_dict()
+    del missing["config"]["model"]["use_checkpoint"]
+
+    check_resume_compat(drifted, meta)
+    check_resume_compat(cfg, missing)
+
+
+def test_eval_failure_policy_follows_resume_compatibility(
+    tmp_path: Path,
+    caplog: LogCaptureFixture,
+) -> None:
+    """Evaluation failure policy changes reject in strict and warn otherwise.
+
+    :param Path tmp_path: Temporary run-directory root.
+    :param LogCaptureFixture caplog: Captured warn-mode compatibility log.
+    """
+    strict_cfg = replace(
+        _base_cfg(tmp_path / "run_eval_failure_policy"),
+        checkpoint=replace(CheckpointConfig(), resume_compat="strict"),
+    )
+    meta = _checkpoint_record(strict_cfg).to_dict()
+    drifted = replace(
+        strict_cfg,
+        train=replace(strict_cfg.train, eval_failure_policy="disable"),
+    )
+
+    with pytest.raises(RuntimeError, match="train.eval_failure_policy"):
+        check_resume_compat(drifted, meta)
+
+    warn_cfg = replace(
+        drifted,
+        checkpoint=replace(drifted.checkpoint, resume_compat="warn"),
+    )
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+        check_resume_compat(warn_cfg, meta)
+    assert "train.eval_failure_policy mismatch" in caplog.text
 
 
 def test_resume_compat_warns_for_multipack_knob_changes(
@@ -1830,6 +2623,29 @@ def test_resume_compat_ignores_inert_dummy_model_config(tmp_path: Path) -> None:
     active_drift = replace(cfg, model=replace(cfg.model, d_model=cfg.model.d_model + 1))
     with pytest.raises(RuntimeError, match="model.d_model"):
         check_resume_compat(active_drift, meta)
+
+
+def test_resume_compat_rejects_active_dummy_muon_routing_change(tmp_path: Path) -> None:
+    """Dummy embedding routing changes must fail before optimizer-state restore."""
+    cfg = _base_cfg(tmp_path / "run_dummy_muon_routing")
+    cfg = replace(
+        cfg,
+        model=replace(cfg.model, share_emb=False),
+        optim=replace(
+            cfg.optim,
+            name="muon",
+            muon=replace(
+                cfg.optim.muon,
+                allow_all_2d=False,
+                allow_tied_embed=True,
+            ),
+        ),
+    )
+    meta = _checkpoint_record(cfg).to_dict()
+    drifted = replace(cfg, model=replace(cfg.model, share_emb=True))
+
+    with pytest.raises(RuntimeError, match="model.share_emb"):
+        check_resume_compat(drifted, meta)
 
 
 def test_resume_compat_ignores_inert_packing_knobs(tmp_path: Path) -> None:
@@ -2024,6 +2840,7 @@ def test_resume_compat_ignores_inert_fields(tmp_path: Path, caplog: LogCaptureFi
         (("config", "optim", "lr"), "optim.lr"),
         (("config", "optim", "adam", "b1"), "optim.adam.b1"),
         (("config", "train", "deterministic"), "train.deterministic_effective"),
+        (("config", "train", "eval_failure_policy"), "train.eval_failure_policy"),
         (("config", "train", "steps"), "train.steps"),
         (("config", "optim", "decay_steps"), "optim.decay_steps"),
     ],
@@ -2036,6 +2853,7 @@ def test_resume_compat_ignores_inert_fields(tmp_path: Path, caplog: LogCaptureFi
         "optimizer",
         "adam",
         "determinism",
+        "eval_failure_policy",
         "steps",
         "schedule",
     ],
@@ -2325,7 +3143,7 @@ def test_strict_packed_segments_covers_multi_document_modes(tmp_path: Path) -> N
     assert not strict_packed_segments(_mode("multipack", strict=False))
 
 
-def test_training_loss_passes_segments_iff_packed() -> None:
+def test_loss_sum_adapter_passes_segments_iff_packed() -> None:
     """Strict packing passes segments and lets the backend derive positions."""
     calls: dict[str, Any] = {}
 
@@ -2344,13 +3162,19 @@ def test_training_loss_passes_segments_iff_packed() -> None:
             key: jax.Array | None = None,
             segment_ids: jax.Array | None = None,
             position_ids: jax.Array | None = None,
+            reduction: str = "mean",
+            return_valid_count: bool = False,
             loss_chunk_size: int | None = None,
-        ) -> jax.Array:
+        ) -> jax.Array | tuple[jax.Array, jax.Array]:
             _ = (input_ids, labels, attention_mask, deterministic, key)
             calls["segment_ids"] = segment_ids
             calls["position_ids"] = position_ids
+            calls["reduction"] = reduction
+            calls["return_valid_count"] = return_valid_count
             calls["loss_chunk_size"] = loss_chunk_size
-            return jnp.zeros(())
+            loss = jnp.zeros((), dtype=jnp.float32)
+            count = jnp.array(7, dtype=jnp.int32)
+            return (loss, count) if return_valid_count else loss
 
     params, static = eqx.partition(_SpyLM(w=jnp.zeros(1)), eqx.is_array)
     micro = Batch(
@@ -2359,7 +3183,7 @@ def test_training_loss_passes_segments_iff_packed() -> None:
         segment_ids=jnp.ones((1, 8), dtype=jnp.int32),
     )
 
-    training_loss(
+    loss_sum_and_count(
         params,
         static,
         batch=micro,
@@ -2370,9 +3194,11 @@ def test_training_loss_passes_segments_iff_packed() -> None:
     )
     assert calls["segment_ids"] is not None
     assert calls["position_ids"] is None
+    assert calls["reduction"] == "sum"
+    assert calls["return_valid_count"] is True
     assert calls["loss_chunk_size"] == 7
 
-    training_loss(
+    loss_sum_and_count(
         params, static, batch=micro, deterministic=True, key=None, use_packed_segments=False
     )
     assert calls["segment_ids"] is None
@@ -2380,7 +3206,7 @@ def test_training_loss_passes_segments_iff_packed() -> None:
     assert calls["loss_chunk_size"] is None
 
     with pytest.raises(TypeError, match="unexpected keyword argument 'cache'"):
-        training_loss(  # type: ignore[call-arg]
+        loss_sum_and_count(  # type: ignore[call-arg]
             params,
             static,
             batch=micro,
@@ -2476,6 +3302,38 @@ def test_resume_reuses_pinned_dataset_revision_without_hub_resolution(
     resumed = replace(cfg, train=replace(cfg.train, steps=2))
     assert run(resumed, config_path=None, resume="latest", dry_run=False) == run_dir
     assert resolve_calls == 1
+
+
+def test_resume_uses_tokenizer_snapshot_after_source_disappears(
+    tmp_path: Path,
+    local_bert_tokenizer: Path,
+) -> None:
+    """Resume must execute only the run-local tokenizer snapshot.
+
+    :param Path tmp_path: Temporary run-directory root.
+    :param Path local_bert_tokenizer: Deterministic local tokenizer source.
+    """
+    cfg = make_small_run_cfg(tmp_path, run_subdir="run_local_tokenizer", decay_steps=2)
+    tokenizer = TokenizerConfig(
+        kind="hf",
+        hf_name_or_path=str(local_bert_tokenizer),
+        hf_use_fast=True,
+        hf_trust_remote_code=False,
+        vocab_size_multiple=1,
+        auto_set_special_tokens=True,
+        add_bos=False,
+        add_eos=False,
+    )
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, tokenizer=tokenizer),
+        train=replace(cfg.train, steps=1),
+    )
+    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
+    local_bert_tokenizer.rename(tmp_path / "source-unavailable")
+
+    resumed = replace(cfg, train=replace(cfg.train, steps=2))
+    assert run(resumed, config_path=None, resume="latest", dry_run=False) == run_dir
 
 
 def test_warn_resume_honors_new_hf_ref_and_reuses_selected_identity(
