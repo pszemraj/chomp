@@ -26,6 +26,7 @@ Phases 4–5:
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import math
 import random
@@ -50,6 +51,7 @@ from chomp.ckpt import (
     build_meta,
     check_resume_compat,
     default_ckpt_dir,
+    load_warm_start_params,
     make_manager,
     restore_data_state_at_step,
     restore_train_state_at_step,
@@ -657,6 +659,47 @@ def _build_model_state(
     state0 = init_train_state(params=params, tx=tx, key=key)
     abstract_state = abstractify_tree(state0)
     return params, static, tx, schedule, state0, abstract_state
+
+
+def _apply_warm_start(
+    state0: TrainState,
+    *,
+    tx: optax.GradientTransformation,
+    init_from_step_dir: Path,
+    tokenizer_identity: dict[str, Any],
+    run_dir: Path,
+) -> TrainState:
+    """Replace freshly initialized parameters with a prior checkpoint's.
+
+    Only params are taken. Optimizer state is re-initialized against the loaded
+    params, the RNG stays the one derived from this run's seed, and step stays
+    zero, which is what gives the new run its own warmup and decay schedule
+    (the LR is a pure function of state.step).
+
+    Provenance is written to the run directory because a warm-started run is
+    otherwise indistinguishable from a fresh one after the fact.
+
+    :param TrainState state0: Freshly initialized train state.
+    :param optax.GradientTransformation tx: Optimizer, re-initialized on loaded params.
+    :param Path init_from_step_dir: Source checkpoint step directory.
+    :param dict[str, Any] tokenizer_identity: This run's tokenizer identity.
+    :param Path run_dir: Destination run directory for the provenance record.
+    :return TrainState: State carrying loaded params at step zero.
+    """
+    params, provenance = load_warm_start_params(
+        init_from_step_dir,
+        abstract_params=abstractify_tree(state0.params),
+        tokenizer_identity=tokenizer_identity,
+    )
+    state = dc_replace(state0, params=params, opt_state=tx.init(params))
+
+    (run_dir / "warm_start.json").write_text(json.dumps(provenance, indent=2, sort_keys=True))
+    print(
+        f"[chomp] warm start: params from {provenance['source_step_dir']} "
+        f"(step {provenance['source_step']}); optimizer, data, and step counter are fresh"
+    )
+    logger.info("Warm started parameters from %s", provenance["source_step_dir"])
+    return state
 
 
 def _build_checkpoint_manager(cfg: Config, run_dir: Path) -> Any | None:
@@ -1446,6 +1489,7 @@ def run(
     *,
     config_path: str | None = None,
     resume: Literal["none", "latest"] | int = "none",
+    init_from: str | Path | None = None,
     dry_run: bool = False,
 ) -> Path:
     """Run a training job and return the run directory.
@@ -1454,12 +1498,18 @@ def run(
     - resume requires logging.run_dir to be set (existing run directory)
     - we restore both train_state and data iterator state when present
 
+    Warm-start contract (init_from):
+    - a fresh run that seeds its parameters from another run's checkpoint
+    - optimizer state, RNG, step counter, and corpus position all start fresh,
+      so data and schedule config may differ from the source arbitrarily
+
     :param Config cfg: Fully validated training configuration.
     :param config_path: Optional path to the source YAML config file.
     :param resume: Resume mode - "none" (fresh), "latest", or specific step number.
+    :param init_from: Optional run or checkpoint step dir to warm start parameters from.
     :param bool dry_run: If True, compile and run a single step, then exit early.
     :raises ValueError: If dense sliding-window attention is requested for training.
-    :raises RuntimeError: If resume setup is invalid.
+    :raises RuntimeError: If resume or warm-start setup is invalid.
     :raises TrainingPreempted: After a signal-requested final checkpoint closes successfully.
     :return Path: Path to the run directory.
     """
@@ -1475,6 +1525,19 @@ def run(
     validate_default_device(allow_cpu=cfg.train.allow_cpu)
     if dry_run and resume != "none":
         raise RuntimeError("dry_run does not support resume; use a fresh run.")
+    # Resume continues one training history; warm start begins a new one from
+    # borrowed parameters. Silently blending them would produce a run whose
+    # optimizer state and step counter disagree about which history they belong to.
+    if init_from is not None and resume != "none":
+        raise RuntimeError(
+            "init_from and resume are mutually exclusive: resume continues an existing run "
+            "in place, while init_from seeds a new run's parameters from another checkpoint. "
+            "Drop --resume to warm start, or drop --init-from to continue."
+        )
+
+    init_from_step_dir = None
+    if init_from is not None:
+        init_from_step_dir, _ = resolve_checkpoint_path(init_from)
 
     run_dir = resolve_run_dir(cfg, config_path=config_path)
     resume_step_dir = _resolve_resume_step_dir(cfg, run_dir=run_dir, resume=resume)
@@ -1525,6 +1588,7 @@ def run(
             config_path=config_path,
             resume=resume,
             resume_step_dir=resume_step_dir,
+            init_from_step_dir=init_from_step_dir,
             dry_run=dry_run,
             stop_request=stop_request,
         )
@@ -1536,6 +1600,7 @@ def _run_impl(
     config_path: str | None,
     resume: Literal["none", "latest"] | int,
     resume_step_dir: Path | None,
+    init_from_step_dir: Path | None = None,
     dry_run: bool,
     stop_request: _StopSignalState,
 ) -> Path:
@@ -1545,6 +1610,7 @@ def _run_impl(
     :param config_path: Optional source YAML path.
     :param resume: Resume selector.
     :param Path | None resume_step_dir: Exact checkpoint selected for resume.
+    :param Path | None init_from_step_dir: Checkpoint to warm start parameters from.
     :param bool dry_run: Whether to run only one compile/step smoke test.
     :param _StopSignalState stop_request: Cooperative preemption state.
     :return Path: Run directory.
@@ -1579,6 +1645,16 @@ def _run_impl(
         )
     params, static, tx, schedule, state0, abstract_state = _build_model_state(cfg)
     _validate_packing_capabilities(cfg, params=params, static=static)
+
+    if init_from_step_dir is not None:
+        state0 = _apply_warm_start(
+            state0,
+            tx=tx,
+            init_from_step_dir=init_from_step_dir,
+            tokenizer_identity=tokenizer_identity,
+            run_dir=run_dir,
+        )
+        params = state0.params
 
     # Log param count once
     n_params = param_count(params)

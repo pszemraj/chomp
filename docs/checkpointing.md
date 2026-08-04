@@ -36,7 +36,7 @@ The manager and data iterator close on every exit path. Orbax waits for asynchro
 
 A save succeeds only when Orbax explicitly accepts it. Before save and after restore, Chomp requires the checkpoint directory step, metadata step, and `TrainState.step` to agree; any mismatch is treated as corruption.
 
-`--resume latest` continues the newest finalized checkpoint. An explicit step may select that newest step, but Chomp rejects an older retained step in the same checkpoint root because subsequent saves would collide with the already finalized future. To branch from an older step, copy it into a new run directory first.
+`--resume latest` continues the newest finalized checkpoint. An explicit step may select that newest step, but Chomp rejects an older retained step in the same checkpoint root because subsequent saves would collide with the already finalized future. To continue an older step under unchanged semantics, copy it into a new run directory first; to start a new training history from it, use `--init-from` below.
 
 A run directory is single-writer. Use a separate copied run directory when branching or running another continuation.
 
@@ -88,6 +88,21 @@ chomp train configs/dev/offline_cpu_smoke.yaml --run-dir runs/chomp/debug_run --
 ```
 
 Add `-o checkpoint.resume_compat=strict` when unchanged config and data semantics are required.
+
+## Warm start (`--init-from`)
+
+`--init-from` seeds a **new** run's parameters from an existing checkpoint. It is not resume: optimizer state, RNG, step counter, token accounting, and corpus position all start fresh, and the new run gets its own warmup and decay schedule because the learning rate is a function of `TrainState.step`.
+
+```bash
+# Phase 2 of a staged run: same model, different data semantics
+chomp train configs/custom/phase2.yaml --run-dir runs/chomp/phase2 --init-from runs/chomp/phase1
+```
+
+The argument accepts a run directory, a checkpoint root, or an explicit step directory, resolved exactly as `chomp generate` resolves its checkpoint argument. `--init-from` and `--resume` are mutually exclusive; the two operations disagree about which training history the optimizer state belongs to.
+
+Because no data or optimizer state is restored, warm start deliberately imposes **no** config compatibility check: packing mode, corpus, batch shape, optimizer, and schedule may all differ. Two things are still enforced. The saved parameter tree must match the new config's architecture, which Orbax validates structurally during restore. The source checkpoint's tokenizer identity must equal the new run's, which is checked explicitly because it is the one mismatch a structural check cannot see — a different tokenizer of the same vocabulary size restores cleanly and then trains on embedding rows that mean something else. Checkpoints with no recorded tokenizer identity are refused rather than assumed compatible.
+
+Each warm-started run records `warm_start.json` in its run directory with the source step directory, step, token count, and tokenizer identity, so a warm-started run remains distinguishable from a fresh one after the fact.
 
 ## Scope of exactness
 

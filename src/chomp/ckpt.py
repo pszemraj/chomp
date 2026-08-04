@@ -436,6 +436,72 @@ def restore_params_only(step_dir: Path, abstract_params: Any) -> Any:
     return restored["params"]
 
 
+def load_warm_start_params(
+    step_dir: Path,
+    *,
+    abstract_params: Any,
+    tokenizer_identity: dict[str, Any],
+) -> tuple[Any, dict[str, Any]]:
+    """Load parameters from a foreign checkpoint to seed a fresh run.
+
+    Warm start is deliberately not resume. Only parameters cross the boundary;
+    optimizer state, RNG, step counter, and corpus position all start fresh.
+    That is what lets the data pipeline change shape between phases (packing
+    mode, corpus, schedule) where exact resume must refuse.
+
+    Orbax validates the parameter tree structurally against ``abstract_params``,
+    so an architecture change fails the restore. Tokenizer identity is checked
+    here instead because it is the one mismatch Orbax cannot see: a different
+    tokenizer with the same vocab size restores cleanly and then trains on
+    embeddings whose rows mean something else.
+
+    :param Path step_dir: Source checkpoint step directory.
+    :param Any abstract_params: ShapeDtypeStruct tree for the new run's params.
+    :param dict[str, Any] tokenizer_identity: New run's tokenizer identity.
+    :raises RuntimeError: If source metadata or tokenizer identity cannot be proven equal.
+    :return tuple[Any, dict[str, Any]]: Restored params and a provenance record.
+    """
+    from chomp.utils.ckpt_paths import read_checkpoint_meta
+
+    step_dir = Path(step_dir)
+    try:
+        meta = read_checkpoint_meta(step_dir)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"Cannot warm start from {step_dir}: checkpoint metadata is missing, so the "
+            "source tokenizer cannot be proven compatible. Warm start requires a schema "
+            f"{CHECKPOINT_META_SCHEMA_VERSION} checkpoint."
+        ) from exc
+
+    source_identity = meta.get("tokenizer_identity")
+    if not isinstance(source_identity, dict):
+        raise RuntimeError(
+            f"Cannot warm start from {step_dir}: checkpoint metadata records no tokenizer "
+            "identity (schema 1 or older). Loading parameters trained under an unknown "
+            "tokenizer would silently reinterpret every embedding row."
+        )
+    if source_identity != tokenizer_identity:
+        raise RuntimeError(
+            f"Cannot warm start from {step_dir}: tokenizer identity mismatch.\n"
+            f"  checkpoint: {source_identity}\n"
+            f"  this run:   {tokenizer_identity}\n"
+            "Warm start copies embedding and output-head rows verbatim, so they are only "
+            "meaningful under the tokenizer that trained them."
+        )
+
+    params = restore_params_only(step_dir, abstract_params)
+
+    provenance = {
+        "source_step_dir": str(step_dir.resolve()),
+        "source_step": int(meta["step"]),
+        "source_tokens_seen": int(meta.get("tokens_seen", 0)),
+        "source_schema_version": meta.get("schema_version"),
+        "source_megalodon_jax": meta.get("megalodon_jax"),
+        "tokenizer_identity": dict(tokenizer_identity),
+    }
+    return params, provenance
+
+
 def check_resume_compat(
     cfg: Config,
     meta: dict[str, Any] | None,

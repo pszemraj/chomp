@@ -160,6 +160,7 @@ Chomp currently has no built-in Hugging Face Transformers or safetensors weight 
 - **Out of memory:** For the 100M/200M recipes, lower the microbatch and raise accumulation with `-o train.batch_size=1 -o train.grad_accum=16`; try `-o model.loss_chunk_size=256` if the vocabulary projection is the peak. The 500M/1B templates already use those settings, and every pretrain recipe uses activation checkpointing. `XLA_PYTHON_CLIENT_PREALLOCATE=false` may help when sharing a GPU but does not reduce true peak memory.
 - **Hub startup is slow or fails:** Real-data runs need outbound HTTPS throughout training. `HF_TOKEN` is optional but can help with rate limits; first startup may spend over a minute resolving revisions, downloading the tokenizer, and opening remote Parquet. Chomp reports failures rather than substituting another dataset.
 - **Run directory exists:** Fresh runs refuse to clobber it. Choose another `--run-dir`, or use `--resume latest` only to continue its checkpoints; branch an older checkpoint into a separate, single-writer directory.
+- **Resume rejects a config change you meant to make:** `--resume` continues one training history and requires the data pipeline to match. To start a new run from an existing model instead, use `--init-from <run-or-step-dir>`, which loads parameters only and leaves optimizer state, schedule, and corpus position fresh. See [Checkpointing: warm start](docs/checkpointing.md#warm-start---init-from).
 
 ## Documentation
 

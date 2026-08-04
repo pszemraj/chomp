@@ -25,6 +25,7 @@ from chomp.ckpt import (
     CheckpointMeta,
     build_meta,
     default_ckpt_dir,
+    load_warm_start_params,
     make_manager,
     megalodon_jax_identity,
     restore_at_step,
@@ -476,6 +477,140 @@ def test_restore_params_only(
 
     with pytest.raises(FileNotFoundError, match="train_state"):
         restore_params_only(ckpt_dir / "999", abstractify_tree(state.params))
+
+
+def test_load_warm_start_params_returns_params_and_provenance(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
+    """Warm start loads the saved params verbatim and records where they came from."""
+    _cfg, state, _mgr, ckpt_dir = _saved_step1_checkpoint(
+        tmp_path / "run_warm_src", track_checkpoint_manager
+    )
+
+    params, provenance = load_warm_start_params(
+        ckpt_dir / "1",
+        abstract_params=abstractify_tree(state.params),
+        tokenizer_identity=_TEST_TOKENIZER_IDENTITY,
+    )
+
+    assert eqx.tree_equal(params, state.params)
+    assert provenance["source_step"] == 1
+    assert provenance["source_step_dir"] == str((ckpt_dir / "1").resolve())
+    assert provenance["tokenizer_identity"] == _TEST_TOKENIZER_IDENTITY
+
+
+def test_load_warm_start_params_rejects_tokenizer_mismatch(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
+    """A different tokenizer must fail loudly: embeddings would be silently reinterpreted."""
+    _cfg, state, _mgr, ckpt_dir = _saved_step1_checkpoint(
+        tmp_path / "run_warm_tok", track_checkpoint_manager
+    )
+
+    with pytest.raises(RuntimeError, match="tokenizer identity mismatch"):
+        load_warm_start_params(
+            ckpt_dir / "1",
+            abstract_params=abstractify_tree(state.params),
+            tokenizer_identity={"manifest_version": 1, "sha256": "some-other-tokenizer"},
+        )
+
+
+def test_load_warm_start_params_requires_recorded_tokenizer_identity(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
+    """A checkpoint that never recorded its tokenizer cannot be proven compatible."""
+    run_dir = tmp_path / "run_warm_legacy"
+    _cfg, state, _mgr, ckpt_dir = _saved_step1_checkpoint(run_dir, track_checkpoint_manager)
+
+    meta_path = ckpt_dir / "1" / "meta" / "metadata"
+    meta = json.loads(meta_path.read_text())
+    del meta["tokenizer_identity"]
+    meta_path.write_text(json.dumps(meta))
+
+    with pytest.raises(RuntimeError, match="no tokenizer identity"):
+        load_warm_start_params(
+            ckpt_dir / "1",
+            abstract_params=abstractify_tree(state.params),
+            tokenizer_identity=_TEST_TOKENIZER_IDENTITY,
+        )
+
+
+def test_warm_start_resets_optimizer_step_and_data_position(tmp_path: Path) -> None:
+    """Warm start begins a new run: params carry over, training history does not."""
+    source_cfg = make_small_run_cfg(tmp_path, run_subdir="phase1", decay_steps=3)
+    source_cfg = replace(source_cfg, train=replace(source_cfg.train, steps=3))
+    source_run_dir = run(source_cfg, config_path=None, resume="none", dry_run=False)
+    assert _checkpoint_steps(source_run_dir) == {2, 3}
+
+    warm_cfg = make_small_run_cfg(tmp_path, run_subdir="phase2", decay_steps=2)
+    warm_cfg = replace(warm_cfg, train=replace(warm_cfg.train, steps=2))
+    warm_run_dir = run(
+        warm_cfg,
+        config_path=None,
+        resume="none",
+        init_from=default_ckpt_dir(source_run_dir) / "3",
+        dry_run=False,
+    )
+
+    assert warm_run_dir != source_run_dir
+    # Step counter restarts rather than continuing from the source's step 3.
+    assert _checkpoint_steps(warm_run_dir) == {1, 2}
+    assert min(_losses_by_step(warm_run_dir)) == 1
+    # The source run is read-only during warm start.
+    assert _checkpoint_steps(source_run_dir) == {2, 3}
+
+    provenance = json.loads((warm_run_dir / "warm_start.json").read_text())
+    assert provenance["source_step"] == 3
+    assert provenance["source_step_dir"] == str((default_ckpt_dir(source_run_dir) / "3").resolve())
+
+    # Params came from the checkpoint, not from this run's seed.
+    control_cfg = make_small_run_cfg(tmp_path, run_subdir="control", decay_steps=2)
+    control_cfg = replace(control_cfg, train=replace(control_cfg.train, steps=2))
+    control_run_dir = run(control_cfg, config_path=None, resume="none", dry_run=False)
+    warm_losses = _losses_by_step(warm_run_dir)
+    control_losses = _losses_by_step(control_run_dir)
+    assert warm_losses[1] != control_losses[1]
+
+
+def test_warm_start_accepts_changed_packing_mode(tmp_path: Path) -> None:
+    """The point of warm start: phase 2 may repack the corpus however it likes."""
+    source_cfg = make_small_run_cfg(tmp_path, run_subdir="pack1", decay_steps=2)
+    source_cfg = replace(source_cfg, train=replace(source_cfg.train, steps=2))
+    source_run_dir = run(source_cfg, config_path=None, resume="none", dry_run=False)
+
+    warm_cfg = make_small_run_cfg(tmp_path, run_subdir="pack2", decay_steps=2)
+    warm_cfg = replace(
+        warm_cfg,
+        train=replace(warm_cfg.train, steps=2),
+        data=replace(warm_cfg.data, packing_mode="bin", packing_max_docs_per_bin=1),
+        checkpoint=replace(warm_cfg.checkpoint, resume_compat="strict"),
+    )
+    warm_run_dir = run(
+        warm_cfg,
+        config_path=None,
+        resume="none",
+        init_from=default_ckpt_dir(source_run_dir) / "2",
+        dry_run=False,
+    )
+
+    assert (warm_run_dir / "warm_start.json").exists()
+    assert _checkpoint_steps(warm_run_dir) == {1, 2}
+
+
+def test_warm_start_and_resume_are_mutually_exclusive(tmp_path: Path) -> None:
+    """Continuing a history and seeding a new one are different operations."""
+    cfg = make_small_run_cfg(tmp_path, run_subdir="excl", decay_steps=2)
+    cfg = replace(cfg, train=replace(cfg.train, steps=1))
+    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
+
+    with pytest.raises(RuntimeError, match="mutually exclusive"):
+        run(
+            replace(cfg, train=replace(cfg.train, steps=2)),
+            config_path=None,
+            resume="latest",
+            init_from=default_ckpt_dir(run_dir) / "1",
+            dry_run=False,
+        )
 
 
 def test_checkpoint_data_state_roundtrip(

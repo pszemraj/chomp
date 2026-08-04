@@ -93,6 +93,19 @@ def test_train_validates_run_dir_override(tmp_path: Path) -> None:
     assert "logging.run_dir must be a non-empty string" in result.output
 
 
+def test_train_init_from_requires_an_existing_checkpoint(tmp_path: Path) -> None:
+    """--init-from is wired and rejects a path that is not there before JAX starts."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}\n")
+
+    result = CliRunner().invoke(
+        cli, ["train", str(config_path), "--init-from", str(tmp_path / "absent")]
+    )
+
+    assert result.exit_code != 0
+    assert "does not exist" in result.output
+
+
 def test_generate_rejects_non_megalodon_backend(tmp_path: Path) -> None:
     """generate should fail fast when model.backend is not megalodon."""
     run_dir = tmp_path / "run"
