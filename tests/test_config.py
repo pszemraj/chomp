@@ -218,6 +218,93 @@ def test_build_config_allows_resolved_derived_section() -> None:
     assert cfg == _base_cfg()
 
 
+def test_warmup_ratio_resolves_to_steps() -> None:
+    """A warmup ratio should derive warmup_steps from the step budget."""
+    data = _base_cfg().to_dict()
+    data["train"]["steps"] = 62000
+    data["optim"]["warmup_ratio"] = 0.032
+    del data["optim"]["warmup_steps"]
+
+    cfg = build_config(data)
+
+    assert cfg.optim.warmup_steps == 1984
+    assert cfg.optim.warmup_ratio == 0.032
+
+
+def test_warmup_ratio_rescales_when_overrides_shorten_the_run() -> None:
+    """Shortening train.steps must rescale warmup instead of failing validation."""
+    data = _base_cfg().to_dict()
+    data["train"]["steps"] = 62000
+    data["optim"]["warmup_ratio"] = 0.05
+    del data["optim"]["warmup_steps"]
+
+    cfg = build_config(data, overrides=["train.steps=200"])
+
+    assert cfg.optim.warmup_steps == 10
+
+
+def test_warmup_ratio_round_trips_through_resolved_dict() -> None:
+    """config_resolved.json stores ratio and resolved steps together."""
+    data = _base_cfg().to_dict()
+    data["train"]["steps"] = 1000
+    data["optim"]["warmup_ratio"] = 0.1
+    del data["optim"]["warmup_steps"]
+
+    cfg = build_config(data)
+
+    assert build_config(cfg.to_dict()) == cfg
+
+
+def test_warmup_ratio_rejects_contradictory_step_count() -> None:
+    """An explicit warmup_steps that disagrees with the ratio must fail loudly."""
+    data = _base_cfg().to_dict()
+    data["train"]["steps"] = 1000
+    data["optim"]["warmup_ratio"] = 0.1
+    data["optim"]["warmup_steps"] = 25
+
+    with pytest.raises(ValueError, match="contradicts optim.warmup_ratio"):
+        build_config(data)
+
+
+def test_warmup_steps_override_conflicts_with_active_ratio() -> None:
+    """Overriding the derived value would be silently discarded, so reject it."""
+    data = _base_cfg().to_dict()
+    data["train"]["steps"] = 1000
+    data["optim"]["warmup_ratio"] = 0.1
+    del data["optim"]["warmup_steps"]
+
+    with pytest.raises(ValueError, match="conflicts with optim.warmup_ratio"):
+        build_config(data, overrides=["optim.warmup_steps=25"])
+
+    cfg = build_config(data, overrides=["optim.warmup_ratio=null", "optim.warmup_steps=25"])
+    assert cfg.optim.warmup_steps == 25
+    assert cfg.optim.warmup_ratio is None
+
+
+@pytest.mark.parametrize("ratio", [-0.1, 1.0, 2.0])
+def test_warmup_ratio_rejects_out_of_range(ratio: float) -> None:
+    """The ratio is a fraction of the run that must leave room to decay."""
+    data = _base_cfg().to_dict()
+    data["optim"]["warmup_ratio"] = ratio
+    del data["optim"]["warmup_steps"]
+
+    with pytest.raises(ValueError, match=r"optim.warmup_ratio must be in \[0, 1\)"):
+        build_config(data)
+
+
+def test_unresolved_warmup_ratio_fails_validation() -> None:
+    """A hand-built Config must not silently ignore its warmup ratio."""
+    base = _base_cfg()
+    cfg = replace(
+        base,
+        train=replace(base.train, steps=1000),
+        optim=replace(base.optim, warmup_ratio=0.1, warmup_steps=0),
+    )
+
+    with pytest.raises(ValueError, match="implies optim.warmup_steps=100"):
+        validate_config(cfg)
+
+
 @pytest.mark.parametrize(
     ("data", "path"),
     [

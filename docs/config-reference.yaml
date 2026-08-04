@@ -315,7 +315,10 @@ optim:
   # optim.grad_clip_norm -- float; default: 1.0; >= 0; zero disables. Global clipping occurs after valid-token normalization and before optimizer partitioning; logged grad_norm is pre-clipping. Keep 1.0 as the starting point.
   grad_clip_norm: "<float>"
 
-  # optim.warmup_steps -- int; default: 10; >= 0 and < train.steps. Linear warmup duration; no ratio alternative exists. Maintained pretrain recipes use 1% of their authored step horizon.
+  # optim.warmup_ratio -- float | null; default: null; 0 <= value < 1. Warmup as a fraction of train.steps, resolved to optim.warmup_steps = round(warmup_ratio * train.steps) after CLI overrides are applied, so shortening train.steps rescales warmup instead of tripping the warmup_steps < train.steps check. Mutually exclusive with optim.warmup_steps in the same config; to override the step count directly on the CLI, also pass optim.warmup_ratio=null. Resume compares the resolved optim.warmup_steps, not this ratio.
+  warmup_ratio: "<float | null>"
+
+  # optim.warmup_steps -- int; default: 10; >= 0 and < train.steps. Linear warmup duration, and the resolved value the schedule and resume checks read. Ignored as an input when optim.warmup_ratio is set, which derives it. Maintained pretrain recipes use 1% of their authored step horizon.
   warmup_steps: "<int>"
 
   # optim.decay_steps -- int | null; default: null, computed as train.steps - warmup_steps; otherwise > 0. This is post-warmup duration, so total schedule horizon = optim.warmup_steps + optim.decay_steps. Extending train.steps with null extends the schedule; set an explicit duration to preserve the original horizon.

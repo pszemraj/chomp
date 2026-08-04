@@ -333,6 +333,7 @@ class OptimConfig:
     lr: float = 3e-4
     weight_decay: float = 0.01
     grad_clip_norm: float = 1.0
+    warmup_ratio: float | None = None
     warmup_steps: int = 10
     decay_steps: int | None = None
     min_lr_ratio: float = 0.0
@@ -529,17 +530,57 @@ def build_config(data: dict[str, Any], overrides: Iterable[str] | None = None) -
     :return Config: Validated configuration object.
     """
     data = _resolve_variables(data)
+    _reject_conflicting_warmup_keys(data)
     cfg = _from_nested_dict(data)
 
+    overridden: set[str] = set()
     if overrides:
         for o in overrides:
             if "=" not in o:
                 raise ValueError(f"Invalid override {o!r}. Expected format like train.steps=123")
             k, v = o.split("=", 1)
+            overridden.add(k.strip())
             cfg = _set_by_dotted_path(cfg, k.strip(), v.strip())
 
+    if "optim.warmup_steps" in overridden and cfg.optim.warmup_ratio is not None:
+        raise ValueError(
+            "override 'optim.warmup_steps' conflicts with optim.warmup_ratio="
+            f"{cfg.optim.warmup_ratio}, which derives the step count; pass "
+            "'optim.warmup_ratio=null' as well to set the step count directly"
+        )
+
+    # Resolve after overrides so that shortening train.steps rescales warmup.
+    cfg = resolve_warmup(cfg)
     validate_config(cfg)
     return cfg
+
+
+def _reject_conflicting_warmup_keys(data: dict[str, Any]) -> None:
+    """Reject configs whose warmup ratio and explicit step count disagree.
+
+    Setting both is allowed only when they already agree, because
+    ``config_resolved.json`` and checkpoint metadata store the ratio next to
+    the step count it produced and must round-trip through `build_config`.
+
+    :param dict[str, Any] data: Raw nested config mapping.
+    :raises ValueError: If optim.warmup_steps contradicts optim.warmup_ratio.
+    """
+    optim = data.get("optim")
+    if not isinstance(optim, dict) or "warmup_steps" not in optim:
+        return
+    ratio = optim.get("warmup_ratio")
+    if ratio is None:
+        return
+    _validate_warmup_ratio(ratio)
+    train = data.get("train")
+    steps = train.get("steps", TrainConfig.steps) if isinstance(train, dict) else TrainConfig.steps
+    expected = warmup_steps_from_ratio(steps=steps, warmup_ratio=ratio)
+    if optim["warmup_steps"] != expected:
+        _vfail(
+            f"optim.warmup_steps ({optim['warmup_steps']}) contradicts optim.warmup_ratio "
+            f"({ratio}), which implies {expected} at train.steps={steps}; the ratio derives "
+            "the step count, so set only one"
+        )
 
 
 def load_config(path: str | Path, overrides: Iterable[str] | None = None) -> Config:
@@ -843,6 +884,21 @@ def _validate_optim(cfg: Config) -> None:
         _vfail(f"optim.grad_clip_norm must be >= 0, got {cfg.optim.grad_clip_norm}")
     if cfg.optim.warmup_steps < 0:
         _vfail(f"optim.warmup_steps must be >= 0, got {cfg.optim.warmup_steps}")
+    if cfg.optim.warmup_ratio is not None:
+        _validate_warmup_ratio(cfg.optim.warmup_ratio)
+        # resolve_warmup() runs before validation on every loaded config, so a
+        # disagreement here means the ratio was never applied and would be
+        # silently ignored by the schedule.
+        expected = warmup_steps_from_ratio(
+            steps=cfg.train.steps, warmup_ratio=cfg.optim.warmup_ratio
+        )
+        if cfg.optim.warmup_steps != expected:
+            _vfail(
+                f"optim.warmup_ratio ({cfg.optim.warmup_ratio}) implies "
+                f"optim.warmup_steps={expected}, got {cfg.optim.warmup_steps}; build the "
+                "config through load_config/build_config so the ratio is resolved, or set "
+                "optim.warmup_ratio to null"
+            )
     if cfg.optim.decay_steps is not None and cfg.optim.decay_steps <= 0:
         _vfail(f"optim.decay_steps must be positive when set, got {cfg.optim.decay_steps}")
     if cfg.optim.min_lr_ratio < 0 or cfg.optim.min_lr_ratio > 1:
@@ -865,8 +921,13 @@ def _validate_optim(cfg: Config) -> None:
     if adam.eps <= 0:
         _vfail(f"optim.adam.eps must be positive, got {adam.eps}")
     if cfg.optim.warmup_steps >= cfg.train.steps:
+        source = (
+            f" (derived from optim.warmup_ratio={cfg.optim.warmup_ratio})"
+            if cfg.optim.warmup_ratio is not None
+            else ""
+        )
         _vfail(
-            f"optim.warmup_steps ({cfg.optim.warmup_steps}) must be < train.steps "
+            f"optim.warmup_steps ({cfg.optim.warmup_steps}){source} must be < train.steps "
             f"({cfg.train.steps})"
         )
 
@@ -1266,6 +1327,49 @@ def strict_packed_segments(cfg: Config) -> bool:
     :return bool: True iff a multi-document packing mode is active with strict isolation.
     """
     return cfg.data.packing_mode in ("bin", "multipack") and cfg.data.packing_strict_segments
+
+
+def warmup_steps_from_ratio(*, steps: int, warmup_ratio: float) -> int:
+    """Warmup step count implied by a fraction of the total step budget.
+
+    :param int steps: Total training steps (``train.steps``).
+    :param float warmup_ratio: Warmup fraction of the step budget, in [0, 1).
+    :return int: Rounded warmup step count.
+    """
+    return int(round(warmup_ratio * steps))
+
+
+def _validate_warmup_ratio(ratio: float) -> None:
+    """Check that a warmup ratio is a fraction that leaves room to decay.
+
+    :param float ratio: Configured ``optim.warmup_ratio``.
+    :raises ValueError: If the ratio is outside [0, 1).
+    """
+    if not isinstance(ratio, (int, float)) or isinstance(ratio, bool):
+        _vfail(f"optim.warmup_ratio must be a number or null, got {ratio!r}")
+    if ratio < 0 or ratio >= 1:
+        _vfail(f"optim.warmup_ratio must be in [0, 1), got {ratio}")
+
+
+def resolve_warmup(cfg: Config) -> Config:
+    """Materialize ``optim.warmup_ratio`` into ``optim.warmup_steps``.
+
+    The ratio is authoritative when set, so ``warmup_steps`` becomes a derived
+    value and every downstream consumer — schedule construction, resume
+    compatibility, checkpoint metadata — keeps reading one resolved step count.
+    Because this runs after CLI overrides, shortening ``train.steps`` rescales
+    warmup with it instead of failing the ``warmup_steps < steps`` check.
+
+    :param Config cfg: Configuration with a possibly unresolved warmup ratio.
+    :raises ValueError: If the ratio is outside [0, 1).
+    :return Config: Configuration whose warmup_steps agrees with warmup_ratio.
+    """
+    ratio = cfg.optim.warmup_ratio
+    if ratio is None:
+        return cfg
+    _validate_warmup_ratio(ratio)
+    resolved = warmup_steps_from_ratio(steps=cfg.train.steps, warmup_ratio=ratio)
+    return replace(cfg, optim=replace(cfg.optim, warmup_steps=resolved))
 
 
 def decay_horizon_from_values(

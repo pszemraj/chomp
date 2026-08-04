@@ -772,9 +772,13 @@ def check_resume_compat(
     optim_name_cur = optim_cur.get("name")
     _cmp_mapping("optim", optim_cur, optim_prev, keys={"name"}, severity="error")
 
+    # warmup_ratio is an input to warmup_steps, which is compared below as part
+    # of the schedule horizon. Comparing the ratio too would reject a resume
+    # that merely restates the same warmup as an explicit step count.
     optim_value_keys = set(optim_cur) - {
         "name",
         "decay_steps",
+        "warmup_ratio",
         "adam",
         "muon",
     }
