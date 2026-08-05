@@ -367,9 +367,9 @@ def test_dev_smoke_configs_load(name: str, data_backend: str, allow_cpu: bool) -
     ("name", "expected_parameters", "batch_size", "grad_accum"),
     [
         ("megalodon_100m_2048.yaml", 113_854_464, 2, 8),
-        ("megalodon_200m_2048.yaml", 187_991_040, 2, 8),
+        ("megalodon_200m_2048.yaml", 188_777_472, 2, 8),
         ("megalodon_500m_2048.yaml", 513_672_192, 1, 16),
-        ("megalodon_1b_2048.yaml", 974_619_648, 1, 16),
+        ("megalodon_1b_2048.yaml", 976_978_944, 1, 16),
     ],
 )
 def test_maintained_pretrain_recipe_contract(
@@ -388,6 +388,11 @@ def test_maintained_pretrain_recipe_contract(
 
     assert param_count(abstract_params) == expected_parameters
     assert cfg.model.backend == "megalodon"
+    # Gated FFN at a param-matched width. swiglu adds a third model_dim x
+    # ffn_hidden_dim matrix rather than rescaling it, so flipping this without
+    # also rescaling ffn_hidden_dim silently inflates the recipe by ~50% of its
+    # feed-forward mass -- which the parameter assertion above would catch.
+    assert cfg.model.swiglu is True
     assert cfg.model.share_emb is True
     assert cfg.model.chunk_size == 512
     assert cfg.model.attention_window is None

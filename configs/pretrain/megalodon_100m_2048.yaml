@@ -1,5 +1,9 @@
 # Maintained 113,854,464-parameter single-GPU baseline at the authored 32,128-token vocabulary.
 # This narrower shape is Chomp's measured baseline, not a released Megalodon preset.
+#
+# Gated FFN at a param-matched width: swiglu adds a third d x f matrix rather than
+# rescaling ffn_hidden_dim, so 3072 -> 2048 holds the parameter count EXACTLY.
+# See docs/training.md "Gated FFN and ffn_hidden_dim".
 
 model:
   backend: megalodon
@@ -9,11 +13,13 @@ model:
   num_heads: 2
   z_dim: 384
   value_dim: 768
-  ffn_hidden_dim: 3072
+  # 2048, not 3072: param-matched for swiglu below (3 x d x f == 2 x d x 3072).
+  ffn_hidden_dim: 2048
   cema_ndim: 16
   norm_num_groups: 32
   norm_eps: 1.0e-5
-  swiglu: false
+  # Gated FFN: silu(fc1(h)) * fc3(h) -> fc2. Upstream's paper presets all set this.
+  swiglu: true
   rescale_nffn: false
   scale_emb: false
   share_emb: true

@@ -41,7 +41,7 @@ model:
   # model.value_dim -- int; default: 128; > 0 and divisible by model.num_heads. Megalodon value width.
   value_dim: "<int>"
 
-  # model.ffn_hidden_dim -- int; default: 256; > 0. Feed-forward width; the maintained recipes use 2.375x to 4x model.model_dim.
+  # model.ffn_hidden_dim -- int; default: 256; > 0. Feed-forward width; the maintained recipes use 1.59x to 2.67x model.model_dim. model.swiglu does NOT rescale this: the gate adds a third model_dim x ffn_hidden_dim matrix at the same width, so a param-matched gated recipe sets this to two-thirds of its non-gated value. See docs/training.md "Gated FFN and ffn_hidden_dim".
   ffn_hidden_dim: "<int>"
 
   # model.cema_ndim -- int; default: 16; > 0. CEMA components per channel; higher values add recurrent capacity and cost.
@@ -62,7 +62,7 @@ model:
   # model.rope_base -- float | null; default: null, which Megalodon resolves to 10000; otherwise > 0. Change only as part of a deliberate context-scaling design.
   rope_base: "<float | null>"
 
-  # model.swiglu -- bool; default: false. Enables SwiGLU in the Megalodon feed-forward network.
+  # model.swiglu -- bool; default: false. Enables SwiGLU in the Megalodon feed-forward network: silu(fc1(h)) * fc3(h) -> fc2 instead of silu(fc1(h)) -> fc2. All maintained pretrain recipes set it true, matching the upstream paper presets. Adds a third projection per layer, so it widens Muon routing and does not rescale model.ffn_hidden_dim -- see that field.
   swiglu: "<bool>"
 
   # model.rescale_nffn -- bool; default: false. Enables learned normalized-FFN residual rescaling; its scale uses Adam without weight decay.

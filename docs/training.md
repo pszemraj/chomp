@@ -10,6 +10,26 @@ Checked-in scenarios are separated by intent. [`configs/dev/`](../configs/dev/) 
 
 The configured maximum target budget is `steps * grad_accum * batch_size * (seq_len - 1)`; boundary, EOS, and padding masks reduce the realized `tokens_seen`. The maintained schedules provide at least roughly 20 maximum target positions per parameter, but that is a starting budget rather than a claim of compute optimality for a specific corpus or research objective.
 
+## Gated FFN and `ffn_hidden_dim`
+
+All four `configs/pretrain/` recipes set `model.swiglu: true`, matching the upstream `megalodon-jax` paper presets. The gated path computes `silu(fc1(h)) * fc3(h) -> fc2`; with `swiglu: false` the FFN is a bare `silu(fc1(h)) -> fc2` with no gate.
+
+**`model.swiglu` does not rescale `model.ffn_hidden_dim`.** Upstream counts FFN parameters as `2*d*f + (d*f if swiglu)`, so enabling the flag adds a third `d x f` matrix at the *same* width and inflates the model by 50% of its FFN mass. Param-matching therefore requires setting `ffn_hidden_dim` to two-thirds of the non-gated width. The maintained recipes already do this; the widths are chosen to stay on multiples of 64 for GEMM tiling:
+
+| recipe | non-gated `f` | gated `f` | parameters |
+| --- | ---: | ---: | ---: |
+| 100M | 3072 | **2048** | 113,854,464 (exact match) |
+| 200M | 2560 | **1728** | 188,777,472 (+0.42%) |
+| 500M | 3840 | **2560** | 513,672,192 (exact match) |
+| 1B | 4864 | **3264** | 976,978,944 (+0.24%) |
+
+Two measured consequences (RTX 5090, 200M, `seq_len` 2048, bf16, param-matched):
+
+- **With `model.use_checkpoint: true` the gate is free on memory** — 18.93 GB gated versus 18.9 GB non-gated — because `fc3`'s activation is rematerialized rather than stored. It costs about 1.7% throughput, which is the recompute.
+- **With checkpointing off it costs memory but not speed** — +2.96 GB, and measured marginally *faster* (73,143 versus 72,247 valid tok/s), since the parameter-matched shapes have equal FLOPs and 1728 tiles better than 2560.
+
+Muon coverage rises with the gate (84 to 96 tensors at the 200M shape) because `fc3` is a genuine GEMM weight; see [Optimization and Optimizers](optimization.md). Changing `model.swiglu` changes the parameter tree, so it is **not** resume-compatible with a checkpoint trained under the other setting.
+
 ## Train step contract
 
 The compiled `train_step`:
@@ -33,6 +53,34 @@ The canonical [`model.chunk_size` and `model.attention_window` contracts](config
 ## GPU environment notes
 
 The supported JAX 0.10.x CUDA 13 stack runs RTX 50xx GPUs with its default kernel selection; Chomp does not rewrite `XLA_FLAGS`. In particular, do not carry over `--xla_gpu_enable_triton_gemm=false` from older RTX 50xx workaround advice: measured on jax 0.10.2 / RTX 5090 (200M Megalodon, seq_len 2048, bf16), disabling Triton GEMM is ~4.5% slower than the default, and `--xla_gpu_verify_triton_fusion_numerics=true` passes on the same workload. Set `XLA_PYTHON_CLIENT_PREALLOCATE=false` when sharing a GPU or when allocator preallocation interferes with another process.
+
+### Device memory ceiling
+
+The usable ceiling is **not** the card's physical memory. JAX preallocates a fraction of the device at startup — `XLA_PYTHON_CLIENT_MEM_FRACTION`, default `0.75` — and every allocation is served from that pool. Chomp does not set the variable, so the default applies unless you export it. Read the actual limit rather than deriving it from the card:
+
+```python
+import jax
+jax.devices()[0].memory_stats()["bytes_limit"]
+```
+
+On a 32.6 GB RTX 5090 that default yields a **25.25 GB** pool; `0.88` yields 29.63 GB and `0.92` yields 30.98 GB. Compare `peak_memory_gb` in `metrics.jsonl` against that number, not against the card. A configuration whose peak sits comfortably under the card can still be several gigabytes over the pool.
+
+**Generation samples raise the peak of the *next* training step**, by a measured +1.65 GB at two different training shapes (bs8×ga8 and bs16×ga4), so the cost belongs to the generation program rather than the training shape. Evaluation costs nothing: it is forward-only over the same `[A,B,T]` shape and reuses the training arena.
+
+The mechanism is fragmentation rather than capacity. Between steps only a few GB is live, but the compiled `jit_train_step` requires one large contiguous scratch arena; the generation program allocates and frees around it, and the arena no longer fits. The failure surfaces during training immediately after a successful sample:
+
+```
+RESOURCE_EXHAUSTED: Out of memory while trying to allocate 18.09GiB
+  [executable_name='jit_train_step']
+```
+
+If a recipe's peak plus that generation headroom exceeds the default pool, either raise the fraction at launch:
+
+```bash
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.92 chomp train <config.yaml> --run-dir runs/<name>
+```
+
+or reduce demand — narrow `train.batch_size` while raising `train.grad_accum` to hold tokens-per-step fixed, enable `model.use_checkpoint`, or set `train.generate_every: 0` to remove the spike. Raising the fraction fails loudly on the first step when the pool cannot be claimed, so it is a visible failure rather than a silent one. Set `XLA_PYTHON_CLIENT_PREALLOCATE=false` instead when sharing a GPU with another process.
 
 XLA kernel selection on GPU is nondeterministic by default. This is the fast path used for production training. For debugging runs that need bit-exact GPU numerics (e.g. comparing an interrupted+resumed run against a continuous one at atol=0), opt in with `XLA_FLAGS=--xla_gpu_deterministic_ops=true`. This is a different knob from `train.deterministic` above (dropout/RNG vs kernel selection), and it is expensive: measured ~25-35% slower steps on a 100M-param Megalodon smoke benchmark (RTX 5090, seq_len 2048, bf16).
 
