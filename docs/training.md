@@ -65,6 +65,15 @@ jax.devices()[0].memory_stats()["bytes_limit"]
 
 On a 32.6 GB RTX 5090 that default yields a **25.25 GB** pool; `0.88` yields 29.63 GB and `0.92` yields 30.98 GB. Compare `peak_memory_gb` in `metrics.jsonl` against that number, not against the card. A configuration whose peak sits comfortably under the card can still be several gigabytes over the pool.
 
+**`bytes_limit` reports the pool XLA was configured to want, not the pool it got.** The fraction is applied to the card's *total* memory, ignoring whatever else is already resident, so the request can exceed what is physically available. When that happens XLA does not fail — it logs a single line to stderr and falls back to an allocator that grows on demand, while `bytes_limit` continues to report the full nominal figure:
+
+```
+E... cuda_executor.cc:1182] [0] Failed to allocate device memory of 28.85GiB
+  (30979129344 bytes): RESOURCE_EXHAUSTED: : CUDA_ERROR_OUT_OF_MEMORY
+```
+
+An on-demand pool is exactly the fragmentation-prone state the fraction was raised to avoid, so the run proceeds and dies later. Measured on the 32.6 GB card with 2144 MiB held by an unrelated process: `0.92` requests 28.85 GiB, fails to reserve, and aborts at the step following the first generation sample; `0.90` requests 28.22 GiB, reserves cleanly, and completes with a 29.14 GB peak. **Grep the startup log for `CUDA_ERROR_OUT_OF_MEMORY` to confirm the reservation actually happened** — that line, not `bytes_limit`, is the ground truth. Leave room for other GPU processes when choosing the fraction, and note that a probe which only queries `bytes_limit` without allocating will not surface the failure, because the reservation is attempted lazily on first use.
+
 **Generation samples raise the peak of the *next* training step**, by a measured +1.65 GB at two different training shapes (bs8×ga8 and bs16×ga4), so the cost belongs to the generation program rather than the training shape. Evaluation costs nothing: it is forward-only over the same `[A,B,T]` shape and reuses the training arena.
 
 The mechanism is fragmentation rather than capacity. Between steps only a few GB is live, but the compiled `jit_train_step` requires one large contiguous scratch arena; the generation program allocates and frees around it, and the arena no longer fits. The failure surfaces during training immediately after a successful sample:
@@ -77,10 +86,10 @@ RESOURCE_EXHAUSTED: Out of memory while trying to allocate 18.09GiB
 If a recipe's peak plus that generation headroom exceeds the default pool, either raise the fraction at launch:
 
 ```bash
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.92 chomp train <config.yaml> --run-dir runs/<name>
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.90 chomp train <config.yaml> --run-dir runs/<name>
 ```
 
-or reduce demand — narrow `train.batch_size` while raising `train.grad_accum` to hold tokens-per-step fixed, enable `model.use_checkpoint`, or set `train.generate_every: 0` to remove the spike. Raising the fraction fails loudly on the first step when the pool cannot be claimed, so it is a visible failure rather than a silent one. Set `XLA_PYTHON_CLIENT_PREALLOCATE=false` instead when sharing a GPU with another process.
+or reduce demand — narrow `train.batch_size` while raising `train.grad_accum` to hold tokens-per-step fixed, enable `model.use_checkpoint`, or set `train.generate_every: 0` to remove the spike. Raising the fraction does **not** fail loudly if the pool cannot be claimed; see the fallback behaviour above, and verify the reservation from the log. Set `XLA_PYTHON_CLIENT_PREALLOCATE=false` instead when sharing a GPU with another process.
 
 XLA kernel selection on GPU is nondeterministic by default. This is the fast path used for production training. For debugging runs that need bit-exact GPU numerics (e.g. comparing an interrupted+resumed run against a continuous one at atol=0), opt in with `XLA_FLAGS=--xla_gpu_deterministic_ops=true`. This is a different knob from `train.deterministic` above (dropout/RNG vs kernel selection), and it is expensive: measured ~25-35% slower steps on a 100M-param Megalodon smoke benchmark (RTX 5090, seq_len 2048, bf16).
 
