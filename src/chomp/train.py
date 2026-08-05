@@ -1281,7 +1281,6 @@ def make_train_step(
     grad_accum = int(cfg.train.grad_accum)
     clip_norm = float(cfg.optim.grad_clip_norm) if cfg.optim.grad_clip_norm else 0.0
     use_packed_segments = strict_packed_segments(cfg)
-    loss_chunk_size = cfg.model.loss_chunk_size
     # Harness-level optimizer math — micro-grad summation, token
     # normalization, and global-norm clipping — is always fp32. Deliberately
     # NOT cfg.model.accum_dtype: that knob feeds the model's *internal*
@@ -1313,7 +1312,6 @@ def make_train_step(
             deterministic=deterministic,
             key=key,
             use_packed_segments=use_packed_segments,
-            loss_chunk_size=loss_chunk_size,
         )
 
     loss_and_grad = eqx.filter_value_and_grad(micro_loss, has_aux=True)
@@ -1430,7 +1428,6 @@ def make_eval_step(
     """
 
     use_packed_segments = strict_packed_segments(cfg)
-    loss_chunk_size = cfg.model.loss_chunk_size
 
     def eval_step(params: Any, batch: Batch) -> tuple[jax.Array, jax.Array]:
         """Compute token-weighted loss sums for a batch.
@@ -1461,7 +1458,6 @@ def make_eval_step(
                 deterministic=True,
                 key=None,
                 use_packed_segments=use_packed_segments,
-                loss_chunk_size=loss_chunk_size,
             )
             return (
                 loss_sum + loss.astype(jnp.float32),

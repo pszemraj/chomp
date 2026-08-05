@@ -128,10 +128,6 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
             lambda cfg: replace(cfg, model=replace(cfg.model, attention_softmax_dtype="float16")),
             "attention_softmax_dtype",
         ),
-        (
-            lambda cfg: replace(cfg, model=replace(cfg.model, loss_chunk_size=0)),
-            "loss_chunk_size",
-        ),
         (lambda cfg: replace(cfg, model=replace(cfg.model, output_size=0)), "output_size"),
         (
             lambda cfg: replace(cfg, model=replace(cfg.model, share_emb=True, output_size=128)),
@@ -192,11 +188,6 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
     for mutate, match in cases:
         with pytest.raises(ValueError, match=match):
             validate_config(mutate(_base_cfg()))
-
-    base = _base_cfg()
-    dummy = replace(base, model=replace(base.model, backend="dummy", loss_chunk_size=8))
-    with pytest.raises(ValueError, match="only when model.backend='megalodon'"):
-        validate_config(dummy)
 
 
 def test_build_config_rejects_unknown_top_level_sections() -> None:
@@ -373,12 +364,12 @@ def test_dev_smoke_configs_load(name: str, data_backend: str, allow_cpu: bool) -
 
 
 @pytest.mark.parametrize(
-    ("name", "expected_parameters", "batch_size", "grad_accum", "loss_chunk_size"),
+    ("name", "expected_parameters", "batch_size", "grad_accum"),
     [
-        ("megalodon_100m_2048.yaml", 113_854_464, 2, 8, None),
-        ("megalodon_200m_2048.yaml", 187_991_040, 2, 8, None),
-        ("megalodon_500m_2048.yaml", 513_672_192, 1, 16, 256),
-        ("megalodon_1b_2048.yaml", 974_619_648, 1, 16, 256),
+        ("megalodon_100m_2048.yaml", 113_854_464, 2, 8),
+        ("megalodon_200m_2048.yaml", 187_991_040, 2, 8),
+        ("megalodon_500m_2048.yaml", 513_672_192, 1, 16),
+        ("megalodon_1b_2048.yaml", 974_619_648, 1, 16),
     ],
 )
 def test_maintained_pretrain_recipe_contract(
@@ -386,7 +377,6 @@ def test_maintained_pretrain_recipe_contract(
     expected_parameters: int,
     batch_size: int,
     grad_accum: int,
-    loss_chunk_size: int | None,
 ) -> None:
     """Maintained recipes should preserve their labeled scale and correctness policy."""
     config_path = Path(__file__).parents[1] / "configs/pretrain" / name
@@ -407,7 +397,6 @@ def test_maintained_pretrain_recipe_contract(
     assert cfg.model.compute_dtype == "bfloat16"
     assert cfg.model.accum_dtype == "float32"
     assert cfg.model.attention_softmax_dtype == "float32"
-    assert cfg.model.loss_chunk_size == loss_chunk_size
     assert cfg.data.packing_strict_segments is True
     assert cfg.data.mask_boundary_loss is True
     assert strict_packed_segments(cfg) is True

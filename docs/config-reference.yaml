@@ -119,10 +119,6 @@ model:
   # model.attention_softmax_dtype -- string; default: float32; one of: float32 | bfloat16. Keep FP32 for numerical stability; BF16 is an explicit lower-precision reduction.
   attention_softmax_dtype: "<float32 | bfloat16>"
 
-  # model.loss_chunk_size -- int | null; default: null; null or > 0; Megalodon-only and active resume semantics. Megalodon-JAX 0.2.2 always evaluates loss log-softmax and scalar reductions in FP32. A positive static value chunks vocabulary projection during train/eval loss and reduces peak memory, but BF16 projection partitioning can change gradients at BF16 scale and rematerializes work in backward. Maintained 500M/1B templates use 256; the 100M/200M recipes leave it null for speed.
-  # Full-logit storage is about batch_size * seq_len * vocab_size * 4 bytes per microbatch. For memory-bound 32K-vocabulary long-context runs, start at 256 and choose the largest value that fits; null is fastest.
-  loss_chunk_size: "<int | null>"
-
 # data -- mapping | null; default: {}. Source, order, packing, tokenizer, and objective fields participate in resume compatibility according to their active semantics.
 data:
   # data.backend -- string; default: hf; one of: hf | local_text. `local_text` consumes literal inline text and is debug-only.

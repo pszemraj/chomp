@@ -55,7 +55,6 @@ def run_training_smoke(run_dir: str, *, backend: str) -> None:
             vocab_size=256,
             use_checkpoint=True,
             compute_dtype="bfloat16",
-            loss_chunk_size=7,
         )
         data = replace(
             cfg.data,

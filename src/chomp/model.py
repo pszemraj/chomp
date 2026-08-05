@@ -405,7 +405,6 @@ def loss_sum_and_count(
     deterministic: bool,
     key: jax.Array | None,
     use_packed_segments: bool = False,
-    loss_chunk_size: int | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Return the backend's FP32 loss numerator and exact valid-target count.
 
@@ -420,7 +419,6 @@ def loss_sum_and_count(
     :param bool deterministic: If False, apply dropout.
     :param key: PRNG key required when deterministic=False.
     :param bool use_packed_segments: Whether to pass segment IDs to backend loss.
-    :param int | None loss_chunk_size: Maximum token states projected per loss-head chunk.
     :return tuple[jax.Array, jax.Array]: FP32 loss sum and integer valid-target count.
     """
 
@@ -434,8 +432,6 @@ def loss_sum_and_count(
     }
     if use_packed_segments:
         kwargs["segment_ids"] = batch.segment_ids
-    if loss_chunk_size is not None:
-        kwargs["loss_chunk_size"] = loss_chunk_size
     loss_sum, valid_count = model.compute_loss(  # type: ignore[attr-defined]
         batch.input_ids,
         batch.labels,

@@ -2557,7 +2557,7 @@ def test_segment_scan_resume_semantics_are_contextual(
 
 @pytest.mark.parametrize(
     ("field", "changed_value", "deterministic"),
-    [("loss_chunk_size", 4, True), ("use_checkpoint", True, False)],
+    [("use_checkpoint", True, False)],
 )
 def test_megalodon_runtime_resume_semantics_are_active(
     tmp_path: Path,
@@ -3299,14 +3299,12 @@ def test_loss_sum_adapter_passes_segments_iff_packed() -> None:
             position_ids: jax.Array | None = None,
             reduction: str = "mean",
             return_valid_count: bool = False,
-            loss_chunk_size: int | None = None,
         ) -> jax.Array | tuple[jax.Array, jax.Array]:
             _ = (input_ids, labels, attention_mask, deterministic, key)
             calls["segment_ids"] = segment_ids
             calls["position_ids"] = position_ids
             calls["reduction"] = reduction
             calls["return_valid_count"] = return_valid_count
-            calls["loss_chunk_size"] = loss_chunk_size
             loss = jnp.zeros((), dtype=jnp.float32)
             count = jnp.array(7, dtype=jnp.int32)
             return (loss, count) if return_valid_count else loss
@@ -3325,20 +3323,17 @@ def test_loss_sum_adapter_passes_segments_iff_packed() -> None:
         deterministic=True,
         key=None,
         use_packed_segments=True,
-        loss_chunk_size=7,
     )
     assert calls["segment_ids"] is not None
     assert calls["position_ids"] is None
     assert calls["reduction"] == "sum"
     assert calls["return_valid_count"] is True
-    assert calls["loss_chunk_size"] == 7
 
     loss_sum_and_count(
         params, static, batch=micro, deterministic=True, key=None, use_packed_segments=False
     )
     assert calls["segment_ids"] is None
     assert calls["position_ids"] is None
-    assert calls["loss_chunk_size"] is None
 
     with pytest.raises(TypeError, match="unexpected keyword argument 'cache'"):
         loss_sum_and_count(  # type: ignore[call-arg]

@@ -34,7 +34,6 @@ model:
   compute_dtype: bfloat16
   accum_dtype: float32
   attention_softmax_dtype: float32
-  loss_chunk_size: null
   output_size: -1
 
 data:
