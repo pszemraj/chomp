@@ -76,6 +76,8 @@ An on-demand pool is exactly the fragmentation-prone state the fraction was rais
 
 **Generation samples raise the peak of the *next* training step**, by a measured +1.65 GB at two different training shapes (bs8×ga8 and bs16×ga4), so the cost belongs to the generation program rather than the training shape. Evaluation costs nothing: it is forward-only over the same `[A,B,T]` shape and reuses the training arena.
 
+**Size the pool from a long run's `peak_memory_gb`, not a short probe's.** The generation spike depends on how fragmented the pool happens to be when the sample lands, so its worst case is a tail event that a 32-step probe rarely reaches. The 200M recipe peaked at 29.14 GB across several 32-step probes and at **29.69 GB** over 100,000 steps — the difference is half the slack under a `0.90` pool. Take the maximum over a completed run when one exists.
+
 The mechanism is fragmentation rather than capacity. Between steps only a few GB is live, but the compiled `jit_train_step` requires one large contiguous scratch arena; the generation program allocates and frees around it, and the arena no longer fits. The failure surfaces during training immediately after a successful sample:
 
 ```
