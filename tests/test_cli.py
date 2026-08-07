@@ -33,6 +33,56 @@ def test_cli_import_does_not_initialize_jax() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def _run_console_entry(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    """Invoke the ``chomp`` process entry point in a subprocess.
+
+    ``main`` calls ``os._exit``, so it can only be exercised out-of-process --
+    in-process it would take the test runner down with it.
+
+    :param list[str] argv: Argument vector, excluding the program name.
+    :return subprocess.CompletedProcess[str]: Completed subprocess result.
+    """
+    code = (
+        "import atexit, sys\n"
+        "atexit.register(lambda: sys.stderr.write('ATEXIT-RAN'))\n"
+        "from chomp.cli.main import main\n"
+        f"sys.argv = ['chomp', *{argv!r}]\n"
+        "main()\n"
+    )
+    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+
+
+def test_console_entry_skips_interpreter_finalization() -> None:
+    """The process entry must exit without running interpreter finalization.
+
+    Native threads inside our dependencies (Apache Arrow, reached through HF
+    streaming) can call into CPython after Py_FinalizeEx starts and abort the
+    process, turning a complete 100k-step run into exit 134. ``main`` flushes
+    and ``os._exit``s instead; a registered ``atexit`` hook not running is the
+    observable evidence that it did.
+    """
+    result = _run_console_entry(["--version"])
+
+    assert result.returncode == 0, result.stderr
+    assert "ATEXIT-RAN" not in result.stderr
+    assert "chomp, version" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_code"),
+    [
+        (["--help"], 0),
+        (["train", "/nonexistent/config.yaml"], 2),
+        (["definitely-not-a-subcommand"], 2),
+    ],
+)
+def test_console_entry_preserves_exit_codes(argv: list[str], expected_code: int) -> None:
+    """Bypassing finalization must not change what the process reports."""
+    result = _run_console_entry(argv)
+
+    assert result.returncode == expected_code, result.stderr
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [

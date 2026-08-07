@@ -10,6 +10,6 @@ Keep these modules thin: argument parsing + calling into library code.
 
 from __future__ import annotations
 
-__all__ = ["cli"]
+__all__ = ["cli", "main"]
 
-from chomp.cli.main import cli
+from chomp.cli.main import cli, main

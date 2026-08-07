@@ -5,6 +5,13 @@ Defines the Click group and shared utilities.
 
 from __future__ import annotations
 
+import contextlib
+import logging
+import os
+import sys
+import traceback
+from typing import NoReturn
+
 import click
 
 from chomp import __version__
@@ -59,3 +66,71 @@ cli.add_command(train)
 from chomp.cli.generate import generate  # noqa: E402
 
 cli.add_command(generate)
+
+
+def _exit_status(code: int | str | None) -> int:
+    """Normalize a ``SystemExit`` code to an integer process status.
+
+    :param code: Value carried by ``SystemExit``.
+    :return int: Integer exit status.
+    """
+    if code is None:
+        return 0
+    if isinstance(code, int):
+        return code
+    print(code, file=sys.stderr)
+    return 1
+
+
+def _hard_exit(code: int) -> NoReturn:
+    """Flush chomp-owned output, then exit without interpreter finalization.
+
+    Native threads inside our dependencies can call back into CPython after
+    ``Py_FinalizeEx`` has begun and kill the process with
+    ``Fatal Python error: PyGILState_Release: thread state ... must be current
+    when releasing``. The known offender here is Apache Arrow (arrow#45214),
+    reached through Hugging Face streaming's Parquet readers; ``datasets``
+    ships a sleep-based workaround and ``HFStreamingTextStream.close`` applies
+    it twice, but a sleep narrows a race, it does not close it. A 100,000-step
+    run observed the abort on 2026-08-07 after every step was done, the final
+    checkpoint was durable, and the closing ``run_dir`` line had printed.
+
+    The failure is therefore harmless to the run and still costs a truthful
+    exit status: SIGABRT (128+6 = 134) makes a complete run look crashed to a
+    shell, an ``&&`` chain, or a scheduler. Chomp closes what it owns before
+    reaching here -- checkpoint manager, data iterator, metrics writer, W&B
+    run, logging handlers -- so finalization has no remaining work of ours to
+    perform, and ``atexit`` hooks are not load-bearing for us. Skipping both
+    buys a deterministic exit code.
+
+    :param int code: Exit status to report.
+    """
+    # Last-resort flush: nothing downstream could report a failure here, and a
+    # closed stdout (piped to `head`, say) must not mask the real exit status.
+    with contextlib.suppress(Exception):
+        logging.shutdown()
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.flush()
+    os._exit(code)
+
+
+def main() -> NoReturn:
+    """Console-script entry point for ``chomp``.
+
+    Wraps the Click group so the process ends through :func:`_hard_exit`.
+    Library callers and tests invoke :data:`cli` directly and keep ordinary
+    interpreter shutdown, which is why this indirection exists at all rather
+    than living inside the group.
+    """
+    code = 0
+    try:
+        cli.main(prog_name="chomp")
+    except SystemExit as exc:
+        code = _exit_status(exc.code)
+    except BaseException:
+        # Click already renders its own errors; anything reaching here is
+        # unexpected and its traceback is the useful part.
+        traceback.print_exc()
+        code = 1
+    _hard_exit(code)
