@@ -514,7 +514,10 @@ def test_export_refuses_non_megalodon_backends(tmp_path: Path) -> None:
     run_dir.mkdir()
     cfg = replace(Config(), model=replace(Config().model, backend="dummy"))
     (run_dir / "config_resolved.json").write_text(json.dumps(cfg.to_dict(), indent=2))
-    (run_dir / "checkpoints" / "1" / "train_state").mkdir(parents=True)
+    step_dir = run_dir / "checkpoints" / "1"
+    (step_dir / "train_state").mkdir(parents=True)
+    (step_dir / "meta").mkdir()
+    (step_dir / "meta" / "metadata").write_text(json.dumps({"config": cfg.to_dict()}))
 
     with pytest.raises(RuntimeError, match="megalodon"):
         export_checkpoint(run_dir, tmp_path / "out")
@@ -805,8 +808,8 @@ def test_policy_export_is_refused_when_it_would_change_outputs(
     """
     from chomp.utils.ckpt_paths import load_config_for_checkpoint
 
-    step_dir, run_dir = resolve_checkpoint_path(str(bf16_run))
-    cfg = load_config_for_checkpoint(step_dir=step_dir, run_dir=run_dir, config_override=None)
+    step_dir, _run_dir = resolve_checkpoint_path(str(bf16_run))
+    cfg = load_config_for_checkpoint(step_dir=step_dir, config_override=None)
     cfg = replace(cfg, model=replace(cfg.model, **override))
     config_path = tmp_path / "override.json"
     config_path.write_text(json.dumps(cfg.to_dict(), indent=2))

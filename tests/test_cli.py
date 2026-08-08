@@ -165,8 +165,10 @@ def test_generate_rejects_non_megalodon_backend(tmp_path: Path) -> None:
     cfg = replace(cfg, model=replace(cfg.model, backend="dummy"))
     (run_dir / "config_resolved.json").write_text(json.dumps(cfg.to_dict(), indent=2))
 
-    step_dir = run_dir / "checkpoints" / "1" / "train_state"
-    step_dir.mkdir(parents=True)
+    step_dir = run_dir / "checkpoints" / "1"
+    (step_dir / "train_state").mkdir(parents=True)
+    (step_dir / "meta").mkdir()
+    (step_dir / "meta" / "metadata").write_text(json.dumps({"config": cfg.to_dict()}))
 
     runner = CliRunner()
     result = runner.invoke(cli, ["generate", str(run_dir), "--prompt", "hello"])

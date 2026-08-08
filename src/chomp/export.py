@@ -224,7 +224,7 @@ def _tokenizer_for_checkpoint(
         meta = None
 
     identity = None if meta is None else meta.get("tokenizer_identity")
-    if meta is not None and meta.get("schema_version") in {2, 3} and not isinstance(identity, dict):
+    if meta is not None and not isinstance(identity, dict):
         raise RuntimeError(
             "Checkpoint metadata is missing tokenizer_identity; cannot export a "
             "tokenizer that provably matches these weights."
@@ -589,9 +589,7 @@ def export_checkpoint(
         )
 
     step_dir, run_dir = resolve_checkpoint_path(checkpoint)
-    cfg = load_config_for_checkpoint(
-        step_dir=step_dir, run_dir=run_dir, config_override=config_override
-    )
+    cfg = load_config_for_checkpoint(step_dir=step_dir, config_override=config_override)
     if cfg.model.backend != "megalodon":
         raise RuntimeError(
             "export only supports model.backend='megalodon'. "

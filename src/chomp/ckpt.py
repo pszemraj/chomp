@@ -477,8 +477,8 @@ def load_warm_start_params(
     if not isinstance(source_identity, dict):
         raise RuntimeError(
             f"Cannot warm start from {step_dir}: checkpoint metadata records no tokenizer "
-            "identity (schema 1 or older). Loading parameters trained under an unknown "
-            "tokenizer would silently reinterpret every embedding row."
+            "identity. Loading parameters trained under an unknown tokenizer would "
+            "silently reinterpret every embedding row."
         )
     if source_identity != tokenizer_identity:
         raise RuntimeError(

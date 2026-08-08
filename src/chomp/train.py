@@ -1614,7 +1614,6 @@ def run(
         if resume_step_dir is not None:
             previous_cfg = load_config_for_checkpoint(
                 step_dir=resume_step_dir,
-                run_dir=run_dir,
                 config_override=None,
             )
 

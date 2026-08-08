@@ -121,10 +121,7 @@ def _generate_and_print(
     "config_override",
     type=click.Path(exists=True),
     default=None,
-    help=(
-        "Override config file (defaults to selected checkpoint metadata; "
-        "legacy checkpoints use the run config)."
-    ),
+    help="Override config file (defaults to the selected checkpoint's own metadata).",
 )
 def generate(
     checkpoint: str,
@@ -209,9 +206,7 @@ def generate(
     click.echo(f"Loading checkpoint from: {step_dir}")
 
     try:
-        cfg = load_config_for_checkpoint(
-            step_dir=step_dir, run_dir=run_dir, config_override=config_override
-        )
+        cfg = load_config_for_checkpoint(step_dir=step_dir, config_override=config_override)
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -228,11 +223,7 @@ def generate(
     checkpoint_tokenizer_identity = (
         None if checkpoint_meta is None else checkpoint_meta.get("tokenizer_identity")
     )
-    if (
-        checkpoint_meta is not None
-        and checkpoint_meta.get("schema_version") in {2, 3}
-        and not isinstance(checkpoint_tokenizer_identity, dict)
-    ):
+    if checkpoint_meta is not None and not isinstance(checkpoint_tokenizer_identity, dict):
         raise click.ClickException(
             "Checkpoint metadata is missing tokenizer_identity; cannot verify generation tokens."
         )

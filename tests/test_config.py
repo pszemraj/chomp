@@ -1038,9 +1038,7 @@ train:
 """
     )
 
-    cfg = load_config_for_checkpoint(
-        step_dir=tmp_path, run_dir=None, config_override=str(config_path)
-    )
+    cfg = load_config_for_checkpoint(step_dir=tmp_path, config_override=str(config_path))
 
     assert cfg.train.seq_len == 64
 
@@ -1063,9 +1061,7 @@ data:
 """
     )
 
-    cfg = load_config_for_checkpoint(
-        step_dir=tmp_path, run_dir=None, config_override=str(config_path)
-    )
+    cfg = load_config_for_checkpoint(step_dir=tmp_path, config_override=str(config_path))
 
     assert cfg.model.vocab_size == 300
 
