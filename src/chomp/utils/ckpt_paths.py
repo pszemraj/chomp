@@ -23,7 +23,7 @@ def _is_step_dir(path: Path) -> bool:
     return path.is_dir() and (path / "train_state").exists()
 
 
-def _latest_step_dir(root: Path) -> Path | None:
+def latest_step_dir(root: Path) -> Path | None:
     """Return the latest step dir with train_state, if any.
 
     :param Path root: Checkpoint root directory.
@@ -173,7 +173,7 @@ def _latest_run_step(run_dir: Path) -> Path:
     :return Path: Latest valid checkpoint step directory.
     """
     ckpt_root = run_dir / "checkpoints"
-    step_dir = _latest_step_dir(ckpt_root)
+    step_dir = latest_step_dir(ckpt_root)
     if step_dir is None:
         raise FileNotFoundError(f"No step directories found in {ckpt_root}")
     return step_dir
@@ -202,7 +202,7 @@ def resolve_checkpoint_path(checkpoint_path: str | Path) -> tuple[Path, Path | N
         run_dir = path
         return _latest_run_step(run_dir), run_dir
 
-    step_dir = _latest_step_dir(path)
+    step_dir = latest_step_dir(path)
     if step_dir is not None:
         run_dir = _find_run_dir_upwards(path)
         if run_dir is None:

@@ -380,6 +380,17 @@ checkpoint:
   # checkpoint.resume_compat -- string; default: warn; one of: strict | warn. Warn mode permits intentional data, objective, schedule, Megalodon-JAX identity, and optimizer-value changes while logging each mismatch; strict rejects them, including missing identity in old checkpoints. Missing metadata is never treated as proven equal. Parameter/optimizer-state structure and Grain restore failures always abort. Maintained long-run recipes select strict.
   resume_compat: "<strict | warn>"
 
+# export -- mapping | null; default: {}. Controls the portable safetensors model written when a run finishes. See docs/export.md.
+export:
+  # export.on_finish -- bool; default: true. Writes the final checkpoint out as a portable model when the run ends on its own terms; preempted, crashed, and dummy-backend runs are skipped, as are runs with checkpoint.enabled=false (the export is written from the final checkpoint). A failure here is logged at ERROR and does not fail the run.
+  on_finish: "<bool>"
+
+  # export.dir_name -- string; default: export; a single directory name, never a path. Destination under the run directory; separators, `.`, and `..` are rejected so an export cannot escape the run or overwrite its checkpoints and tokenizer. A resumed run replaces the previous export.
+  dir_name: "<nonempty single path segment>"
+
+  # export.verify -- bool; default: true. Re-reads the written weights and compares every parameter, because safetensors carries no payload checksum. Costs one extra read of the file; leave on.
+  verify: "<bool>"
+
 # logging -- mapping | null; default: {}. Relative metrics/log paths are joined to the final run directory but not confined to it; absolute paths or `..` can escape. Files are append-only with no interprocess locking, so never share targets between concurrent runs.
 logging:
   # logging.project -- string; default: chomp; nonempty. Used verbatim in generated path runs/<project>/... and as the fallback W&B project; use a simple relative name because absolute/traversal values can escape runs/.

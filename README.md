@@ -153,13 +153,13 @@ chomp generate runs/my_run --prompt "Hello world" --max-tokens 64 --temperature 
 
 Success prints the resolved checkpoint path, restores model parameters, and emits prompt/generated panels. `--temperature 0` is greedy; sampling defaults to temperature `1.0` and seed `42`, with optional `--top-k` and `--top-p`. You may also pass a checkpoint root or an exact step directory instead of the run directory.
 
-Export a checkpoint's weights as portable safetensors:
+A run that finishes on its own terms exports itself to `runs/my_run/export/`, so the model is loadable without a second command. Preempted, crashed, and unfinished runs are skipped — their newest checkpoint is a resume point, not a result. Set `export.on_finish: false` to turn this off. You can also export any checkpoint by hand:
 
 ```bash
 chomp export runs/my_run --out exports/my_run-step100000
 ```
 
-The result holds `model.safetensors`, the run-pinned tokenizer, and a `chomp_export.json` manifest. The weights file carries the full `MegalodonConfig` in its header, so it loads without chomp via `megalodon_jax.load_checkpoint(path, key=...)`; `chomp generate` also accepts an export directory wherever it accepts a run directory. Export is lossless float32, is re-read and verified by default, and refuses to run when the tokenizer cannot be proven to match the checkpoint. It is inference-only — an export carries no optimizer state and cannot be resumed from. See [Export](docs/export.md) for the format, the manifest schema, and why there is no bf16 or Hugging Face Transformers variant.
+Either way the result holds `model.safetensors`, a Hugging Face shaped `config.json`, the run-pinned tokenizer, and a `chomp_export.json` manifest. The weights file carries the full `MegalodonConfig` in its header, so it loads without chomp via `megalodon_jax.load_checkpoint(path, key=...)`; `config.json` states the same architecture in the field names other frameworks expect, for ports that will not parse a safetensors header. `chomp generate` accepts an export directory wherever it accepts a run directory. Export is lossless float32, is re-read and verified by default, runs on the host so it cannot compete with a training run for device memory, and refuses when the tokenizer cannot be proven to match the checkpoint. It is inference-only — an export carries no optimizer state and cannot be resumed from. See [Export](docs/export.md) for the format, the manifest schema, and why there is no bf16 or Hugging Face Transformers variant.
 
 ## Troubleshooting
 

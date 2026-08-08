@@ -353,6 +353,18 @@ class CheckpointConfig:
 
 
 @dataclass(frozen=True)
+class ExportConfig:
+    """Portable weight export written when a run finishes cleanly."""
+
+    on_finish: bool = True
+    #: Directory name under the run directory. A single path segment, never a
+    #: path: export writes into the run's own tree and must not be able to
+    #: reach outside it, or overwrite the run's checkpoints and tokenizer.
+    dir_name: str = "export"
+    verify: bool = True
+
+
+@dataclass(frozen=True)
 class WandbConfig:
     """Weights & Biases configuration."""
 
@@ -393,6 +405,7 @@ class Config:
     train: TrainConfig = TrainConfig()
     optim: OptimConfig = OptimConfig()
     checkpoint: CheckpointConfig = CheckpointConfig()
+    export: ExportConfig = ExportConfig()
     logging: LoggingConfig = LoggingConfig()
     debug: DebugConfig = DebugConfig()
 
@@ -692,7 +705,17 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
     :return Config: Fully constructed Config with all sub-configs.
     """
 
-    allowed = {"model", "data", "train", "optim", "checkpoint", "logging", "debug", "derived"}
+    allowed = {
+        "model",
+        "data",
+        "train",
+        "optim",
+        "checkpoint",
+        "export",
+        "logging",
+        "debug",
+        "derived",
+    }
     unknown = sorted(set(data) - allowed)
     if unknown:
         _vfail(f"unknown top-level config section(s): {', '.join(unknown)}")
@@ -741,6 +764,7 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
     logging = LoggingConfig(wandb=wandb, **logging_d)
     debug = DebugConfig(**_section(data.get("debug"), "debug"))
     checkpoint = CheckpointConfig(**_section(data.get("checkpoint"), "checkpoint"))
+    export = ExportConfig(**_section(data.get("export"), "export"))
 
     # Data + nested tokenizer
     data_d = _section(data.get("data"), "data")
@@ -756,6 +780,7 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
         train=train,
         optim=optim,
         checkpoint=checkpoint,
+        export=export,
         logging=logging,
         debug=debug,
     )
@@ -943,6 +968,21 @@ def _validate_checkpoint(cfg: Config) -> None:
             _vfail(f"checkpoint.save_every must be positive, got {cfg.checkpoint.save_every}")
         if cfg.checkpoint.max_to_keep <= 0:
             _vfail(f"checkpoint.max_to_keep must be positive, got {cfg.checkpoint.max_to_keep}")
+
+
+def _validate_export(cfg: Config) -> None:
+    """Validate the end-of-run export destination.
+
+    ``dir_name`` is joined onto the run directory, so anything but a plain
+    name could send the export outside the run or on top of the run's own
+    ``checkpoints/`` and ``tokenizer/``.
+    """
+    name = cfg.export.dir_name
+    if not name or name in {".", ".."} or name != Path(name).name:
+        _vfail(
+            "export.dir_name must be a single directory name inside the run directory, "
+            f"got {name!r}"
+        )
 
 
 def _validate_model(cfg: Config) -> None:
@@ -1262,6 +1302,7 @@ def validate_config(cfg: Config) -> None:
     _validate_train(cfg)
     _validate_optim(cfg)
     _validate_checkpoint(cfg)
+    _validate_export(cfg)
     _validate_model(cfg)
     _validate_data(cfg)
     _validate_logging(cfg)

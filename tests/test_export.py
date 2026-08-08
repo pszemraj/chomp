@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 from dataclasses import replace
@@ -20,10 +21,14 @@ from chomp.cli import cli
 from chomp.config import Config, build_config
 from chomp.data.pipeline import load_tokenizer_snapshot
 from chomp.export import (
+    CONFIG_FILENAME,
     EXPORT_SCHEMA_VERSION,
+    HF_ARCHITECTURE,
+    HF_MODEL_TYPE,
     MANIFEST_FILENAME,
     WEIGHTS_FILENAME,
     _verify_weights,
+    _weights_metadata,
     export_checkpoint,
     is_export_dir,
     load_export,
@@ -448,6 +453,127 @@ def test_export_refuses_non_megalodon_backends(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="megalodon"):
         export_checkpoint(run_dir, tmp_path / "out")
+
+
+def test_config_json_rebuilds_the_architecture_in_the_weights_file(exported_dir: Path) -> None:
+    """config.json must be sufficient on its own to describe what was exported.
+
+    This is the whole point of writing it: a reader with no megalodon-jax and no
+    safetensors parser gets the architecture. If it cannot reconstruct the
+    config the weights were saved with, it is decoration.
+    """
+    import jax.numpy as jnp
+    from megalodon_jax import load_checkpoint
+    from megalodon_jax.config import MegalodonConfig
+
+    config = json.loads((exported_dir / CONFIG_FILENAME).read_text())
+    names = {field.name for field in MegalodonConfig.__dataclass_fields__.values()}
+    dtypes = {"float32": jnp.float32, "bfloat16": jnp.bfloat16}
+    rebuilt = MegalodonConfig(
+        **{
+            key: dtypes[value] if key.endswith("dtype") else value
+            for key, value in config.items()
+            if key in names
+        }
+    )
+
+    model = load_checkpoint(exported_dir / WEIGHTS_FILENAME, key=jax.random.key(0))
+    assert rebuilt == model.config
+
+
+def test_config_json_carries_hugging_face_names_and_the_weight_contract(
+    exported_dir: Path,
+) -> None:
+    """The HF fields are aliases of the native ones, and must not drift from them."""
+    config = json.loads((exported_dir / CONFIG_FILENAME).read_text())
+
+    assert config["model_type"] == HF_MODEL_TYPE
+    assert config["architectures"] == [HF_ARCHITECTURE]
+    assert config["torch_dtype"] == config["param_dtype"]
+    assert config["hidden_size"] == config["model_dim"]
+    assert config["num_hidden_layers"] == config["num_layers"]
+    assert config["num_attention_heads"] == config["num_heads"]
+    assert config["intermediate_size"] == config["ffn_hidden_dim"]
+    assert config["tie_word_embeddings"] == config["share_emb"]
+    # No positional table exists, so no context bound may be implied.
+    assert "max_position_embeddings" not in config
+
+    # The layout contract is copied from the header of the file it describes,
+    # so a port reading config.json alone knows how to interpret the tensors.
+    metadata = _weights_metadata(exported_dir / WEIGHTS_FILENAME)
+    contract = config["megalodon_jax"]
+    assert contract["weights_file"] == WEIGHTS_FILENAME
+    assert contract["config_fingerprint"] == metadata["config_fingerprint"]
+    assert contract["rope_layout"] == metadata["rope_layout"]
+    assert contract["normalization_storage"] == metadata["normalization_storage"]
+    assert contract["bias_schema"] == metadata["bias_schema"]
+    assert contract["tying"] == metadata["tying"]
+
+
+def test_config_json_survives_an_overwrite(trained_run: Path, tmp_path: Path) -> None:
+    """Overwrite sweeps files the old manifest claimed; the model config is not one."""
+    destination = tmp_path / "reexported"
+    export_checkpoint(trained_run, destination)
+    result = export_checkpoint(trained_run, destination, overwrite=True)
+
+    assert result.config_path == destination / CONFIG_FILENAME
+    assert result.config_path.is_file()
+    assert read_export_manifest(destination)["config_file"] == CONFIG_FILENAME
+
+
+def test_a_finished_run_exports_itself(trained_run: Path) -> None:
+    """A clean run leaves a loadable model in its own directory, with no second command."""
+    export_dir = trained_run / "export"
+
+    assert is_export_dir(export_dir)
+    manifest = read_export_manifest(export_dir)
+    step_dir, _run_dir = resolve_checkpoint_path(str(trained_run))
+    assert manifest["source"]["step"] == int(step_dir.name)
+    assert (export_dir / CONFIG_FILENAME).is_file()
+    # Loadable, not merely present.
+    assert param_count(load_export(export_dir).params) == manifest["param_count"]
+
+
+def test_export_on_finish_false_leaves_the_run_directory_alone(tmp_path: Path) -> None:
+    """The end-of-run export is a default, not a fixture of training."""
+    tokenizer_dir = _write_bert_tokenizer(tmp_path / "tokenizer")
+    cfg = _run_config(tokenizer_dir=tokenizer_dir, run_dir=tmp_path / "run")
+    cfg = replace(cfg, export=replace(cfg.export, on_finish=False))
+
+    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
+
+    assert not (run_dir / "export").exists()
+
+
+def test_a_failed_end_of_run_export_does_not_fail_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Training that succeeded must not be reported as failed over a convenience copy.
+
+    The checkpoint is already durable at this point and ``chomp export``
+    reproduces the export in seconds, so the failure is logged rather than
+    raised -- but it must be logged, not swallowed.
+    """
+    tokenizer_dir = _write_bert_tokenizer(tmp_path / "tokenizer")
+    cfg = _run_config(tokenizer_dir=tokenizer_dir, run_dir=tmp_path / "run")
+
+    def _fail(*args: Any, **kwargs: Any) -> Any:
+        """Fail the way a full disk or a permission error would."""
+        raise RuntimeError("no space left on device")
+
+    monkeypatch.setattr("chomp.export.export_checkpoint", _fail)
+
+    with caplog.at_level(logging.ERROR, logger="chomp.train"):
+        run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
+
+    assert not (run_dir / "export").exists()
+    # The run's actual output is untouched and still resolvable.
+    assert resolve_checkpoint_path(str(run_dir))[0].is_dir()
+
+    failures = [record for record in caplog.records if "End-of-run export" in record.getMessage()]
+    assert failures, "the export failure was swallowed"
+    assert failures[0].levelno == logging.ERROR
+    assert failures[0].exc_info is not None
 
 
 def test_cli_export_then_generate_matches_the_run(trained_run: Path, tmp_path: Path) -> None:

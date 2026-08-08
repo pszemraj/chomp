@@ -760,6 +760,72 @@ def _close_run_resources(
     return errors
 
 
+def _export_final_model(cfg: Config, *, run_dir: Path) -> Path | None:
+    """Write a portable model export from the run's last checkpoint.
+
+    Called once, after a clean finish, so the thing a run is for -- the model --
+    is on disk in a loadable form without a second command. It reads the
+    checkpoint back from disk rather than serializing the live train state, so
+    what ships is exactly what a later ``chomp export`` would produce.
+
+    Failure here does not fail the run. The checkpoint is already durable and
+    ``chomp export`` reproduces this in seconds, so a full training run must not
+    be reported as failed because a convenience copy could not be written -- but
+    it is logged at ERROR, never swallowed.
+
+    :param Config cfg: Run configuration.
+    :param Path run_dir: Run directory holding the checkpoints.
+    :return Path | None: Export directory, or None when nothing was written.
+    """
+    if cfg.model.backend != "megalodon":
+        logger.info(
+            "Skipping end-of-run export: model.backend=%r has no portable weight format.",
+            cfg.model.backend,
+        )
+        return None
+    if not cfg.checkpoint.enabled:
+        logger.warning(
+            "Skipping end-of-run export: export.on_finish is set but checkpoint.enabled "
+            "is false, and the export is written from the final checkpoint."
+        )
+        return None
+
+    from chomp.export import export_checkpoint
+    from chomp.utils.ckpt_paths import latest_step_dir
+
+    if latest_step_dir(default_ckpt_dir(run_dir)) is None:
+        logger.info("Skipping end-of-run export: the run wrote no checkpoint to export.")
+        return None
+
+    destination = run_dir / cfg.export.dir_name
+    try:
+        result = export_checkpoint(
+            run_dir,
+            destination,
+            overwrite=True,
+            verify=cfg.export.verify,
+        )
+    except Exception:
+        logger.exception(
+            "End-of-run export to %s failed. The final checkpoint is unaffected; "
+            "run `chomp export %s --out %s` to retry.",
+            destination,
+            run_dir,
+            destination,
+        )
+        return None
+
+    logger.info(
+        "Exported step %d (%d params, %.1f MB) to %s",
+        result.step,
+        result.param_count,
+        result.weights_bytes / 1e6,
+        result.export_dir,
+    )
+    print(f"[chomp] exported model to {result.export_dir}")
+    return result.export_dir
+
+
 def _save_training_checkpoint(
     manager: Any,
     *,
@@ -2280,6 +2346,28 @@ def _run_impl(
         finalization_errors.extend(
             _close_run_resources(manager, data_it, phase="training finalization")
         )
+
+        # Export only a run that finished on its own terms. A preempted or
+        # crashed run's newest checkpoint is a resume point, not a result, and
+        # exporting one would put a model in the run directory that nobody
+        # decided was finished. Deliberately after the manager is closed: the
+        # export reads the final checkpoint back off disk, and an async save
+        # may still have been in flight before that.
+        if (
+            cfg.export.on_finish
+            and not exc_in_flight
+            and not finalization_errors
+            and preemption_reason is None
+            and not stop_request.requested
+        ):
+            export_dir = _export_final_model(cfg, run_dir=run_dir)
+            if wandb_run is not None:
+                with contextlib.suppress(Exception):
+                    if export_dir is None:
+                        wandb_run.summary["export_written"] = False
+                    else:
+                        wandb_run.summary["export_written"] = True
+                        wandb_run.summary["export_dir"] = str(export_dir)
 
         # Checkpoint or iterator finalization failures fail the run (raise
         # below), so W&B's exit code must agree. Finish telemetry only after

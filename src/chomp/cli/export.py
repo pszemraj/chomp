@@ -80,6 +80,7 @@ def export(
         f"  {result.weights_path.name}: {result.param_count:,} params, {size}"
         + (" (verified)" if result.verified else " (NOT verified)")
     )
+    click.echo(f"  {result.config_path.name}: architecture, Hugging Face layout")
     if result.tokenizer_files:
         click.echo(f"  tokenizer: {', '.join(result.tokenizer_files)}")
     else:

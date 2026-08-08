@@ -109,6 +109,10 @@ Periodic Megalodon generation samples prompts from a bounded pool of up to 16 un
 
 `chomp generate` accepts a run directory or checkpoint step directory, restores the stored parameters and resolved config, and uses the run-pinned tokenizer described in [Data Pipeline: tokenization](data_pipeline.md#tokenization) when available. For schema-2+ checkpoints, generation recomputes that tokenizer's effective manifest identity and requires it to match the selected checkpoint before encoding the prompt; metadata-free legacy checkpoints retain the previous source/snapshot fallback. Set `--temperature 0` for greedy decoding; seeded sampling is the default. Run `chomp generate --help` for the option list.
 
+## End-of-run export
+
+A run that finishes on its own terms writes its final checkpoint out as a portable model in `<run_dir>/export/` — safetensors weights, a Hugging Face shaped `config.json`, and the run-pinned tokenizer. Preempted, crashed, `dummy`-backend, and uncheckpointed runs are skipped. The export runs on the host, so it does not compete with the run's own device memory pool, and a failure is logged at ERROR without failing the run. Controls live under [`export.*`](config-reference.yaml); the format and its limits are documented in [Export](export.md).
+
 ## Dry run
 
 Use `chomp train <config.yaml> --dry-run` to validate config, build the tokenizer/model/data pipeline, and execute one step before exiting. The step compiles when `train.jit` is enabled. When `debug.nan_check` is enabled, success also requires finite loss, gradient norm, learning rate, post-update parameters, and optimizer state. W&B logging is skipped in dry-run mode.

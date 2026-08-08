@@ -190,6 +190,20 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
             validate_config(mutate(_base_cfg()))
 
 
+def test_export_dir_name_must_stay_inside_the_run_directory() -> None:
+    """dir_name is joined onto the run directory, so only a plain name is safe.
+
+    Anything with a separator could put the export outside the run, or on top of
+    the run's own checkpoints and tokenizer snapshot.
+    """
+    for name in ("../escape", "nested/export", "/absolute", "", ".", ".."):
+        cfg = replace(_base_cfg(), export=replace(_base_cfg().export, dir_name=name))
+        with pytest.raises(ValueError, match="export.dir_name"):
+            validate_config(cfg)
+
+    validate_config(replace(_base_cfg(), export=replace(_base_cfg().export, dir_name="model")))
+
+
 def test_build_config_rejects_unknown_top_level_sections() -> None:
     """Top-level config typos should fail instead of being silently ignored."""
     data = _base_cfg().to_dict()

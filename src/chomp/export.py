@@ -21,6 +21,12 @@ Chomp's job is the two ends upstream cannot do: getting from a run directory to
 a ``MegalodonForCausalLM``, and shipping the tokenizer and provenance beside
 the weights so the token IDs and the embedding rows stay married.
 
+The architecture is also written out as a Hugging Face shaped ``config.json``.
+Nothing in chomp reads it -- the safetensors header stays authoritative here --
+but it is the file every other ecosystem looks for, and it is what lets a port
+to another framework read the architecture without parsing a safetensors
+header or installing megalodon-jax.
+
 Export is lossless and does not change dtypes. ``model.param_dtype`` is pinned
 to float32, so an export is float32 and roughly four bytes per parameter. A
 bf16 variant is deliberately absent: upstream's ``BF16_DTYPE_POLICY`` keeps
@@ -64,10 +70,52 @@ EXPORT_SCHEMA_VERSION = 1
 
 WEIGHTS_FILENAME = "model.safetensors"
 MANIFEST_FILENAME = "chomp_export.json"
+CONFIG_FILENAME = "config.json"
 
 # Tokenizer files are copied to the export root rather than into a
 # ``tokenizer/`` subdirectory, so ``AutoTokenizer.from_pretrained(export_dir)``
 # resolves without knowing anything about chomp's run layout.
+
+#: ``config.json`` values that Hugging Face itself owns.
+HF_MODEL_TYPE = "megalodon"
+HF_ARCHITECTURE = "MegalodonForCausalLM"
+
+#: Hugging Face config field -> ``MegalodonConfig`` field. Aliases, not
+#: translations: only pairs whose meaning is identical are listed, so a reader
+#: that knows either vocabulary sees the same architecture. Megalodon fields
+#: with no HF counterpart (``z_dim``, ``cema_ndim``, ``chunk_size``, ...) keep
+#: their upstream names, which is what ``PretrainedConfig.attribute_map`` is
+#: for on the PyTorch side. ``vocab_size``, ``attention_dropout``, and the
+#: special-token IDs already spell the same in both.
+#:
+#: ``max_position_embeddings`` is deliberately absent: Megalodon has no
+#: positional table and no architectural context bound, so any value would be
+#: a training detail dressed up as a constraint.
+_HF_ALIASES = {
+    "hidden_size": "model_dim",
+    "num_hidden_layers": "num_layers",
+    "num_attention_heads": "num_heads",
+    "intermediate_size": "ffn_hidden_dim",
+    "tie_word_embeddings": "share_emb",
+}
+
+#: Weight-layout contract recorded by ``megalodon_jax.save_checkpoint``. These
+#: are what a port has to agree with to read the tensors correctly -- how RoPE
+#: pairs are laid out, whether normalization scales are stored as ``1 + w``,
+#: which projections carry biases -- so they travel in ``config.json`` rather
+#: than staying buried in the safetensors header.
+_WEIGHT_CONTRACT_KEYS = (
+    "format",
+    "format_version",
+    "config_fingerprint",
+    "parameter_manifest_sha256",
+    "rope_layout",
+    "normalization_storage",
+    "bias_schema",
+    "initializer_schema",
+    "tying",
+    "dtype_policy",
+)
 
 
 @dataclass(frozen=True)
@@ -76,6 +124,7 @@ class ExportResult:
 
     export_dir: Path
     weights_path: Path
+    config_path: Path
     step: int
     param_count: int
     weights_bytes: int
@@ -235,6 +284,85 @@ def _verify_weights(weights_path: Path, params: Any) -> None:
             )
 
 
+def _weights_metadata(weights_path: Path) -> dict[str, str]:
+    """Read the safetensors header metadata of a written weights file.
+
+    :param Path weights_path: SafeTensors file to inspect.
+    :raises RuntimeError: If the file carries no readable metadata.
+    :return dict[str, str]: Header metadata map.
+    """
+    from safetensors import safe_open
+
+    # ``numpy`` reads the header without materializing tensors or pulling in a
+    # second array framework.
+    with safe_open(str(weights_path), framework="numpy") as handle:
+        metadata = handle.metadata()
+    if not metadata:
+        raise RuntimeError(f"{weights_path} has no safetensors metadata to describe it.")
+    return dict(metadata)
+
+
+def _write_hf_config(weights_path: Path, destination: Path) -> Path:
+    """Write ``config.json`` describing the weights file beside it.
+
+    Built from the header of the file it sits next to, never from the chomp
+    config that produced it. Upstream stores the complete ``MegalodonConfig``
+    in that header, so reading it back is what makes the two impossible to
+    disagree: this function cannot describe a model it did not just write.
+
+    The result is Hugging Face shaped -- ``model_type``, ``architectures``,
+    ``torch_dtype``, and the standard size fields -- so a PyTorch
+    ``PretrainedConfig`` subclass can consume it directly, while every
+    Megalodon-specific field keeps its upstream name.
+
+    :param Path weights_path: Weights file this config describes.
+    :param Path destination: Export directory to write into.
+    :raises RuntimeError: If the header is missing its config or an alias has no source.
+    :return Path: The written ``config.json``.
+    """
+    metadata = _weights_metadata(weights_path)
+    payload = metadata.get("config_json")
+    if not payload:
+        raise RuntimeError(
+            f"{weights_path} carries no config_json; megalodon-jax did not write it, "
+            "so chomp cannot describe the architecture it contains."
+        )
+    native = json.loads(payload)
+
+    config: dict[str, Any] = dict(native)
+    for hf_name, native_name in _HF_ALIASES.items():
+        if native_name not in native:
+            raise RuntimeError(
+                f"megalodon-jax no longer records {native_name!r}; the Hugging Face "
+                f"alias {hf_name!r} in chomp's exporter needs updating."
+            )
+        config[hf_name] = native[native_name]
+
+    config["model_type"] = HF_MODEL_TYPE
+    config["architectures"] = [HF_ARCHITECTURE]
+    # Ordinary parameter storage. Upstream's bf16 policy keeps normalization,
+    # CEMA, and affine parameters at fp32 regardless, so this is the dtype of
+    # the bulk of the file rather than of every tensor in it.
+    config["torch_dtype"] = native["param_dtype"]
+    config["megalodon_jax"] = {
+        "weights_file": weights_path.name,
+        **megalodon_jax_identity(),
+        **{key: metadata[key] for key in _WEIGHT_CONTRACT_KEYS if key in metadata},
+    }
+
+    # An alias that collided with a native field would silently redefine the
+    # architecture for every reader of this file.
+    if {key: config[key] for key in native} != native:
+        raise RuntimeError(
+            "Hugging Face aliases overwrote a native megalodon field in config.json; "
+            "the exported architecture description is not trustworthy."
+        )
+
+    config_path = destination / CONFIG_FILENAME
+    config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    return config_path
+
+
 def _check_destination(destination: Path, *, overwrite: bool) -> tuple[str, ...]:
     """Decide whether a destination may be written, without changing anything.
 
@@ -276,7 +404,11 @@ def _check_destination(destination: Path, *, overwrite: bool) -> tuple[str, ...]
             f"({exc}), so chomp cannot tell which files belong to it. Remove the "
             "directory and export again."
         ) from exc
-    owned = [*previous.get("tokenizer_files", []), previous.get("weights_file", "")]
+    owned = [
+        *previous.get("tokenizer_files", []),
+        previous.get("weights_file", ""),
+        previous.get("config_file", ""),
+    ]
     return tuple(name for name in owned if isinstance(name, str) and name)
 
 
@@ -294,7 +426,7 @@ def _remove_stale_files(
     :param tuple[str, ...] previous: Names the previous manifest claimed.
     :param tuple[str, ...] written: Names this export just wrote.
     """
-    keep = {*written, WEIGHTS_FILENAME, MANIFEST_FILENAME}
+    keep = {*written, WEIGHTS_FILENAME, MANIFEST_FILENAME, CONFIG_FILENAME}
     for name in previous:
         if name in keep:
             continue
@@ -347,17 +479,29 @@ def export_checkpoint(
     # one the restored arrays were actually shaped by.
     cfg, _tokenizer = prepare_tokenizer_and_config(cfg, tokenizer=tokenizer)
 
-    params, static = build_model(cfg, key=jax.random.key(0))
-    params = restore_params_only(step_dir, abstractify_tree(params))
-    model = eqx.combine(params, static)
+    # Export moves bytes; it computes nothing. Doing it on the host keeps a
+    # second full copy of the parameters off the accelerator, which matters
+    # because the export at the end of a run competes with a memory pool sized
+    # for that run's training step and holding its optimizer state.
+    with jax.default_device(jax.devices("cpu")[0]):
+        params, static = build_model(cfg, key=jax.random.key(0))
+        params = restore_params_only(step_dir, abstractify_tree(params))
+        model = eqx.combine(params, static)
 
-    destination.mkdir(parents=True, exist_ok=True)
-    weights_path = destination / WEIGHTS_FILENAME
-    save_checkpoint(model, weights_path)
-    if verify:
-        _verify_weights(weights_path, params)
+        destination.mkdir(parents=True, exist_ok=True)
+        weights_path = destination / WEIGHTS_FILENAME
+        save_checkpoint(model, weights_path)
+        if verify:
+            _verify_weights(weights_path, params)
 
     tokenizer_files = _copy_tokenizer_files(run_dir, destination)
+    if CONFIG_FILENAME in tokenizer_files:
+        raise RuntimeError(
+            f"The run's tokenizer snapshot contains a {CONFIG_FILENAME}, which collides "
+            "with the model config chomp writes for this export. One of the two would "
+            "silently win; move the tokenizer file aside and export again."
+        )
+    config_path = _write_hf_config(weights_path, destination)
     _remove_stale_files(destination, previous=previous_files, written=tokenizer_files)
 
     try:
@@ -371,6 +515,7 @@ def export_checkpoint(
         "chomp_version": CHOMP_VERSION,
         "megalodon_jax": megalodon_jax_identity(),
         "weights_file": WEIGHTS_FILENAME,
+        "config_file": CONFIG_FILENAME,
         "param_count": param_count(params),
         "source": {
             "run_dir": None if run_dir is None else str(run_dir),
@@ -392,6 +537,7 @@ def export_checkpoint(
     return ExportResult(
         export_dir=destination,
         weights_path=weights_path,
+        config_path=config_path,
         step=step,
         param_count=manifest["param_count"],
         weights_bytes=weights_path.stat().st_size,

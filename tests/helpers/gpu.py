@@ -23,6 +23,83 @@ def query_nvidia_gpu_names() -> list[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
+def run_export_placement_smoke(run_dir: str) -> None:
+    """Train one megalodon step on GPU, then export and check where the params went.
+
+    Export moves bytes and computes nothing, so it must not put a second copy of
+    the parameters on the accelerator: the end-of-run export runs inside a
+    process still holding a memory pool sized for that run's train step, and a
+    finished long run is the worst possible moment to OOM. The assertion is only
+    meaningful on a GPU host, which is why it lives here.
+
+    :param str run_dir: Fresh run directory.
+    :raises AssertionError: If any exported parameter was not on the host.
+    """
+    from dataclasses import replace as dc_replace
+
+    import jax
+    import megalodon_jax
+
+    from chomp.config import Config
+    from chomp.export import export_checkpoint
+    from chomp.train import run
+    from tests.helpers.config_factories import make_tiny_megalodon_model
+
+    cfg = Config()
+    cfg = dc_replace(
+        cfg,
+        model=make_tiny_megalodon_model(vocab_size=256, compute_dtype="bfloat16"),
+        data=dc_replace(
+            cfg.data,
+            backend="local_text",
+            local_text="real megalodon gpu export path",
+            repeat=True,
+            max_eval_samples=0,
+            packing_mode="sequential",
+            tokenizer=dc_replace(cfg.data.tokenizer, kind="byte", add_bos=False, add_eos=False),
+        ),
+        train=dc_replace(
+            cfg.train,
+            steps=1,
+            batch_size=1,
+            seq_len=32,
+            grad_accum=1,
+            allow_cpu=False,
+            log_every=1,
+            eval_every=0,
+        ),
+        optim=dc_replace(cfg.optim, lr=1e-3, warmup_steps=0, min_lr_ratio=0.0),
+        checkpoint=dc_replace(cfg.checkpoint, save_every=1, async_save=False),
+        logging=dc_replace(
+            cfg.logging, run_dir=run_dir, wandb=dc_replace(cfg.logging.wandb, enabled=False)
+        ),
+    )
+
+    assert jax.default_backend() == "gpu", jax.default_backend()
+    output_dir = run(cfg)
+
+    # The run exported itself on the way out, and that export must load.
+    assert (output_dir / "export" / "model.safetensors").is_file()
+
+    platforms: set[str] = set()
+    original = megalodon_jax.save_checkpoint
+
+    def _spy(model: object, path: object) -> None:
+        """Record parameter device platforms, then save normally."""
+        leaves = [leaf for leaf in jax.tree_util.tree_leaves(model) if hasattr(leaf, "devices")]
+        platforms.update(device.platform for leaf in leaves for device in leaf.devices())
+        original(model, path)
+
+    megalodon_jax.save_checkpoint = _spy
+    try:
+        export_checkpoint(output_dir, output_dir / "reexport", verify=False)
+    finally:
+        megalodon_jax.save_checkpoint = original
+
+    assert platforms == {"cpu"}, platforms
+    print("MEGALODON_GPU_EXPORT_OK")
+
+
 def run_training_smoke(run_dir: str, *, backend: str) -> None:
     """Run one real training step for a GPU smoke-test backend.
 
