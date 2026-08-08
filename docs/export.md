@@ -170,9 +170,11 @@ identical text. Inside chomp, `chomp.export.load_export` returns the same
 
 ## Guarantees, and what they are not
 
-**Export is lossless.** Parameters are written at the dtype they were trained
-at. `model.param_dtype` is pinned to `float32`, so an export is float32 and
-roughly four bytes per parameter — about 760 MB for the 200M recipe.
+**Export is lossless by default.** Parameters are written at the dtype they
+were trained at. `model.param_dtype` is pinned to `float32`, so an export is
+float32 and roughly four bytes per parameter — about 760 MB for the 200M
+recipe. `--dtype policy` opts into a derived variant instead; it is smaller,
+and inference-equivalent rather than bit-preserving.
 
 **Export is verified by default.** safetensors carries no payload checksum, and
 upstream's manifest hash covers tensor names, shapes, and dtypes rather than
@@ -193,10 +195,9 @@ out in a different order and the files are the same length but not the same
 bytes. Compare exports by loading and comparing tensors, never by hashing the
 file.
 
-**There is no bf16 export.** Upstream's `BF16_DTYPE_POLICY` keeps some
-parameters at fp32 while casting the rest, and which parameters those are is
-upstream's decision, encoded in its model constructor. Guessing at it here
-would produce a file that loads and is subtly wrong. Cast downstream instead.
+**Halving the size is a separate, derived artifact.** See
+[Mixed-precision export](#mixed-precision-export) below. The fp32 export stays
+the canonical one.
 
 **There is no Hugging Face Transformers export.** A `transformers`-loadable
 checkpoint needs a PyTorch `PreTrainedModel` for this architecture, which does
@@ -211,15 +212,96 @@ read, not something `AutoModel` can load today.
 **Only `model.backend: megalodon` can be exported.** The `dummy` backend is a
 smoke-test model with no serialization format; export refuses it.
 
+## Mixed-precision export
+
+`--dtype policy` writes a second, derived variant. **The fp32 export is the
+canonical artifact** — it is the master weights, the model of record, and the
+thing to keep. The variant is roughly half the size and computes the identical
+result, which makes it the one to ship for inference.
+
+```bash
+chomp export runs/my_run --out exports/my_run-policy --dtype policy
+```
+
+It is not a bf16 export. The file is genuinely mixed: most tensors are bf16,
+and a minority — normalization affine parameters, the CEMA recurrence
+parameters, TimestepNorm, and the per-layer `gamma`/`beta` — stay fp32.
+safetensors records a dtype per tensor, so this is one ordinary file. **That
+minority is correct, not an inconsistency to clean up.**
+
+The split is exactly upstream's `BF16_DTYPE_POLICY`, and chomp does not
+reconstruct it. It asks megalodon-jax to build the same architecture at
+`param_dtype=bfloat16` and reads the dtype of every parameter back out; that
+skeleton *is* the policy applied to this parameter tree. Upstream then
+validates every tensor's shape and dtype against it on the way in and again on
+the way out, because `load_checkpoint` rebuilds the model from the config in
+the header and rejects a tensor whose dtype does not match. No parameter name
+is ever pattern-matched.
+
+### Why it is lossless in the only sense that matters
+
+`compute_dtype` is bf16, so the forward pass casts these same tensors to bf16
+before using them. The export drops bits that never reached the arithmetic.
+The model's arithmetic is therefore *byte-identical* — not close, identical,
+and the tests assert it exactly rather than to a tolerance. Measured on the
+200M recipe: the uncached forward at several lengths, the cached prefill,
+teacher-forced decode steps, and a full 96-token greedy decode all match bit
+for bit, and every stored tensor is exactly the fp32 original rounded.
+
+The fp32 tensors are the ones that stay fp32 *during compute*. Rounding them
+would change outputs, which is the whole reason upstream holds them back.
+
+**Comparing generated text on a GPU does not test this.** Greedy decoding runs
+inside one `filter_jit`ed scan, and this repo runs fast, non-deterministic
+kernels: the same fp32 export decodes to different text in two processes, and
+disagrees with its own CPU result from token 51. One flipped argmax rewrites
+every token after it, so a text diff on GPU reports a difference for the fp32
+export against itself. Verify equivalence by comparing logits, or on CPU —
+which is what the tests do.
+
+### When it is refused
+
+Two configurations break the equivalence, and export refuses rather than
+writing a file that loads and is quietly wrong:
+
+- **`compute_dtype` is not bf16.** Nothing is cast in the forward pass, so
+  every dropped bit is one the model would have used.
+- **`scale_emb` is set.** The gathered embedding rows are scaled *before* the
+  cast to `compute_dtype`, so fp32 storage computes `bf16(w * scale)` where
+  bf16 storage computes `bf16(w) * bf16(scale)`. On a smoke model those differ
+  in 2047 of 2048 logits.
+
+Neither is repairable by holding the affected tensor back at fp32: the file's
+dtypes have to match what upstream builds from the header config.
+
+### Reading one
+
+Identical to the fp32 export — same three lines, same `chomp generate`, same
+tokenizer files. `config.json` reports `torch_dtype: bfloat16` (the dtype of
+ordinary parameters) and its `megalodon_jax.dtype_policy` reads
+`bf16-ordinary-params-fp32-sensitive`. A loader that needs the exact per-tensor
+split reads the safetensors header, or `dtype_summary` in the manifest.
+
+The end-of-run export is always fp32. A run's own output is its master weights;
+deriving a smaller copy is a decision to make afterward.
+
 ## chomp_export.json
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "chomp_version": "...",
   "megalodon_jax": {"distribution": "megalodon-jax", "version": "0.2.2"},
   "weights_file": "model.safetensors",
   "config_file": "config.json",
+  "weights_dtype": "policy-mixed",
+  "dtype_summary": {
+    "by_dtype": {
+      "bfloat16": {"tensors": 145, "bytes": 375781376},
+      "float32":  {"tensors": 158, "bytes": 3547136}
+    },
+    "fp32_tensors": ["model.layers.0.attn.beta", "model.layers.0.attn.cema.alpha", "..."]
+  },
   "param_count": 188777472,
   "source": {"run_dir": "...", "step_dir": "...", "step": 100000},
   "training": {"tokens_seen": 13094263113, "eval_status": {...}},
@@ -234,6 +316,11 @@ smoke-test model with no serialization format; export refuses it.
 actually shaped by, not the ones the YAML asked for. It records the data and
 optimizer settings that produced these weights, which the safetensors header
 does not carry.
+
+`weights_dtype` is `float32` or `policy-mixed`, and is what tells a loader
+which variant it has without opening the weights. `dtype_summary.fp32_tensors`
+is present only for a mixed file, where it is the exception list; a
+single-dtype file omits it rather than restating every tensor name.
 
 `schema_version` is checked exactly on load. Chomp does not translate across
 schema versions anywhere else, and an export that loaded under the wrong schema

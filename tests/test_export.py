@@ -22,6 +22,8 @@ from chomp.config import Config, build_config
 from chomp.data.pipeline import load_tokenizer_snapshot
 from chomp.export import (
     CONFIG_FILENAME,
+    DTYPE_FLOAT32,
+    DTYPE_POLICY,
     EXPORT_SCHEMA_VERSION,
     HF_ARCHITECTURE,
     HF_MODEL_TYPE,
@@ -80,11 +82,12 @@ def _write_bert_tokenizer(path: Path) -> Path:
     return path
 
 
-def _run_config(*, tokenizer_dir: Path, run_dir: Path) -> Config:
+def _run_config(*, tokenizer_dir: Path, run_dir: Path, compute_dtype: str = "float32") -> Config:
     """Build the tiny megalodon + HF-tokenizer config the exported run trains.
 
     :param Path tokenizer_dir: Local tokenizer snapshot source.
     :param Path run_dir: Destination run directory.
+    :param str compute_dtype: Forward-pass dtype; bf16 is what --dtype policy requires.
     :return Config: Validated smoke-sized training configuration.
     """
     return build_config(
@@ -102,7 +105,7 @@ def _run_config(*, tokenizer_dir: Path, run_dir: Path) -> Config:
                 "norm_num_groups": 4,
                 "swiglu": True,
                 "share_emb": True,
-                "compute_dtype": "float32",
+                "compute_dtype": compute_dtype,
             },
             "data": {
                 "backend": "local_text",
@@ -165,6 +168,68 @@ def exported_dir(trained_run: Path, tmp_path_factory: pytest.TempPathFactory) ->
 
     assert result.verified is True
     return result.export_dir
+
+
+@pytest.fixture(scope="module")
+def bf16_run(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Train a run that computes in bf16, which is what ``--dtype policy`` needs.
+
+    Separate from ``trained_run`` on purpose: that one computes in fp32, where
+    the policy variant is correctly refused.
+
+    :param pytest.TempPathFactory tmp_path_factory: Session temp-directory factory.
+    :return Path: Run directory holding a checkpoint and a tokenizer snapshot.
+    """
+    base = tmp_path_factory.mktemp("policy")
+    tokenizer_dir = _write_bert_tokenizer(base / "bert-tokenizer")
+    cfg = _run_config(tokenizer_dir=tokenizer_dir, run_dir=base / "run", compute_dtype="bfloat16")
+    return run(cfg, config_path=None, resume="none", dry_run=False)
+
+
+@pytest.fixture(scope="module")
+def dtype_exports(bf16_run: Path, tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+    """Export the bf16-compute run both ways, for comparison.
+
+    :param Path bf16_run: Trained run computing in bf16.
+    :param pytest.TempPathFactory tmp_path_factory: Session temp-directory factory.
+    :return tuple[Path, Path]: The float32 export and the policy-mixed export.
+    """
+    base = tmp_path_factory.mktemp("dtype_exports")
+    canonical = export_checkpoint(bf16_run, base / "float32")
+    policy = export_checkpoint(bf16_run, base / "policy", dtype=DTYPE_POLICY)
+
+    assert canonical.weights_dtype == "float32"
+    assert policy.weights_dtype == "policy-mixed"
+    return canonical.export_dir, policy.export_dir
+
+
+def _logits(export_dir: Path) -> Any:
+    """Run one deterministic forward pass over a fixed prompt from an export.
+
+    :param Path export_dir: Export directory to load.
+    :return Any: Logits array.
+    """
+    import equinox as eqx
+
+    loaded = load_export(export_dir)
+    model = eqx.combine(loaded.params, loaded.static)
+    ids = jax.numpy.array([[5, 6, 7, 8, 9, 10, 11, 5]], dtype=jax.numpy.int32)
+    logits, _cache = model(ids, deterministic=True)
+    return logits
+
+
+def _tensor_dtypes(weights_path: Path) -> dict[str, str]:
+    """Read the per-tensor dtypes out of a safetensors header.
+
+    :param Path weights_path: safetensors file to inspect.
+    :return dict[str, str]: Tensor name -> dtype name.
+    """
+    from safetensors import safe_open
+
+    with safe_open(str(weights_path), framework="numpy") as handle:
+        # safe_open is not a mapping; keys() is its API, not a dict idiom.
+        names = handle.keys()  # noqa: SIM118
+        return {name: str(handle.get_slice(name).get_dtype()) for name in names}
 
 
 @pytest.fixture
@@ -606,3 +671,192 @@ def test_cli_export_then_generate_matches_the_run(trained_run: Path, tmp_path: P
 
     assert overridden.exit_code != 0
     assert "--config does not apply to an export directory" in overridden.output
+
+
+def test_policy_export_is_inference_equivalent_to_the_float32_export(
+    dtype_exports: tuple[Path, Path],
+) -> None:
+    """The acceptance test: the derived variant must compute the identical thing.
+
+    Exact, not close. The forward pass already casts these tensors to bf16
+    before using them, so the export drops only bits that never reached the
+    arithmetic. Any difference at all means the cast set is wrong -- a tensor
+    was rounded that the model actually consumes at fp32 -- and a tolerance
+    would hide exactly the bug this variant can have.
+    """
+    canonical, policy = dtype_exports
+
+    assert bool(jax.numpy.array_equal(_logits(canonical), _logits(policy)))
+
+
+def test_policy_export_generates_byte_identical_greedy_text(
+    bf16_run: Path, dtype_exports: tuple[Path, Path]
+) -> None:
+    """Greedy decoding from the variant must match the fp32 export and the checkpoint."""
+    canonical, policy = dtype_exports
+    runner = CliRunner()
+    args = ["--prompt", IN_VOCAB_TEXT, "--max-tokens", "8", "--temperature", "0", "--seed", "42"]
+
+    from_policy = runner.invoke(cli, ["generate", str(policy), *args])
+    from_canonical = runner.invoke(cli, ["generate", str(canonical), *args])
+    from_run = runner.invoke(cli, ["generate", str(bf16_run), *args])
+
+    assert from_policy.exit_code == 0, from_policy.output
+    assert from_canonical.exit_code == 0, from_canonical.output
+    assert from_run.exit_code == 0, from_run.output
+    assert _generated_text(from_policy.output).strip()
+    assert _generated_text(from_policy.output) == _generated_text(from_canonical.output)
+    assert _generated_text(from_policy.output) == _generated_text(from_run.output)
+
+
+def test_policy_export_keeps_precision_sensitive_tensors_at_fp32(
+    dtype_exports: tuple[Path, Path],
+) -> None:
+    """The file must be genuinely mixed, and mixed exactly where upstream says.
+
+    The first two assertions are the blanket-cast guard: ``tree.map(astype)``
+    would produce a uniformly bf16 file that still loads and still generates
+    plausible text. The last one cross-checks the fp32 set against upstream's
+    ``precision`` module, which enumerates the sensitive parameters
+    independently of the model constructor the exporter derives them from.
+    """
+    from megalodon_jax import load_checkpoint
+    from megalodon_jax.precision import _iter_sensitive_params
+
+    _canonical, policy = dtype_exports
+    dtypes = _tensor_dtypes(policy / WEIGHTS_FILENAME)
+    fp32 = {name for name, dtype in dtypes.items() if dtype == "F32"}
+    bf16 = {name for name, dtype in dtypes.items() if dtype == "BF16"}
+
+    assert fp32, "no tensor stayed fp32; the policy was replaced by a blanket cast"
+    assert bf16, "no tensor became bf16; nothing was re-encoded"
+    assert fp32 | bf16 == set(dtypes), sorted(set(dtypes) - (fp32 | bf16))
+
+    model = load_checkpoint(policy / WEIGHTS_FILENAME, key=jax.random.key(0))
+    sensitive = {f"model.{name}" for name, _array in _iter_sensitive_params(model)}
+    assert fp32 == sensitive
+
+
+def test_policy_export_loads_through_megalodon_jax_alone(
+    dtype_exports: tuple[Path, Path],
+) -> None:
+    """A mixed-dtype file must still load by the same three-line path fp32 does."""
+    from megalodon_jax import load_checkpoint
+
+    canonical, policy = dtype_exports
+
+    model = load_checkpoint(policy / WEIGHTS_FILENAME, key=jax.random.key(0))
+    logits, _cache = model(jax.numpy.array([[5, 6, 7, 8]], dtype=jax.numpy.int32))
+
+    assert model.config.param_dtype == jax.numpy.bfloat16
+    assert logits.shape[-1] == model.config.vocab_size
+    # Loading it the chomp way must agree with loading it upstream's way.
+    assert bool(jax.numpy.array_equal(logits, _logits(policy)[:, :4]))
+    assert (policy / WEIGHTS_FILENAME).stat().st_size < (
+        canonical / WEIGHTS_FILENAME
+    ).stat().st_size
+
+
+def test_policy_export_manifest_describes_the_mixed_file(
+    dtype_exports: tuple[Path, Path],
+) -> None:
+    """A loader must be able to tell the variant apart without reading the weights."""
+    canonical, policy = dtype_exports
+
+    assert read_export_manifest(canonical)["weights_dtype"] == "float32"
+    assert "fp32_tensors" not in read_export_manifest(canonical)["dtype_summary"]
+
+    manifest = read_export_manifest(policy)
+    summary = manifest["dtype_summary"]
+    dtypes = _tensor_dtypes(policy / WEIGHTS_FILENAME)
+
+    assert manifest["weights_dtype"] == "policy-mixed"
+    assert set(summary["by_dtype"]) == {"bfloat16", "float32"}
+    assert summary["by_dtype"]["float32"]["tensors"] == sum(
+        1 for d in dtypes.values() if d == "F32"
+    )
+    assert summary["by_dtype"]["bfloat16"]["tensors"] == sum(
+        1 for d in dtypes.values() if d == "BF16"
+    )
+    assert set(summary["fp32_tensors"]) == {n for n, d in dtypes.items() if d == "F32"}
+    # config.json follows the file, so a reader is told the ordinary-param dtype.
+    config = json.loads((policy / CONFIG_FILENAME).read_text())
+    assert config["torch_dtype"] == "bfloat16"
+    assert config["megalodon_jax"]["dtype_policy"] == "bf16-ordinary-params-fp32-sensitive"
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"compute_dtype": "float32"}, "compute_dtype"),
+        ({"scale_emb": True}, "scale_emb"),
+    ],
+)
+def test_policy_export_is_refused_when_it_would_change_outputs(
+    bf16_run: Path, tmp_path: Path, override: dict[str, Any], message: str
+) -> None:
+    """Where the variant is not inference-equivalent, it must not be written at all.
+
+    Both cases are real: with fp32 compute nothing is cast in the forward pass,
+    and with scale_emb the embedding is scaled before the cast, so bf16 storage
+    rounds at a different point. Neither can be repaired by holding a tensor
+    back at fp32, because the file's dtypes must match what upstream builds
+    from the config in its header.
+    """
+    from chomp.utils.ckpt_paths import load_config_for_checkpoint
+
+    step_dir, run_dir = resolve_checkpoint_path(str(bf16_run))
+    cfg = load_config_for_checkpoint(step_dir=step_dir, run_dir=run_dir, config_override=None)
+    cfg = replace(cfg, model=replace(cfg.model, **override))
+    config_path = tmp_path / "override.json"
+    config_path.write_text(json.dumps(cfg.to_dict(), indent=2))
+    destination = tmp_path / "refused"
+
+    with pytest.raises(RuntimeError, match=message):
+        export_checkpoint(
+            bf16_run, destination, dtype=DTYPE_POLICY, config_override=str(config_path)
+        )
+
+    assert not destination.exists(), "a refused export must leave nothing behind"
+
+
+def test_export_rejects_an_unknown_dtype(bf16_run: Path, tmp_path: Path) -> None:
+    """A typo must not silently fall back to the canonical export."""
+    with pytest.raises(ValueError, match="Unknown export dtype"):
+        export_checkpoint(bf16_run, tmp_path / "out", dtype="bfloat16")
+
+
+def test_manifest_rejects_an_unknown_weights_dtype(export_copy: Path) -> None:
+    """weights_dtype decides which dtypes the file should hold; it cannot be guessed."""
+    manifest_path = export_copy / MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["weights_dtype"]
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="weights_dtype"):
+        read_export_manifest(export_copy)
+
+
+def test_cli_dtype_choices_match_the_exporter() -> None:
+    """The CLI spells its choices out to avoid importing JAX; they must not drift."""
+    from chomp.cli.export import export as export_command
+
+    option = next(param for param in export_command.params if param.name == "dtype")
+
+    assert set(option.type.choices) == {DTYPE_FLOAT32, DTYPE_POLICY}
+    assert option.default == DTYPE_FLOAT32
+
+
+def test_cli_export_dtype_policy_writes_the_variant(bf16_run: Path, tmp_path: Path) -> None:
+    """The flag is the user-facing surface, so drive it end to end."""
+    runner = CliRunner()
+    destination = tmp_path / "cli_policy"
+
+    result = runner.invoke(
+        cli, ["export", str(bf16_run), "--out", str(destination), "--dtype", DTYPE_POLICY]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "policy-mixed" in result.output
+    assert "(verified)" in result.output
+    assert read_export_manifest(destination)["weights_dtype"] == "policy-mixed"

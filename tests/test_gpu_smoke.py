@@ -81,3 +81,15 @@ def test_megalodon_gpu_export_keeps_parameters_off_the_device(tmp_path: Path) ->
     p = _run_on_gpu(code, cwd=tmp_path)
     assert p.returncode == 0, f"stdout:\n{p.stdout}\nstderr:\n{p.stderr}"
     assert "MEGALODON_GPU_EXPORT_OK" in p.stdout
+
+
+def test_megalodon_gpu_policy_dtype_export_is_inference_equivalent(tmp_path: Path) -> None:
+    """The policy-dtype export must compute the identical thing on real hardware."""
+    run_dir = tmp_path / "policy_dtype_run"
+    code = (
+        "from tests.helpers.gpu import run_policy_dtype_equivalence_smoke; "
+        f"run_policy_dtype_equivalence_smoke({str(run_dir)!r})"
+    )
+    p = _run_on_gpu(code, cwd=tmp_path)
+    assert p.returncode == 0, f"stdout:\n{p.stdout}\nstderr:\n{p.stderr}"
+    assert "MEGALODON_GPU_POLICY_DTYPE_OK" in p.stdout

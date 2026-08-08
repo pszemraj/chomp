@@ -27,18 +27,17 @@ but it is the file every other ecosystem looks for, and it is what lets a port
 to another framework read the architecture without parsing a safetensors
 header or installing megalodon-jax.
 
-Export is lossless and does not change dtypes. ``model.param_dtype`` is pinned
-to float32, so an export is float32 and roughly four bytes per parameter. A
-bf16 variant is deliberately absent: upstream's ``BF16_DTYPE_POLICY`` keeps
-some parameters at fp32 and the choice of which is upstream's to make, not
-something to guess at here.
+The default export is lossless and does not change dtypes. ``model.param_dtype``
+is pinned to float32, so it is float32 and roughly four bytes per parameter.
+``--dtype policy`` writes a derived variant instead, at the per-tensor dtypes
+upstream's bf16 policy assigns; see :func:`_policy_dtype_model`.
 """
 
 from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -66,11 +65,22 @@ if TYPE_CHECKING:
 
 #: Bumped when the manifest gains or loses a required key. The weights file has
 #: its own independent version in the safetensors header, owned by upstream.
-EXPORT_SCHEMA_VERSION = 1
+EXPORT_SCHEMA_VERSION = 2
 
 WEIGHTS_FILENAME = "model.safetensors"
 MANIFEST_FILENAME = "chomp_export.json"
 CONFIG_FILENAME = "config.json"
+
+#: ``--dtype`` values. ``float32`` is the canonical artifact -- the master
+#: weights, exactly as trained. ``policy`` is derived from it.
+DTYPE_FLOAT32 = "float32"
+DTYPE_POLICY = "policy"
+
+#: What the manifest records for each. These describe the *file* rather than
+#: the request, which is why ``policy`` becomes ``policy-mixed``: the variant
+#: is not one dtype, and a loader that assumed it was would be wrong about most
+#: of the tensors in either direction.
+_WEIGHTS_DTYPE_LABELS = {DTYPE_FLOAT32: "float32", DTYPE_POLICY: "policy-mixed"}
 
 # Tokenizer files are copied to the export root rather than into a
 # ``tokenizer/`` subdirectory, so ``AutoTokenizer.from_pretrained(export_dir)``
@@ -128,6 +138,7 @@ class ExportResult:
     step: int
     param_count: int
     weights_bytes: int
+    weights_dtype: str
     tokenizer_files: tuple[str, ...]
     verified: bool
 
@@ -178,6 +189,16 @@ def read_export_manifest(export_dir: str | Path) -> dict[str, Any]:
         raise ValueError(
             f"Export schema version {version!r} is not supported by this chomp "
             f"(expects {EXPORT_SCHEMA_VERSION}). Re-export from the training checkpoint."
+        )
+
+    # Required, and load-bearing: it decides which parameter dtypes the weights
+    # file is expected to hold, so a missing or unknown value would make the
+    # manifest/header cross-check below meaningless rather than merely absent.
+    known = set(_WEIGHTS_DTYPE_LABELS.values())
+    if manifest.get("weights_dtype") not in known:
+        raise ValueError(
+            f"Export manifest declares weights_dtype {manifest.get('weights_dtype')!r}, "
+            f"which this chomp does not know (expects one of {sorted(known)}): {manifest_path}"
         )
     return manifest
 
@@ -282,6 +303,106 @@ def _verify_weights(weights_path: Path, params: Any) -> None:
                 f"Exported parameter {index} did not survive the round trip through "
                 f"{weights_path}; the file is corrupt."
             )
+
+
+def _require_policy_equivalence(config: Any) -> None:
+    """Refuse a policy-dtype export that would not be inference-equivalent.
+
+    The variant is only worth having because it changes nothing: every tensor
+    it stores at bf16 is one the forward pass casts to bf16 before use, so the
+    bits it drops never participated in the computation. Two configurations
+    break that, and both are visible here rather than in the output:
+
+    ``compute_dtype`` other than bf16 means the forward pass never casts, so
+    every dropped bit is one the model would have used.
+
+    ``scale_emb`` multiplies the gathered embedding rows *before* the cast to
+    ``compute_dtype`` (upstream ``model.py``), so fp32 storage computes
+    ``bf16(w * scale)`` where bf16 storage computes ``bf16(w) * bf16(scale)``.
+    Measured on a smoke model those differ in 2047 of 2048 logits.
+
+    Neither is repairable by holding the affected tensor at fp32: the file's
+    dtypes must match what upstream builds from the config in its header, or
+    ``load_checkpoint`` rejects it.
+
+    :param Any config: ``MegalodonConfig`` the weights will be written under.
+    :raises RuntimeError: If a policy-dtype export would change model outputs.
+    """
+    if config.compute_dtype != jax.numpy.bfloat16:
+        raise RuntimeError(
+            f"--dtype {DTYPE_POLICY} needs model.compute_dtype='bfloat16'; this checkpoint "
+            f"computes in {jax.numpy.dtype(config.compute_dtype).name}. Storing bf16 would "
+            "drop bits the forward pass uses, so the export would not match the checkpoint. "
+            f"Export it at --dtype {DTYPE_FLOAT32}."
+        )
+    if config.scale_emb:
+        raise RuntimeError(
+            f"--dtype {DTYPE_POLICY} is not inference-equivalent when model.scale_emb is set: "
+            "the embedding is scaled before the cast to compute_dtype, so bf16 storage rounds "
+            f"at a different point and changes the logits. Export it at --dtype {DTYPE_FLOAT32}."
+        )
+
+
+def _policy_dtype_model(model: Any) -> tuple[Any, dict[str, Any]]:
+    """Restate a model's parameters at the dtypes upstream's bf16 policy assigns.
+
+    The cast set is not reconstructed here, and no parameter name is matched
+    against a pattern. Upstream decides which leaves its bf16 policy keeps at
+    fp32 -- normalization, CEMA, and affine parameters -- and encodes that
+    decision in its model constructor. So this asks the constructor: it builds
+    the same architecture at ``param_dtype=bfloat16`` and reads the dtype of
+    every leaf back out. That skeleton *is* the policy applied to this exact
+    parameter tree, including the leaves that only exist under some configs.
+
+    ``apply_model_state_dict`` then validates every tensor's shape *and dtype*
+    against that skeleton, so a cast set that disagreed with the policy fails
+    here rather than becoming a file that loads and is quietly wrong.
+
+    :param Any model: Restored ``MegalodonForCausalLM`` at ``param_dtype`` float32.
+    :raises RuntimeError: If the export would not be inference-equivalent.
+    :return tuple[Any, dict[str, Any]]: Policy-dtype model and its dtype summary.
+    """
+    from megalodon_jax.checkpoint import apply_model_state_dict, model_state_dict
+    from megalodon_jax.model import MegalodonForCausalLM
+
+    _require_policy_equivalence(model.config)
+
+    policy_config = replace(model.config, param_dtype=jax.numpy.bfloat16)
+    skeleton = MegalodonForCausalLM(policy_config, key=jax.random.key(0))
+    template = model_state_dict(skeleton)
+    source = model_state_dict(model)
+    if set(source) != set(template):
+        raise RuntimeError(
+            "megalodon-jax builds a different parameter set at bf16 storage than at fp32 "
+            f"({sorted(set(source) ^ set(template))}); chomp cannot map one onto the other."
+        )
+
+    cast = {name: array.astype(template[name].dtype) for name, array in source.items()}
+    policy_model, _report = apply_model_state_dict(skeleton, cast)
+    return policy_model, _dtype_summary(cast)
+
+
+def _dtype_summary(tensors: dict[str, Any]) -> dict[str, Any]:
+    """Describe the per-tensor dtypes of a weights file for the manifest.
+
+    :param dict[str, Any] tensors: Native name -> array mapping being written.
+    :return dict[str, Any]: Counts and bytes per dtype, plus the fp32 exception list.
+    """
+    by_dtype: dict[str, dict[str, int]] = {}
+    for array in tensors.values():
+        entry = by_dtype.setdefault(str(array.dtype), {"tensors": 0, "bytes": 0})
+        entry["tensors"] += 1
+        entry["bytes"] += array.nbytes
+
+    summary: dict[str, Any] = {"by_dtype": dict(sorted(by_dtype.items()))}
+    if len(by_dtype) > 1:
+        # Only meaningful for a mixed file, where it is the exception list a
+        # reader has to honor. For a single-dtype file it would just restate
+        # every tensor name.
+        summary["fp32_tensors"] = sorted(
+            name for name, array in tensors.items() if array.dtype == jax.numpy.float32
+        )
+    return summary
 
 
 def _weights_metadata(weights_path: Path) -> dict[str, str]:
@@ -443,6 +564,7 @@ def export_checkpoint(
     config_override: str | None = None,
     overwrite: bool = False,
     verify: bool = True,
+    dtype: str = DTYPE_FLOAT32,
 ) -> ExportResult:
     """Write one training checkpoint out as a portable safetensors model.
 
@@ -451,12 +573,20 @@ def export_checkpoint(
     :param str | None config_override: Optional config file replacing the checkpoint's.
     :param bool overwrite: Whether to replace an existing export in the destination.
     :param bool verify: Whether to reload the written file and compare parameters.
+    :param str dtype: ``float32`` for the master weights, ``policy`` for the derived variant.
     :raises FileNotFoundError: If no checkpoint can be resolved.
+    :raises ValueError: If ``dtype`` is not a known variant.
     :raises RuntimeError: If the backend is unsupported or the tokenizer cannot be proven.
     :raises FileExistsError: If the destination is non-empty and cannot be safely replaced.
     :return ExportResult: Description of what was written.
     """
     from megalodon_jax import save_checkpoint
+    from megalodon_jax.checkpoint import model_state_dict
+
+    if dtype not in _WEIGHTS_DTYPE_LABELS:
+        raise ValueError(
+            f"Unknown export dtype {dtype!r}; expected one of {sorted(_WEIGHTS_DTYPE_LABELS)}."
+        )
 
     step_dir, run_dir = resolve_checkpoint_path(checkpoint)
     cfg = load_config_for_checkpoint(
@@ -488,6 +618,14 @@ def export_checkpoint(
         params = restore_params_only(step_dir, abstractify_tree(params))
         model = eqx.combine(params, static)
 
+        if dtype == DTYPE_POLICY:
+            # Raises before anything is written if this checkpoint's config
+            # would make the variant something other than a re-encoding.
+            model, dtype_summary = _policy_dtype_model(model)
+            params, _static_unused = eqx.partition(model, eqx.is_array)
+        else:
+            dtype_summary = _dtype_summary(model_state_dict(model))
+
         destination.mkdir(parents=True, exist_ok=True)
         weights_path = destination / WEIGHTS_FILENAME
         save_checkpoint(model, weights_path)
@@ -516,6 +654,8 @@ def export_checkpoint(
         "megalodon_jax": megalodon_jax_identity(),
         "weights_file": WEIGHTS_FILENAME,
         "config_file": CONFIG_FILENAME,
+        "weights_dtype": _WEIGHTS_DTYPE_LABELS[dtype],
+        "dtype_summary": dtype_summary,
         "param_count": param_count(params),
         "source": {
             "run_dir": None if run_dir is None else str(run_dir),
@@ -541,6 +681,7 @@ def export_checkpoint(
         step=step,
         param_count=manifest["param_count"],
         weights_bytes=weights_path.stat().st_size,
+        weights_dtype=manifest["weights_dtype"],
         tokenizer_files=tokenizer_files,
         verified=verify,
     )
@@ -573,6 +714,11 @@ def load_export(export_dir: str | Path, *, key: jax.Array | None = None) -> Load
     cfg = build_config(manifest["config"])
 
     expected = megalodon_config_from(cfg)
+    if manifest["weights_dtype"] == _WEIGHTS_DTYPE_LABELS[DTYPE_POLICY]:
+        # The chomp config records how the model was trained -- fp32 master
+        # weights -- and the manifest says this file re-encoded them. Comparing
+        # without that adjustment would reject every policy export.
+        expected = replace(expected, param_dtype=jax.numpy.bfloat16)
     if model.config != expected:
         raise RuntimeError(
             f"{MANIFEST_FILENAME} describes a different model than {weights_path.name} "

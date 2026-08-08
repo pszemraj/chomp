@@ -27,6 +27,18 @@ import click
     help="Re-read the written weights and compare them to what was exported (default: on).",
 )
 @click.option(
+    "--dtype",
+    # Spelled out rather than imported from chomp.export, which pulls in JAX at
+    # import time; test_cli_dtype_choices_match_the_exporter keeps them in step.
+    type=click.Choice(["float32", "policy"]),
+    default="float32",
+    help=(
+        "Weight dtypes to write. 'float32' is the master weights, exactly as trained. "
+        "'policy' re-encodes them at megalodon-jax's bf16 policy dtypes: about half "
+        "the size, and inference-equivalent (default: float32)."
+    ),
+)
+@click.option(
     "--config",
     "config_override",
     type=click.Path(exists=True),
@@ -41,6 +53,7 @@ def export(
     export_dir: str,
     overwrite: bool,
     verify: bool,
+    dtype: str,
     config_override: str | None,
 ) -> None:
     """Export a checkpoint's weights as portable safetensors.
@@ -53,6 +66,7 @@ def export(
     :param str export_dir: Destination directory.
     :param bool overwrite: Whether to replace an existing export.
     :param bool verify: Whether to reload the written weights and compare.
+    :param str dtype: Weight dtype variant to write.
     :param config_override: Path to override config file (optional).
     """
     # Deferred import keeps CLI startup from initializing JAX before arguments
@@ -66,6 +80,7 @@ def export(
             config_override=config_override,
             overwrite=overwrite,
             verify=verify,
+            dtype=dtype,
         )
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
@@ -77,8 +92,8 @@ def export(
     )
     click.echo(f"Exported step {result.step} to {result.export_dir}")
     click.echo(
-        f"  {result.weights_path.name}: {result.param_count:,} params, {size}"
-        + (" (verified)" if result.verified else " (NOT verified)")
+        f"  {result.weights_path.name}: {result.param_count:,} params, {size}, "
+        f"{result.weights_dtype}" + (" (verified)" if result.verified else " (NOT verified)")
     )
     click.echo(f"  {result.config_path.name}: architecture, Hugging Face layout")
     if result.tokenizer_files:
