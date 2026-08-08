@@ -2,7 +2,9 @@
 
 chomp uses Orbax to checkpoint **both** training state and data iterator state. Under the same code and runtime, an unchanged run resumes exactly; intentional config changes use the compatibility policy below.
 
-Related: [Config Reference](config-reference.yaml) (`checkpoint.*`), [Training Loop](training.md), [Data Pipeline](data_pipeline.md).
+Related: [Config Reference](config-reference.yaml) (`checkpoint.*`), [Training Loop](training.md), [Data Pipeline](data_pipeline.md), [Export](export.md).
+
+A checkpoint is for continuing a run, not for shipping a model: it is chomp-specific, carries optimizer state, and is roughly twice the size of the weights. To hand the model to something else, see [Export](export.md).
 
 ## Design intent
 

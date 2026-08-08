@@ -2,7 +2,80 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 import click
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    import jax
+
+    from chomp.config import Config
+    from chomp.data.pipeline import Tokenizer
+
+
+def _generate_and_print(
+    *,
+    params: Any,
+    static: Any,
+    cfg: Config,
+    tokenizer: Tokenizer,
+    prompt: str,
+    max_tokens: int,
+    temperature: float,
+    top_k: int | None,
+    top_p: float | None,
+    gen_key: jax.Array,
+    generate_tokens: Callable[..., tuple[list[int], Any]],
+) -> None:
+    """Tokenize, generate, and print, given a model that is already loaded.
+
+    Shared by both load paths: a training checkpoint restored through Orbax and
+    an export directory rebuilt from safetensors arrive here as the same
+    ``(params, static)`` pair.
+
+    :param Any params: Model parameters.
+    :param Any static: Static model components.
+    :param Config cfg: Config supplying the special-token IDs.
+    :param Tokenizer tokenizer: Tokenizer bound to these weights.
+    :param str prompt: Text prompt for generation.
+    :param int max_tokens: Maximum number of tokens to generate.
+    :param float temperature: Sampling temperature (0 for greedy).
+    :param top_k: Top-k sampling cutoff (optional).
+    :param top_p: Nucleus sampling threshold (optional).
+    :param gen_key: PRNG key for sampling.
+    :param generate_tokens: Backend generation entry point.
+    :raises click.ClickException: If the prompt is empty or generation fails.
+    """
+    prompt_tokens = tokenizer.encode(prompt)
+    if not prompt_tokens:
+        raise click.ClickException("Prompt tokenized to empty sequence")
+
+    click.echo("Generating...")
+    try:
+        gen_tokens, _next_key = generate_tokens(
+            params,
+            static,
+            prompt_tokens=prompt_tokens,
+            max_new_tokens=max_tokens,
+            bos_token_id=cfg.model.bos_token_id,
+            eos_token_id=cfg.model.eos_token_id,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            key=gen_key,
+        )
+    except Exception as exc:
+        raise click.ClickException(f"Generation failed: {exc}") from exc
+
+    click.echo("\n" + "=" * 60)
+    click.echo("Prompt:")
+    click.echo(prompt)
+    click.echo("-" * 60)
+    click.echo("Generated:")
+    click.echo(tokenizer.decode(gen_tokens))
+    click.echo("=" * 60)
 
 
 @click.command()
@@ -65,7 +138,8 @@ def generate(
 ) -> None:
     """Generate text from a trained checkpoint.
 
-    :param str checkpoint: Path to run directory or checkpoint step directory.
+    :param str checkpoint: Path to a run directory, checkpoint step directory,
+        or a directory produced by ``chomp export``.
     :param str prompt: Text prompt for generation.
     :param int max_tokens: Maximum number of tokens to generate.
     :param float temperature: Sampling temperature (0 for greedy).
@@ -83,6 +157,7 @@ def generate(
         load_tokenizer_snapshot_for_resume,
         prepare_tokenizer_and_config,
     )
+    from chomp.export import is_export_dir, load_export, load_export_tokenizer
     from chomp.model import build_model, generate_tokens
     from chomp.utils.ckpt_paths import (
         load_config_for_checkpoint,
@@ -90,6 +165,41 @@ def generate(
         resolve_checkpoint_path,
     )
     from chomp.utils.tree import abstractify_tree
+
+    key = jax.random.key(seed)
+    model_key, gen_key = jax.random.split(key)
+
+    # An export directory is already the model: upstream rebuilds it from the
+    # config in the safetensors header, so none of the run-directory config,
+    # tokenizer-identity, or Orbax restore machinery below applies.
+    if is_export_dir(checkpoint):
+        if config_override:
+            # Refusing beats ignoring: the architecture comes from the weights
+            # header here, so an override could only disagree with it.
+            raise click.ClickException(
+                "--config does not apply to an export directory; its config is stored "
+                "in the export itself. Generate from the run directory to override it."
+            )
+        click.echo(f"Loading exported model from: {checkpoint}")
+        try:
+            loaded = load_export(checkpoint, key=model_key)
+            tokenizer = load_export_tokenizer(checkpoint, loaded.config)
+        except Exception as exc:
+            raise click.ClickException(str(exc)) from exc
+        _generate_and_print(
+            params=loaded.params,
+            static=loaded.static,
+            cfg=loaded.config,
+            tokenizer=tokenizer,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            gen_key=gen_key,
+            generate_tokens=generate_tokens,
+        )
+        return
 
     # Find checkpoint and load config
     try:
@@ -158,8 +268,6 @@ def generate(
     cfg, tokenizer = prepare_tokenizer_and_config(cfg, tokenizer=tokenizer)
 
     # Build model skeleton for abstract shapes
-    key = jax.random.key(seed)
-    model_key, gen_key = jax.random.split(key)
     params, static = build_model(cfg, key=model_key)
 
     # Restore params from checkpoint
@@ -169,36 +277,16 @@ def generate(
     except FileNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    # Tokenize prompt
-    prompt_tokens = tokenizer.encode(prompt)
-    if not prompt_tokens:
-        raise click.ClickException("Prompt tokenized to empty sequence")
-
-    # Generate
-    click.echo("Generating...")
-    try:
-        gen_tokens, _next_key = generate_tokens(
-            params,
-            static,
-            prompt_tokens=prompt_tokens,
-            max_new_tokens=max_tokens,
-            bos_token_id=cfg.model.bos_token_id,
-            eos_token_id=cfg.model.eos_token_id,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            key=gen_key,
-        )
-    except Exception as exc:
-        raise click.ClickException(f"Generation failed: {exc}") from exc
-
-    generated_text = tokenizer.decode(gen_tokens)
-
-    # Output
-    click.echo("\n" + "=" * 60)
-    click.echo("Prompt:")
-    click.echo(prompt)
-    click.echo("-" * 60)
-    click.echo("Generated:")
-    click.echo(generated_text)
-    click.echo("=" * 60)
+    _generate_and_print(
+        params=params,
+        static=static,
+        cfg=cfg,
+        tokenizer=tokenizer,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        gen_key=gen_key,
+        generate_tokens=generate_tokens,
+    )

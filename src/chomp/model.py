@@ -326,6 +326,56 @@ def parameter_optimizer_groups(cfg: Config, params: Any) -> Any:
     return jax.tree_util.tree_map_with_path(label, params)
 
 
+def megalodon_config_from(cfg: Config) -> Any:
+    """Translate a chomp config into the backend's ``MegalodonConfig``.
+
+    Kept separate from :func:`build_model` because the exported safetensors
+    header stores this object verbatim. Export compares the config it rebuilds
+    here against the one embedded in a weights file, so the two must be
+    produced by the same code rather than by two copies of this field list.
+
+    :param Config cfg: Chomp configuration whose ``model`` section is translated.
+    :return Any: ``megalodon_jax.config.MegalodonConfig`` for this model.
+    """
+    from megalodon_jax.config import MegalodonConfig
+
+    return MegalodonConfig(
+        vocab_size=cfg.model.vocab_size,
+        model_dim=cfg.model.model_dim,
+        num_layers=cfg.model.num_layers,
+        num_heads=cfg.model.num_heads,
+        z_dim=cfg.model.z_dim,
+        value_dim=cfg.model.value_dim,
+        ffn_hidden_dim=cfg.model.ffn_hidden_dim,
+        cema_ndim=cfg.model.cema_ndim,
+        chunk_size=cfg.model.chunk_size,
+        attention_window=cfg.model.attention_window,
+        norm_num_groups=cfg.model.norm_num_groups,
+        norm_eps=cfg.model.norm_eps,
+        rope_base=cfg.model.rope_base,
+        swiglu=cfg.model.swiglu,
+        rescale_nffn=cfg.model.rescale_nffn,
+        scale_emb=cfg.model.scale_emb,
+        share_emb=cfg.model.share_emb,
+        norm_affine=cfg.model.norm_affine,
+        dropout=cfg.model.dropout,
+        attention_dropout=cfg.model.attention_dropout,
+        attention_dropout_mode=cfg.model.attention_dropout_mode,
+        hidden_dropout=cfg.model.hidden_dropout,
+        pad_token_id=cfg.model.pad_token_id,
+        bos_token_id=cfg.model.bos_token_id,
+        eos_token_id=cfg.model.eos_token_id,
+        init_mode=cfg.model.init_mode,
+        use_checkpoint=cfg.model.use_checkpoint,
+        output_size=cfg.model.output_size,
+        use_associative_segment_scan=cfg.model.use_associative_segment_scan,
+        param_dtype=dtype_from_str(cfg.model.param_dtype),
+        compute_dtype=dtype_from_str(cfg.model.compute_dtype),
+        accum_dtype=dtype_from_str(cfg.model.accum_dtype),
+        attention_softmax_dtype=dtype_from_str(cfg.model.attention_softmax_dtype),
+    )
+
+
 def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
     """Build model and return (params, static).
 
@@ -347,46 +397,9 @@ def build_model(cfg: Config, *, key: jax.Array) -> tuple[Any, Any]:
             key=key,
         )
     elif cfg.model.backend == "megalodon":
-        from megalodon_jax.config import MegalodonConfig
         from megalodon_jax.model import MegalodonForCausalLM
 
-        mcfg = MegalodonConfig(
-            vocab_size=cfg.model.vocab_size,
-            model_dim=cfg.model.model_dim,
-            num_layers=cfg.model.num_layers,
-            num_heads=cfg.model.num_heads,
-            z_dim=cfg.model.z_dim,
-            value_dim=cfg.model.value_dim,
-            ffn_hidden_dim=cfg.model.ffn_hidden_dim,
-            cema_ndim=cfg.model.cema_ndim,
-            chunk_size=cfg.model.chunk_size,
-            attention_window=cfg.model.attention_window,
-            norm_num_groups=cfg.model.norm_num_groups,
-            norm_eps=cfg.model.norm_eps,
-            rope_base=cfg.model.rope_base,
-            swiglu=cfg.model.swiglu,
-            rescale_nffn=cfg.model.rescale_nffn,
-            scale_emb=cfg.model.scale_emb,
-            share_emb=cfg.model.share_emb,
-            norm_affine=cfg.model.norm_affine,
-            dropout=cfg.model.dropout,
-            attention_dropout=cfg.model.attention_dropout,
-            attention_dropout_mode=cfg.model.attention_dropout_mode,
-            hidden_dropout=cfg.model.hidden_dropout,
-            pad_token_id=cfg.model.pad_token_id,
-            bos_token_id=cfg.model.bos_token_id,
-            eos_token_id=cfg.model.eos_token_id,
-            init_mode=cfg.model.init_mode,
-            use_checkpoint=cfg.model.use_checkpoint,
-            output_size=cfg.model.output_size,
-            use_associative_segment_scan=cfg.model.use_associative_segment_scan,
-            param_dtype=dtype_from_str(cfg.model.param_dtype),
-            compute_dtype=dtype_from_str(cfg.model.compute_dtype),
-            accum_dtype=dtype_from_str(cfg.model.accum_dtype),
-            attention_softmax_dtype=dtype_from_str(cfg.model.attention_softmax_dtype),
-        )
-
-        model = MegalodonForCausalLM(mcfg, key=key)
+        model = MegalodonForCausalLM(megalodon_config_from(cfg), key=key)
     else:  # pragma: no cover
         raise ValueError(f"Unknown model.backend: {cfg.model.backend!r}")
 

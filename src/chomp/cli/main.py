@@ -67,6 +67,10 @@ from chomp.cli.generate import generate  # noqa: E402
 
 cli.add_command(generate)
 
+from chomp.cli.export import export  # noqa: E402
+
+cli.add_command(export)
+
 
 def _exit_status(code: int | str | None) -> int:
     """Normalize a ``SystemExit`` code to an integer process status.

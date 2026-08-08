@@ -153,7 +153,13 @@ chomp generate runs/my_run --prompt "Hello world" --max-tokens 64 --temperature 
 
 Success prints the resolved checkpoint path, restores model parameters, and emits prompt/generated panels. `--temperature 0` is greedy; sampling defaults to temperature `1.0` and seed `42`, with optional `--top-k` and `--top-p`. You may also pass a checkpoint root or an exact step directory instead of the run directory.
 
-Chomp currently has no built-in Hugging Face Transformers or safetensors weight export. Training checkpoints are Orbax pytrees interpreted by Megalodon-JAX; the tokenizer itself is saved in Hugging Face format under the run directory. Export requires a model-specific conversion path and should not be assumed from the presence of `save_pretrained` tokenizer files.
+Export a checkpoint's weights as portable safetensors:
+
+```bash
+chomp export runs/my_run --out exports/my_run-step100000
+```
+
+The result holds `model.safetensors`, the run-pinned tokenizer, and a `chomp_export.json` manifest. The weights file carries the full `MegalodonConfig` in its header, so it loads without chomp via `megalodon_jax.load_checkpoint(path, key=...)`; `chomp generate` also accepts an export directory wherever it accepts a run directory. Export is lossless float32, is re-read and verified by default, and refuses to run when the tokenizer cannot be proven to match the checkpoint. It is inference-only — an export carries no optimizer state and cannot be resumed from. See [Export](docs/export.md) for the format, the manifest schema, and why there is no bf16 or Hugging Face Transformers variant.
 
 ## Troubleshooting
 
@@ -172,6 +178,7 @@ Chomp currently has no built-in Hugging Face Transformers or safetensors weight 
 - [Packing](docs/packing.md): packing strategy and boundary-masking semantics
 - [Optimization](docs/optimization.md): optimizer behavior and Muon sweep guidance
 - [Checkpointing](docs/checkpointing.md): save/restore/resume contract and exactness scope
+- [Export](docs/export.md): portable safetensors weight export and what it does not promise
 - [Development Guide](docs/dev.md): lint, format, test workflow, and local config conventions
 - [Experiments](docs/experiments/README.md): numbered log of training experiments, their setup, and their results
 
