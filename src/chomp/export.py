@@ -235,23 +235,25 @@ def _verify_weights(weights_path: Path, params: Any) -> None:
             )
 
 
-def _prepare_destination(destination: Path, *, overwrite: bool) -> None:
-    """Clear a destination directory of a previous export, or refuse to use it.
+def _check_destination(destination: Path, *, overwrite: bool) -> tuple[str, ...]:
+    """Decide whether a destination may be written, without changing anything.
 
-    ``overwrite`` deletes only the files the previous export's manifest claims,
-    never the directory itself. Writing over an export in place would otherwise
-    leave the old run's tokenizer files behind, and ``AutoTokenizer`` would load
-    whichever it found -- a stale ``vocab.txt`` beside new weights is exactly
-    the mismatch the tokenizer identity check exists to prevent. A non-empty
-    directory that is *not* an export is refused outright: chomp cannot know
-    what else lives there, so deleting is not its call to make.
+    Deliberately non-destructive. Everything after this call can still fail --
+    the tokenizer identity check, the Orbax restore, the write itself -- and an
+    overwrite that deleted a good export before proving it could produce a
+    replacement would leave the user with neither. The names returned here are
+    swept only once new weights are on disk.
+
+    A non-empty directory that is not an export is refused outright: chomp
+    cannot know what else lives there, so deleting is not its call to make.
 
     :param Path destination: Directory the export will be written into.
     :param bool overwrite: Whether a previous export may be replaced.
-    :raises FileExistsError: If the destination holds content export will not remove.
+    :raises FileExistsError: If the destination holds content export will not replace.
+    :return tuple[str, ...]: File names the previous export claimed, if any.
     """
     if not destination.exists() or not any(destination.iterdir()):
-        return
+        return ()
 
     if not is_export_dir(destination):
         raise FileExistsError(
@@ -264,13 +266,38 @@ def _prepare_destination(destination: Path, *, overwrite: bool) -> None:
         )
 
     try:
-        stale = read_export_manifest(destination)
-        owned = [*stale.get("tokenizer_files", []), stale.get("weights_file", WEIGHTS_FILENAME)]
-    except (ValueError, FileNotFoundError):
-        # An unreadable manifest still identified this as an export directory.
-        # Remove what this version knows how to write and leave the rest.
-        owned = [WEIGHTS_FILENAME]
-    for name in [*owned, MANIFEST_FILENAME]:
+        previous = read_export_manifest(destination)
+    except (ValueError, FileNotFoundError) as exc:
+        # Refusing beats half-cleaning. Without a readable manifest chomp cannot
+        # tell which tokenizer files this directory owns, and leaving one behind
+        # beside new weights is the exact mismatch overwrite exists to prevent.
+        raise FileExistsError(
+            f"{destination} holds an export whose {MANIFEST_FILENAME} is unreadable "
+            f"({exc}), so chomp cannot tell which files belong to it. Remove the "
+            "directory and export again."
+        ) from exc
+    owned = [*previous.get("tokenizer_files", []), previous.get("weights_file", "")]
+    return tuple(name for name in owned if isinstance(name, str) and name)
+
+
+def _remove_stale_files(
+    destination: Path, *, previous: tuple[str, ...], written: tuple[str, ...]
+) -> None:
+    """Delete files a previous export owned that this one did not rewrite.
+
+    Called only after the new weights are durable. ``AutoTokenizer`` loads
+    whichever tokenizer files it finds, so a ``vocab.txt`` left over from a
+    different model would silently pair the wrong vocabulary with these
+    weights.
+
+    :param Path destination: Export directory.
+    :param tuple[str, ...] previous: Names the previous manifest claimed.
+    :param tuple[str, ...] written: Names this export just wrote.
+    """
+    keep = {*written, WEIGHTS_FILENAME, MANIFEST_FILENAME}
+    for name in previous:
+        if name in keep:
+            continue
         candidate = destination / name
         # Reject path traversal from a hand-edited manifest before unlinking.
         if candidate.parent == destination and candidate.is_file():
@@ -310,7 +337,7 @@ def export_checkpoint(
         )
 
     destination = Path(export_dir)
-    _prepare_destination(destination, overwrite=overwrite)
+    previous_files = _check_destination(destination, overwrite=overwrite)
 
     tokenizer, tokenizer_identity = _tokenizer_for_checkpoint(
         step_dir=step_dir, run_dir=run_dir, cfg=cfg
@@ -331,6 +358,7 @@ def export_checkpoint(
         _verify_weights(weights_path, params)
 
     tokenizer_files = _copy_tokenizer_files(run_dir, destination)
+    _remove_stale_files(destination, previous=previous_files, written=tokenizer_files)
 
     try:
         meta = read_checkpoint_meta(step_dir)

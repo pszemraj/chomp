@@ -89,6 +89,13 @@ rows directly, so export applies the same identity check `chomp generate` does
 and refuses rather than warns when the run's tokenizer cannot be shown to match
 the checkpoint's recorded `tokenizer_identity`.
 
+**Exports are not byte-reproducible.** Two exports of the same checkpoint
+contain identical tensors but can differ in the safetensors header: upstream
+serializes its metadata map from an unordered container, so the JSON keys come
+out in a different order and the files are the same length but not the same
+bytes. Compare exports by loading and comparing tensors, never by hashing the
+file.
+
 **There is no bf16 export.** Upstream's `BF16_DTYPE_POLICY` keeps some
 parameters at fp32 while casting the rest, and which parameters those are is
 upstream's decision, encoded in its model constructor. Guessing at it here
