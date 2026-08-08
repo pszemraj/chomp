@@ -173,6 +173,7 @@ Chomp currently has no built-in Hugging Face Transformers or safetensors weight 
 - [Optimization](docs/optimization.md): optimizer behavior and Muon sweep guidance
 - [Checkpointing](docs/checkpointing.md): save/restore/resume contract and exactness scope
 - [Development Guide](docs/dev.md): lint, format, test workflow, and local config conventions
+- [Experiments](docs/experiments/README.md): numbered log of training experiments, their setup, and their results
 
 ## License and citation
 
