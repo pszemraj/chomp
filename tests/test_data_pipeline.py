@@ -36,6 +36,7 @@ from chomp.data.pipeline import (
     _build_packer,
     _SequenceProducer,
     build_eval_iterator,
+    build_tokenizer,
     build_train_iterator,
     data_fingerprint,
     effective_window_shuffle_seed,
@@ -1434,3 +1435,60 @@ def test_byte_tokenizer_skips_special_tokens() -> None:
     tok = ByteTokenizer(byte_offset=4)
     ids = [0, 1] + tok.encode("hi")
     assert tok.decode(ids) == "hi"
+
+
+def _drain_producer(producer: _SequenceProducer, windows: int) -> None:
+    """Advance a producer by a fixed number of packed windows.
+
+    :param _SequenceProducer producer: Producer to advance.
+    :param int windows: Number of windows to pop.
+    """
+    for _ in range(windows):
+        producer.next_window()
+
+
+def test_packer_state_discriminators_are_family_specific() -> None:
+    """Each packer family must recognize only its own checkpointed state."""
+    cfg_seq = make_pipeline_cfg(packing_mode="sequential")
+    cfg_bin = make_pipeline_cfg(packing_mode="bin", packing_max_docs_per_bin=1)
+    seq_state = _build_packer(cfg_seq).get_state()
+    bin_state = _build_packer(cfg_bin).get_state()
+
+    assert TokenPacker.can_restore_state(seq_state)
+    assert not TokenPacker.can_restore_state(bin_state)
+    assert FFDPacker.can_restore_state(bin_state)
+    assert not FFDPacker.can_restore_state(seq_state)
+
+
+def test_resume_across_packing_mode_keeps_stream_position(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Switching data.packing_mode on resume must keep the corpus position.
+
+    A phased run that changes packing cannot load the previous packer's
+    buffers -- the two families store disjoint state. Restoring the text
+    stream anyway is what lets phase two continue reading the corpus instead
+    of replaying it from the start.
+    """
+    corpus = "".join(f"document number {i} with some filler text. " for i in range(64))
+    cfg_seq = make_pipeline_cfg(packing_mode="sequential", local_text=corpus)
+    cfg_bin = make_pipeline_cfg(packing_mode="bin", packing_max_docs_per_bin=1, local_text=corpus)
+
+    source = _SequenceProducer(cfg_seq, tokenizer=build_tokenizer(cfg_seq))
+    _drain_producer(source, 5)
+    saved = source.get_state()
+    assert saved["packer"]["document_stats"]["docs_seen"] > 0
+
+    target = _SequenceProducer(cfg_bin, tokenizer=build_tokenizer(cfg_bin))
+    with caplog.at_level(logging.WARNING, logger="chomp.data.pipeline"):
+        target.set_state(saved)
+
+    assert "different data.packing_mode" in caplog.text
+    # Document counters carry across the phase boundary so docs_seen and the
+    # source_tokens_* totals stay continuous.
+    assert target.get_state()["packer"]["document_stats"] == saved["packer"]["document_stats"]
+    # The stream resumes rather than restarting, and the new packer works.
+    assert target.get_state()["text"] == saved["text"]
+    tokens, segments = target.next_window()
+    assert tokens.shape == (cfg_bin.train.seq_len,)
+    assert segments.shape == (cfg_bin.train.seq_len,)

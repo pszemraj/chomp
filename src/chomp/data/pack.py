@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import base64
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import numpy as np
 
@@ -284,6 +284,34 @@ class PackerState:
 class _PackerBase:
     """Shared document preparation and diagnostics for all packers."""
 
+    #: Key that appears only in this packer family's checkpointed state. The
+    #: packer families store disjoint buffers (a token carry versus document
+    #: and row queues), so a state written under one ``data.packing_mode``
+    #: cannot be loaded by another. Restore paths test this before trying.
+    _STATE_DISCRIMINATOR: ClassVar[str] = ""
+
+    @classmethod
+    def can_restore_state(cls, state: Mapping[str, Any]) -> bool:
+        """Report whether a checkpointed packer state was written by this family.
+
+        :param Mapping[str, Any] state: Checkpointed packer state.
+        :return bool: True when ``set_state`` can consume this state.
+        """
+        return bool(cls._STATE_DISCRIMINATOR) and cls._STATE_DISCRIMINATOR in state
+
+    def load_shared_state(self, state: Mapping[str, Any]) -> None:
+        """Restore only the packer-independent portion of a checkpointed state.
+
+        Document counters and the exhausted flag use one schema across every
+        packer, so they survive a `data.packing_mode` change even though the
+        in-flight buffers do not. Keeping them makes `docs_seen` and the
+        `source_tokens_*` totals continuous across a phase boundary.
+
+        :param Mapping[str, Any] state: Checkpointed packer state.
+        """
+        self._document_stats = _DocumentStats.from_dict(state["document_stats"])
+        self._exhausted = bool(state["exhausted"])
+
     def __init__(
         self,
         *,
@@ -344,6 +372,8 @@ class _PackerBase:
 
 class TokenPacker(_PackerBase):
     """Pack variable-length tokenized documents into fixed-length sequences."""
+
+    _STATE_DISCRIMINATOR: ClassVar[str] = "remaining_tokens"
 
     def __init__(
         self,
@@ -742,6 +772,8 @@ class FFDPacker(_PackerBase):
     stream of larger arrivals. Once :meth:`finish` marks the stream exhausted,
     sub-threshold pending documents are flushed into padded bins.
     """
+
+    _STATE_DISCRIMINATOR: ClassVar[str] = "pending_tokens_i32_b64"
 
     def __init__(
         self,

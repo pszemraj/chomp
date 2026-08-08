@@ -1183,10 +1183,35 @@ class _SequenceProducer:
     def set_state(self, state: dict[str, Any]) -> None:
         """Restore producer state from a checkpoint.
 
+        The corpus position and the packer's in-flight buffers are stored
+        separately, and only the buffers are packer-specific. When a resume
+        changes `data.packing_mode` the buffers cannot transfer, but the stream
+        position can — so the new phase continues reading where the old one
+        stopped instead of replaying the corpus from the beginning. This is the
+        path a phased run takes when it switches packing, and it is reachable
+        only under `checkpoint.resume_compat: warn`, because a packing-mode
+        change is an error under `strict` and aborts before any restore.
+
         :param dict[str, Any] state: State dict from get_state().
         """
         self._text_stream.set_state(state["text"])
-        self._packer.set_state(state["packer"])
+        packer_state = state["packer"]
+        if self._packer.can_restore_state(packer_state):
+            self._packer.set_state(packer_state)
+            return
+        # Counters carry; buffers do not. The discarded tokens are whatever the
+        # previous packer had accepted but not yet emitted -- one partial window
+        # plus at most one document tail -- so the new phase skips that much of
+        # the corpus and starts its first window on a document boundary.
+        self._packer.load_shared_state(packer_state)
+        logger.warning(
+            "Resumed into a different data.packing_mode: the checkpointed packer "
+            "buffer cannot load into a %s. Corpus position and document counters "
+            "were restored, so the stream continues where it stopped; the previous "
+            "packer's unemitted tokens (under one window plus at most one document "
+            "tail) are dropped.",
+            type(self._packer).__name__,
+        )
 
     def get_stats(self) -> dict[str, int | float]:
         """Return source- and packer-level document stats if available.
