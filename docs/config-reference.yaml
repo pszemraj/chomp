@@ -205,6 +205,10 @@ data:
   # Positive collection counts selected documents, not rows/tokens; a null-split holdout scans roughly value / hf_eval_holdout_fraction source rows. Documents are fully tokenized and retained until first eval, then packed batches are cached on host; max_doc_tokens does not cap that startup tokenization or interim storage. local_text repeats one text.
   max_eval_samples: "<int>"
 
+  # data.eval_packing -- string; default: onedoc; one of: train | onedoc. Decides how eval rows are laid out, not which documents are selected. onedoc puts one document per padded row and pins its own FFD lookahead, so eval_loss measures the single-document condition generation runs under and stays comparable across runs whose training packing differs; train reuses packing_mode and its knobs instead.
+  # Resume-significant: changing it changes what eval_loss means, so it follows checkpoint.resume_compat warn/strict semantics. onedoc costs eval wall clock proportional to the padding it adds (roughly 2x on long-document corpora) and is unaffected by packing_strict_segments, which has nothing to isolate at one segment per row.
+  eval_packing: "<train | onedoc>"
+
   # data.tokenizer -- mapping | null; default: {}. Active tokenization semantics participate in resume compatibility. The saved effective class, package versions, files, and canary outputs contextually bind HF loading knobs. HF encoding itself adds no specials; add_bos/add_eos below own training/eval insertion.
   tokenizer:
     # data.tokenizer.kind -- string; default: hf; one of: byte | hf. Byte is an offline infrastructure tokenizer and must disable special insertion unless byte_offset reserves IDs for it.

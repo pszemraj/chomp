@@ -420,11 +420,16 @@ def test_eval_fingerprint_tracks_effective_ffd_geometry(
     lookahead_name: str,
     fingerprint_key: str,
 ) -> None:
-    """Eval lookahead changes below the train clamp must change its arrays and identity."""
+    """Eval lookahead changes below the train clamp must change its arrays and identity.
+
+    Scoped to ``eval_packing='train'``: the training lookahead only reaches the
+    eval rows when eval inherits the training packer.
+    """
     common = {
         "batch_size": 2,
         "seq_len": 8,
         "packing_mode": mode,
+        "eval_packing": "train",
         "max_eval_samples": 4,
         "tokenizer": TokenizerConfig(
             kind="byte",

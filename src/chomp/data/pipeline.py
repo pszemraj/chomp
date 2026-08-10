@@ -33,7 +33,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from chomp.config import Config, resolve_window_shuffle_rows, validate_config
+from chomp.config import Config, eval_config, resolve_window_shuffle_rows, validate_config
 from chomp.types import IGNORE_INDEX, Batch
 
 from .hf import ContentPartition, HFStreamingTextStream, HFStreamSpec, LocalTextStream
@@ -902,9 +902,15 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
     if d.max_eval_samples > 0:
         eval_fp["split"] = _eval_source_split(cfg)
         eval_fp["content_partition"] = "eval" if _content_holdout_enabled(cfg) else "all"
-        if d.packing_mode in ("bin", "multipack"):
-            # Evaluation emits B rows per cycle rather than training's A*B,
-            # so a raw lookahead change can be inert for train but active here.
+        # Row layout decides what eval_loss means, so it is fingerprinted even
+        # when it merely inherits the packing section above: 'train' and
+        # 'onedoc' score the same documents under different conditioning.
+        eval_fp["packing"] = d.eval_packing
+        if d.eval_packing == "train" and d.packing_mode in ("bin", "multipack"):
+            # Evaluation emits B rows per cycle rather than training's A*B, so a
+            # raw lookahead change can be inert for train but active here. The
+            # one-document instrument pins its lookahead to that row count
+            # instead, which train.batch_size above already covers.
             eval_fp["packing_lookahead_docs"] = resolve_ffd_lookahead(
                 cfg,
                 rows_per_pack=cfg.train.batch_size,
@@ -1242,6 +1248,11 @@ class _EvalBatchIterator:
         :param Config cfg: Training configuration.
         :param list[list[int]] tokens: Ordered pre-tokenized documents.
         """
+        # Rows are laid out under the eval instrument's packing, which by
+        # default is not the training packer's. `make_eval_step` derives the
+        # same config, so the segment semantics the batches carry and the ones
+        # the forward pass executes cannot disagree.
+        cfg = eval_config(cfg)
         self._producer = _SequenceProducer(
             cfg,
             tokenizer=None,

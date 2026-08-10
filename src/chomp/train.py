@@ -61,6 +61,7 @@ from chomp.ckpt import (
 from chomp.config import (
     Config,
     derived_deterministic,
+    eval_config,
     resolve_decay_horizon,
     strict_packed_segments,
 )
@@ -1493,7 +1494,10 @@ def make_eval_step(
     :return Callable: eval_step(params, batch) -> (loss_sum, token_sum).
     """
 
-    use_packed_segments = strict_packed_segments(cfg)
+    # Evaluation runs under its own packing (data.eval_packing), so the
+    # strictness decision must come from the same derived config that laid the
+    # eval rows out -- not from the training packer.
+    use_packed_segments = strict_packed_segments(eval_config(cfg))
 
     def eval_step(params: Any, batch: Batch) -> tuple[jax.Array, jax.Array]:
         """Compute token-weighted loss sums for a batch.

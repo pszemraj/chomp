@@ -101,6 +101,8 @@ Evaluation activation, cadence, failure policy, and persistent status are define
 
 Eval batches are assembled once and cached host-side for the whole run; device transfer happens per batch each eval, so no device memory is held between evals.
 
+Evaluation does not inherit the training packer. Under the default [`data.eval_packing: onedoc`](config-reference.yaml) each eval row holds one document, padded, with its own pinned FFD lookahead, so `eval_loss` measures the condition generation actually runs under — a single document in context, no CEMA/TimestepNorm state carried in from an unrelated one — and does not move when `data.packing_mode` and its knobs change. That is what makes the eval series of two runs trained under different packing directly comparable. `eval_packing: train` reuses the training packing knobs instead, scoring the model under its own training distribution. The choice affects row layout only, never which documents are selected, and it is resume-significant: changing it mid-run changes what `eval_loss` means and follows `checkpoint.resume_compat`. The one-document layout adds padding, so an eval pass costs roughly the reciprocal of the packing utilization it gives up (about 2x on long-document corpora) — bounded work against `data.max_eval_samples` documents, not a per-step cost.
+
 ## Generation samples
 
 Periodic Megalodon generation samples prompts from a bounded pool of up to 16 unshuffled training-split documents, avoiding a second production-sized shuffle window. Long prompts randomly use their first or last configured span, and no EOS is appended. Cadence, computed lengths, sampling controls, and backend applicability are canonical under [`train.generate_*`](config-reference.yaml).

@@ -601,6 +601,10 @@ def test_data_and_logging_validation_rejects_invalid_values() -> None:
         ),
         (lambda cfg: replace(cfg, data=replace(cfg.data, packing_mode="unknown")), "packing_mode"),
         (
+            lambda cfg: replace(cfg, data=replace(cfg.data, eval_packing="bin")),
+            "eval_packing",
+        ),
+        (
             lambda cfg: replace(cfg, data=replace(cfg.data, max_eval_samples=-1)),
             "max_eval_samples",
         ),

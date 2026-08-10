@@ -82,7 +82,7 @@ Source-schema violations fail deterministically rather than being coerced or ski
 
 When evaluation collection is active, process startup deterministically selects and tokenizes one fixed, unshuffled document set before training. Explicit-split and hash-holdout activation, sizing, and cadence rules are canonical under the [`data.hf_eval_*`, `data.max_eval_samples`, and `train.eval_every` fields](config-reference.yaml). Null-split selection hashes complete text with BLAKE2, so duplicate content cannot cross train/eval; selection never falls back across sources. Initialization and runtime failures share the workflow under [Training evaluation](training.md#evaluation).
 
-Packed batches are materialized on first evaluation, cached host-side, and replace the original Python token lists. Effective eval packing lookahead is tracked separately from training because their cycle sizes differ; the exact clamp rules live with the packing-field contracts in the Config Reference.
+Packed batches are materialized on first evaluation, cached host-side, and replace the original Python token lists. How those rows are laid out is [`data.eval_packing`](config-reference.yaml), which is independent of the training packer by default; effective eval packing lookahead is tracked separately from training because their cycle sizes differ, and the exact clamp rules live with the packing-field contracts in the Config Reference. Row layout never changes which documents were selected above.
 
 TODO: bound initial evaluation collection by tokens rather than only `data.max_eval_samples`, and replace the Python-list cache with a compact contiguous int32 ragged representation. This needs an explicit selection/fingerprint policy for the token budget.
 

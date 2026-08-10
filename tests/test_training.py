@@ -3070,7 +3070,11 @@ def test_strict_resume_detects_eval_effective_lookahead_change(
     mode: str,
     lookahead_name: str,
 ) -> None:
-    """Strict resume must reject lookahead drift that changes only eval packing."""
+    """Strict resume must reject lookahead drift that changes only eval packing.
+
+    Requires ``eval_packing='train'``; the default instrument pins its own
+    lookahead and is deliberately deaf to these knobs.
+    """
     cfg = _base_cfg(tmp_path / f"run_eval_lookahead_{mode}")
     cfg = replace(
         cfg,
@@ -3078,6 +3082,7 @@ def test_strict_resume_detects_eval_effective_lookahead_change(
         data=replace(
             cfg.data,
             packing_mode=mode,
+            eval_packing="train",
             max_eval_samples=4,
             **{lookahead_name: 2},
         ),
@@ -3091,6 +3096,40 @@ def test_strict_resume_detects_eval_effective_lookahead_change(
 
     with pytest.raises(RuntimeError, match="data.eval.packing_lookahead_docs"):
         check_resume_compat(drifted, meta)
+
+
+def test_strict_resume_detects_eval_packing_change(tmp_path: Path) -> None:
+    """Swapping the eval instrument mid-run must not pass silently.
+
+    The eval_loss series either measures one thing for the whole run or it is
+    not a series, so this is the same class of drift as changing the eval split.
+    """
+    cfg = _base_cfg(tmp_path / "run_eval_packing")
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, packing_mode="bin", max_eval_samples=4),
+        checkpoint=replace(cfg.checkpoint, resume_compat="strict"),
+    )
+    meta = _checkpoint_record(cfg).to_dict()
+    drifted = replace(cfg, data=replace(cfg.data, eval_packing="train"))
+
+    with pytest.raises(RuntimeError, match="data.eval_packing"):
+        check_resume_compat(drifted, meta)
+
+
+def test_eval_packing_change_is_inert_when_eval_disabled(tmp_path: Path) -> None:
+    """With no eval data there is no instrument to keep stable."""
+    cfg = _base_cfg(tmp_path / "run_eval_packing_disabled")
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, packing_mode="bin", max_eval_samples=0),
+        checkpoint=replace(cfg.checkpoint, resume_compat="strict"),
+    )
+    meta = _checkpoint_record(cfg).to_dict()
+    drifted = replace(cfg, data=replace(cfg.data, eval_packing="train"))
+
+    assert data_fingerprint(drifted) == data_fingerprint(cfg)
+    check_resume_compat(drifted, meta)
 
 
 @pytest.mark.parametrize(

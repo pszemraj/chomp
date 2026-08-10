@@ -40,6 +40,7 @@ PackingMode = Literal["sequential", "bin", "multipack"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 ResumeCompat = Literal["strict", "warn"]
 EvalFailurePolicy = Literal["fatal", "disable"]
+EvalPacking = Literal["train", "onedoc"]
 
 
 class _UniqueKeySafeLoader(yaml.SafeLoader):
@@ -266,6 +267,12 @@ class DataConfig:
 
     # Validation set creation from the explicitly selected split/source.
     max_eval_samples: int = 1000
+    # How evaluation rows are packed. "onedoc" puts one document per row, so
+    # eval_loss measures the condition generation actually runs under and does
+    # not move when the *training* packer changes. "train" packs eval rows with
+    # the training knobs above, which reads the model under its own training
+    # distribution but makes eval_loss incomparable across packing changes.
+    eval_packing: EvalPacking = "onedoc"
 
     # Tokenizer
     tokenizer: TokenizerConfig = TokenizerConfig()
@@ -1163,6 +1170,8 @@ def _validate_data(cfg: Config) -> None:
             "data.packing_mode must be 'sequential', 'bin', or 'multipack', got "
             f"{cfg.data.packing_mode!r}"
         )
+    if cfg.data.eval_packing not in ("train", "onedoc"):
+        _vfail(f"data.eval_packing must be 'train' or 'onedoc', got {cfg.data.eval_packing!r}")
     if (
         cfg.data.packing_mode in ("bin", "multipack")
         and cfg.data.packing_max_docs_per_bin is not None
@@ -1361,6 +1370,48 @@ def strict_packed_segments(cfg: Config) -> bool:
     :return bool: True iff a multi-document packing mode is active with strict isolation.
     """
     return cfg.data.packing_mode in ("bin", "multipack") and cfg.data.packing_strict_segments
+
+
+def eval_config(cfg: Config) -> Config:
+    """The configuration the evaluation path assembles rows and scores under.
+
+    Evaluation is a measuring instrument, and an instrument that changes with
+    the thing it measures is not one. Under ``data.eval_packing='onedoc'`` the
+    training packing knobs are rewritten to one document per row, so
+    ``eval_loss`` reads the condition generation actually runs under -- a single
+    document in context, no recurrent state carried in from an unrelated one --
+    and two runs that train under different packing stay directly comparable.
+    ``'train'`` returns the config unchanged, scoring the model under its own
+    training distribution instead.
+
+    The eval document set is unaffected either way: packing decides how those
+    documents are laid out in rows, not which ones are selected.
+
+    :param Config cfg: Training configuration.
+    :return Config: Configuration for eval data assembly and the eval step.
+    """
+    if cfg.data.eval_packing == "train":
+        return cfg
+    return replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            packing_mode="bin",
+            # One document per row. `_place_first_fit` rejects every non-empty
+            # bin, so a row holds one document or one capacity-sized chunk of a
+            # long one, right-padded.
+            packing_max_docs_per_bin=1,
+            # Clamped up to one packing cycle's worth of rows. FFD seeds every
+            # bin with the oldest candidate and a one-document cap leaves it
+            # nothing to fill afterwards, so this lays the eval documents out in
+            # source order and keeps the instrument independent of the training
+            # lookahead knobs.
+            packing_buffer_docs=1,
+            # Nothing to isolate a lone segment from, so strict execution would
+            # buy no separation and cost roughly 2x.
+            packing_strict_segments=False,
+        ),
+    )
 
 
 def warmup_steps_from_ratio(*, steps: int, warmup_ratio: float) -> int:

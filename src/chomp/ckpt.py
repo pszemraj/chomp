@@ -681,7 +681,10 @@ def check_resume_compat(
         "data.eval",
         eval_cur,
         eval_prev,
-        labels={"max_eval_samples": "data.max_eval_samples"},
+        labels={
+            "max_eval_samples": "data.max_eval_samples",
+            "packing": "data.eval_packing",
+        },
         severity=semantic_severity,
     )
 

@@ -93,10 +93,37 @@ a longer stop point:
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.90 chomp train \
   configs/custom/finepdfs_200m_2048-packed-fast.yaml \
   --run-dir runs/chomp-200-2608-p2-seq --resume latest \
-  -o train.steps=125000
+  -o train.steps=125000 -o checkpoint.resume_compat=warn
 ```
 
+`resume_compat: warn` is required on the control arm too, because part 1's
+checkpoint predates `data.eval_packing` and its metadata records no value for
+it. That is the only strict-level entry the change adds; see
+[the eval instrument](#the-eval-instrument) below.
+
 Serialize the two — there is one GPU.
+
+### The eval instrument
+
+Evaluation no longer inherits the training packer. `data.eval_packing` defaults
+to `onedoc`, so both arms score the same held-out documents one-per-row,
+padded, under the condition generation actually runs in — a single document in
+context, no CEMA/TimestepNorm state carried in from an unrelated one. Without
+that, each arm would be measured by a device the arm itself changed, and the
+two `eval_loss` series would not be comparable.
+
+The 30-step probe below measured the offset this introduces on part 1's
+weights: 2.8849 one-doc against the 2.8899 sequential eval logged at step
+100,000, a 0.005-nat shift — the same size as the run-to-run eval band, but it
+is a real discontinuity in the series at step 100,000 in *both* arms, not a
+result. **Part 1's clean-instrument baseline is 2.8849; that is the number
+phase 2 has to beat.**
+
+`data.eval_packing` is fingerprinted, so switching it mid-run is caught like
+any other eval-selection change. Part 1's checkpoint predates the field, which
+is why both arms need `resume_compat: warn` — the expected warning entries are
+`train.steps` and `data.eval_packing` on the control, plus the four packing
+knobs on the treatment. Anything else in that list is an accident.
 
 ### Held constant
 
@@ -108,6 +135,9 @@ Serialize the two — there is one GPU.
 - **Eval split.** `data.hf_eval_split: null` partitions the train split by
   content hash, and neither arm changes the hash or the seed, so both evaluate
   on the same documents part 1 did.
+- **Eval instrument.** `data.eval_packing: onedoc` in both arms, so the rows
+  those documents are laid out in are identical regardless of how each arm
+  trains. See [the eval instrument](#the-eval-instrument).
 - **Corpus position.** Both arms continue the stream from token 13.09B rather
   than replaying it. This required a code change (below).
 - **Optimizer state, RNG, step counter.** Carried by `--resume`;
@@ -118,10 +148,11 @@ Serialize the two — there is one GPU.
 
 `train.steps` differs from the checkpoint's value in both arms. Under
 `checkpoint.resume_compat: strict` that is a warning rather than an error only
-because `decay_steps` is pinned. The treatment arm additionally needs
-`resume_compat: warn`, because a `data.packing_mode` change is a hard error
-under `strict`. **Read the resume warning block at startup and confirm the only
-entries are the packing knobs and `train.steps`.** Anything else in that list
+because `decay_steps` is pinned. Both arms nonetheless need `resume_compat:
+warn`: the treatment because a `data.packing_mode` change is a hard error under
+`strict`, and both because part 1's metadata records no `data.eval_packing`.
+**Read the resume warning block at startup and confirm the only entries are the
+packing knobs, `data.eval_packing`, and `train.steps`.** Anything else in that list
 is an accident, not this experiment.
 
 ## Confound: equal steps is not equal tokens
@@ -174,13 +205,19 @@ real checkpoint rather than on a smoke config.
 | `peak_memory_gb` | 29.136 — fits the 0.90 pool |
 | eval under one-doc packing | 2.8849 / 2.8885 / 2.8902 |
 
-**The eval instrument barely moves.** Eval batches are packed with the same
-config as training, so switching packing also switches the measuring device.
-On essentially unchanged weights, one-doc eval read 2.8849 against part 1's
-sequential 2.8899 — a 0.005-nat shift, the same size as the run-to-run eval
-band. Cross-arm eval comparison is fair and needs no correction.
+**The eval instrument barely moves.** At the time of the probe, eval batches
+were packed with the same config as training, so switching packing also
+switched the measuring device. On essentially unchanged weights, one-doc eval
+read 2.8849 against part 1's sequential 2.8899 — a 0.005-nat shift, the same
+size as the run-to-run eval band. That measurement is what
+[`data.eval_packing`](../config-reference.yaml) was subsequently built on: the
+instrument is now pinned to one-doc for both arms rather than following each
+arm's training packer, so the shift is a one-time offset at step 100,000
+instead of a per-arm confound. 2.8849 is the baseline to beat.
 
-## Prerequisite fix
+## Prerequisite fixes
+
+### Resuming across a packing-mode change
 
 Resuming across a `packing_mode` change was impossible before commit
 `2b24331`: it died with `KeyError: 'pending_tokens_i32_b64'`. The two packer
@@ -196,6 +233,15 @@ The discarded tokens are whatever the old packer had accepted but not emitted:
 under one window plus at most one document tail. Reachable only under
 `resume_compat: warn`; `strict` still refuses. See
 [packing](../packing.md) and [checkpointing](../checkpointing.md).
+
+### An eval instrument that survives a packing change
+
+Evaluation used to pack its rows with the training knobs, so each arm would
+have been scored by a device it had just changed. `data.eval_packing` splits
+the two: eval row layout is now its own decision, defaulting to one document
+per row, and the training packer no longer reaches it. Selection is untouched —
+the same held-out documents either way. See
+[training](../training.md#evaluation).
 
 ## Results
 

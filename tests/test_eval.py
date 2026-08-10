@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 from _pytest.logging import LogCaptureFixture
 
@@ -19,6 +20,7 @@ from chomp.config import (
 from chomp.data import (
     build_eval_iterator,
     build_tokenizer,
+    data_fingerprint,
     load_generation_prompt_tokens,
     load_or_create_eval_tokens,
 )
@@ -198,7 +200,7 @@ def test_eval_pads_missing_rows_and_ignores_train_grad_accum(
     patch_hf_load_dataset(
         {
             "train": [{"text": "xxxx"} for _ in range(64)],
-            # 4 tokens flush into a single [T=8] window < rows_per_batch=2.
+            # Two 2-token docs, each far short of a [T=8] window.
             "validation": [{"text": "yy"}, {"text": "zz"}],
         }
     )
@@ -219,8 +221,80 @@ def test_eval_pads_missing_rows_and_ignores_train_grad_accum(
     eval_rows = [row for row in rows if row.get("eval_loss") not in (None, "")]
     assert eval_rows
     eval_batches = list(build_eval_iterator(cfg, tokens=[[1, 2], [3, 4]]))
-    assert len(eval_batches) == 1
-    assert eval_batches[0].input_ids.shape == (1, 1, 8)
+    # Default eval packing gives each document its own padded row, so both
+    # short docs survive at B=1 instead of being merged into one bin, and
+    # train.grad_accum=2 leaves the A axis at 1 either way.
+    assert len(eval_batches) == 2
+    assert all(batch.input_ids.shape == (1, 1, 8) for batch in eval_batches)
+
+
+_INSTRUMENT_DOCS = [[10] * 6, [20] * 6, [30] * 2, [40] * 2]
+
+
+def _segments_per_row(batches: list[Any]) -> list[int]:
+    """Count distinct non-padding segments in each row of every batch.
+
+    :param list[Any] batches: Assembled eval batches.
+    :return list[int]: One segment count per row, in emission order.
+    """
+    counts: list[int] = []
+    for batch in batches:
+        rows = np.asarray(batch.segment_ids).reshape(-1, batch.segment_ids.shape[-1])
+        counts.extend(len(set(row[row > 0].tolist())) for row in rows)
+    return counts
+
+
+def test_eval_instrument_does_not_move_with_the_training_packer() -> None:
+    """Training packing must not reach the default eval rows.
+
+    This is the property a packing comparison rests on: two runs that train
+    under different packing have to be scored by the same instrument, or their
+    eval_loss series measure different things and cannot be compared.
+    """
+    sequential = list(
+        build_eval_iterator(_eval_cfg(packing_mode="sequential"), tokens=_INSTRUMENT_DOCS)
+    )
+    binned = list(
+        build_eval_iterator(
+            _eval_cfg(packing_mode="bin", packing_buffer_docs=4),
+            tokens=_INSTRUMENT_DOCS,
+        )
+    )
+
+    assert sequential
+    assert len(sequential) == len(binned)
+    for from_sequential, from_bin in zip(sequential, binned, strict=True):
+        assert np.array_equal(from_sequential.input_ids, from_bin.input_ids)
+        assert np.array_equal(from_sequential.labels, from_bin.labels)
+        assert np.array_equal(from_sequential.segment_ids, from_bin.segment_ids)
+
+
+def test_onedoc_eval_isolates_documents_and_train_packing_does_not() -> None:
+    """The default instrument gives each document its own row; 'train' does not."""
+    onedoc = list(
+        build_eval_iterator(
+            _eval_cfg(packing_mode="bin", packing_buffer_docs=4),
+            tokens=_INSTRUMENT_DOCS,
+        )
+    )
+    inherited = list(
+        build_eval_iterator(
+            _eval_cfg(packing_mode="bin", packing_buffer_docs=4, eval_packing="train"),
+            tokens=_INSTRUMENT_DOCS,
+        )
+    )
+
+    assert _segments_per_row(onedoc) == [1] * len(_INSTRUMENT_DOCS)
+    assert max(_segments_per_row(inherited)) > 1
+
+
+def test_eval_packing_is_fingerprinted() -> None:
+    """Row layout decides what eval_loss means, so a resume has to see it change."""
+    onedoc = _eval_cfg(packing_mode="bin", max_eval_samples=4)
+    inherited = replace(onedoc, data=replace(onedoc.data, eval_packing="train"))
+
+    assert data_fingerprint(onedoc)["eval"]["packing"] == "onedoc"
+    assert data_fingerprint(inherited)["eval"]["packing"] == "train"
 
 
 def test_eval_zero_valid_tokens_disables_eval(

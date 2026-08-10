@@ -245,7 +245,12 @@ def test_megalodon_accumulation_matches_full_batch() -> None:
         )
         assert eqx.tree_equal(state.params, reference_state.params, rtol=2e-5, atol=2e-6)
 
+    # These rows are hand-packed with two segments, so the eval step has to
+    # inherit the training packer to score them under the same objective; the
+    # default one-document instrument would assume a single segment per row and
+    # count the cross-document pair.
     cfg = _megalodon_accum_cfg(grad_accum=1)
+    cfg = replace(cfg, data=replace(cfg.data, eval_packing="train"))
     eval_sum, eval_count = make_eval_step(cfg, static=static)(params, full_batch)
     direct_sum, direct_count = loss_sum_and_count(
         params,
