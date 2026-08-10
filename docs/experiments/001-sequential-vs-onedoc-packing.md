@@ -1,7 +1,8 @@
 # 001 — Does sequential packing hurt a recurrent-state model?
 
-**Status:** planned. Part 1 (the shared baseline) finished 2026-08-07. Neither
-phase-2 arm has been launched.
+**Status:** treatment arm run and stopped early 2026-08-10 with a clear
+negative result — one-doc continuation makes clean-input loss *worse* and heals
+far too slowly to repay it. Control arm running. See [Results](#results).
 
 ## Question
 
@@ -112,12 +113,29 @@ context, no CEMA/TimestepNorm state carried in from an unrelated one. Without
 that, each arm would be measured by a device the arm itself changed, and the
 two `eval_loss` series would not be comparable.
 
-The 30-step probe below measured the offset this introduces on part 1's
-weights: 2.8849 one-doc against the 2.8899 sequential eval logged at step
-100,000, a 0.005-nat shift — the same size as the run-to-run eval band, but it
-is a real discontinuity in the series at step 100,000 in *both* arms, not a
-result. **Part 1's clean-instrument baseline is 2.8849; that is the number
-phase 2 has to beat.**
+The offset this introduces was measured directly, by restoring part 1's
+step-100000 weights and scoring the same 1000 held-out documents twice on the
+same process (2026-08-10, RTX 5090):
+
+| instrument | eval_loss | valid tokens | batches |
+|---|---|---|---|
+| `eval_packing: train` (sequential, part 1's own) | **2.8899** | 1,863,259 | 114 |
+| `eval_packing: onedoc` | **2.8820** | 1,863,614 | 195 |
+
+The `train` figure reproduces part 1's logged step-100000 `eval_loss` to four
+decimals, which is what makes the `onedoc` figure from the same process
+trustworthy. One-doc eval reads **0.0079 nats lower** on identical weights —
+there are no contaminated prefixes left to mispredict after. The 195-vs-114
+batch count is the padding cost, consistent with ~0.6 utilization.
+
+**Part 1's clean-instrument baseline is 2.8820; that is the number phase 2 has
+to beat.** The 30-step probe below recorded 2.8849, which is 0.0029 too high:
+it was taken *after* some one-doc training steps rather than on the untouched
+checkpoint. To reproduce, score the checkpoint directly rather than reading a
+probe's first eval — restore params with `restore_params_only`, collect the
+documents once with `load_or_create_eval_tokens`, then sum
+`make_eval_step` over `build_eval_iterator` for each `eval_packing` value and
+divide by the returned token count. There is no `chomp eval` subcommand.
 
 `data.eval_packing` is fingerprinted, so switching it mid-run is caught like
 any other eval-selection change. Part 1's checkpoint predates the field, which
@@ -157,23 +175,23 @@ is an accident, not this experiment.
 
 ## Confound: equal steps is not equal tokens
 
-One-document rows waste the tail of every row. Measured over a 30-step probe
-from the real checkpoint, `packing_utilization` was **0.534** — so at equal
-steps the treatment arm sees roughly 47% fewer valid tokens than the control:
+One-document rows waste the tail of every row. Measured over 12,525 steps of
+the treatment arm, `packing_utilization` averaged **0.61** — so at equal steps
+the treatment arm sees roughly 39% fewer valid tokens than the control:
 
 | | steps | utilization | valid tokens | wall clock |
 |---|---|---|---|---|
 | control (sequential) | 25,000 | 1.000 | ~3.28B | ~12.4 h |
-| treatment (one-doc) | 25,000 | 0.534 | ~1.75B | ~12.4 h |
-| treatment, token-matched | ~46,800 | 0.534 | ~3.28B | ~23 h |
+| treatment (one-doc) | 25,000 | 0.61 | ~2.00B | ~12.4 h |
+| treatment, token-matched | ~41,000 | 0.61 | ~3.28B | ~20 h |
 
 (`packing_utilization` is measured; token counts and wall clock are arithmetic
 from it and from `step_time_s`.)
 
-Note `configs/custom/finepdfs_200m_2048-onedoc-62k.yaml` claims 0.701 in its
-header. Both that and the 0.534 here are short-window samples of a heavy-tailed
-length distribution and neither is settled; the real number lands somewhere in
-between and a full arm will pin it down.
+The 30-step probe read 0.534 and
+`configs/custom/finepdfs_200m_2048-onedoc-62k.yaml` claims 0.701 in its header;
+both were short-window samples of a heavy-tailed length distribution. The
+12,525-step arm settles it between them at ~0.61.
 
 **Plan: run equal steps first**, because the result is decisive in one
 direction and cheap:
@@ -205,15 +223,18 @@ real checkpoint rather than on a smoke config.
 | `peak_memory_gb` | 29.136 — fits the 0.90 pool |
 | eval under one-doc packing | 2.8849 / 2.8885 / 2.8902 |
 
-**The eval instrument barely moves.** At the time of the probe, eval batches
-were packed with the same config as training, so switching packing also
-switched the measuring device. On essentially unchanged weights, one-doc eval
-read 2.8849 against part 1's sequential 2.8899 — a 0.005-nat shift, the same
-size as the run-to-run eval band. That measurement is what
+**The eval instrument moves less than the effect.** At the time of the probe,
+eval batches were packed with the same config as training, so switching packing
+also switched the measuring device. The probe read 2.8849 one-doc against part
+1's sequential 2.8899 and called the shift 0.005 nats. Both halves of that were
+slightly wrong: direct scoring of the untouched checkpoint (see [the eval
+instrument](#the-eval-instrument)) puts the offset at **0.0079** and the one-doc
+baseline at **2.8820**, because the probe's first eval already included some
+one-doc training steps. That measurement is what
 [`data.eval_packing`](../config-reference.yaml) was subsequently built on: the
 instrument is now pinned to one-doc for both arms rather than following each
 arm's training packer, so the shift is a one-time offset at step 100,000
-instead of a per-arm confound. 2.8849 is the baseline to beat.
+instead of a per-arm confound.
 
 ## Prerequisite fixes
 
@@ -245,7 +266,54 @@ the same held-out documents either way. See
 
 ## Results
 
-Not yet run.
+### Treatment (one-doc) — stopped early at step 112,525 of 125,000
+
+Run dir `runs/chomp-200-2608-p2-onedoc`, wandb
+`200m-finepdfs-onedoc-seq2048-b8x8-swiglu-part2-25k` (`bp6a7nsj`), 2026-08-10.
+Stopped deliberately after 12,525 of 25,000 steps; the checkpoint at 112,500 is
+intact and `--resume latest` continues it.
+
+All values on the pinned one-doc instrument, against the measured 2.8820
+baseline:
+
+| step | eval_loss | Δ baseline | Δ previous |
+|---|---|---|---|
+| 100,000 | 2.8820 | — | — |
+| 102,500 | 2.9046 | +0.0226 | +0.0226 |
+| 105,000 | 2.9082 | +0.0262 | +0.0036 |
+| 107,500 | 2.9142 | +0.0322 | +0.0060 |
+| 110,000 | 2.9123 | +0.0303 | −0.0019 |
+| 112,500 | 2.9104 | +0.0284 | −0.0019 |
+
+**One-doc continuation makes clean-input loss worse, and heals too slowly to
+repay it.** Loss rose for 7,500 steps to a peak of +0.0322, then began a steady
+linear recovery of −0.0019 per 2,500 steps. Extrapolating that rate, returning
+to 2.8820 needs roughly **37,400 further steps** — three times the budget that
+remained, and that assumes a linear recovery rather than the more usual decay
+toward an asymptote above baseline.
+
+This is not the token deficit. A token deficit slows improvement; it cannot
+push loss above the starting point. Nor is it the schedule: part 1's last 5,000
+steps at this same constant 3e-5 moved eval ~0.000. The cause is the packing
+change.
+
+The likely mechanism is not that contamination was harmless but that one-doc
+rows destroy something worth more. Under sequential packing a long document
+spans consecutive rows and CEMA/TimestepNorm carry genuine context across them;
+under one-doc packing each capacity-sized chunk starts cold. On a long-document
+corpus that trade is a net loss.
+
+Operationally: `segments_per_seq` held at exactly 1.0/1/1, `step_time_s` 1.78
+(indistinguishable from sequential), `peak_memory_gb` 29.2 under the 0.90 pool,
+`tokens_seen` 13.094B → 14.096B. Measured packing utilization over the whole
+arm was **~0.61**, not the 0.534 the 30-step probe suggested — so the
+equal-steps token deficit is ~1.65x, not ~1.9x. The 0.701 in the
+`-onedoc-62k` header remains the high end; ~0.61 is the settled figure at this
+shape.
+
+### Control (sequential)
+
+Running.
 
 <!--
 When an arm finishes, record here: final eval_loss and the step it came from,
