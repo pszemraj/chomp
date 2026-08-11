@@ -1,8 +1,11 @@
 # 001 — Does sequential packing hurt a recurrent-state model?
 
-**Status:** treatment arm run and stopped early 2026-08-10 with a clear
+**Status:** one-doc treatment run and stopped early 2026-08-10 with a clear
 negative result — one-doc continuation makes clean-input loss *worse* and heals
-far too slowly to repay it. Control arm running. See [Results](#results).
+far too slowly to repay it. Sequential control completed 2026-08-11, flat
+across all ten evals. A third arm (`bin` + strict segments, the first
+confound-free test of the actual question) is running. See
+[Results](#results).
 
 ## Question
 
@@ -309,8 +312,9 @@ fewer valid tokens per optimizer step at an unchanged LR, and a smaller
 effective batch at fixed LR raises the SGD noise floor — which produces a rise
 to a worse plateau rather than a transient, matching the shape observed. This
 predicts that `bin` packing without a per-row document cap, which keeps
-utilization at ~1.0, would *not* show the damage. That arm has not been run;
-see below.
+utilization at 1.000, would *not* show the damage. That arm is running — see
+[`bin` + strict segments](#bin--strict-segments--running), which was launched
+to test exactly this.
 
 Operationally: `segments_per_seq` held at exactly 1.0/1/1, `step_time_s` 1.78
 (indistinguishable from sequential), `peak_memory_gb` 29.2 under the 0.90 pool,
@@ -320,43 +324,80 @@ equal-steps token deficit is ~1.65x, not ~1.9x. The 0.701 in the
 `-onedoc-62k` header remains the high end; ~0.61 is the settled figure at this
 shape.
 
-### Control (sequential)
+### Control (sequential) — complete, 125,000 steps
 
-Running. Paired against the treatment at identical steps, same checkpoint,
-optimizer state, RNG, corpus position, LR, and eval instrument:
+Run dir `runs/chomp-200-2608-p2-seq`, finished 2026-08-11, 16,367,832,519
+tokens, `packing_utilization` 1.000, exported to `<run_dir>/export/`.
+
+| step | 102.5k | 105k | 107.5k | 110k | 112.5k | 115k | 117.5k | 120k | 122.5k | 125k |
+|---|---|---|---|---|---|---|---|---|---|---|
+| eval | 2.8836 | 2.8815 | 2.8805 | 2.8812 | 2.8801 | 2.8792 | 2.8824 | 2.8819 | 2.8822 | 2.8849 |
+
+Mean **2.8818**, spread **0.0058**, **no trend** — first five average 2.8814,
+last five 2.8821. 25,000 further steps and 3.27B further tokens at the spent
+minimum LR move this model essentially nowhere, which is what makes it a usable
+reference. It also pins the eval band at 0.0058 over ten points, confirming the
+0.005 used above.
+
+**A retraction.** An intermediate reading of the first three control points
+claimed the control drifts down ~0.0016 per 2,500 steps, and concluded that
+most of the treatment's late recovery was ordinary training rather than
+healing. Ten points show that drift was inside the band. The control is flat,
+so the treatment's −0.0019 per 2,500 steps is genuine healing measured against
+a flat reference. Do not read a trend off three points spanning 0.003 when the
+band is 0.006.
+
+Paired against the treatment at identical steps — same checkpoint, optimizer
+state, RNG, corpus position, LR, and eval instrument, differing only in
+packing:
 
 | step | control | treatment | gap |
 |---|---|---|---|
-| 102,500 | 2.8836 (+0.0016) | 2.9046 (+0.0226) | 0.0210 |
-| 105,000 | 2.8815 (−0.0005) | 2.9082 (+0.0262) | 0.0267 |
-| 107,500 | 2.8805 (−0.0015) | 2.9142 (+0.0322) | 0.0337 |
+| 102,500 | 2.8836 | 2.9046 | 0.0210 |
+| 105,000 | 2.8815 | 2.9082 | 0.0267 |
+| 107,500 | 2.8805 | 2.9142 | 0.0337 |
+| 110,000 | 2.8812 | 2.9123 | 0.0311 |
+| 112,500 | 2.8801 | 2.9104 | 0.0303 |
 
-The control is not flat — it drifts down ~0.0016 per 2,500 steps, so part 1's
-last-5k flatness understated ongoing progress at min LR. Consequence: most of
-the treatment's late "recovery" (−0.0019 per 2,500 steps) is ordinary training,
-not healing. The packing-attributable component is ~0.0003 per 2,500 steps,
-indistinguishable from zero at this band, so the arms do not converge on any
-practical horizon. (Rate differences of 0.0003–0.0016 against a ~0.005
-single-point band are suggestive only; the 0.0337 gap is the solid part.)
+The gap peaks at 0.0337 and closes at ~0.0017 per 2,500 steps, so the treatment
+needs on the order of 45,000 further steps merely to draw level.
 
-## Not tested: `bin` packing
+### `bin` + strict segments — running
 
-Only two of three packing regimes have been run. Note the config naming trap:
-`-packed-` in `configs/custom/` means **`packing_mode: sequential`**, not `bin`.
+The third packing regime. Note the config naming trap: `-packed-` in
+`configs/custom/` means **`packing_mode: sequential`**, not `bin`, and the
+`packing_strict_segments: true` in those files is inert because it applies only
+to `bin`/`multipack`.
 
-| regime | config | utilization | run? |
+| regime | config | utilization | status |
 |---|---|---|---|
-| `sequential` | `-packed-fast`, `-packed-62k` | 1.0 | yes (part 1, control) |
-| `bin` + `max_docs_per_bin: 1` | `-onedoc-*` | ~0.61 | yes (treatment) |
-| `bin`, no doc cap, `strict_segments: true` | none | ~1.0 | **no** |
+| `sequential` | `-packed-fast`, `-packed-62k` | 1.000 | part 1 + control, done |
+| `bin` + `max_docs_per_bin: 1` | `-onedoc-*` | ~0.61 | treatment, done |
+| `bin`, no doc cap, `strict_segments: true` | `-bin-part2` | 1.000 | running |
 
-`packing_strict_segments: true` in the `-packed-` configs is inert: it applies
-only to `bin`/`multipack`. The untested third row is the clean test of the
-original question — it removes cross-document contamination via full state
-isolation (see [packing](../packing.md)) while keeping utilization at ~1.0, so
-it carries neither the padding waste nor the token deficit that the one-doc arm
-introduced. It costs ~2x attention FLOPs. It is also the arm that discriminates
-the effective-batch explanation above from a genuine contamination effect.
+This is the first clean test of the question this experiment asks. Full state
+isolation (see [packing](../packing.md)) removes cross-document contamination
+while utilization stays at 1.000 — no padding, no token deficit, so neither
+confound the one-doc arm carried. It also discriminates the effective-batch
+explanation above: if that explanation is right, this arm should track the
+control.
+
+Two costs measured before committing GPU time, both absent from
+[packing](../packing.md), which says only that backward peak "must still be
+measured":
+
+- With `use_checkpoint: false` at bs8 x ga8 x seq2048, strict segments ask for a
+  single **32.56 GiB** allocation in `jit_train_step` and die with
+  `RESOURCE_EXHAUSTED` on a 32 GB card.
+- With `use_checkpoint: true`: **13.4 GB** peak (including a generation sample)
+  and **6.055 s/step**, i.e. **3.4x** the sequential arms' 1.790 s, not the ~2x
+  the attention-FLOP figure implies. Checkpointing's rematerialization compounds
+  with strict mode's chunk re-anchoring.
+
+Gradient checkpointing is the confound-free way to fit it: rematerialization is
+bit-identical math, whereas narrowing the micro-batch would reassociate the
+gradient accumulation sum and make the accumulation partition a second variable
+alongside packing.
 
 <!--
 When an arm finishes, record here: final eval_loss and the step it came from,
