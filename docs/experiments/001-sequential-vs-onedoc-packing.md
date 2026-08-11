@@ -297,11 +297,20 @@ push loss above the starting point. Nor is it the schedule: part 1's last 5,000
 steps at this same constant 3e-5 moved eval ~0.000. The cause is the packing
 change.
 
-The likely mechanism is not that contamination was harmless but that one-doc
-rows destroy something worth more. Under sequential packing a long document
-spans consecutive rows and CEMA/TimestepNorm carry genuine context across them;
-under one-doc packing each capacity-sized chunk starts cold. On a long-document
-corpus that trade is a net loss.
+**Mechanism is not established.** An earlier draft of this section blamed lost
+long-range context — that under sequential packing a long document spans
+consecutive rows and CEMA/TimestepNorm carry context across them. That is
+false: consecutive windows land in different *rows*, and no recurrent state
+crosses rows or steps (`TrainState` is step/params/opt_state/rng only, and
+training never uses a cache). Every row starts cold under both schemes.
+
+The surviving candidate is the effective-batch one. One-doc rows deliver ~39%
+fewer valid tokens per optimizer step at an unchanged LR, and a smaller
+effective batch at fixed LR raises the SGD noise floor — which produces a rise
+to a worse plateau rather than a transient, matching the shape observed. This
+predicts that `bin` packing without a per-row document cap, which keeps
+utilization at ~1.0, would *not* show the damage. That arm has not been run;
+see below.
 
 Operationally: `segments_per_seq` held at exactly 1.0/1/1, `step_time_s` 1.78
 (indistinguishable from sequential), `peak_memory_gb` 29.2 under the 0.90 pool,
@@ -313,7 +322,41 @@ shape.
 
 ### Control (sequential)
 
-Running.
+Running. Paired against the treatment at identical steps, same checkpoint,
+optimizer state, RNG, corpus position, LR, and eval instrument:
+
+| step | control | treatment | gap |
+|---|---|---|---|
+| 102,500 | 2.8836 (+0.0016) | 2.9046 (+0.0226) | 0.0210 |
+| 105,000 | 2.8815 (−0.0005) | 2.9082 (+0.0262) | 0.0267 |
+| 107,500 | 2.8805 (−0.0015) | 2.9142 (+0.0322) | 0.0337 |
+
+The control is not flat — it drifts down ~0.0016 per 2,500 steps, so part 1's
+last-5k flatness understated ongoing progress at min LR. Consequence: most of
+the treatment's late "recovery" (−0.0019 per 2,500 steps) is ordinary training,
+not healing. The packing-attributable component is ~0.0003 per 2,500 steps,
+indistinguishable from zero at this band, so the arms do not converge on any
+practical horizon. (Rate differences of 0.0003–0.0016 against a ~0.005
+single-point band are suggestive only; the 0.0337 gap is the solid part.)
+
+## Not tested: `bin` packing
+
+Only two of three packing regimes have been run. Note the config naming trap:
+`-packed-` in `configs/custom/` means **`packing_mode: sequential`**, not `bin`.
+
+| regime | config | utilization | run? |
+|---|---|---|---|
+| `sequential` | `-packed-fast`, `-packed-62k` | 1.0 | yes (part 1, control) |
+| `bin` + `max_docs_per_bin: 1` | `-onedoc-*` | ~0.61 | yes (treatment) |
+| `bin`, no doc cap, `strict_segments: true` | none | ~1.0 | **no** |
+
+`packing_strict_segments: true` in the `-packed-` configs is inert: it applies
+only to `bin`/`multipack`. The untested third row is the clean test of the
+original question — it removes cross-document contamination via full state
+isolation (see [packing](../packing.md)) while keeping utilization at ~1.0, so
+it carries neither the padding waste nor the token deficit that the one-doc arm
+introduced. It costs ~2x attention FLOPs. It is also the arm that discriminates
+the effective-batch explanation above from a genuine contamination effect.
 
 <!--
 When an arm finishes, record here: final eval_loss and the step it came from,
