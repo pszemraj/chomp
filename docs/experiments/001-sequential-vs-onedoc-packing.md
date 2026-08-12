@@ -1,10 +1,10 @@
 # 001 — Does sequential packing hurt a recurrent-state model?
 
-**Status:** one-doc treatment run and stopped early 2026-08-10 with a clear
-negative result — one-doc continuation makes clean-input loss *worse* and heals
-far too slowly to repay it. Sequential control completed 2026-08-11, flat
-across all ten evals. A third arm (`bin` + strict segments, the first
-confound-free test of the actual question) is running. See
+**Status:** DONE, 2026-08-11. All three packing regimes measured against a
+common baseline. Cross-document contamination is real but small: strict segment
+isolation at full utilization buys 0.0043 nats (t = −4.1) for 2.8x the wall
+clock per token, while one-document-per-row costs 0.0282 (t = +16.1). Keep
+`sequential`. "Train contaminated, heal after" does not work. See
 [Results](#results).
 
 ## Question
@@ -269,6 +269,33 @@ the same held-out documents either way. See
 
 ## Results
 
+### Summary — all three packing regimes
+
+Baseline is part 1's step-100000 weights scored directly on the one-doc
+instrument: **2.8820**. All arms resume that checkpoint and differ only in
+packing.
+
+| arm | packing | evals | mean eval | vs control | t | util | s/step | valid tok/s |
+|---|---|---|---|---|---|---|---|---|
+| control | `sequential` | 10 | 2.8818 | — | — | 1.000 | 1.80 | 72,767 |
+| treatment | `bin`, 1 doc/row | 5 | 2.9099 | **+0.0282** | +16.1 | 0.608 | 1.79 | 44,704 |
+| arm 3 | `bin` + strict | 4 | **2.8775** | **−0.0043** | −4.10 | 0.989 | 5.03 | 25,776 |
+
+**Both effects are real and they point in opposite directions.** Removing
+contamination the *right* way (strict isolation, full utilization) buys 0.0043
+nats. Removing it the *wrong* way (one document per row, 39% padding) costs
+0.0282 — roughly 6.5x larger, and in the wrong direction.
+
+**Operational conclusion: keep `sequential`.** 0.0043 nats is not worth 2.8x
+the wall clock per token (25,776 vs 72,767 valid tok/s). The same time spent on
+sequential packing buys ~2.8x more tokens, which at any live point on an LR
+schedule dominates 0.004 nats. The contamination that motivated this experiment
+is real, measurable, and too small to pay to remove at this scale.
+
+**And the original question — "train contaminated, heal it after" — is
+answered no.** See the treatment arm: the heal exists but repays ~0.0019 per
+2,500 steps against a ~0.03 deficit.
+
 ### Treatment (one-doc) — stopped early at step 112,525 of 125,000
 
 Run dir `runs/chomp-200-2608-p2-onedoc`, wandb
@@ -362,7 +389,42 @@ packing:
 The gap peaks at 0.0337 and closes at ~0.0017 per 2,500 steps, so the treatment
 needs on the order of 45,000 further steps merely to draw level.
 
-### `bin` + strict segments — running
+### `bin` + strict segments — complete, 10,000 steps
+
+Run dir `runs/chomp-200-2608-p2-binstrict`, wandb `qxo3pm35`, finished
+2026-08-11. 14,390,891,457 tokens, `packing_utilization` 0.995, exported.
+
+| step | 102,500 | 105,000 | 107,500 | 110,000 |
+|---|---|---|---|---|
+| eval | 2.8758 | 2.8781 | 2.8797 | 2.8763 |
+| paired Δ vs control | −0.0077 | −0.0034 | −0.0008 | −0.0049 |
+
+Mean **2.8775** (sd 0.00178, n=4) against the control's 2.8818 (sd 0.00168,
+n=10): **−0.0043, t = −4.10**. All four paired differences are negative.
+
+**Strict segment isolation is a real improvement over sequential packing, and
+it is small.** This is the first confound-free measurement of the question this
+experiment asks, because utilization is 0.989 — no padding, no token deficit,
+same 131,072 valid tokens per step as the control.
+
+Two readings-off-noise happened while this arm ran and are recorded as a
+caution: the paired gap went −0.0077 → −0.0034 → −0.0008, which was narrated as
+a decay toward zero, and then the fourth point came back to −0.0049. Adjacent
+eval points differ by ~0.002 against a per-point sd of ~0.0017; **only the arm
+mean against the control mean is a statistic.** The same error was made earlier
+on the control's first three points. Do not narrate point-to-point movement.
+
+#### Instrument caveat
+
+Evaluation is one document per row, so an arm whose *training* also isolated
+documents is better matched to the measuring condition. That is correct for the
+operational question — which model is better under the conditions generation
+runs in — but it means −0.0043 cannot be read as "contamination damages the
+model in general," only as "under single-document evaluation." Note the one-doc
+arm had the same structural advantage and still lost by 0.028, which makes its
+damage more striking rather than less.
+
+### `bin` + strict segments — configuration and costs
 
 The third packing regime. Note the config naming trap: `-packed-` in
 `configs/custom/` means **`packing_mode: sequential`**, not `bin`, and the
@@ -372,15 +434,12 @@ to `bin`/`multipack`.
 | regime | config | utilization | status |
 |---|---|---|---|
 | `sequential` | `-packed-fast`, `-packed-62k` | 1.000 | part 1 + control, done |
-| `bin` + `max_docs_per_bin: 1` | `-onedoc-*` | ~0.61 | treatment, done |
-| `bin`, no doc cap, `strict_segments: true` | `-bin-part2` | 1.000 | running |
+| `bin` + `max_docs_per_bin: 1` | `-onedoc-*` | 0.608 | treatment, done |
+| `bin`, no doc cap, `strict_segments: true` | `-bin-part2` | 0.989 | done |
 
-This is the first clean test of the question this experiment asks. Full state
-isolation (see [packing](../packing.md)) removes cross-document contamination
-while utilization stays at 1.000 — no padding, no token deficit, so neither
-confound the one-doc arm carried. It also discriminates the effective-batch
-explanation above: if that explanation is right, this arm should track the
-control.
+Full state isolation (see [packing](../packing.md)) removes cross-document
+contamination while utilization stays near 1.0 — no padding, no token deficit,
+so neither confound the one-doc arm carried.
 
 Two costs measured before committing GPU time, both absent from
 [packing](../packing.md), which says only that backward peak "must still be
