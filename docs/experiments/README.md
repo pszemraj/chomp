@@ -31,4 +31,4 @@ should say that too.
 
 | # | Experiment | Status |
 |---|---|---|
-| [001](001-sequential-vs-onedoc-packing.md) | Does sequential packing hurt? CEMA/TimestepNorm state contamination across document boundaries | done — barely: strict isolation buys 0.0043 nats for 2.8x the cost, one-doc-per-row costs 0.0282. Keep sequential |
+| [001](001-sequential-vs-onedoc-packing.md) | Does sequential packing hurt? CEMA/TimestepNorm state contamination across document boundaries | done — aggregate is small (strict buys 0.0043 for 2.8x cost; one-doc-per-row costs 0.0282), but a position decomposition finds 0.13 nats in the first 15 positions that more tokens never fix. Keep sequential, add a ≲2,500-step strict tail |

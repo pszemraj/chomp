@@ -286,11 +286,14 @@ contamination the *right* way (strict isolation, full utilization) buys 0.0043
 nats. Removing it the *wrong* way (one document per row, 39% padding) costs
 0.0282 — roughly 6.5x larger, and in the wrong direction.
 
-**Operational conclusion: keep `sequential`.** 0.0043 nats is not worth 2.8x
-the wall clock per token (25,776 vs 72,767 valid tok/s). The same time spent on
-sequential packing buys ~2.8x more tokens, which at any live point on an LR
-schedule dominates 0.004 nats. The contamination that motivated this experiment
-is real, measurable, and too small to pay to remove at this scale.
+**Operational conclusion: keep `sequential` for the bulk, and end with a short
+strict-packed tail.** 0.0043 nats is not worth 2.8x the wall clock per token
+(25,776 vs 72,767 valid tok/s) across a whole run — the same time on sequential
+buys ~2.8x more tokens, which dominates at any live point on an LR schedule. But
+the aggregate is a token-weighted mean that hides a 24x-larger effect in the
+first tens of positions, and that part is *not* purchasable with more tokens.
+A tail of ≲2,500 strict steps captures it for ~8% wall-clock overhead. See
+[the position decomposition](#follow-up--where-the-strict-advantage-lives-2026-08-13).
 
 **And the original question — "train contaminated, heal it after" — is
 answered no.** See the treatment arm: the heal exists but repays ~0.0019 per
@@ -457,6 +460,139 @@ Gradient checkpointing is the confound-free way to fit it: rematerialization is
 bit-identical math, whereas narrowing the micro-batch would reassociate the
 gradient accumulation sum and make the accumulation partition a second variable
 alongside packing.
+
+## Follow-up — where the strict advantage lives (2026-08-13)
+
+The −0.0043 headline is a token-weighted mean over 2048 positions, so it can
+hide structure. TimestepNorm's statistics are cumulative along the sequence: a
+document starting at row position 900 has its first token normalized by
+statistics settled over 900 tokens of unrelated text, while at inference the
+same token is normalized by statistics from *one* token. Cumulative statistics
+converge fast, which predicts the advantage is concentrated near a cold start.
+
+It is — but that turned out to be only half the story.
+
+### Method
+
+Scripts and raw arrays in `scratch/exp001-position/` (gitignored).
+
+All checkpoints are scored through **one** explicitly built config, **one** eval
+token set, and **one** model graph; only the weights vary. That is deliberately
+stronger than using each run's own config — and necessary, because these run
+dirs snapshot part 1's config rather than their own (see the provenance note
+below). `hf_revision` is pinned to the commit both arms resolved at launch
+(`8904a95…`) so eval documents cannot drift.
+
+Per-token loss comes from the backend's `compute_loss(reduction="none")`, shape
+`(B, T-1)`, where index `j` scores the target at row position `j+1`. The
+hand-built valid mask is asserted to reconstruct the stock `make_eval_step`
+aggregate exactly, on both loss sum and token count.
+
+Position semantics: the one-doc instrument puts one document *chunk* per row
+starting at row position 0, and documents longer than `seq_len` are pre-chunked
+to capacity, so **row position is position-since-cold-start**. For the 82% of
+eval documents that fit in one row it is also position within the document; the
+rest start mid-document but still start cold, which is the condition under test.
+`add_bos` is false, so target position 1 is predicting the *second* token from
+the first with no context at all.
+
+Eval set: 1000 documents, 1,864,169 tokens, median length 768, 17.9% over
+`seq_len`, 1560 rows, 1,863,614 valid targets.
+
+Harness validation: part1@100000 reproduces the recorded **2.8820 exactly**
+(delta −0.0000), and the three strict checkpoints reproduce their logged
+training-time evals (2.8781 / 2.8797 / 2.8763).
+
+The arms sit at different steps — retention kept only the last 3 checkpoints per
+run, so no matched step exists. The sequential reference is therefore linearly
+interpolated to step 110,000 from part1@100000 and seq@120000, with seq@125000
+as a linearity check. Uncertainty is a 95% paired bootstrap over the 1560 eval
+rows (2000 resamples); rows are identical across checkpoints, asserted.
+
+### Result — a front spike plus a uniform floor
+
+Step-matched to 110,000. `contrib` = delta x token share; the column sums to the
+aggregate difference.
+
+| target positions | token share | seq@110k | strict | delta | 95% CI | contrib | % of total |
+|---|---|---|---|---|---|---|---|
+| **1–15** | 1.3% | 3.9046 | 3.7726 | **−0.1319** | [−0.1454, −0.1186] | −0.00165 | **29.4%** |
+| 16–31 | 1.3% | 3.2151 | 3.1799 | −0.0353 | [−0.0434, −0.0263] | −0.00047 | 8.4% |
+| 32–63 | 2.7% | 3.0481 | 3.0350 | −0.0130 | [−0.0187, −0.0074] | −0.00035 | 6.2% |
+| 64–127 | 5.2% | 2.9302 | 2.9247 | −0.0055 | [−0.0095, −0.0015] | −0.00029 | 5.1% |
+| 128–255 | 9.8% | 2.8714 | 2.8654 | −0.0060 | [−0.0088, −0.0031] | −0.00059 | 10.5% |
+| 256–511 | 17.1% | 2.8051 | 2.8017 | −0.0034 | [−0.0056, −0.0013] | −0.00058 | 10.4% |
+| 512–1023 | 26.4% | 2.8780 | 2.8766 | −0.0014 | [−0.0035, +0.0004] | −0.00038 | 6.7% |
+| 1024–2047 | 36.2% | 2.8573 | 2.8537 | −0.0036 | [−0.0055, −0.0017] | −0.00130 | 23.2% |
+| **total** | 100% | 2.8820 | 2.8763 | **−0.0056** | | −0.00560 | 100% |
+
+The first 15 target positions hold **1.3% of the tokens but carry 29% of the
+total advantage**, at 24x the aggregate effect size. Through position 8: 0.7% of
+tokens, 22.6% of the advantage.
+
+**But the effect is not purely front-loaded.** A floor of roughly −0.0035
+persists at every depth; positions 1024–2047 contribute another 23% with a CI
+that excludes zero. The structure is a steep front spike *plus* a small uniform
+advantage — not a spike decaying to nothing.
+
+### More tokens do not fix the front deficit
+
+Sequential training does not close the front gap with additional budget. Over
+25,000 steps (~3.3B tokens) the sequential arm's 1–15 bucket went 3.9098 →
+3.8993 → 3.9086: flat, inside its own 0.0105 band.
+
+This is the load-bearing finding. The "sequential wins because the same wall
+clock buys 2.8x more tokens" argument does **not** apply to this deficit,
+because sequential packing structurally almost never presents the
+cold-start-at-document-start condition: row starts are cold but land
+mid-document, and document starts land mid-row with warm state. More tokens of a
+distribution that omits a condition does not teach that condition. It is a
+coverage problem, not a budget problem — which is exactly why the aggregate,
+dominated by the 36% of tokens past position 1024, hid it.
+
+### The fix is fast — a short strict tail is enough
+
+Bucket 1–15 across the strict arm, which branched from part1@100000:
+
+| step | strict steps elapsed | bucket 1–15 |
+|---|---|---|
+| 100,000 | 0 (branch point) | 3.9098 |
+| 105,000 | 5,000 | **3.7727** |
+| 107,500 | 7,500 | 3.7744 |
+| 110,000 | 10,000 | 3.7726 |
+
+The entire 0.133-nat gain is present at the first available checkpoint and then
+flat (spread 0.0018, noise). It does not accumulate. The aggregate advantage was
+likewise at full magnitude by the first eval at 102,500, so the true healing
+time is **≤2,500 steps** — under 3% of a 100,000-step run.
+
+### What this changes
+
+- **Keep `sequential` for the bulk.** Unchanged: the aggregate is still ~0.005
+  nats against 2.8x wall clock per token.
+- **Add a short strict-packed tail.** A few thousand steps captures essentially
+  the whole benefit, including the part extra tokens cannot buy, at ~3% of the
+  run at 2.8x cost — roughly 8% wall-clock overhead.
+- **Do not quote −0.0043 as the cost of contamination for short-context work.**
+  For a prompt in the first tens of tokens the gap is ~0.13 nats, 24x larger.
+  Generation from a short prompt, chat turn openings, and SFT example starts all
+  live in the damaged region; long few-shot contexts largely do not.
+- **Multiple-choice loglikelihood evals cancel this only partially.** Candidates
+  share a prefix and therefore share the *same* state, but for a short stem that
+  shared state is the miscalibrated one. This was not measured — it is the
+  obvious next experiment, and it needs an accuracy metric, not a loss.
+
+### Provenance note
+
+Every phase-2 run dir contains part 1's `config_original.yaml` /
+`config_resolved.json` (identical md5 across all four runs, missing the
+`eval_packing` key entirely). This is **not** a chomp defect: the arms were
+branched by copying part 1's run dir, and `utils/io.py` deliberately does not
+rewrite the snapshot on resume. The runs themselves were correct — `launch.log`
+records the real effective config (`packing_mode` current=`'bin'`,
+`strict_segments`=True, `use_checkpoint`=True, `steps`=110000). The residual
+gap: a resumed run leaves no on-disk record of what it actually ran except that
+log. Read `launch.log`, not the config snapshot, when auditing these dirs.
 
 <!--
 When an arm finishes, record here: final eval_loss and the step it came from,
