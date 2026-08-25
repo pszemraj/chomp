@@ -172,7 +172,7 @@ def read_export_manifest(export_dir: str | Path) -> dict[str, Any]:
 
     :param str | Path export_dir: Export directory.
     :raises FileNotFoundError: If the directory holds no manifest.
-    :raises ValueError: If the manifest is corrupt or from a newer schema.
+    :raises ValueError: If the manifest is corrupt, incomplete, or from a newer schema.
     :return dict[str, Any]: Parsed manifest.
     """
     manifest_path = Path(export_dir) / MANIFEST_FILENAME
@@ -203,6 +203,15 @@ def read_export_manifest(export_dir: str | Path) -> dict[str, Any]:
         raise ValueError(
             f"Export manifest declares weights_dtype {manifest.get('weights_dtype')!r}, "
             f"which this chomp does not know (expects one of {sorted(known)}): {manifest_path}"
+        )
+
+    # The chomp config is the half of the export the safetensors header cannot
+    # supply -- tokenizer settings, data, optimizer -- so a manifest without it
+    # describes nothing loadable.
+    if not isinstance(manifest.get("config"), dict):
+        raise ValueError(
+            f"Export manifest carries no chomp config, so the tokenizer and training "
+            f"settings for these weights are unknown: {manifest_path}"
         )
     return manifest
 
@@ -493,6 +502,12 @@ def _write_hf_config(weights_path: Path, destination: Path) -> Path:
             )
         config[hf_name] = native[native_name]
 
+    if "param_dtype" not in native:
+        raise RuntimeError(
+            "megalodon-jax no longer records 'param_dtype'; the 'torch_dtype' field "
+            "in chomp's exporter needs updating."
+        )
+
     config["model_type"] = HF_MODEL_TYPE
     config["architectures"] = [HF_ARCHITECTURE]
     # Ordinary parameter storage. Upstream's bf16 policy keeps normalization,
@@ -535,7 +550,14 @@ def _check_destination(destination: Path, *, overwrite: bool) -> tuple[str, ...]
     :raises FileExistsError: If the destination holds content export will not replace.
     :return tuple[str, ...]: File names the previous export claimed, if any.
     """
-    if not destination.exists() or not any(destination.iterdir()):
+    if not destination.exists():
+        return ()
+    if not destination.is_dir():
+        raise FileExistsError(
+            f"{destination} exists and is not a directory, so chomp cannot export into it. "
+            "Choose an empty or new directory."
+        )
+    if not any(destination.iterdir()):
         return ()
 
     if not is_export_dir(destination):

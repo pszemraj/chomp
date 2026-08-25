@@ -379,6 +379,19 @@ def test_read_export_manifest_rejects_unknown_schema(export_copy: Path, tmp_path
         read_export_manifest(empty)
 
 
+def test_read_export_manifest_requires_the_chomp_config(export_copy: Path) -> None:
+    """The config is what the safetensors header cannot supply; without it nothing loads."""
+    manifest_path = export_copy / MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["config"]
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="carries no chomp config"):
+        read_export_manifest(export_copy)
+    with pytest.raises(ValueError, match="carries no chomp config"):
+        load_export(export_copy)
+
+
 def test_load_export_rejects_manifest_that_disagrees_with_weights(export_copy: Path) -> None:
     """A hand-edited manifest must not silently re-describe the weights."""
     manifest_path = export_copy / MANIFEST_FILENAME
@@ -409,6 +422,13 @@ def test_export_destination_rules(trained_run: Path, tmp_path: Path) -> None:
             export_checkpoint(trained_run, occupied, overwrite=overwrite)
     assert (occupied / "stray.txt").read_text() == "do not clobber me\n"
     assert not (occupied / WEIGHTS_FILENAME).exists()
+
+    # A destination that is a file gets the module's own refusal, not the bare
+    # NotADirectoryError that listing it would raise.
+    a_file = tmp_path / "already-a-file"
+    a_file.write_text("not a directory\n")
+    with pytest.raises(FileExistsError, match="is not a directory"):
+        export_checkpoint(trained_run, a_file, overwrite=True)
 
 
 def test_overwrite_removes_files_the_previous_manifest_claimed(
