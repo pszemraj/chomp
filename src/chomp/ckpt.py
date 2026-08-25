@@ -398,15 +398,75 @@ def restore_meta_at_step(manager: ocp.CheckpointManager, *, step: int) -> dict[s
     return meta
 
 
+def _validate_restored_params(restored: Any, abstract_params: Any, *, step_dir: Path) -> None:
+    """Refuse a params restore that did not fully satisfy the requested tree.
+
+    ``transforms={}`` makes Orbax permissive by design so the saved
+    opt_state/rng/step subtrees can be skipped, and that permissiveness extends
+    to params: a leaf missing from the checkpoint comes back as the requested
+    :class:`jax.ShapeDtypeStruct` rather than raising, and a leaf whose saved
+    shape differs is restored at the *checkpoint's* shape. Both would otherwise
+    reach the optimizer as uninitialized or wrongly shaped parameters.
+
+    :param Any restored: Params pytree returned by Orbax.
+    :param Any abstract_params: ShapeDtypeStruct tree the caller asked for.
+    :param Path step_dir: Source step directory, for the error message.
+    :raises RuntimeError: If any leaf is unrestored or has the wrong shape/dtype.
+    """
+    import jax
+
+    mismatches: list[str] = []
+
+    def _check(path: Any, expected: Any, actual: Any) -> None:
+        """Record one leaf that the checkpoint did not satisfy.
+
+        :param Any path: Key path of the leaf within the params tree.
+        :param Any expected: Requested ShapeDtypeStruct leaf.
+        :param Any actual: Leaf Orbax returned for that position.
+        """
+        where = jax.tree_util.keystr(path)
+        if isinstance(actual, jax.ShapeDtypeStruct):
+            mismatches.append(
+                f"{where}: absent from the checkpoint "
+                f"(this run expects {expected.shape} {expected.dtype})"
+            )
+        elif actual.shape != expected.shape or actual.dtype != expected.dtype:
+            mismatches.append(
+                f"{where}: checkpoint has {actual.shape} {actual.dtype}, "
+                f"this run expects {expected.shape} {expected.dtype}"
+            )
+
+    jax.tree_util.tree_map_with_path(_check, abstract_params, restored)
+    if not mismatches:
+        return
+
+    shown = "\n".join(f"  {line}" for line in mismatches[:5])
+    if len(mismatches) > 5:
+        shown += f"\n  ... and {len(mismatches) - 5} more"
+    raise RuntimeError(
+        f"Checkpoint parameters in {step_dir} do not match the model this run built.\n"
+        f"{shown}\n"
+        "Parameters are copied verbatim, so the architecture must match. Compare "
+        "model.* against the source run's config_resolved.json."
+    )
+
+
 def restore_params_only(step_dir: Path, abstract_params: Any) -> Any:
     """Restore only the params subtree from a checkpoint step directory.
 
     Inference-side helper: loads train_state/params without opt_state/rng/step,
     directly from a step dir (no CheckpointManager needed).
 
+    Every requested leaf is verified to have been restored at the requested
+    shape and dtype; see :func:`_validate_restored_params` for why Orbax alone
+    does not enforce that. Parameters present in the checkpoint but absent from
+    ``abstract_params`` are dropped without comment, which is what lets this
+    function ignore the saved opt_state/rng/step subtrees.
+
     :param Path step_dir: Checkpoint step directory (contains train_state/).
     :param Any abstract_params: ShapeDtypeStruct tree matching params.
     :raises FileNotFoundError: If the step dir has no train_state.
+    :raises RuntimeError: If the checkpoint does not satisfy abstract_params.
     :return Any: Restored params pytree.
     """
     import orbax.checkpoint as ocp
@@ -433,7 +493,9 @@ def restore_params_only(step_dir: Path, abstract_params: Any) -> Any:
                 restore_args=ocp.checkpoint_utils.construct_restore_args(abstract_train_state),
             ),
         )
-    return restored["params"]
+    params = restored["params"]
+    _validate_restored_params(params, abstract_params, step_dir=Path(step_dir))
+    return params
 
 
 def load_warm_start_params(
@@ -449,11 +511,12 @@ def load_warm_start_params(
     That is what lets the data pipeline change shape between phases (packing
     mode, corpus, schedule) where exact resume must refuse.
 
-    Orbax validates the parameter tree structurally against ``abstract_params``,
-    so an architecture change fails the restore. Tokenizer identity is checked
-    here instead because it is the one mismatch Orbax cannot see: a different
-    tokenizer with the same vocab size restores cleanly and then trains on
-    embeddings whose rows mean something else.
+    :func:`restore_params_only` verifies that every parameter this run needs was
+    restored at the expected shape and dtype, so an architecture change is
+    refused. Tokenizer identity is checked here instead because it is the one
+    mismatch no structural check can see: a different tokenizer with the same
+    vocab size restores cleanly and then trains on embeddings whose rows mean
+    something else.
 
     :param Path step_dir: Source checkpoint step directory.
     :param Any abstract_params: ShapeDtypeStruct tree for the new run's params.

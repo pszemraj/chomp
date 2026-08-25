@@ -479,6 +479,51 @@ def test_restore_params_only(
         restore_params_only(ckpt_dir / "999", abstractify_tree(state.params))
 
 
+def test_restore_params_only_rejects_a_shape_mismatch(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
+    """A widened parameter must refuse, not silently restore at the saved width."""
+    _cfg, state, _mgr, ckpt_dir = _saved_step1_checkpoint(
+        tmp_path / "run_params_wide", track_checkpoint_manager
+    )
+
+    wider = {"w": jax.ShapeDtypeStruct((4,), jnp.float32)}
+    with pytest.raises(RuntimeError, match=r"do not match the model.*\n.*expects \(4,\)"):
+        restore_params_only(ckpt_dir / "1", wider)
+
+
+def test_restore_params_only_rejects_a_parameter_absent_from_the_checkpoint(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
+    """A parameter the checkpoint never saved must refuse rather than stay abstract."""
+    _cfg, state, _mgr, ckpt_dir = _saved_step1_checkpoint(
+        tmp_path / "run_params_extra", track_checkpoint_manager
+    )
+
+    grown = dict(abstractify_tree(state.params))
+    grown["extra_layer"] = jax.ShapeDtypeStruct((3,), jnp.float32)
+    with pytest.raises(RuntimeError, match="absent from the checkpoint"):
+        restore_params_only(ckpt_dir / "1", grown)
+
+
+def test_load_warm_start_params_refuses_an_architecture_change(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
+    """Warm start into a changed architecture must fail loudly at restore."""
+    _cfg, state, _mgr, ckpt_dir = _saved_step1_checkpoint(
+        tmp_path / "run_warm_arch", track_checkpoint_manager
+    )
+
+    grown = dict(abstractify_tree(state.params))
+    grown["extra_layer"] = jax.ShapeDtypeStruct((3,), jnp.float32)
+    with pytest.raises(RuntimeError, match="absent from the checkpoint"):
+        load_warm_start_params(
+            ckpt_dir / "1",
+            abstract_params=grown,
+            tokenizer_identity=_TEST_TOKENIZER_IDENTITY,
+        )
+
+
 def test_load_warm_start_params_returns_params_and_provenance(
     tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
 ) -> None:
