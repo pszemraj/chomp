@@ -258,10 +258,19 @@ replayed the 13.1B tokens the model had already trained on.
 Producer state is `{"text": ..., "packer": ...}` and only the packer half is
 family-specific. On a family mismatch the stream position and the document
 counters now restore normally and only the buffers are dropped, with a warning.
-The discarded tokens are whatever the old packer had accepted but not emitted:
-under one window plus at most one document tail. Reachable only under
-`resume_compat: warn`; `strict` still refuses. See
+Reachable only under `resume_compat: warn`; `strict` still refuses. See
 [packing](../packing.md) and [checkpointing](../checkpointing.md).
+
+**Correction.** This section originally bounded the discarded tokens at "under
+one window plus at most one document tail." That is true only when leaving
+`sequential`, whose buffer is a flat token carry. Leaving `bin` discards the
+FFD pending queue, which holds up to `max(bins_per_pack, lookahead_docs)`
+chunks plus any rendered rows — 275,945 tokens at this recipe's geometry,
+roughly 55x the stated bound. Those documents are counted as consumed in
+`docs_seen` and `source_tokens_*` but are never trained on. The warning now
+reports the measured count per family rather than the sequential bound. The
+arms below are unaffected: every switch they perform leaves `sequential`,
+which is the direction the original bound described correctly.
 
 ### An eval instrument that survives a packing change
 
