@@ -80,7 +80,10 @@ Tokenizer files land at the export root rather than under `tokenizer/`, so
 `AutoTokenizer.from_pretrained(export_dir)` resolves without knowing anything
 about chomp's run layout. They are copied rather than re-serialized: the
 identity manifest hashes their exact bytes, and a round trip through
-`save_pretrained` could invalidate the identity export just proved.
+`save_pretrained` could invalidate the identity export just proved. That flat
+layout is also why `identity.json` travels with them — it is what makes the
+copied files checkable on load — and why a nested or name-colliding snapshot is
+refused rather than flattened.
 
 ## config.json
 
@@ -183,10 +186,32 @@ generation produced nonsense. So `chomp export` re-reads the file it just wrote
 and compares every parameter. `--no-verify` skips this; the output says
 `(NOT verified)` when you do.
 
-**The tokenizer is proven, not assumed.** Token IDs index restored embedding
-rows directly, so export applies the same identity check `chomp generate` does
-and refuses rather than warns when the run's tokenizer cannot be shown to match
-the checkpoint's recorded `tokenizer_identity`.
+**The tokenizer is proven, not assumed — in both directions.** Token IDs index
+restored embedding rows directly, so export applies the same identity check
+`chomp generate` does and refuses rather than warns when the run's tokenizer
+cannot be shown to match the checkpoint's recorded `tokenizer_identity`.
+Loading checks it again rather than trusting the recorded proof:
+`load_export_tokenizer` hashes every file the copied `identity.json` claims and
+refuses, naming the file, if one is missing or its bytes have changed. It also
+requires `identity.json` itself to hash back to the `tokenizer_identity` in
+`chomp_export.json`, so a directory assembled from two exports fails instead of
+pairing one export's vocabulary with the other's weights. Byte tokenizers are
+built from the config and ship no vocabulary, so there is nothing to check.
+
+**A tokenizer snapshot that cannot be shipped faithfully is refused.** Export
+copies the snapshot flat into the export root so
+`AutoTokenizer.from_pretrained(export_dir)` resolves. A snapshot containing a
+subdirectory, or a file named `model.safetensors`, `config.json`, or
+`chomp_export.json`, is refused from the source listing before anything is
+written — the first because a flat copy would ship a tokenizer its own identity
+says is incomplete, the second because one of the two files would silently win.
+
+**An interrupted export does not leave a loadable half.** `chomp_export.json` is
+what makes a directory an export, and it is removed before the weights it
+describes are replaced. Anything that fails between the new weights and the new
+manifest therefore leaves a directory that is loudly not an export, rather than
+new weights paired with the previous export's config and tokenizer. Re-export
+into it after removing the directory.
 
 **Exports are not byte-reproducible.** Two exports of the same checkpoint
 contain identical tensors but can differ in the safetensors header: upstream
@@ -325,6 +350,13 @@ single-dtype file omits it rather than restating every tensor name.
 `schema_version` is checked exactly on load. Chomp does not translate across
 schema versions anywhere else, and an export that loaded under the wrong schema
 could pair the wrong vocabulary with these weights; re-export instead.
+`weights_dtype` and `config` are required alongside it: without the config the
+tokenizer and training settings for these weights are unknown, so a manifest
+missing it is rejected rather than partially honored.
+
+`tokenizer_identity` is the compact identity the source checkpoint recorded, and
+it is checked against the shipped `identity.json` every time the tokenizer is
+loaded — see [Guarantees](#guarantees-and-what-they-are-not).
 
 Loading cross-checks the two config sources against each other. If
 `chomp_export.json` describes a different architecture than the safetensors
