@@ -1917,9 +1917,13 @@ def _run_impl(
             total_tokens = total_tokens + token_sum
 
         if batch_count == 0:
+            # Name the packer that laid out these rows, not the training one:
+            # under data.eval_packing='onedoc' they are not the same packer.
+            eval_cfg = eval_config(cfg)
             raise RuntimeError(
                 "Evaluation produced zero batches. "
-                f"packing_mode={cfg.data.packing_mode!r}, "
+                f"eval_packing={cfg.data.eval_packing!r} "
+                f"(packing_mode={eval_cfg.data.packing_mode!r}), "
                 f"eval_rows_per_batch={int(cfg.train.batch_size)}, "
                 f"eval_doc_count={eval_doc_count}. "
                 "The eval set did not yield any usable packed window. Increase "
@@ -1935,7 +1939,7 @@ def _run_impl(
                 f"Evaluation produced {batch_count} batch(es) but zero valid "
                 "loss tokens: every label is masked. Check "
                 "data.mask_boundary_loss / data.train_on_eos against the eval "
-                "document lengths."
+                f"document lengths, under eval_packing={cfg.data.eval_packing!r}."
             )
         total_loss_value = float(total_loss_host)
         if not math.isfinite(total_loss_value):
