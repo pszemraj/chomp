@@ -626,6 +626,16 @@ def export_checkpoint(
 
         destination.mkdir(parents=True, exist_ok=True)
         weights_path = destination / WEIGHTS_FILENAME
+
+        # The manifest is what makes a directory an export, so it is dropped
+        # before the weights it describes are replaced. Everything after the
+        # write can still fail -- the tokenizer copy, config.json, the manifest
+        # write itself -- and without this the window leaves new weights beside
+        # the previous export's config and tokenizer, which is a pairing
+        # ``load_export`` accepts whenever the two share an architecture.
+        # Failing inside the window now leaves a directory that is loudly not
+        # an export instead.
+        (destination / MANIFEST_FILENAME).unlink(missing_ok=True)
         save_checkpoint(model, weights_path)
         if verify:
             _verify_weights(weights_path, params)

@@ -474,6 +474,31 @@ def test_a_failed_overwrite_leaves_the_previous_export_intact(
     assert read_export_manifest(destination)["param_count"] == original.param_count
 
 
+def test_a_failure_after_the_weights_write_leaves_no_loadable_export(
+    trained_run: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """New weights must never be left paired with the previous export's manifest."""
+    destination = tmp_path / "interrupted"
+    export_checkpoint(trained_run, destination)
+
+    def _fail(*args: Any, **kwargs: Any) -> Any:
+        """Fail after the weights are durable but before the manifest is rewritten."""
+        raise RuntimeError("copy exploded")
+
+    monkeypatch.setattr("chomp.export._copy_tokenizer_files", _fail)
+
+    with pytest.raises(RuntimeError, match="copy exploded"):
+        export_checkpoint(trained_run, destination, overwrite=True)
+
+    # The stale manifest described the weights that were just replaced, and
+    # load_export would have accepted the pair: same architecture, different file.
+    assert not (destination / MANIFEST_FILENAME).exists()
+    assert (destination / WEIGHTS_FILENAME).is_file()
+    assert is_export_dir(destination) is False
+    with pytest.raises(FileNotFoundError, match=MANIFEST_FILENAME):
+        load_export(destination)
+
+
 def test_verify_catches_a_corrupted_payload_that_loading_does_not(
     trained_run: Path, tmp_path: Path
 ) -> None:
