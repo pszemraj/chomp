@@ -43,6 +43,7 @@ _WINDOW_SHUFFLE_SEED_OFFSET = 104_729
 _UINT32_MODULUS = 2**32
 TOKENIZER_MANIFEST_FILENAME = "identity.json"
 TOKENIZER_MANIFEST_VERSION = 1
+TOKENIZER_MANIFEST_FIELDS = ("format_version", "implementation", "packages", "files", "canary")
 TOKENIZER_CANARY_VERSION = 1
 _TOKENIZER_CANARIES = (
     ("ordinary", "The quick brown fox."),
@@ -541,6 +542,24 @@ def _build_tokenizer_manifest(tok_dir: Path, tok: Tokenizer) -> dict[str, Any]:
     }
 
 
+def tokenizer_manifest_mismatches(expected: Any, observed: dict[str, Any]) -> list[str]:
+    """Return the manifest fields on which two tokenizer identities disagree.
+
+    The compact checkpoint identity is a hash of the whole manifest, so it can
+    only say "different". Naming the fields separates a rebuilt environment
+    (``packages``) from a genuinely different vocabulary (``files``).
+
+    :param Any expected: Manifest read from disk, or any non-mapping if unreadable.
+    :param dict[str, Any] observed: Manifest rebuilt from the current snapshot.
+    :return list[str]: Differing field names, in manifest order.
+    """
+    return [
+        field
+        for field in TOKENIZER_MANIFEST_FIELDS
+        if not isinstance(expected, dict) or expected.get(field) != observed.get(field)
+    ]
+
+
 def tokenizer_checkpoint_identity(manifest: dict[str, Any]) -> dict[str, Any]:
     """Return the compact tokenizer identity stored in every checkpoint.
 
@@ -656,12 +675,7 @@ def load_tokenizer_snapshot_for_resume(
 
     tokenizer = load_tokenizer_snapshot(run_dir, cfg)
     observed = _build_tokenizer_manifest(tok_dir, tokenizer)
-    fields = ("format_version", "implementation", "packages", "files", "canary")
-    mismatches = [
-        field
-        for field in fields
-        if not isinstance(expected, dict) or expected.get(field) != observed[field]
-    ]
+    mismatches = tokenizer_manifest_mismatches(expected, observed)
     if mismatches:
         detail = ", ".join(mismatches)
         message = f"Tokenizer identity mismatch in: {detail}"

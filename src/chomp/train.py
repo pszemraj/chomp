@@ -30,6 +30,7 @@ import json
 import logging
 import math
 import random
+import shutil
 import signal
 import sys
 import threading
@@ -53,6 +54,7 @@ from chomp.ckpt import (
     default_ckpt_dir,
     load_warm_start_params,
     make_manager,
+    read_warm_start_source,
     restore_data_state_at_step,
     restore_train_state_at_step,
     save,
@@ -691,6 +693,7 @@ def _apply_warm_start(
         init_from_step_dir,
         abstract_params=abstractify_tree(state0.params),
         tokenizer_identity=tokenizer_identity,
+        run_dir=run_dir,
     )
     state = dc_replace(state0, params=params, opt_state=tx.init(params))
 
@@ -1683,6 +1686,12 @@ def _run_impl(
 
     allow_existing = resume != "none"
 
+    if init_from_step_dir is not None:
+        # Gate on the source before creating anything. These refusals depend
+        # only on the source checkpoint, and raising them after create_run_dir
+        # would leave a directory the retry then refuses to clobber.
+        read_warm_start_source(init_from_step_dir)
+
     (
         cfg,
         tokenizer,
@@ -1712,13 +1721,25 @@ def _run_impl(
     _validate_packing_capabilities(cfg, params=params, static=static)
 
     if init_from_step_dir is not None:
-        state0 = _apply_warm_start(
-            state0,
-            tx=tx,
-            init_from_step_dir=init_from_step_dir,
-            tokenizer_identity=tokenizer_identity,
-            run_dir=run_dir,
-        )
+        try:
+            state0 = _apply_warm_start(
+                state0,
+                tx=tx,
+                init_from_step_dir=init_from_step_dir,
+                tokenizer_identity=tokenizer_identity,
+                run_dir=run_dir,
+            )
+        except BaseException:
+            # Warm start and resume are mutually exclusive, so allow_existing is
+            # False here and create_run_dir just made this directory. Leaving it
+            # behind would make the retry fail on "run dir already exists"
+            # instead of on the real problem.
+            if not allow_existing:
+                logger.error(
+                    "Warm start failed; removing the run directory it created: %s", run_dir
+                )
+                shutil.rmtree(run_dir, ignore_errors=True)
+            raise
         params = state0.params
 
     # Log param count once

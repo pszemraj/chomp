@@ -56,7 +56,9 @@ from chomp.data import (
     build_train_iterator,
     data_fingerprint,
     prepare_tokenizer_and_config,
+    tokenizer_checkpoint_identity,
 )
+from chomp.data.pipeline import TOKENIZER_MANIFEST_FILENAME
 from chomp.model import build_model, loss_sum_and_count, supports_packed_segments
 from chomp.train import (
     _METRICS_FILE_DROP,
@@ -640,6 +642,84 @@ def test_warm_start_accepts_changed_packing_mode(tmp_path: Path) -> None:
 
     assert (warm_run_dir / "warm_start.json").exists()
     assert _checkpoint_steps(warm_run_dir) == {1, 2}
+
+
+def test_warm_start_refusal_leaves_no_run_directory_behind(tmp_path: Path) -> None:
+    """A refused warm start must not block its own retry with a half-built run dir."""
+    source_cfg = make_small_run_cfg(tmp_path, run_subdir="tokgate1", decay_steps=2)
+    source_cfg = replace(source_cfg, train=replace(source_cfg.train, steps=2))
+    source_run_dir = run(source_cfg, config_path=None, resume="none", dry_run=False)
+
+    source_step = default_ckpt_dir(source_run_dir) / "2"
+    meta_path = source_step / "meta" / "metadata"
+    meta = json.loads(meta_path.read_text())
+    meta["tokenizer_identity"] = {"manifest_version": 1, "sha256": "a-different-tokenizer"}
+    meta_path.write_text(json.dumps(meta))
+
+    warm_cfg = make_small_run_cfg(tmp_path, run_subdir="tokgate2", decay_steps=2)
+    warm_cfg = replace(warm_cfg, train=replace(warm_cfg.train, steps=2))
+    warm_run_dir = Path(warm_cfg.logging.run_dir)
+
+    with pytest.raises(RuntimeError, match="tokenizer identity mismatch"):
+        run(warm_cfg, config_path=None, resume="none", init_from=source_step, dry_run=False)
+    assert not warm_run_dir.exists()
+
+    # The retry fails on the real problem again, not on "run dir already exists".
+    with pytest.raises(RuntimeError, match="tokenizer identity mismatch"):
+        run(warm_cfg, config_path=None, resume="none", init_from=source_step, dry_run=False)
+
+
+def test_warm_start_reports_which_tokenizer_manifest_fields_differ(tmp_path: Path) -> None:
+    """Two hashes cannot separate a rebuilt environment from a different vocabulary."""
+    source_cfg = make_small_run_cfg(tmp_path, run_subdir="fielddiff1", decay_steps=2)
+    source_cfg = replace(source_cfg, train=replace(source_cfg.train, steps=2))
+    source_run_dir = run(source_cfg, config_path=None, resume="none", dry_run=False)
+    source_step = default_ckpt_dir(source_run_dir) / "2"
+
+    # Doctor one manifest field and re-point the checkpoint at the new identity,
+    # so the source snapshot still proves it describes these weights.
+    manifest_path = source_run_dir / "tokenizer" / TOKENIZER_MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest["packages"] = {**manifest["packages"], "transformers": "0.0.0-doctored"}
+    manifest_path.write_text(json.dumps(manifest))
+    meta_path = source_step / "meta" / "metadata"
+    meta = json.loads(meta_path.read_text())
+    meta["tokenizer_identity"] = tokenizer_checkpoint_identity(manifest)
+    meta_path.write_text(json.dumps(meta))
+
+    warm_cfg = make_small_run_cfg(tmp_path, run_subdir="fielddiff2", decay_steps=2)
+    warm_cfg = replace(warm_cfg, train=replace(warm_cfg.train, steps=2))
+
+    with pytest.raises(RuntimeError, match="differing manifest fields: packages"):
+        run(warm_cfg, config_path=None, resume="none", init_from=source_step, dry_run=False)
+
+
+def test_warm_start_source_without_tokenizer_identity_is_refused_before_the_run_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal that depends only on the source must fire before anything is created."""
+    source_cfg = make_small_run_cfg(tmp_path, run_subdir="nogate1", decay_steps=2)
+    source_cfg = replace(source_cfg, train=replace(source_cfg.train, steps=2))
+    source_run_dir = run(source_cfg, config_path=None, resume="none", dry_run=False)
+
+    source_step = default_ckpt_dir(source_run_dir) / "2"
+    meta_path = source_step / "meta" / "metadata"
+    meta = json.loads(meta_path.read_text())
+    del meta["tokenizer_identity"]
+    meta_path.write_text(json.dumps(meta))
+
+    def _fail_if_called(*args: Any, **kwargs: Any) -> Path:
+        """Fail the test if run-directory creation is reached at all."""
+        raise AssertionError("create_run_dir was reached despite an unusable warm-start source")
+
+    monkeypatch.setattr("chomp.train.create_run_dir", _fail_if_called)
+
+    warm_cfg = make_small_run_cfg(tmp_path, run_subdir="nogate2", decay_steps=2)
+    warm_cfg = replace(warm_cfg, train=replace(warm_cfg.train, steps=2))
+
+    with pytest.raises(RuntimeError, match="no tokenizer identity"):
+        run(warm_cfg, config_path=None, resume="none", init_from=source_step, dry_run=False)
+    assert not Path(warm_cfg.logging.run_dir).exists()
 
 
 def test_warm_start_and_resume_are_mutually_exclusive(tmp_path: Path) -> None:

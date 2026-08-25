@@ -498,31 +498,17 @@ def restore_params_only(step_dir: Path, abstract_params: Any) -> Any:
     return params
 
 
-def load_warm_start_params(
-    step_dir: Path,
-    *,
-    abstract_params: Any,
-    tokenizer_identity: dict[str, Any],
-) -> tuple[Any, dict[str, Any]]:
-    """Load parameters from a foreign checkpoint to seed a fresh run.
+def read_warm_start_source(step_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read a warm-start source checkpoint and the tokenizer identity it recorded.
 
-    Warm start is deliberately not resume. Only parameters cross the boundary;
-    optimizer state, RNG, step counter, and corpus position all start fresh.
-    That is what lets the data pipeline change shape between phases (packing
-    mode, corpus, schedule) where exact resume must refuse.
-
-    :func:`restore_params_only` verifies that every parameter this run needs was
-    restored at the expected shape and dtype, so an architecture change is
-    refused. Tokenizer identity is checked here instead because it is the one
-    mismatch no structural check can see: a different tokenizer with the same
-    vocab size restores cleanly and then trains on embeddings whose rows mean
-    something else.
+    Split out from :func:`load_warm_start_params` so the destination run can be
+    gated on the source before it creates anything: both refusals here depend
+    only on the source checkpoint, and failing them after the new run directory
+    exists would leave a directory that the next attempt refuses to clobber.
 
     :param Path step_dir: Source checkpoint step directory.
-    :param Any abstract_params: ShapeDtypeStruct tree for the new run's params.
-    :param dict[str, Any] tokenizer_identity: New run's tokenizer identity.
-    :raises RuntimeError: If source metadata or tokenizer identity cannot be proven equal.
-    :return tuple[Any, dict[str, Any]]: Restored params and a provenance record.
+    :raises RuntimeError: If metadata is missing or records no tokenizer identity.
+    :return tuple[dict[str, Any], dict[str, Any]]: Checkpoint metadata and its tokenizer identity.
     """
     from chomp.utils.ckpt_paths import read_checkpoint_meta
 
@@ -543,11 +529,103 @@ def load_warm_start_params(
             "identity. Loading parameters trained under an unknown tokenizer would "
             "silently reinterpret every embedding row."
         )
+    return meta, source_identity
+
+
+def _read_tokenizer_manifest(run_dir: Path | None) -> dict[str, Any] | None:
+    """Read a run's tokenizer identity manifest, or None if unavailable.
+
+    :param Path | None run_dir: Run directory holding a tokenizer snapshot.
+    :return dict[str, Any] | None: Parsed manifest, or None if missing or unreadable.
+    """
+    from chomp.data.pipeline import TOKENIZER_MANIFEST_FILENAME
+
+    if run_dir is None:
+        return None
+    path = Path(run_dir) / "tokenizer" / TOKENIZER_MANIFEST_FILENAME
+    try:
+        manifest = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return manifest if isinstance(manifest, dict) else None
+
+
+def _tokenizer_mismatch_detail(
+    step_dir: Path,
+    source_identity: dict[str, Any],
+    tokenizer_identity: dict[str, Any],
+    run_dir: Path | None,
+) -> str:
+    """Describe a tokenizer identity mismatch by field where the manifests allow it.
+
+    The identities are hashes of whole manifests, so on their own they cannot
+    distinguish a rebuilt environment from a different vocabulary. When both
+    manifests are readable — and the source's still hashes to what the
+    checkpoint recorded — the differing fields are named instead.
+
+    :param Path step_dir: Source checkpoint step directory.
+    :param dict[str, Any] source_identity: Identity recorded by the checkpoint.
+    :param dict[str, Any] tokenizer_identity: This run's tokenizer identity.
+    :param Path | None run_dir: Destination run directory, holding this run's manifest.
+    :return str: Indented mismatch detail for the refusal message.
+    """
+    from chomp.data.pipeline import tokenizer_checkpoint_identity, tokenizer_manifest_mismatches
+
+    fallback = (
+        f"  checkpoint: {source_identity}\n"
+        f"  this run:   {tokenizer_identity}\n"
+        f"  (no comparable manifests; {step_dir} and this run must share a tokenizer)"
+    )
+    # A step dir is <run>/<checkpoint root>/<step>, so its run dir is two up.
+    source_manifest = _read_tokenizer_manifest(Path(step_dir).parent.parent)
+    observed_manifest = _read_tokenizer_manifest(run_dir)
+    if source_manifest is None or observed_manifest is None:
+        return fallback
+    # A snapshot that no longer hashes to the recorded identity describes some
+    # other tokenizer than the one that trained these weights.
+    if tokenizer_checkpoint_identity(source_manifest) != source_identity:
+        return fallback
+
+    fields = tokenizer_manifest_mismatches(source_manifest, observed_manifest)
+    if not fields:
+        return fallback
+    return f"  differing manifest fields: {', '.join(fields)}"
+
+
+def load_warm_start_params(
+    step_dir: Path,
+    *,
+    abstract_params: Any,
+    tokenizer_identity: dict[str, Any],
+    run_dir: Path | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Load parameters from a foreign checkpoint to seed a fresh run.
+
+    Warm start is deliberately not resume. Only parameters cross the boundary;
+    optimizer state, RNG, step counter, and corpus position all start fresh.
+    That is what lets the data pipeline change shape between phases (packing
+    mode, corpus, schedule) where exact resume must refuse.
+
+    :func:`restore_params_only` verifies that every parameter this run needs was
+    restored at the expected shape and dtype, so an architecture change is
+    refused. Tokenizer identity is checked here instead because it is the one
+    mismatch no structural check can see: a different tokenizer with the same
+    vocab size restores cleanly and then trains on embeddings whose rows mean
+    something else.
+
+    :param Path step_dir: Source checkpoint step directory.
+    :param Any abstract_params: ShapeDtypeStruct tree for the new run's params.
+    :param dict[str, Any] tokenizer_identity: New run's tokenizer identity.
+    :param Path | None run_dir: Destination run directory, used to explain a mismatch.
+    :raises RuntimeError: If source metadata or tokenizer identity cannot be proven equal.
+    :return tuple[Any, dict[str, Any]]: Restored params and a provenance record.
+    """
+    step_dir = Path(step_dir)
+    meta, source_identity = read_warm_start_source(step_dir)
     if source_identity != tokenizer_identity:
         raise RuntimeError(
             f"Cannot warm start from {step_dir}: tokenizer identity mismatch.\n"
-            f"  checkpoint: {source_identity}\n"
-            f"  this run:   {tokenizer_identity}\n"
+            f"{_tokenizer_mismatch_detail(step_dir, source_identity, tokenizer_identity, run_dir)}\n"
             "Warm start copies embedding and output-head rows verbatim, so they are only "
             "meaningful under the tokenizer that trained them."
         )
