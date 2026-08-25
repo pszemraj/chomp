@@ -29,6 +29,7 @@ from chomp.export import (
     HF_MODEL_TYPE,
     MANIFEST_FILENAME,
     WEIGHTS_FILENAME,
+    _tokenizer_files_to_copy,
     _verify_weights,
     _weights_metadata,
     export_checkpoint,
@@ -472,6 +473,52 @@ def test_a_failed_overwrite_leaves_the_previous_export_intact(
     assert (destination / MANIFEST_FILENAME).read_text() == manifest_before
     assert is_export_dir(destination)
     assert read_export_manifest(destination)["param_count"] == original.param_count
+
+
+@pytest.mark.parametrize("reserved", [CONFIG_FILENAME, WEIGHTS_FILENAME, MANIFEST_FILENAME])
+def test_a_tokenizer_file_wearing_an_export_name_is_refused_from_the_listing(
+    trained_run: Path, tmp_path: Path, reserved: str
+) -> None:
+    """A collision must be caught from the source, before a copy overwrites anything.
+
+    Exercised against ``_tokenizer_files_to_copy`` rather than through
+    ``export_checkpoint``: a snapshot cannot be edited after the fact without
+    breaking the tokenizer identity, which refuses earlier and for a different
+    reason. Only a tokenizer whose own ``save_pretrained`` wrote one of these
+    names reaches this guard, and then the identity matches.
+    """
+    run_copy = tmp_path / "run"
+    shutil.copytree(trained_run, run_copy)
+    (run_copy / "tokenizer" / reserved).write_text("tokenizer file wearing an export name\n")
+
+    with pytest.raises(RuntimeError, match=f"contains a {reserved}"):
+        _tokenizer_files_to_copy(run_copy)
+
+
+def test_a_nested_tokenizer_snapshot_is_refused_rather_than_partially_shipped(
+    trained_run: Path, tmp_path: Path
+) -> None:
+    """Copying only the top level would ship a tokenizer its own identity contradicts."""
+    run_copy = tmp_path / "run"
+    shutil.copytree(trained_run, run_copy)
+    nested = run_copy / "tokenizer" / "extra"
+    nested.mkdir()
+    (nested / "vocab.txt").write_text("a file the flat export layout would drop\n")
+
+    with pytest.raises(RuntimeError, match="contains a subdirectory"):
+        _tokenizer_files_to_copy(run_copy)
+
+
+def test_listing_the_tokenizer_snapshot_writes_nothing(trained_run: Path) -> None:
+    """The guard is only safe to run before the write because it is pure listing."""
+    tok_dir = trained_run / "tokenizer"
+    before = sorted(path.name for path in tok_dir.iterdir())
+
+    listed = _tokenizer_files_to_copy(trained_run)
+
+    assert [path.name for path in listed] == before
+    assert sorted(path.name for path in tok_dir.iterdir()) == before
+    assert "tokenizer.json" in before
 
 
 def test_a_failure_after_the_weights_write_leaves_no_loadable_export(

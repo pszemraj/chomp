@@ -71,6 +71,10 @@ WEIGHTS_FILENAME = "model.safetensors"
 MANIFEST_FILENAME = "chomp_export.json"
 CONFIG_FILENAME = "config.json"
 
+#: Names the export writes into its own root. A tokenizer file carrying one of
+#: these would either overwrite an export file or be overwritten by it.
+_RESERVED_EXPORT_NAMES = frozenset({WEIGHTS_FILENAME, MANIFEST_FILENAME, CONFIG_FILENAME})
+
 #: ``--dtype`` values. ``float32`` is the canonical artifact -- the master
 #: weights, exactly as trained. ``policy`` is derived from it.
 DTYPE_FLOAT32 = "float32"
@@ -246,28 +250,58 @@ def _tokenizer_for_checkpoint(
     return None, None
 
 
-def _copy_tokenizer_files(run_dir: Path | None, export_dir: Path) -> tuple[str, ...]:
-    """Copy a run's tokenizer snapshot into the export root.
+def _tokenizer_files_to_copy(run_dir: Path | None) -> tuple[Path, ...]:
+    """List a run's tokenizer snapshot files, refusing a layout export cannot ship.
 
-    The files are copied rather than re-serialized: the identity manifest
-    hashes their exact bytes, so a round-trip through ``save_pretrained`` could
-    invalidate the identity that :func:`_tokenizer_for_checkpoint` just proved.
+    Non-destructive, and called before anything is written: both refusals below
+    are knowable from the source alone, and discovering either one halfway
+    through the copy would mean the damage is already done.
 
     :param Path | None run_dir: Run directory, when one was found.
-    :param Path export_dir: Destination export directory.
-    :return tuple[str, ...]: Sorted names of the copied files.
+    :raises RuntimeError: If the snapshot is nested or collides with an export file.
+    :return tuple[Path, ...]: Sorted snapshot files, empty when there is no snapshot.
     """
     if run_dir is None:
         return ()
     tok_dir = run_dir / "tokenizer"
     if not tok_dir.is_dir():
         return ()
-    copied = []
-    for source in sorted(tok_dir.iterdir()):
-        if source.is_file():
-            shutil.copy2(source, export_dir / source.name)
-            copied.append(source.name)
-    return tuple(copied)
+
+    sources = sorted(tok_dir.iterdir())
+    for source in sources:
+        if source.is_dir():
+            # The snapshot is flat by construction (``save_pretrained`` writes
+            # into one directory), and the identity manifest hashes the tree
+            # with ``rglob``. Copying only the top level would ship a tokenizer
+            # missing files that its own identity says it has.
+            raise RuntimeError(
+                f"The run's tokenizer snapshot contains a subdirectory ({source.name}), "
+                "which chomp's flat export layout cannot represent. Export supports "
+                "the single-directory snapshot save_pretrained writes."
+            )
+        if source.name in _RESERVED_EXPORT_NAMES:
+            raise RuntimeError(
+                f"The run's tokenizer snapshot contains a {source.name}, which collides "
+                "with a file chomp writes for this export. One of the two would "
+                "silently win; move the tokenizer file aside and export again."
+            )
+    return tuple(sources)
+
+
+def _copy_tokenizer_files(sources: tuple[Path, ...], export_dir: Path) -> tuple[str, ...]:
+    """Copy a run's tokenizer snapshot into the export root.
+
+    The files are copied rather than re-serialized: the identity manifest
+    hashes their exact bytes, so a round-trip through ``save_pretrained`` could
+    invalidate the identity that :func:`_tokenizer_for_checkpoint` just proved.
+
+    :param tuple[Path, ...] sources: Snapshot files from :func:`_tokenizer_files_to_copy`.
+    :param Path export_dir: Destination export directory.
+    :return tuple[str, ...]: Sorted names of the copied files.
+    """
+    for source in sources:
+        shutil.copy2(source, export_dir / source.name)
+    return tuple(source.name for source in sources)
 
 
 def _verify_weights(weights_path: Path, params: Any) -> None:
@@ -576,7 +610,8 @@ def export_checkpoint(
     :param str dtype: ``float32`` for the master weights, ``policy`` for the derived variant.
     :raises FileNotFoundError: If no checkpoint can be resolved.
     :raises ValueError: If ``dtype`` is not a known variant.
-    :raises RuntimeError: If the backend is unsupported or the tokenizer cannot be proven.
+    :raises RuntimeError: If the backend is unsupported, or the tokenizer cannot be
+        proven to match the checkpoint or has a layout the export cannot ship.
     :raises FileExistsError: If the destination is non-empty and cannot be safely replaced.
     :return ExportResult: Description of what was written.
     """
@@ -602,6 +637,9 @@ def export_checkpoint(
     tokenizer, tokenizer_identity = _tokenizer_for_checkpoint(
         step_dir=step_dir, run_dir=run_dir, cfg=cfg
     )
+    # Listed and checked here so a snapshot export cannot ship is refused while
+    # the destination is still untouched.
+    tokenizer_sources = _tokenizer_files_to_copy(run_dir)
     # Vocabulary padding and special-token IDs are resolved here exactly as
     # training resolved them, so the config stored beside the weights is the
     # one the restored arrays were actually shaped by.
@@ -640,13 +678,7 @@ def export_checkpoint(
         if verify:
             _verify_weights(weights_path, params)
 
-    tokenizer_files = _copy_tokenizer_files(run_dir, destination)
-    if CONFIG_FILENAME in tokenizer_files:
-        raise RuntimeError(
-            f"The run's tokenizer snapshot contains a {CONFIG_FILENAME}, which collides "
-            "with the model config chomp writes for this export. One of the two would "
-            "silently win; move the tokenizer file aside and export again."
-        )
+    tokenizer_files = _copy_tokenizer_files(tokenizer_sources, destination)
     config_path = _write_hf_config(weights_path, destination)
     _remove_stale_files(destination, previous=previous_files, written=tokenizer_files)
 
