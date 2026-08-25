@@ -299,6 +299,20 @@ class _PackerBase:
         """
         return bool(cls._STATE_DISCRIMINATOR) and cls._STATE_DISCRIMINATOR in state
 
+    @classmethod
+    def summarize_buffered_state(cls, state: Mapping[str, Any]) -> dict[str, int]:
+        """Count the unemitted content held in a checkpointed state of this family.
+
+        Buffer schemas are family-specific, so only the family that wrote a
+        state can measure it. A resume that changes `data.packing_mode` drops
+        the buffer, and it needs these counts to report honestly how much of
+        the already-consumed stream is being discarded.
+
+        :param Mapping[str, Any] state: Checkpointed packer state of this family.
+        :return dict[str, int]: Buffered ``tokens``, ``documents``, and ``rows``.
+        """
+        raise NotImplementedError
+
     def load_shared_state(self, state: Mapping[str, Any]) -> None:
         """Restore only the packer-independent portion of a checkpointed state.
 
@@ -515,6 +529,28 @@ class TokenPacker(_PackerBase):
             exhausted=bool(self._exhausted),
         )
         return st.to_dict()
+
+    @classmethod
+    def summarize_buffered_state(cls, state: Mapping[str, Any]) -> dict[str, int]:
+        """Count the token carry held in a checkpointed sequential state.
+
+        The carry is a flat token remainder, so every buffered token is real.
+        Segment IDs are reused across the row rather than being unique document
+        handles, so ``documents`` counts contiguous segment runs -- the number
+        of document spans present -- not distinct ID values.
+
+        :param Mapping[str, Any] state: Checkpointed sequential packer state.
+        :return dict[str, int]: Buffered ``tokens``, ``documents``, and ``rows``.
+        """
+        st = PackerState.from_dict(dict(state))
+        runs = 0
+        previous = 0
+        for segment in st.remaining_segments:
+            segment = int(segment)
+            if segment and segment != previous:
+                runs += 1
+            previous = segment
+        return {"tokens": len(st.remaining_tokens), "documents": runs, "rows": 0}
 
     def set_state(self, state: dict[str, Any]) -> None:
         """Restore packer state from a checkpoint.
@@ -933,6 +969,27 @@ class FFDPacker(_PackerBase):
         )
         return st.to_dict()
 
+    @classmethod
+    def summarize_buffered_state(cls, state: Mapping[str, Any]) -> dict[str, int]:
+        """Count the queued documents and rendered rows in a checkpointed FFD state.
+
+        The pending queue holds up to ``max(bins_per_pack, lookahead_docs)``
+        chunks awaiting a pack cycle, so this buffer is far larger than the
+        sequential carry. Rendered rows are padded to ``seq_len``; only their
+        live segment positions count as real tokens.
+
+        :param Mapping[str, Any] state: Checkpointed FFD packer state.
+        :return dict[str, int]: Buffered ``tokens``, ``documents``, and ``rows``.
+        """
+        st = FFDPackerState.from_dict(dict(state))
+        pending = sum(int(np.asarray(doc).size) for doc in st.pending_docs)
+        rendered = sum(int(np.count_nonzero(np.asarray(segs))) for segs in st.ready_segments)
+        return {
+            "tokens": pending + rendered,
+            "documents": len(st.pending_docs),
+            "rows": len(st.ready_tokens),
+        }
+
     def set_state(self, state: dict[str, Any]) -> None:
         """Restore packer state from a checkpoint.
 
@@ -949,3 +1006,19 @@ class FFDPacker(_PackerBase):
         )
         self._document_stats = st.document_stats
         self._exhausted = bool(st.exhausted)
+
+
+def summarize_packer_buffer(state: Mapping[str, Any]) -> tuple[str, dict[str, int]]:
+    """Identify which packer family wrote a state and count what it buffered.
+
+    Used when a resume changes `data.packing_mode`: the incoming state belongs
+    to the family the run is leaving, so the outgoing family must measure it.
+
+    :param Mapping[str, Any] state: Checkpointed packer state.
+    :raises ValueError: If no packer family recognizes the state.
+    :return tuple[str, dict[str, int]]: Family name and its buffered counts.
+    """
+    for family in (TokenPacker, FFDPacker):
+        if family.can_restore_state(state):
+            return family.__name__, family.summarize_buffered_state(state)
+    raise ValueError(f"Checkpointed packer state matches no packer family; keys: {sorted(state)}")

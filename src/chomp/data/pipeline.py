@@ -37,7 +37,7 @@ from chomp.config import Config, eval_config, resolve_window_shuffle_rows, valid
 from chomp.types import IGNORE_INDEX, Batch
 
 from .hf import ContentPartition, HFStreamingTextStream, HFStreamSpec, LocalTextStream
-from .pack import FFDPacker, TokenPacker
+from .pack import FFDPacker, TokenPacker, summarize_packer_buffer
 
 _WINDOW_SHUFFLE_SEED_OFFSET = 104_729
 _UINT32_MODULUS = 2**32
@@ -1205,18 +1205,25 @@ class _SequenceProducer:
         if self._packer.can_restore_state(packer_state):
             self._packer.set_state(packer_state)
             return
-        # Counters carry; buffers do not. The discarded tokens are whatever the
-        # previous packer had accepted but not yet emitted -- one partial window
-        # plus at most one document tail -- so the new phase skips that much of
-        # the corpus and starts its first window on a document boundary.
+        # Counters carry; buffers do not. How much that costs depends entirely
+        # on which family wrote the state: a sequential carry is bounded by one
+        # window plus a document tail, while an FFD pending queue holds up to
+        # max(bins_per_pack, lookahead_docs) chunks and can run to hundreds of
+        # thousands of tokens. Ask the writing family for the real numbers
+        # rather than quoting the smaller bound for both.
+        source_family, buffered = summarize_packer_buffer(packer_state)
         self._packer.load_shared_state(packer_state)
         logger.warning(
-            "Resumed into a different data.packing_mode: the checkpointed packer "
-            "buffer cannot load into a %s. Corpus position and document counters "
-            "were restored, so the stream continues where it stopped; the previous "
-            "packer's unemitted tokens (under one window plus at most one document "
-            "tail) are dropped.",
+            "Resumed into a different data.packing_mode: the checkpointed %s buffer "
+            "cannot load into a %s. Corpus position and document counters were "
+            "restored, so the stream continues where it stopped, but the %d buffered "
+            "tokens it held (%d pending documents, %d rendered rows) were already "
+            "consumed from the stream and will never be trained on.",
+            source_family,
             type(self._packer).__name__,
+            buffered["tokens"],
+            buffered["documents"],
+            buffered["rows"],
         )
 
     def get_stats(self) -> dict[str, int | float]:
