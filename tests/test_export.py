@@ -546,6 +546,52 @@ def test_a_failure_after_the_weights_write_leaves_no_loadable_export(
         load_export(destination)
 
 
+def test_loading_an_export_tokenizer_verifies_the_files_against_the_identity(
+    trained_run: Path, exported_dir: Path
+) -> None:
+    """The happy path still loads, and encodes exactly as the run's tokenizer did."""
+    cfg = load_export(exported_dir).config
+
+    exported = load_export_tokenizer(exported_dir, cfg)
+    from_run = load_tokenizer_snapshot(trained_run, cfg)
+
+    assert exported.encode(IN_VOCAB_TEXT) == from_run.encode(IN_VOCAB_TEXT)
+
+
+def test_a_tampered_tokenizer_file_is_refused_by_name(export_copy: Path) -> None:
+    """Export proves the tokenizer matches; loading must not take that on trust."""
+    cfg = load_export(export_copy).config
+    vocab = export_copy / "vocab.txt"
+    assert vocab.is_file()
+    vocab.write_text(vocab.read_text().replace("hello", "goodbye"))
+
+    with pytest.raises(RuntimeError, match="vocab.txt"):
+        load_export_tokenizer(export_copy, cfg)
+
+
+def test_a_missing_tokenizer_identity_is_refused(export_copy: Path) -> None:
+    """Without the identity manifest the shipped files cannot be checked at all."""
+    cfg = load_export(export_copy).config
+    (export_copy / "identity.json").unlink()
+
+    with pytest.raises(FileNotFoundError, match="identity.json"):
+        load_export_tokenizer(export_copy, cfg)
+
+
+def test_a_swapped_tokenizer_identity_is_refused(export_copy: Path, tmp_path: Path) -> None:
+    """A directory assembled from two exports must not load either one's vocabulary."""
+    cfg = load_export(export_copy).config
+    identity_path = export_copy / "identity.json"
+    identity = json.loads(identity_path.read_text())
+    # Re-hash the file it describes so the per-file records still agree; only
+    # the manifest as a whole no longer matches what the export recorded.
+    identity["canary"]["cases"][0]["ids"] = [0]
+    identity_path.write_text(json.dumps(identity))
+
+    with pytest.raises(RuntimeError, match="not the one this export recorded"):
+        load_export_tokenizer(export_copy, cfg)
+
+
 def test_verify_catches_a_corrupted_payload_that_loading_does_not(
     trained_run: Path, tmp_path: Path
 ) -> None:

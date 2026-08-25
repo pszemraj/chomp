@@ -449,6 +449,19 @@ def prepare_tokenizer_and_config(
     return cfg, tok
 
 
+def sha256_file(path: Path) -> str:
+    """Return the SHA-256 digest of a file's contents.
+
+    :param Path path: File to hash.
+    :return str: Hex digest.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _snapshot_file_records(tok_dir: Path) -> list[dict[str, Any]]:
     """Return hashes and sizes for every tokenizer snapshot file.
 
@@ -460,15 +473,11 @@ def _snapshot_file_records(tok_dir: Path) -> list[dict[str, Any]]:
     for path in sorted(tok_dir.rglob("*")):
         if not path.is_file() or path == manifest_path:
             continue
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
         records.append(
             {
                 "path": path.relative_to(tok_dir).as_posix(),
                 "size": path.stat().st_size,
-                "sha256": digest.hexdigest(),
+                "sha256": sha256_file(path),
             }
         )
     return records

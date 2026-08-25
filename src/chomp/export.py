@@ -769,18 +769,76 @@ def load_export(export_dir: str | Path, *, key: jax.Array | None = None) -> Load
     return LoadedExport(params=params, static=static, config=cfg, manifest=manifest)
 
 
+def _verify_exported_tokenizer(directory: Path, identity: dict[str, Any]) -> None:
+    """Check the shipped tokenizer files against the identity the export recorded.
+
+    Export refuses a tokenizer it cannot prove matches the checkpoint, but
+    nothing re-checked that proof on the way back in: ``HFTokenizer`` loads
+    whichever files are present. Everything needed is already in the directory
+    -- the copied ``identity.json`` records a SHA-256 per file, and hashing it
+    reproduces the compact identity stored in the export manifest -- so this
+    verifies rather than trusts.
+
+    :param Path directory: Export directory.
+    :param dict[str, Any] identity: ``tokenizer_identity`` from the export manifest.
+    :raises FileNotFoundError: If the identity manifest was not shipped.
+    :raises RuntimeError: If a tokenizer file is missing or does not match.
+    """
+    from chomp.data.pipeline import (
+        TOKENIZER_MANIFEST_FILENAME,
+        sha256_file,
+        tokenizer_checkpoint_identity,
+    )
+
+    manifest_path = directory / TOKENIZER_MANIFEST_FILENAME
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"Export {directory} records a tokenizer identity but ships no "
+            f"{TOKENIZER_MANIFEST_FILENAME}, so its tokenizer files cannot be "
+            "checked against the weights. Re-export it."
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Corrupted tokenizer identity in {manifest_path}: {exc}") from exc
+
+    if tokenizer_checkpoint_identity(manifest) != identity:
+        raise RuntimeError(
+            f"{TOKENIZER_MANIFEST_FILENAME} in {directory} is not the one this export "
+            f"recorded in {MANIFEST_FILENAME}. The directory pairs a tokenizer with "
+            "weights it was not exported beside; re-export it."
+        )
+
+    for record in manifest.get("files", []):
+        path = directory / record["path"]
+        if not path.is_file():
+            raise RuntimeError(
+                f"Export {directory} is missing tokenizer file {record['path']!r}, "
+                "which its identity says these weights were trained with."
+            )
+        if sha256_file(path) != record["sha256"]:
+            raise RuntimeError(
+                f"Tokenizer file {record['path']!r} in {directory} does not match the "
+                "identity recorded for these weights; its token IDs may not index the "
+                "embedding rows they were trained against."
+            )
+
+
 def load_export_tokenizer(export_dir: str | Path, cfg: Config) -> Tokenizer:
     """Load the tokenizer shipped inside an export directory.
 
     :param str | Path export_dir: Export directory holding tokenizer files.
     :param Config cfg: Config from the export manifest.
     :raises FileNotFoundError: If a Hugging Face tokenizer was expected but not shipped.
+    :raises RuntimeError: If the shipped files do not match the recorded identity.
     :return Tokenizer: Tokenizer bound to these weights.
     """
     from chomp.data.pipeline import ByteTokenizer, HFTokenizer
 
     directory = Path(export_dir)
     if cfg.data.tokenizer.kind == "byte":
+        # Built from the config, not from files, so there is nothing shipped to
+        # verify -- and no vocabulary to get wrong.
         return ByteTokenizer(byte_offset=cfg.data.tokenizer.byte_offset)
 
     if not (directory / "tokenizer.json").is_file():
@@ -788,6 +846,11 @@ def load_export_tokenizer(export_dir: str | Path, cfg: Config) -> Tokenizer:
             f"Export {directory} declares a Hugging Face tokenizer but ships no "
             "tokenizer.json. Re-export from a run directory containing tokenizer/."
         )
+
+    identity = read_export_manifest(directory).get("tokenizer_identity")
+    if isinstance(identity, dict):
+        _verify_exported_tokenizer(directory, identity)
+
     return HFTokenizer(
         str(directory),
         use_fast=cfg.data.tokenizer.hf_use_fast,
