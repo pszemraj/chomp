@@ -27,7 +27,7 @@ from chomp.data.grain import (
     _TrainSequenceIterDataset,
 )
 from chomp.data.hf import HFStreamingTextStream, HFStreamSpec, resolve_dataset_revision
-from chomp.data.pack import FFDPacker, FFDPackerState, TokenPacker
+from chomp.data.pack import FFDPacker, FFDPackerState, TokenPacker, summarize_packer_buffer
 from chomp.data.pipeline import (
     _TOKENIZER_CANARIES,
     TOKENIZER_MANIFEST_FILENAME,
@@ -1497,3 +1497,47 @@ def test_resume_across_packing_mode_keeps_stream_position(
     tokens, segments = target.next_window()
     assert tokens.shape == (cfg_bin.train.seq_len,)
     assert segments.shape == (cfg_bin.train.seq_len,)
+
+
+def test_resume_from_bin_reports_the_dropped_buffer_size(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Leaving `bin` must report how many buffered tokens the switch discards.
+
+    The FFD pending queue holds up to max(bins_per_pack, lookahead_docs)
+    chunks, so it is orders of magnitude larger than the sequential token
+    carry. Those tokens were consumed from the stream and are never trained
+    on, so the warning has to state the real count rather than a bound
+    borrowed from the other packer family.
+    """
+    corpus = "".join(f"document number {i} with some filler text. " for i in range(64))
+    cfg_bin = make_pipeline_cfg(packing_mode="bin", packing_buffer_docs=32, local_text=corpus)
+    cfg_seq = make_pipeline_cfg(packing_mode="sequential", local_text=corpus)
+
+    source = _SequenceProducer(cfg_bin, tokenizer=build_tokenizer(cfg_bin))
+    _drain_producer(source, 5)
+    saved = source.get_state()
+
+    family, buffered = summarize_packer_buffer(saved["packer"])
+    assert family == "FFDPacker"
+    # The queue must actually hold something, or the assertions below pass
+    # against an empty buffer and prove nothing.
+    assert buffered["tokens"] > 0
+
+    target = _SequenceProducer(cfg_seq, tokenizer=build_tokenizer(cfg_seq))
+    with caplog.at_level(logging.WARNING, logger="chomp.data.pipeline"):
+        target.set_state(saved)
+
+    assert "different data.packing_mode" in caplog.text
+    assert "FFDPacker" in caplog.text
+    assert f"{buffered['tokens']} buffered tokens" in caplog.text
+    assert "never be trained on" in caplog.text
+    # The superseded claim must not come back; it understates FFD by ~55x.
+    assert "one document tail" not in caplog.text
+
+    # Counters and stream position still carry, and the new packer runs.
+    assert target.get_state()["packer"]["document_stats"] == saved["packer"]["document_stats"]
+    assert target.get_state()["text"] == saved["text"]
+    tokens, segments = target.next_window()
+    assert tokens.shape == (cfg_seq.train.seq_len,)
+    assert segments.shape == (cfg_seq.train.seq_len,)
