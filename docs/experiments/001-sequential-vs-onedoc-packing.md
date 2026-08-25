@@ -1,11 +1,16 @@
 # 001 — Does sequential packing hurt a recurrent-state model?
 
-**Status:** DONE, 2026-08-11. All three packing regimes measured against a
-common baseline. Cross-document contamination is real but small: strict segment
-isolation at full utilization buys 0.0043 nats (t = −4.1) for 2.8x the wall
-clock per token, while one-document-per-row costs 0.0282 (t = +16.1). Keep
-`sequential`. "Train contaminated, heal after" does not work. See
-[Results](#results).
+**Status:** DONE, 2026-08-13. All three packing regimes measured against a
+common baseline, then decomposed by position. In aggregate, cross-document
+contamination is real but small: strict segment isolation at full utilization
+buys 0.0043 nats (t = −4.1) for 2.8x the wall clock per token, while
+one-document-per-row costs 0.0282 (t = +16.1). But that aggregate is a
+token-weighted mean, and it hides its own shape — strict is worth 0.1319 nats
+over the first 15 positions of a document, and more sequential tokens never
+close that gap. **Keep `sequential` for the bulk and end with a ≲2,500-step
+strict-bin tail.** "Train contaminated, heal after" does not work as a
+whole-run strategy. See [Results](#results) and
+[the position decomposition](#follow-up--where-the-strict-advantage-lives-2026-08-13).
 
 ## Question
 
