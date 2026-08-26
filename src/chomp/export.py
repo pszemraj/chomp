@@ -856,7 +856,7 @@ def load_export_tokenizer(export_dir: str | Path, cfg: Config) -> Tokenizer:
 
     :param str | Path export_dir: Export directory holding tokenizer files.
     :param Config cfg: Config from the export manifest.
-    :raises FileNotFoundError: If a Hugging Face tokenizer was expected but not shipped.
+    :raises FileNotFoundError: If a checkpoint-bound tokenizer identity was not shipped.
     :raises RuntimeError: If the shipped files do not match the recorded identity.
     :return Tokenizer: Tokenizer bound to these weights.
     """
@@ -867,12 +867,6 @@ def load_export_tokenizer(export_dir: str | Path, cfg: Config) -> Tokenizer:
         # Built from the config, not from files, so there is nothing shipped to
         # verify -- and no vocabulary to get wrong.
         return ByteTokenizer(byte_offset=cfg.data.tokenizer.byte_offset)
-
-    if not (directory / "tokenizer.json").is_file():
-        raise FileNotFoundError(
-            f"Export {directory} declares a Hugging Face tokenizer but ships no "
-            "tokenizer.json. Re-export from a run directory containing tokenizer/."
-        )
 
     identity = read_export_manifest(directory).get("tokenizer_identity")
     if isinstance(identity, dict):

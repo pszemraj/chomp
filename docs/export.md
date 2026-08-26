@@ -70,13 +70,13 @@ exports/my_run-step100000/
 ├── model.safetensors        # weights + the full MegalodonConfig in the header
 ├── config.json              # the same architecture, Hugging Face field names
 ├── chomp_export.json        # provenance and the resolved chomp config
-├── tokenizer.json           # the run-pinned tokenizer, copied byte-for-byte
 ├── tokenizer_config.json
 ├── special_tokens_map.json
+├── tokenizer.json / vocab.txt / ...  # implementation-specific tokenizer assets
 └── identity.json            # chomp's tokenizer identity manifest
 ```
 
-Tokenizer files land at the export root rather than under `tokenizer/`, so `AutoTokenizer.from_pretrained(export_dir)` resolves without knowing anything about chomp's run layout. Tokenizer assets are copied rather than re-serialized: the identity manifest hashes their exact bytes, and a round trip through `save_pretrained` could invalidate the identity export just proved. `identity.json` itself is written from the observed manifest that matched the checkpoint. This keeps an export self-consistent after warn-mode runtime drift, where the run directory deliberately preserves its older valid manifest while later checkpoints record the observed execution identity. The flat layout is also why a nested or name-colliding snapshot is refused rather than flattened.
+Tokenizer files land at the export root rather than under `tokenizer/`, so `AutoTokenizer.from_pretrained(export_dir)` resolves without knowing anything about chomp's run layout. The exact assets depend on the configured implementation: a slow tokenizer can legitimately omit `tokenizer.json`, and chomp loads it with the recorded `hf_use_fast` value after verifying every file named by `identity.json`. Tokenizer assets are copied rather than re-serialized because the identity manifest hashes their exact bytes, and a round trip through `save_pretrained` could invalidate the identity export just proved. `identity.json` itself is written from the observed manifest that matched the checkpoint. This keeps an export self-consistent after warn-mode runtime drift, where the run directory deliberately preserves its older valid manifest while later checkpoints record the observed execution identity. The flat layout is also why a nested or name-colliding snapshot is refused rather than flattened.
 
 ## config.json
 

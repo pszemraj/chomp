@@ -19,7 +19,12 @@ from click.testing import CliRunner
 from chomp.ckpt import restore_params_only
 from chomp.cli import cli
 from chomp.config import Config, build_config
-from chomp.data.pipeline import load_tokenizer_snapshot, tokenizer_checkpoint_identity
+from chomp.data.pipeline import (
+    build_tokenizer,
+    load_tokenizer_snapshot,
+    save_tokenizer_snapshot,
+    tokenizer_checkpoint_identity,
+)
 from chomp.export import (
     CONFIG_FILENAME,
     DTYPE_FLOAT32,
@@ -47,16 +52,17 @@ TRAINED_STEPS = 2
 IN_VOCAB_TEXT = "hello world The quick brown fox ."
 
 
-def _write_bert_tokenizer(path: Path) -> Path:
+def _write_bert_tokenizer(path: Path, *, use_fast: bool = True) -> Path:
     """Create the same deterministic local tokenizer the conftest fixture builds.
 
     Duplicated here rather than reused because ``local_bert_tokenizer`` is
     function-scoped and this module trains once for the whole file.
 
     :param Path path: Directory to write the tokenizer into.
+    :param bool use_fast: Whether to save the fast or slow BERT implementation.
     :return Path: Local tokenizer source directory.
     """
-    from transformers import BertTokenizerFast
+    from transformers import BertTokenizer, BertTokenizerFast
 
     path.mkdir(parents=True)
     vocab = [
@@ -75,7 +81,8 @@ def _write_bert_tokenizer(path: Path) -> Path:
     ]
     vocab_path = path / "vocab.txt"
     vocab_path.write_text("\n".join(vocab) + "\n")
-    BertTokenizerFast(
+    tokenizer_type = BertTokenizerFast if use_fast else BertTokenizer
+    tokenizer_type(
         vocab_file=str(vocab_path),
         do_lower_case=False,
         clean_up_tokenization_spaces=False,
@@ -378,6 +385,43 @@ def test_export_ships_the_manifest_that_matched_the_checkpoint(
     assert shipped_manifest != stale_manifest
     assert tokenizer_checkpoint_identity(shipped_manifest) == export_manifest["tokenizer_identity"]
     load_export_tokenizer(export_dir, build_config(export_manifest["config"]))
+
+
+def test_load_export_tokenizer_accepts_a_slow_snapshot_without_tokenizer_json(
+    tmp_path: Path,
+) -> None:
+    """Identity-listed slow assets are sufficient without fast serialization.
+
+    :param Path tmp_path: Pytest temporary directory.
+    """
+    source = _write_bert_tokenizer(tmp_path / "source", use_fast=False)
+    cfg = _run_config(tokenizer_dir=source, run_dir=tmp_path / "unused")
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            tokenizer=replace(cfg.data.tokenizer, hf_use_fast=False),
+        ),
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    execution_tokenizer, identity = save_tokenizer_snapshot(run_dir, cfg, build_tokenizer(cfg))
+
+    export_dir = tmp_path / "export"
+    shutil.copytree(run_dir / "tokenizer", export_dir)
+    assert not (export_dir / "tokenizer.json").exists()
+    manifest = {
+        "schema_version": EXPORT_SCHEMA_VERSION,
+        "weights_dtype": DTYPE_FLOAT32,
+        "tokenizer_identity": identity,
+        "config": cfg.to_dict(),
+    }
+    (export_dir / MANIFEST_FILENAME).write_text(json.dumps(manifest))
+
+    loaded = load_export_tokenizer(export_dir, cfg)
+
+    assert loaded._tok.is_fast is False
+    assert loaded.encode(IN_VOCAB_TEXT) == execution_tokenizer.encode(IN_VOCAB_TEXT)
 
 
 def test_is_export_dir_distinguishes_exports_from_runs(
