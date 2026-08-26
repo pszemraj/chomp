@@ -48,6 +48,8 @@ from chomp import __version__ as CHOMP_VERSION
 from chomp.ckpt import megalodon_jax_identity, restore_params_only
 from chomp.config import Config, build_config
 from chomp.data.pipeline import (
+    _build_tokenizer_manifest,
+    _write_tokenizer_manifest,
     load_tokenizer_snapshot,
     load_tokenizer_snapshot_for_resume,
     prepare_tokenizer_and_config,
@@ -218,7 +220,7 @@ def read_export_manifest(export_dir: str | Path) -> dict[str, Any]:
 
 def _tokenizer_for_checkpoint(
     *, step_dir: Path, run_dir: Path | None, cfg: Config
-) -> tuple[Tokenizer | None, dict[str, Any] | None]:
+) -> tuple[Tokenizer | None, dict[str, Any] | None, dict[str, Any] | None]:
     """Load the run-pinned tokenizer and prove it matches the checkpoint.
 
     Mirrors the generation path: token IDs index restored embedding rows
@@ -229,7 +231,7 @@ def _tokenizer_for_checkpoint(
     :param Path | None run_dir: Run directory, when one was found.
     :param Config cfg: Config belonging to the checkpoint.
     :raises RuntimeError: If the tokenizer is missing or does not match.
-    :return tuple: Tokenizer (None for byte tokenizers) and its checkpoint identity.
+    :return tuple: Tokenizer, checkpoint identity, and validated full manifest.
     """
     try:
         meta = read_checkpoint_meta(step_dir)
@@ -252,11 +254,12 @@ def _tokenizer_for_checkpoint(
                 "Tokenizer identity does not match the selected checkpoint; refusing "
                 "to export because token IDs may not match its embedding rows."
             )
-        return tokenizer, observed
+        observed_manifest = _build_tokenizer_manifest(run_dir / "tokenizer", tokenizer)
+        return tokenizer, observed, observed_manifest
 
     if cfg.data.tokenizer.kind == "hf" and run_dir is not None and (run_dir / "tokenizer").exists():
-        return load_tokenizer_snapshot(run_dir, cfg), None
-    return None, None
+        return load_tokenizer_snapshot(run_dir, cfg), None, None
+    return None, None, None
 
 
 def _tokenizer_files_to_copy(run_dir: Path | None) -> tuple[Path, ...]:
@@ -656,7 +659,7 @@ def export_checkpoint(
     destination = Path(export_dir)
     previous_files = _check_destination(destination, overwrite=overwrite)
 
-    tokenizer, tokenizer_identity = _tokenizer_for_checkpoint(
+    tokenizer, tokenizer_identity, tokenizer_manifest = _tokenizer_for_checkpoint(
         step_dir=step_dir, run_dir=run_dir, cfg=cfg
     )
     # Listed and checked here so a snapshot export cannot ship is refused while
@@ -701,6 +704,8 @@ def export_checkpoint(
             _verify_weights(weights_path, params)
 
     tokenizer_files = _copy_tokenizer_files(tokenizer_sources, destination)
+    if tokenizer_manifest is not None:
+        _write_tokenizer_manifest(destination, tokenizer_manifest)
     config_path = _write_hf_config(weights_path, destination)
     _remove_stale_files(destination, previous=previous_files, written=tokenizer_files)
 

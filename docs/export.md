@@ -76,14 +76,7 @@ exports/my_run-step100000/
 └── identity.json            # chomp's tokenizer identity manifest
 ```
 
-Tokenizer files land at the export root rather than under `tokenizer/`, so
-`AutoTokenizer.from_pretrained(export_dir)` resolves without knowing anything
-about chomp's run layout. They are copied rather than re-serialized: the
-identity manifest hashes their exact bytes, and a round trip through
-`save_pretrained` could invalidate the identity export just proved. That flat
-layout is also why `identity.json` travels with them — it is what makes the
-copied files checkable on load — and why a nested or name-colliding snapshot is
-refused rather than flattened.
+Tokenizer files land at the export root rather than under `tokenizer/`, so `AutoTokenizer.from_pretrained(export_dir)` resolves without knowing anything about chomp's run layout. Tokenizer assets are copied rather than re-serialized: the identity manifest hashes their exact bytes, and a round trip through `save_pretrained` could invalidate the identity export just proved. `identity.json` itself is written from the observed manifest that matched the checkpoint. This keeps an export self-consistent after warn-mode runtime drift, where the run directory deliberately preserves its older valid manifest while later checkpoints record the observed execution identity. The flat layout is also why a nested or name-colliding snapshot is refused rather than flattened.
 
 ## config.json
 

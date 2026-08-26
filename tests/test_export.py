@@ -19,7 +19,7 @@ from click.testing import CliRunner
 from chomp.ckpt import restore_params_only
 from chomp.cli import cli
 from chomp.config import Config, build_config
-from chomp.data.pipeline import load_tokenizer_snapshot
+from chomp.data.pipeline import load_tokenizer_snapshot, tokenizer_checkpoint_identity
 from chomp.export import (
     CONFIG_FILENAME,
     DTYPE_FLOAT32,
@@ -350,6 +350,34 @@ def test_tokenizer_ships_at_the_export_root(trained_run: Path, exported_dir: Pat
     ids = export_tokenizer.encode(IN_VOCAB_TEXT)
     assert ids
     assert ids == run_tokenizer.encode(IN_VOCAB_TEXT)
+
+
+def test_export_ships_the_manifest_that_matched_the_checkpoint(
+    trained_run: Path,
+    tmp_path: Path,
+) -> None:
+    """Warn-mode runtime drift must not produce a self-inconsistent export.
+
+    :param Path trained_run: Trained run with a checkpoint-bound tokenizer identity.
+    :param Path tmp_path: Pytest temporary directory.
+    """
+    run_copy = tmp_path / "run"
+    shutil.copytree(trained_run, run_copy)
+    identity_path = run_copy / "tokenizer" / "identity.json"
+    stale_manifest = json.loads(identity_path.read_text())
+    package = next(iter(stale_manifest["packages"]))
+    stale_manifest["packages"][package] = "stale-runtime-version"
+    identity_path.write_text(json.dumps(stale_manifest))
+    source_manifest = identity_path.read_bytes()
+
+    export_dir = export_checkpoint(run_copy, tmp_path / "export").export_dir
+
+    assert identity_path.read_bytes() == source_manifest
+    shipped_manifest = json.loads((export_dir / "identity.json").read_text())
+    export_manifest = read_export_manifest(export_dir)
+    assert shipped_manifest != stale_manifest
+    assert tokenizer_checkpoint_identity(shipped_manifest) == export_manifest["tokenizer_identity"]
+    load_export_tokenizer(export_dir, build_config(export_manifest["config"]))
 
 
 def test_is_export_dir_distinguishes_exports_from_runs(
