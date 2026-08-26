@@ -381,7 +381,18 @@ def _setup_run_dir_and_tokenizer(
         run_dir_hint = Path(cfg.logging.run_dir)
         if not run_dir_hint.exists():
             raise RuntimeError(f"Resume requested but run directory does not exist: {run_dir_hint}")
-        tokenizer, tokenizer_identity = load_tokenizer_snapshot_for_resume(run_dir_hint, cfg)
+        selected_tokenizer_identity = (
+            None if resume_meta is None else resume_meta.get("tokenizer_identity")
+        )
+        tokenizer, tokenizer_identity = load_tokenizer_snapshot_for_resume(
+            run_dir_hint,
+            cfg,
+            selected_checkpoint_identity=(
+                selected_tokenizer_identity
+                if isinstance(selected_tokenizer_identity, dict)
+                else None
+            ),
+        )
 
     cfg, tokenizer = prepare_tokenizer_and_config(cfg, tokenizer=tokenizer)
 

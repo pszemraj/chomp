@@ -238,7 +238,9 @@ def generate(
             )
         try:
             tokenizer, observed_tokenizer_identity = load_tokenizer_snapshot_for_resume(
-                run_dir, cfg
+                run_dir,
+                cfg,
+                selected_checkpoint_identity=checkpoint_tokenizer_identity,
             )
         except Exception as exc:
             raise click.ClickException(str(exc)) from exc

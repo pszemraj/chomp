@@ -248,7 +248,11 @@ def _tokenizer_for_checkpoint(
     if isinstance(identity, dict):
         if run_dir is None or not (run_dir / "tokenizer").exists():
             raise RuntimeError("Checkpoint requires its run-pinned tokenizer snapshot for export.")
-        tokenizer, observed = load_tokenizer_snapshot_for_resume(run_dir, cfg)
+        tokenizer, observed = load_tokenizer_snapshot_for_resume(
+            run_dir,
+            cfg,
+            selected_checkpoint_identity=identity,
+        )
         if observed != identity:
             raise RuntimeError(
                 "Tokenizer identity does not match the selected checkpoint; refusing "

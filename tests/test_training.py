@@ -2621,6 +2621,48 @@ def test_resume_requires_checkpoint_bound_tokenizer_identity(
     assert "tokenizer_identity mismatch" in caplog.text
 
 
+def test_strict_resume_uses_identity_from_checkpoint_after_warn_drift(tmp_path: Path) -> None:
+    """A later checkpoint can supersede the preserved run-start tokenizer manifest.
+
+    :param Path tmp_path: Temporary run directory root.
+    """
+    cfg = make_small_run_cfg(tmp_path, run_subdir="tokenizer_drift", decay_steps=4)
+    cfg = replace(cfg, train=replace(cfg.train, steps=1))
+    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
+
+    manifest_path = run_dir / "tokenizer" / TOKENIZER_MANIFEST_FILENAME
+    stale_manifest = json.loads(manifest_path.read_text())
+    stale_manifest["packages"] = {"stale-tokenizer-runtime": "0.0.0"}
+    manifest_path.write_text(json.dumps(stale_manifest))
+    stale_identity = tokenizer_checkpoint_identity(stale_manifest)
+
+    step_one_meta_path = default_ckpt_dir(run_dir) / "1" / "meta" / "metadata"
+    step_one_meta = json.loads(step_one_meta_path.read_text())
+    step_one_meta["tokenizer_identity"] = stale_identity
+    step_one_meta_path.write_text(json.dumps(step_one_meta))
+
+    warn_cfg = replace(
+        cfg,
+        train=replace(cfg.train, steps=2),
+        checkpoint=replace(cfg.checkpoint, resume_compat="warn"),
+    )
+    run(warn_cfg, config_path=None, resume="latest", dry_run=False)
+
+    step_two_meta_path = default_ckpt_dir(run_dir) / "2" / "meta" / "metadata"
+    step_two_identity = json.loads(step_two_meta_path.read_text())["tokenizer_identity"]
+    assert step_two_identity != stale_identity
+    assert json.loads(manifest_path.read_text()) == stale_manifest
+
+    strict_cfg = replace(
+        warn_cfg,
+        train=replace(warn_cfg.train, steps=3),
+        checkpoint=replace(warn_cfg.checkpoint, resume_compat="strict"),
+    )
+    run(strict_cfg, config_path=None, resume="latest", dry_run=False)
+
+    assert 3 in _checkpoint_steps(run_dir)
+
+
 def test_segment_scan_resume_semantics_are_contextual(
     tmp_path: Path,
     caplog: LogCaptureFixture,

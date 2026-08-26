@@ -638,11 +638,15 @@ def load_tokenizer_snapshot(run_dir: Path, cfg: Config) -> Tokenizer:
 def load_tokenizer_snapshot_for_resume(
     run_dir: Path,
     cfg: Config,
+    *,
+    selected_checkpoint_identity: dict[str, Any] | None = None,
 ) -> tuple[Tokenizer, dict[str, Any]]:
     """Load and validate the run-pinned tokenizer before resume.
 
     :param Path run_dir: Existing run directory.
     :param Config cfg: Current training configuration.
+    :param dict[str, Any] | None selected_checkpoint_identity: Tokenizer identity
+        recorded by the selected checkpoint, if available.
     :raises RuntimeError: If strict resume cannot prove tokenizer identity.
     :return tuple[Tokenizer, dict[str, Any]]: Execution tokenizer and checkpoint identity.
     """
@@ -675,17 +679,19 @@ def load_tokenizer_snapshot_for_resume(
 
     tokenizer = load_tokenizer_snapshot(run_dir, cfg)
     observed = _build_tokenizer_manifest(tok_dir, tokenizer)
+    observed_identity = tokenizer_checkpoint_identity(observed)
     mismatches = tokenizer_manifest_mismatches(expected, observed)
     if mismatches:
         detail = ", ".join(mismatches)
         message = f"Tokenizer identity mismatch in: {detail}"
-        if severity == "strict":
+        if severity == "strict" and selected_checkpoint_identity != observed_identity:
             raise RuntimeError(message)
-        logger.warning("%s; continuing because checkpoint.resume_compat='warn'.", message)
-        if not isinstance(expected, dict):
-            _write_tokenizer_manifest(tok_dir, observed)
+        if severity == "warn":
+            logger.warning("%s; continuing because checkpoint.resume_compat='warn'.", message)
+            if not isinstance(expected, dict):
+                _write_tokenizer_manifest(tok_dir, observed)
 
-    return tokenizer, tokenizer_checkpoint_identity(observed)
+    return tokenizer, observed_identity
 
 
 def _collect_texts(stream: TextStream, max_samples: int) -> list[str]:
