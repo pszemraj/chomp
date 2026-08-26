@@ -794,19 +794,52 @@ def check_resume_compat(
     # key must be present because missing metadata cannot establish equality.
     src_prev = meta_fp.get("source") or {}
     src_cur = cur_fp.get("source") or {}
+    hf_window_replay = (src_prev.get("backend") == "hf" and bool(src_prev.get("shuffle"))) or (
+        src_cur.get("backend") == "hf" and bool(src_cur.get("shuffle"))
+    )
+    source_replay_fields = {
+        "backend",
+        "dataset",
+        "name",
+        "split",
+        "text_key",
+        "revision",
+        "shuffle",
+        "shuffle_buffer_size",
+        "shuffle_buffer_bytes",
+        "seed",
+        "content_partition",
+        "eval_holdout_fraction",
+        "local_text",
+    }
+    if packed_window_replay:
+        # Reconstructing packed rows can cross source exhaustion, so repeat is
+        # part of that outer window's replay recipe as well.
+        source_replay_fields.add("repeat")
+    source_labels = {
+        "backend": "data.source.backend",
+        "dataset": "data.hf_dataset",
+        "name": "data.hf_name",
+        "split": "data.hf_split",
+        "revision": "data.hf_revision",
+        "eval_holdout_fraction": "data.hf_eval_holdout_fraction",
+    }
+    source_active = set(src_cur)
     _cmp_mapping(
         "data",
         src_cur,
         src_prev,
-        labels={
-            "backend": "data.source.backend",
-            "dataset": "data.hf_dataset",
-            "name": "data.hf_name",
-            "split": "data.hf_split",
-            "revision": "data.hf_revision",
-            "eval_holdout_fraction": "data.hf_eval_holdout_fraction",
-        },
+        keys=source_active & source_replay_fields,
+        severity="error" if packed_window_replay or hf_window_replay else semantic_severity,
+        labels=source_labels,
+    )
+    _cmp_mapping(
+        "data",
+        src_cur,
+        src_prev,
+        keys=source_active - source_replay_fields,
         severity=semantic_severity,
+        labels=source_labels,
     )
 
     tok_prev = meta_fp.get("tokenizer") or {}

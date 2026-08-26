@@ -150,7 +150,7 @@ data:
   # data.text_key -- string; default: text; nonempty when backend=hf; ignored by local_text. Every selected row must contain a string at this key; schema failures are not retried.
   text_key: "<nonempty string>"
 
-  # data.shuffle -- bool; default: true; HF-only and training-only. Shuffles owned document windows; every eval source and generation prompt pool remains unshuffled. Packed-row shuffle is separate.
+  # data.shuffle -- bool; default: true; HF-only and training-only. Shuffles owned document windows; every eval source and generation prompt pool remains unshuffled. Packed-row shuffle is separate. While active on either side of a resume, the source-selection/partition fields and effective document-window recipe are hard compatibility requirements because the saved cursor replays that window.
   shuffle: "<bool>"
 
   # data.shuffle_buffer_size -- int; default: 10000; > 0 when HF shuffle is active and resume-inert when shuffle=false. Document-count cap per owned window; maintained pretrain recipes use 200000 together with the byte cap for stronger mixing.

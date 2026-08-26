@@ -3379,35 +3379,95 @@ def test_lookahead_change_is_inert_when_eval_disabled(
         ("shuffle_buffer_size", 10_000, 200_000, "shuffle_buffer_size"),
         ("shuffle_buffer_bytes", 1024, 2048, "shuffle_buffer_bytes"),
         ("hf_revision", "abc123", "def456", "hf_revision"),
-        ("repeat", True, False, "data.repeat"),
+        ("seed", 1, 2, "data.seed"),
+        ("hf_dataset", "dummy", "other", "hf_dataset"),
     ],
 )
-def test_resume_compat_warns_for_hf_source_drift(
+def test_warn_resume_rejects_hf_window_replay_drift(
     tmp_path: Path,
     field: str,
     initial: Any,
     changed: Any,
     match: str,
-    caplog: LogCaptureFixture,
 ) -> None:
-    """HF source-order and identity changes warn in the default mode."""
+    """An HF document cursor is valid only for its saved replay recipe.
+
+    :param Path tmp_path: Temporary run directory root.
+    :param str field: Source or shuffle field to change.
+    :param Any initial: Value recorded by the checkpoint.
+    :param Any changed: Value requested for resume.
+    :param str match: Expected incompatibility field.
+    """
     cfg = _base_cfg(tmp_path / f"run_{field}")
-    data = replace(
-        cfg.data,
-        backend="hf",
-        hf_dataset="dummy",
-        hf_name="dummy",
-        hf_split="train",
-        shuffle=True,
-        **{field: initial},
-    )
+    source = {
+        "backend": "hf",
+        "hf_dataset": "dummy",
+        "hf_name": "dummy",
+        "hf_split": "train",
+        "shuffle": True,
+        field: initial,
+    }
+    data = replace(cfg.data, **source)
     cfg = replace(cfg, data=data)
     meta = _checkpoint_record(cfg).to_dict()
     drifted = replace(cfg, data=replace(cfg.data, **{field: changed}))
 
-    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+    with pytest.raises(RuntimeError, match=match):
         check_resume_compat(drifted, meta)
-    assert match in caplog.text
+
+
+def test_hf_repeat_change_retains_warn_mode_semantics(
+    tmp_path: Path, caplog: LogCaptureFixture
+) -> None:
+    """Repeat changes future exhaustion behavior, not active-window replay.
+
+    :param Path tmp_path: Temporary run directory root.
+    :param LogCaptureFixture caplog: Captured compatibility warning.
+    """
+    cfg = _base_cfg(tmp_path / "run_repeat")
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_split="train",
+            shuffle=True,
+            repeat=True,
+        ),
+    )
+    meta = _checkpoint_record(cfg).to_dict()
+
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+        check_resume_compat(replace(cfg, data=replace(cfg.data, repeat=False)), meta)
+    assert "data.repeat" in caplog.text
+
+
+def test_packed_window_replay_rejects_unshuffled_hf_source_drift(tmp_path: Path) -> None:
+    """The outer row window also binds an otherwise unshuffled HF source.
+
+    :param Path tmp_path: Temporary run directory root.
+    """
+    cfg = _base_cfg(tmp_path / "run_outer_source_replay")
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_split="train",
+            hf_revision="abc123",
+            shuffle=False,
+            window_shuffle_tokens=64,
+        ),
+    )
+    meta = _checkpoint_record(cfg).to_dict()
+    drifted = replace(cfg, data=replace(cfg.data, hf_revision="def456"))
+
+    with pytest.raises(RuntimeError, match="hf_revision"):
+        check_resume_compat(drifted, meta)
 
 
 def test_resume_compat_ignores_inert_shuffle_values(tmp_path: Path) -> None:

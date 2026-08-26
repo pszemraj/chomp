@@ -74,7 +74,7 @@ Bin and multipack queue rows are checkpointed as flat int32 payloads with row of
 
 This is checkpointed alongside the model so resume does not rely on `.skip()` or re-streaming.
 
-Hugging Face's streaming shuffle omits the contents of its read-ahead buffer from `state_dict()`, so chomp never calls it in the checkpointed path. Chomp instead permutes disjoint document windows. State stores the unshuffled source position at the current window's start, its index, and the output cursor; a restore reconstructs the window deterministically without inflating the checkpoint with document text. Checkpoint metadata separately binds immutable source identity; its field and continuation contracts are in the [Config Reference](config-reference.yaml) and [Checkpointing and Resume](checkpointing.md#resume-compatibility-checks).
+Hugging Face's streaming shuffle omits the contents of its read-ahead buffer from `state_dict()`, so chomp never calls it in the checkpointed path. Chomp instead permutes disjoint document windows. State stores the unshuffled source position at the current window's start, its index, and the output cursor; a restore reconstructs the window deterministically without inflating the checkpoint with document text. Because that cursor has meaning only for the exact reconstructed window, both resume modes refuse changes to the active source-selection, partition, or document-shuffle recipe. Checkpoint metadata binds those fields; their continuation contracts are in the [Config Reference](config-reference.yaml) and [Checkpointing and Resume](checkpointing.md#resume-compatibility-checks).
 
 Source-schema violations fail deterministically rather than being coerced or skipped; the selected-field contract is [`data.text_key`](config-reference.yaml).
 
