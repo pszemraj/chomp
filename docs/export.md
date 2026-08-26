@@ -191,6 +191,8 @@ requires `identity.json` itself to hash back to the `tokenizer_identity` in
 pairing one export's vocabulary with the other's weights. Byte tokenizers are
 built from the config and ship no vocabulary, so there is nothing to check.
 
+A metadata-free standalone checkpoint may use `--config` to recover model semantics, but an HF config is not a tokenizer artifact or proof of which token IDs trained the weights. Such an export therefore still requires a discoverable run-pinned tokenizer snapshot and refuses before writing anything when none exists.
+
 **A tokenizer snapshot that cannot be shipped faithfully is refused.** Export
 copies the snapshot flat into the export root so
 `AutoTokenizer.from_pretrained(export_dir)` resolves. A snapshot containing a

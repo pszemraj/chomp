@@ -733,6 +733,35 @@ def test_export_refuses_non_megalodon_backends(tmp_path: Path) -> None:
         export_checkpoint(run_dir, tmp_path / "out")
 
 
+def test_metadata_free_hf_export_requires_a_tokenizer_snapshot(
+    trained_run: Path,
+    tmp_path: Path,
+) -> None:
+    """A config-only standalone checkpoint cannot emit an unloadable HF export.
+
+    :param Path trained_run: Run containing a real restorable checkpoint.
+    :param Path tmp_path: Temporary export root.
+    """
+    source_step, _run_dir = resolve_checkpoint_path(trained_run)
+    source_meta = json.loads((source_step / "meta" / "metadata").read_text())
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(source_meta["config"]))
+
+    standalone_step = tmp_path / "standalone-step"
+    shutil.copytree(source_step, standalone_step)
+    shutil.rmtree(standalone_step / "meta")
+    destination = tmp_path / "export"
+
+    with pytest.raises(RuntimeError, match="run-pinned tokenizer snapshot"):
+        export_checkpoint(
+            standalone_step,
+            destination,
+            config_override=str(config_path),
+        )
+
+    assert not destination.exists()
+
+
 def test_config_json_rebuilds_the_architecture_in_the_weights_file(exported_dir: Path) -> None:
     """config.json must be sufficient on its own to describe what was exported.
 

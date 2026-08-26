@@ -261,8 +261,13 @@ def _tokenizer_for_checkpoint(
         observed_manifest = _build_tokenizer_manifest(run_dir / "tokenizer", tokenizer)
         return tokenizer, observed, observed_manifest
 
-    if cfg.data.tokenizer.kind == "hf" and run_dir is not None and (run_dir / "tokenizer").exists():
-        return load_tokenizer_snapshot(run_dir, cfg), None, None
+    if cfg.data.tokenizer.kind == "hf":
+        if run_dir is not None and (run_dir / "tokenizer").exists():
+            return load_tokenizer_snapshot(run_dir, cfg), None, None
+        raise RuntimeError(
+            "Checkpoint has no tokenizer identity or run-pinned tokenizer snapshot; "
+            "cannot produce a loadable Hugging Face-tokenized export from config alone."
+        )
     return None, None, None
 
 
