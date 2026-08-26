@@ -2954,10 +2954,6 @@ def test_resume_compat_requires_valid_token_count(tmp_path: Path, tokens_seen: A
     ("mutate", "match"),
     [
         (
-            lambda c: replace(c, data=replace(c.data, window_shuffle_tokens=64)),
-            "window_shuffle_rows",
-        ),
-        (
             lambda c: replace(
                 c, data=replace(c.data, mask_boundary_loss=not c.data.mask_boundary_loss)
             ),
@@ -2972,7 +2968,7 @@ def test_resume_compat_requires_valid_token_count(tmp_path: Path, tokens_seen: A
             "deterministic",
         ),
     ],
-    ids=["window_shuffle", "mask_boundary", "train_on_eos", "deterministic"],
+    ids=["mask_boundary", "train_on_eos", "deterministic"],
 )
 def test_resume_compat_warns_for_stream_and_objective_drift(
     tmp_path: Path, mutate: Any, match: str, caplog: LogCaptureFixture
@@ -2983,6 +2979,91 @@ def test_resume_compat_warns_for_stream_and_objective_drift(
     with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
         check_resume_compat(mutate(cfg), meta)
     assert match in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (
+            lambda c: replace(c, data=replace(c.data, packing_mode="multipack")),
+            "packing_mode",
+        ),
+        (
+            lambda c: replace(c, data=replace(c.data, packing_buffer_docs=16)),
+            "packing_buffer_docs",
+        ),
+        (
+            lambda c: replace(c, data=replace(c.data, packing_max_docs_per_bin=2)),
+            "packing_max_docs_per_bin",
+        ),
+        (
+            lambda c: replace(c, data=replace(c.data, seed=c.data.seed + 1)),
+            "window_shuffle_seed",
+        ),
+        (
+            lambda c: replace(c, data=replace(c.data, window_shuffle_tokens=128)),
+            "window_shuffle_rows",
+        ),
+        (
+            lambda c: replace(
+                c,
+                train=replace(c.train, seq_len=16),
+                data=replace(c.data, window_shuffle_tokens=128),
+            ),
+            "train.seq_len",
+        ),
+        (
+            lambda c: replace(c, train=replace(c.train, batch_size=2)),
+            "packing_cycle_rows",
+        ),
+        (
+            lambda c: replace(
+                c,
+                data=replace(
+                    c.data,
+                    tokenizer=replace(c.data.tokenizer, add_eos=True),
+                ),
+            ),
+            "tokenizer.add_eos",
+        ),
+    ],
+    ids=[
+        "ffd_mode",
+        "ffd_lookahead",
+        "ffd_doc_cap",
+        "window_seed",
+        "window_geometry",
+        "sequence_length",
+        "packing_cycle",
+        "token_preparation",
+    ],
+)
+def test_warn_resume_rejects_packed_window_reconstruction_drift(
+    tmp_path: Path,
+    mutate: Any,
+    match: str,
+) -> None:
+    """Warn mode cannot apply an old row cursor to a rebuilt, different window.
+
+    :param Path tmp_path: Temporary run directory root.
+    :param Any mutate: Configuration mutation affecting packed-row reconstruction.
+    :param str match: Expected incompatibility field.
+    """
+    cfg = _base_cfg(tmp_path / "run_packed_window_replay")
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            packing_mode="bin",
+            packing_buffer_docs=8,
+            packing_max_docs_per_bin=1,
+            window_shuffle_tokens=64,
+        ),
+    )
+    meta = _checkpoint_record(cfg).to_dict()
+
+    with pytest.raises(RuntimeError, match=match):
+        check_resume_compat(mutate(cfg), meta)
 
 
 def test_resume_compat_strict_rejects_semantic_drift(tmp_path: Path) -> None:
@@ -3368,10 +3449,8 @@ def test_resume_compat_ignores_inert_shuffle_values(tmp_path: Path) -> None:
     check_resume_compat(inert_hf_drift, _checkpoint_record(hf).to_dict())
 
 
-def test_resume_compat_warns_for_local_window_shuffle_seed_drift(
-    tmp_path: Path, caplog: LogCaptureFixture
-) -> None:
-    """Local window-shuffle seed drift warns in the default mode."""
+def test_resume_compat_rejects_local_window_shuffle_seed_drift(tmp_path: Path) -> None:
+    """An old packed-row cursor is invalid under a new window permutation."""
     cfg = _base_cfg(tmp_path / "run_window_seed")
     cfg = replace(cfg, data=replace(cfg.data, window_shuffle_tokens=64))
     assert cfg.data.backend == "local_text"
@@ -3379,9 +3458,8 @@ def test_resume_compat_warns_for_local_window_shuffle_seed_drift(
     meta = _checkpoint_record(cfg).to_dict()
 
     drifted = replace(cfg, data=replace(cfg.data, seed=cfg.data.seed + 1))
-    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+    with pytest.raises(RuntimeError, match="window_shuffle_seed"):
         check_resume_compat(drifted, meta)
-    assert "window_shuffle_seed" in caplog.text
 
     disabled = replace(cfg, data=replace(cfg.data, window_shuffle_tokens=0))
     disabled_meta = _checkpoint_record(disabled).to_dict()

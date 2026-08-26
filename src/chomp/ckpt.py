@@ -724,6 +724,15 @@ def check_resume_compat(
 
     cur_fp = data_fingerprint(cfg)
     semantic_severity = "error" if cfg.checkpoint.resume_compat == "strict" else "warning"
+    pack_prev = meta_fp.get("packing") or {}
+    pack_cur = cur_fp.get("packing") or {}
+    packed_window_replay = bool(pack_prev.get("window_shuffle_rows", 0)) or bool(
+        pack_cur.get("window_shuffle_rows", 0)
+    )
+    # Grain restores this layer from the producer state at the current packed
+    # window's start, then advances the saved row cursor. Anything that can
+    # rebuild different rows must therefore remain equal even in warn mode.
+    replay_severity = "error" if packed_window_replay else semantic_severity
 
     _cmp(
         "checkpoint_meta.schema_version",
@@ -744,21 +753,42 @@ def check_resume_compat(
         "tokenizer_identity",
         tokenizer_identity,
         meta.get("tokenizer_identity", _MISSING),
-        severity=semantic_severity,
+        severity=replay_severity,
     )
 
     _cmp_mapping(
         "",
         cur_fp,
         meta_fp,
-        keys={"seq_len", "batch_size", "grad_accum"},
+        keys={"seq_len"},
         labels={
             "seq_len": "train.seq_len",
+        },
+        severity=replay_severity,
+    )
+    _cmp_mapping(
+        "",
+        cur_fp,
+        meta_fp,
+        keys={"batch_size", "grad_accum"},
+        labels={
             "batch_size": "train.batch_size",
             "grad_accum": "train.grad_accum",
         },
         severity=semantic_severity,
     )
+    if packed_window_replay:
+        previous_cycle_rows = _MISSING
+        previous_batch_size = meta_fp.get("batch_size", _MISSING)
+        previous_grad_accum = meta_fp.get("grad_accum", _MISSING)
+        if isinstance(previous_batch_size, int) and isinstance(previous_grad_accum, int):
+            previous_cycle_rows = previous_batch_size * previous_grad_accum
+        _cmp(
+            "data.packing_cycle_rows",
+            int(cfg.train.batch_size) * int(cfg.train.grad_accum),
+            previous_cycle_rows,
+            severity="error",
+        )
 
     # Fingerprint sections contain only active backend/mode keys. Every current
     # key must be present because missing metadata cannot establish equality.
@@ -791,27 +821,48 @@ def check_resume_compat(
         "vocab_size_multiple",
         "auto_set_special_tokens",
     }
+    tokenizer_replay_fields = {
+        "kind",
+        "add_bos",
+        "add_eos",
+        "max_doc_tokens",
+        "byte_offset",
+    }
+    tokenizer_active = set(tok_cur) - tokenizer_contextual
     _cmp_mapping(
         "tokenizer",
         tok_cur,
         tok_prev,
-        keys=set(tok_cur) - tokenizer_contextual,
+        keys=tokenizer_active & tokenizer_replay_fields,
+        severity=replay_severity,
+    )
+    _cmp_mapping(
+        "tokenizer",
+        tok_cur,
+        tok_prev,
+        keys=tokenizer_active - tokenizer_replay_fields,
         severity=semantic_severity,
     )
 
     # Fingerprinted packing knobs change data order or the training objective.
-    pack_prev = meta_fp.get("packing") or {}
-    pack_cur = cur_fp.get("packing") or {}
     # Knobs whose DataConfig field carries the packing_ prefix; the rest are
     # top-level data.* fields recorded in the fingerprint's packing section.
     packing_prefixed = {"mode", "buffer_docs", "max_docs_per_bin", "group_docs", "strict_segments"}
+    packer_replay_fields = {
+        "mode",
+        "buffer_docs",
+        "max_docs_per_bin",
+        "group_docs",
+        "window_shuffle_rows",
+        "window_shuffle_seed",
+    }
     for key in sorted(pack_cur):
         label = f"data.packing_{key}" if key in packing_prefixed else f"data.{key}"
         _cmp(
             label,
             pack_cur.get(key, _MISSING),
             pack_prev.get(key, _MISSING),
-            severity=semantic_severity,
+            severity=replay_severity if key in packer_replay_fields else semantic_severity,
         )
 
     # Eval tokens are rebuilt from the live stream on every start; selection
@@ -901,13 +952,21 @@ def check_resume_compat(
             "output_size",
             "param_dtype",
         }
+    model_replay_fields = {"pad_token_id", "bos_token_id", "eos_token_id"} & model_active
     model_structural &= model_active
     _cmp_mapping("model", model_cur, model_prev, keys=model_structural, severity="error")
     _cmp_mapping(
         "model",
         model_cur,
         model_prev,
-        keys=model_active - model_structural,
+        keys=model_replay_fields - model_structural,
+        severity=replay_severity,
+    )
+    _cmp_mapping(
+        "model",
+        model_cur,
+        model_prev,
+        keys=model_active - model_structural - model_replay_fields,
         severity=semantic_severity,
     )
 
