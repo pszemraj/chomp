@@ -41,7 +41,7 @@ model:
   # model.value_dim -- int; default: 128; > 0 and divisible by model.num_heads. Megalodon value width.
   value_dim: "<int>"
 
-  # model.ffn_hidden_dim -- int; default: 256; > 0. Feed-forward width; the maintained recipes use 2.375x to 4x model.model_dim.
+  # model.ffn_hidden_dim -- int; default: 256; > 0. Feed-forward width; the maintained recipes use 1.59x to 2.67x model.model_dim. model.swiglu does NOT rescale this: the gate adds a third model_dim x ffn_hidden_dim matrix at the same width, so a param-matched gated recipe sets this to two-thirds of its non-gated value. See docs/training.md "Gated FFN and ffn_hidden_dim".
   ffn_hidden_dim: "<int>"
 
   # model.cema_ndim -- int; default: 16; > 0. CEMA components per channel; higher values add recurrent capacity and cost.
@@ -62,7 +62,7 @@ model:
   # model.rope_base -- float | null; default: null, which Megalodon resolves to 10000; otherwise > 0. Change only as part of a deliberate context-scaling design.
   rope_base: "<float | null>"
 
-  # model.swiglu -- bool; default: false. Enables SwiGLU in the Megalodon feed-forward network.
+  # model.swiglu -- bool; default: false. Enables SwiGLU in the Megalodon feed-forward network: silu(fc1(h)) * fc3(h) -> fc2 instead of silu(fc1(h)) -> fc2. All maintained pretrain recipes set it true, matching the upstream paper presets. Adds a third projection per layer, so it widens Muon routing and does not rescale model.ffn_hidden_dim -- see that field.
   swiglu: "<bool>"
 
   # model.rescale_nffn -- bool; default: false. Enables learned normalized-FFN residual rescaling; its scale uses Adam without weight decay.
@@ -119,10 +119,6 @@ model:
   # model.attention_softmax_dtype -- string; default: float32; one of: float32 | bfloat16. Keep FP32 for numerical stability; BF16 is an explicit lower-precision reduction.
   attention_softmax_dtype: "<float32 | bfloat16>"
 
-  # model.loss_chunk_size -- int | null; default: null; null or > 0; Megalodon-only and active resume semantics. Megalodon-JAX 0.2.2 always evaluates loss log-softmax and scalar reductions in FP32. A positive static value chunks vocabulary projection during train/eval loss and reduces peak memory, but BF16 projection partitioning can change gradients at BF16 scale and rematerializes work in backward. Maintained 500M/1B templates use 256; the 100M/200M recipes leave it null for speed.
-  # Full-logit storage is about batch_size * seq_len * vocab_size * 4 bytes per microbatch. For memory-bound 32K-vocabulary long-context runs, start at 256 and choose the largest value that fits; null is fastest.
-  loss_chunk_size: "<int | null>"
-
 # data -- mapping | null; default: {}. Source, order, packing, tokenizer, and objective fields participate in resume compatibility according to their active semantics.
 data:
   # data.backend -- string; default: hf; one of: hf | local_text. `local_text` consumes literal inline text and is debug-only.
@@ -154,7 +150,7 @@ data:
   # data.text_key -- string; default: text; nonempty when backend=hf; ignored by local_text. Every selected row must contain a string at this key; schema failures are not retried.
   text_key: "<nonempty string>"
 
-  # data.shuffle -- bool; default: true; HF-only and training-only. Shuffles owned document windows; every eval source and generation prompt pool remains unshuffled. Packed-row shuffle is separate.
+  # data.shuffle -- bool; default: true; HF-only and training-only. Shuffles owned document windows; every eval source and generation prompt pool remains unshuffled. Packed-row shuffle is separate. While active on either side of a resume, the source-selection/partition fields and effective document-window recipe are hard compatibility requirements because the saved cursor replays that window.
   shuffle: "<bool>"
 
   # data.shuffle_buffer_size -- int; default: 10000; > 0 when HF shuffle is active and resume-inert when shuffle=false. Document-count cap per owned window; maintained pretrain recipes use 200000 together with the byte cap for stronger mixing.
@@ -208,6 +204,10 @@ data:
   # data.max_eval_samples -- int; default: 1000; >= 0. With null hf_eval_split, zero disables eval data and returns the hash holdout to training, while any positive value partitions HF training regardless of train.eval_every. Eval collection itself additionally requires eval_every>0, a non-dry active run, and evaluation not already disabled.
   # Positive collection counts selected documents, not rows/tokens; a null-split holdout scans roughly value / hf_eval_holdout_fraction source rows. Documents are fully tokenized and retained until first eval, then packed batches are cached on host; max_doc_tokens does not cap that startup tokenization or interim storage. local_text repeats one text.
   max_eval_samples: "<int>"
+
+  # data.eval_packing -- string; default: onedoc; one of: train | onedoc. Decides how eval rows are laid out, not which documents are selected. onedoc puts one document per padded row and pins its own FFD lookahead, so eval_loss measures the single-document condition generation runs under and stays comparable across runs whose training packing differs; train reuses packing_mode and its knobs instead.
+  # Resume-significant: changing it changes what eval_loss means, so it follows checkpoint.resume_compat warn/strict semantics. onedoc costs eval wall clock proportional to the padding it adds (roughly 2x on long-document corpora) and is unaffected by packing_strict_segments, which has nothing to isolate at one segment per row.
+  eval_packing: "<train | onedoc>"
 
   # data.tokenizer -- mapping | null; default: {}. Active tokenization semantics participate in resume compatibility. The saved effective class, package versions, files, and canary outputs contextually bind HF loading knobs. HF encoding itself adds no specials; add_bos/add_eos below own training/eval insertion.
   tokenizer:
@@ -315,7 +315,10 @@ optim:
   # optim.grad_clip_norm -- float; default: 1.0; >= 0; zero disables. Global clipping occurs after valid-token normalization and before optimizer partitioning; logged grad_norm is pre-clipping. Keep 1.0 as the starting point.
   grad_clip_norm: "<float>"
 
-  # optim.warmup_steps -- int; default: 10; >= 0 and < train.steps. Linear warmup duration; no ratio alternative exists. Maintained pretrain recipes use 1% of their authored step horizon.
+  # optim.warmup_ratio -- float | null; default: null; 0 <= value < 1. Warmup as a fraction of train.steps, resolved to optim.warmup_steps = round(warmup_ratio * train.steps) after CLI overrides are applied, so shortening train.steps rescales warmup instead of tripping the warmup_steps < train.steps check. Mutually exclusive with optim.warmup_steps in the same config; to override the step count directly on the CLI, also pass optim.warmup_ratio=null. Resume compares the resolved optim.warmup_steps, not this ratio.
+  warmup_ratio: "<float | null>"
+
+  # optim.warmup_steps -- int; default: 10; >= 0 and < train.steps. Linear warmup duration, and the resolved value the schedule and resume checks read. Ignored as an input when optim.warmup_ratio is set, which derives it. Maintained pretrain recipes use 1% of their authored step horizon.
   warmup_steps: "<int>"
 
   # optim.decay_steps -- int | null; default: null, computed as train.steps - warmup_steps; otherwise > 0. This is post-warmup duration, so total schedule horizon = optim.warmup_steps + optim.decay_steps. Extending train.steps with null extends the schedule; set an explicit duration to preserve the original horizon.
@@ -378,8 +381,19 @@ checkpoint:
   # checkpoint.async_save -- bool; default: true; used only when enabled. Overlaps I/O with training and is recommended for GPU runs; graceful shutdown waits, but abrupt termination can lose the newest in-flight save.
   async_save: "<bool>"
 
-  # checkpoint.resume_compat -- string; default: warn; one of: strict | warn. Warn mode permits intentional data, objective, schedule, Megalodon-JAX identity, and optimizer-value changes while logging each mismatch; strict rejects them, including missing identity in old checkpoints. Missing metadata is never treated as proven equal. Parameter/optimizer-state structure and Grain restore failures always abort. Maintained long-run recipes select strict.
+  # checkpoint.resume_compat -- string; default: warn; one of: strict | warn. Warn mode permits intentional data, objective, schedule, Megalodon-JAX identity, and optimizer-value changes while logging each mismatch; strict rejects them, including missing identity in old checkpoints. Missing metadata is never treated as proven equal. Parameter/optimizer-state structure and Grain restore failures always abort. A sequential <-> bin/multipack switch also aborts when packed-window shuffle is active because its saved row cursor is packer-dependent; use --init-from for that phased change. Maintained long-run recipes select strict.
   resume_compat: "<strict | warn>"
+
+# export -- mapping | null; default: {}. Controls the portable safetensors model written when a run finishes. See docs/export.md.
+export:
+  # export.on_finish -- bool; default: true. Writes the final checkpoint out as a portable model when the run ends on its own terms; preempted, crashed, and dummy-backend runs are skipped, as are runs with checkpoint.enabled=false (the export is written from the final checkpoint). A failure here is logged at ERROR and does not fail the run.
+  on_finish: "<bool>"
+
+  # export.dir_name -- string; default: export; a single directory name, never a path. Destination under the run directory; separators, `.`, and `..` are rejected so an export cannot escape the run or overwrite its checkpoints and tokenizer. A resumed run replaces the previous export.
+  dir_name: "<nonempty single path segment>"
+
+  # export.verify -- bool; default: true. Re-reads the written weights and compares every parameter, because safetensors carries no payload checksum. Costs one extra read of the file; leave on.
+  verify: "<bool>"
 
 # logging -- mapping | null; default: {}. Relative metrics/log paths are joined to the final run directory but not confined to it; absolute paths or `..` can escape. Files are append-only with no interprocess locking, so never share targets between concurrent runs.
 logging:

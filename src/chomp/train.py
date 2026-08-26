@@ -26,9 +26,11 @@ Phases 4–5:
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import math
 import random
+import shutil
 import signal
 import sys
 import threading
@@ -50,7 +52,9 @@ from chomp.ckpt import (
     build_meta,
     check_resume_compat,
     default_ckpt_dir,
+    load_warm_start_params,
     make_manager,
+    read_warm_start_source,
     restore_data_state_at_step,
     restore_train_state_at_step,
     save,
@@ -59,6 +63,7 @@ from chomp.ckpt import (
 from chomp.config import (
     Config,
     derived_deterministic,
+    eval_config,
     resolve_decay_horizon,
     strict_packed_segments,
 )
@@ -376,7 +381,18 @@ def _setup_run_dir_and_tokenizer(
         run_dir_hint = Path(cfg.logging.run_dir)
         if not run_dir_hint.exists():
             raise RuntimeError(f"Resume requested but run directory does not exist: {run_dir_hint}")
-        tokenizer, tokenizer_identity = load_tokenizer_snapshot_for_resume(run_dir_hint, cfg)
+        selected_tokenizer_identity = (
+            None if resume_meta is None else resume_meta.get("tokenizer_identity")
+        )
+        tokenizer, tokenizer_identity = load_tokenizer_snapshot_for_resume(
+            run_dir_hint,
+            cfg,
+            selected_checkpoint_identity=(
+                selected_tokenizer_identity
+                if isinstance(selected_tokenizer_identity, dict)
+                else None
+            ),
+        )
 
     cfg, tokenizer = prepare_tokenizer_and_config(cfg, tokenizer=tokenizer)
 
@@ -659,6 +675,48 @@ def _build_model_state(
     return params, static, tx, schedule, state0, abstract_state
 
 
+def _apply_warm_start(
+    state0: TrainState,
+    *,
+    tx: optax.GradientTransformation,
+    init_from_step_dir: Path,
+    tokenizer_identity: dict[str, Any],
+    run_dir: Path,
+) -> TrainState:
+    """Replace freshly initialized parameters with a prior checkpoint's.
+
+    Only params are taken. Optimizer state is re-initialized against the loaded
+    params, the RNG stays the one derived from this run's seed, and step stays
+    zero, which is what gives the new run its own warmup and decay schedule
+    (the LR is a pure function of state.step).
+
+    Provenance is written to the run directory because a warm-started run is
+    otherwise indistinguishable from a fresh one after the fact.
+
+    :param TrainState state0: Freshly initialized train state.
+    :param optax.GradientTransformation tx: Optimizer, re-initialized on loaded params.
+    :param Path init_from_step_dir: Source checkpoint step directory.
+    :param dict[str, Any] tokenizer_identity: This run's tokenizer identity.
+    :param Path run_dir: Destination run directory for the provenance record.
+    :return TrainState: State carrying loaded params at step zero.
+    """
+    params, provenance = load_warm_start_params(
+        init_from_step_dir,
+        abstract_params=abstractify_tree(state0.params),
+        tokenizer_identity=tokenizer_identity,
+        run_dir=run_dir,
+    )
+    state = dc_replace(state0, params=params, opt_state=tx.init(params))
+
+    (run_dir / "warm_start.json").write_text(json.dumps(provenance, indent=2, sort_keys=True))
+    print(
+        f"[chomp] warm start: params from {provenance['source_step_dir']} "
+        f"(step {provenance['source_step']}); optimizer, data, and step counter are fresh"
+    )
+    logger.info("Warm started parameters from %s", provenance["source_step_dir"])
+    return state
+
+
 def _build_checkpoint_manager(cfg: Config, run_dir: Path) -> Any | None:
     """Create checkpoint manager when enabled.
 
@@ -715,6 +773,72 @@ def _close_run_resources(
         logger.exception("Closing the training data iterator during %s failed", phase)
         errors.append(exc)
     return errors
+
+
+def _export_final_model(cfg: Config, *, run_dir: Path) -> Path | None:
+    """Write a portable model export from the run's last checkpoint.
+
+    Called once, after a clean finish, so the thing a run is for -- the model --
+    is on disk in a loadable form without a second command. It reads the
+    checkpoint back from disk rather than serializing the live train state, so
+    what ships is exactly what a later ``chomp export`` would produce.
+
+    Failure here does not fail the run. The checkpoint is already durable and
+    ``chomp export`` reproduces this in seconds, so a full training run must not
+    be reported as failed because a convenience copy could not be written -- but
+    it is logged at ERROR, never swallowed.
+
+    :param Config cfg: Run configuration.
+    :param Path run_dir: Run directory holding the checkpoints.
+    :return Path | None: Export directory, or None when nothing was written.
+    """
+    if cfg.model.backend != "megalodon":
+        logger.info(
+            "Skipping end-of-run export: model.backend=%r has no portable weight format.",
+            cfg.model.backend,
+        )
+        return None
+    if not cfg.checkpoint.enabled:
+        logger.warning(
+            "Skipping end-of-run export: export.on_finish is set but checkpoint.enabled "
+            "is false, and the export is written from the final checkpoint."
+        )
+        return None
+
+    from chomp.export import export_checkpoint
+    from chomp.utils.ckpt_paths import latest_step_dir
+
+    if latest_step_dir(default_ckpt_dir(run_dir)) is None:
+        logger.info("Skipping end-of-run export: the run wrote no checkpoint to export.")
+        return None
+
+    destination = run_dir / cfg.export.dir_name
+    try:
+        result = export_checkpoint(
+            run_dir,
+            destination,
+            overwrite=True,
+            verify=cfg.export.verify,
+        )
+    except Exception:
+        logger.exception(
+            "End-of-run export to %s failed. The final checkpoint is unaffected; "
+            "run `chomp export %s --out %s` to retry.",
+            destination,
+            run_dir,
+            destination,
+        )
+        return None
+
+    logger.info(
+        "Exported step %d (%d params, %.1f MB) to %s",
+        result.step,
+        result.param_count,
+        result.weights_bytes / 1e6,
+        result.export_dir,
+    )
+    print(f"[chomp] exported model to {result.export_dir}")
+    return result.export_dir
 
 
 def _save_training_checkpoint(
@@ -1238,7 +1362,6 @@ def make_train_step(
     grad_accum = int(cfg.train.grad_accum)
     clip_norm = float(cfg.optim.grad_clip_norm) if cfg.optim.grad_clip_norm else 0.0
     use_packed_segments = strict_packed_segments(cfg)
-    loss_chunk_size = cfg.model.loss_chunk_size
     # Harness-level optimizer math — micro-grad summation, token
     # normalization, and global-norm clipping — is always fp32. Deliberately
     # NOT cfg.model.accum_dtype: that knob feeds the model's *internal*
@@ -1270,7 +1393,6 @@ def make_train_step(
             deterministic=deterministic,
             key=key,
             use_packed_segments=use_packed_segments,
-            loss_chunk_size=loss_chunk_size,
         )
 
     loss_and_grad = eqx.filter_value_and_grad(micro_loss, has_aux=True)
@@ -1386,8 +1508,10 @@ def make_eval_step(
     :return Callable: eval_step(params, batch) -> (loss_sum, token_sum).
     """
 
-    use_packed_segments = strict_packed_segments(cfg)
-    loss_chunk_size = cfg.model.loss_chunk_size
+    # Evaluation runs under its own packing (data.eval_packing), so the
+    # strictness decision must come from the same derived config that laid the
+    # eval rows out -- not from the training packer.
+    use_packed_segments = strict_packed_segments(eval_config(cfg))
 
     def eval_step(params: Any, batch: Batch) -> tuple[jax.Array, jax.Array]:
         """Compute token-weighted loss sums for a batch.
@@ -1418,7 +1542,6 @@ def make_eval_step(
                 deterministic=True,
                 key=None,
                 use_packed_segments=use_packed_segments,
-                loss_chunk_size=loss_chunk_size,
             )
             return (
                 loss_sum + loss.astype(jnp.float32),
@@ -1446,6 +1569,7 @@ def run(
     *,
     config_path: str | None = None,
     resume: Literal["none", "latest"] | int = "none",
+    init_from: str | Path | None = None,
     dry_run: bool = False,
 ) -> Path:
     """Run a training job and return the run directory.
@@ -1454,12 +1578,18 @@ def run(
     - resume requires logging.run_dir to be set (existing run directory)
     - we restore both train_state and data iterator state when present
 
+    Warm-start contract (init_from):
+    - a fresh run that seeds its parameters from another run's checkpoint
+    - optimizer state, RNG, step counter, and corpus position all start fresh,
+      so data and schedule config may differ from the source arbitrarily
+
     :param Config cfg: Fully validated training configuration.
     :param config_path: Optional path to the source YAML config file.
     :param resume: Resume mode - "none" (fresh), "latest", or specific step number.
+    :param init_from: Optional run or checkpoint step dir to warm start parameters from.
     :param bool dry_run: If True, compile and run a single step, then exit early.
     :raises ValueError: If dense sliding-window attention is requested for training.
-    :raises RuntimeError: If resume setup is invalid.
+    :raises RuntimeError: If resume or warm-start setup is invalid.
     :raises TrainingPreempted: After a signal-requested final checkpoint closes successfully.
     :return Path: Path to the run directory.
     """
@@ -1475,6 +1605,19 @@ def run(
     validate_default_device(allow_cpu=cfg.train.allow_cpu)
     if dry_run and resume != "none":
         raise RuntimeError("dry_run does not support resume; use a fresh run.")
+    # Resume continues one training history; warm start begins a new one from
+    # borrowed parameters. Silently blending them would produce a run whose
+    # optimizer state and step counter disagree about which history they belong to.
+    if init_from is not None and resume != "none":
+        raise RuntimeError(
+            "init_from and resume are mutually exclusive: resume continues an existing run "
+            "in place, while init_from seeds a new run's parameters from another checkpoint. "
+            "Drop --resume to warm start, or drop --init-from to continue."
+        )
+
+    init_from_step_dir = None
+    if init_from is not None:
+        init_from_step_dir, _ = resolve_checkpoint_path(init_from)
 
     run_dir = resolve_run_dir(cfg, config_path=config_path)
     resume_step_dir = _resolve_resume_step_dir(cfg, run_dir=run_dir, resume=resume)
@@ -1489,7 +1632,6 @@ def run(
         if resume_step_dir is not None:
             previous_cfg = load_config_for_checkpoint(
                 step_dir=resume_step_dir,
-                run_dir=run_dir,
                 config_override=None,
             )
 
@@ -1525,6 +1667,7 @@ def run(
             config_path=config_path,
             resume=resume,
             resume_step_dir=resume_step_dir,
+            init_from_step_dir=init_from_step_dir,
             dry_run=dry_run,
             stop_request=stop_request,
         )
@@ -1536,6 +1679,7 @@ def _run_impl(
     config_path: str | None,
     resume: Literal["none", "latest"] | int,
     resume_step_dir: Path | None,
+    init_from_step_dir: Path | None = None,
     dry_run: bool,
     stop_request: _StopSignalState,
 ) -> Path:
@@ -1545,12 +1689,19 @@ def _run_impl(
     :param config_path: Optional source YAML path.
     :param resume: Resume selector.
     :param Path | None resume_step_dir: Exact checkpoint selected for resume.
+    :param Path | None init_from_step_dir: Checkpoint to warm start parameters from.
     :param bool dry_run: Whether to run only one compile/step smoke test.
     :param _StopSignalState stop_request: Cooperative preemption state.
     :return Path: Run directory.
     """
 
     allow_existing = resume != "none"
+
+    if init_from_step_dir is not None:
+        # Gate on the source before creating anything. These refusals depend
+        # only on the source checkpoint, and raising them after create_run_dir
+        # would leave a directory the retry then refuses to clobber.
+        read_warm_start_source(init_from_step_dir)
 
     (
         cfg,
@@ -1579,6 +1730,28 @@ def _run_impl(
         )
     params, static, tx, schedule, state0, abstract_state = _build_model_state(cfg)
     _validate_packing_capabilities(cfg, params=params, static=static)
+
+    if init_from_step_dir is not None:
+        try:
+            state0 = _apply_warm_start(
+                state0,
+                tx=tx,
+                init_from_step_dir=init_from_step_dir,
+                tokenizer_identity=tokenizer_identity,
+                run_dir=run_dir,
+            )
+        except BaseException:
+            # Warm start and resume are mutually exclusive, so allow_existing is
+            # False here and create_run_dir just made this directory. Leaving it
+            # behind would make the retry fail on "run dir already exists"
+            # instead of on the real problem.
+            if not allow_existing:
+                logger.error(
+                    "Warm start failed; removing the run directory it created: %s", run_dir
+                )
+                shutil.rmtree(run_dir, ignore_errors=True)
+            raise
+        params = state0.params
 
     # Log param count once
     n_params = param_count(params)
@@ -1755,9 +1928,13 @@ def _run_impl(
             total_tokens = total_tokens + token_sum
 
         if batch_count == 0:
+            # Name the packer that laid out these rows, not the training one:
+            # under data.eval_packing='onedoc' they are not the same packer.
+            eval_cfg = eval_config(cfg)
             raise RuntimeError(
                 "Evaluation produced zero batches. "
-                f"packing_mode={cfg.data.packing_mode!r}, "
+                f"eval_packing={cfg.data.eval_packing!r} "
+                f"(packing_mode={eval_cfg.data.packing_mode!r}), "
                 f"eval_rows_per_batch={int(cfg.train.batch_size)}, "
                 f"eval_doc_count={eval_doc_count}. "
                 "The eval set did not yield any usable packed window. Increase "
@@ -1773,7 +1950,7 @@ def _run_impl(
                 f"Evaluation produced {batch_count} batch(es) but zero valid "
                 "loss tokens: every label is masked. Check "
                 "data.mask_boundary_loss / data.train_on_eos against the eval "
-                "document lengths."
+                f"document lengths, under eval_packing={cfg.data.eval_packing!r}."
             )
         total_loss_value = float(total_loss_host)
         if not math.isfinite(total_loss_value):
@@ -2208,6 +2385,28 @@ def _run_impl(
         finalization_errors.extend(
             _close_run_resources(manager, data_it, phase="training finalization")
         )
+
+        # Export only a run that finished on its own terms. A preempted or
+        # crashed run's newest checkpoint is a resume point, not a result, and
+        # exporting one would put a model in the run directory that nobody
+        # decided was finished. Deliberately after the manager is closed: the
+        # export reads the final checkpoint back off disk, and an async save
+        # may still have been in flight before that.
+        if (
+            cfg.export.on_finish
+            and not exc_in_flight
+            and not finalization_errors
+            and preemption_reason is None
+            and not stop_request.requested
+        ):
+            export_dir = _export_final_model(cfg, run_dir=run_dir)
+            if wandb_run is not None:
+                with contextlib.suppress(Exception):
+                    if export_dir is None:
+                        wandb_run.summary["export_written"] = False
+                    else:
+                        wandb_run.summary["export_written"] = True
+                        wandb_run.summary["export_dir"] = str(export_dir)
 
         # Checkpoint or iterator finalization failures fail the run (raise
         # below), so W&B's exit code must agree. Finish telemetry only after

@@ -33,16 +33,17 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from chomp.config import Config, resolve_window_shuffle_rows, validate_config
+from chomp.config import Config, eval_config, resolve_window_shuffle_rows, validate_config
 from chomp.types import IGNORE_INDEX, Batch
 
 from .hf import ContentPartition, HFStreamingTextStream, HFStreamSpec, LocalTextStream
-from .pack import FFDPacker, TokenPacker
+from .pack import FFDPacker, TokenPacker, summarize_packer_buffer
 
 _WINDOW_SHUFFLE_SEED_OFFSET = 104_729
 _UINT32_MODULUS = 2**32
 TOKENIZER_MANIFEST_FILENAME = "identity.json"
 TOKENIZER_MANIFEST_VERSION = 1
+TOKENIZER_MANIFEST_FIELDS = ("format_version", "implementation", "packages", "files", "canary")
 TOKENIZER_CANARY_VERSION = 1
 _TOKENIZER_CANARIES = (
     ("ordinary", "The quick brown fox."),
@@ -449,6 +450,19 @@ def prepare_tokenizer_and_config(
     return cfg, tok
 
 
+def sha256_file(path: Path) -> str:
+    """Return the SHA-256 digest of a file's contents.
+
+    :param Path path: File to hash.
+    :return str: Hex digest.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _snapshot_file_records(tok_dir: Path) -> list[dict[str, Any]]:
     """Return hashes and sizes for every tokenizer snapshot file.
 
@@ -460,15 +474,11 @@ def _snapshot_file_records(tok_dir: Path) -> list[dict[str, Any]]:
     for path in sorted(tok_dir.rglob("*")):
         if not path.is_file() or path == manifest_path:
             continue
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
         records.append(
             {
                 "path": path.relative_to(tok_dir).as_posix(),
                 "size": path.stat().st_size,
-                "sha256": digest.hexdigest(),
+                "sha256": sha256_file(path),
             }
         )
     return records
@@ -530,6 +540,24 @@ def _build_tokenizer_manifest(tok_dir: Path, tok: Tokenizer) -> dict[str, Any]:
             ],
         },
     }
+
+
+def tokenizer_manifest_mismatches(expected: Any, observed: dict[str, Any]) -> list[str]:
+    """Return the manifest fields on which two tokenizer identities disagree.
+
+    The compact checkpoint identity is a hash of the whole manifest, so it can
+    only say "different". Naming the fields separates a rebuilt environment
+    (``packages``) from a genuinely different vocabulary (``files``).
+
+    :param Any expected: Manifest read from disk, or any non-mapping if unreadable.
+    :param dict[str, Any] observed: Manifest rebuilt from the current snapshot.
+    :return list[str]: Differing field names, in manifest order.
+    """
+    return [
+        field
+        for field in TOKENIZER_MANIFEST_FIELDS
+        if not isinstance(expected, dict) or expected.get(field) != observed.get(field)
+    ]
 
 
 def tokenizer_checkpoint_identity(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -610,11 +638,15 @@ def load_tokenizer_snapshot(run_dir: Path, cfg: Config) -> Tokenizer:
 def load_tokenizer_snapshot_for_resume(
     run_dir: Path,
     cfg: Config,
+    *,
+    selected_checkpoint_identity: dict[str, Any] | None = None,
 ) -> tuple[Tokenizer, dict[str, Any]]:
     """Load and validate the run-pinned tokenizer before resume.
 
     :param Path run_dir: Existing run directory.
     :param Config cfg: Current training configuration.
+    :param dict[str, Any] | None selected_checkpoint_identity: Tokenizer identity
+        recorded by the selected checkpoint, if available.
     :raises RuntimeError: If strict resume cannot prove tokenizer identity.
     :return tuple[Tokenizer, dict[str, Any]]: Execution tokenizer and checkpoint identity.
     """
@@ -647,22 +679,19 @@ def load_tokenizer_snapshot_for_resume(
 
     tokenizer = load_tokenizer_snapshot(run_dir, cfg)
     observed = _build_tokenizer_manifest(tok_dir, tokenizer)
-    fields = ("format_version", "implementation", "packages", "files", "canary")
-    mismatches = [
-        field
-        for field in fields
-        if not isinstance(expected, dict) or expected.get(field) != observed[field]
-    ]
+    observed_identity = tokenizer_checkpoint_identity(observed)
+    mismatches = tokenizer_manifest_mismatches(expected, observed)
     if mismatches:
         detail = ", ".join(mismatches)
         message = f"Tokenizer identity mismatch in: {detail}"
-        if severity == "strict":
+        if severity == "strict" and selected_checkpoint_identity != observed_identity:
             raise RuntimeError(message)
-        logger.warning("%s; continuing because checkpoint.resume_compat='warn'.", message)
-        if not isinstance(expected, dict):
-            _write_tokenizer_manifest(tok_dir, observed)
+        if severity == "warn":
+            logger.warning("%s; continuing because checkpoint.resume_compat='warn'.", message)
+            if not isinstance(expected, dict):
+                _write_tokenizer_manifest(tok_dir, observed)
 
-    return tokenizer, tokenizer_checkpoint_identity(observed)
+    return tokenizer, observed_identity
 
 
 def _collect_texts(stream: TextStream, max_samples: int) -> list[str]:
@@ -902,9 +931,15 @@ def data_fingerprint(cfg: Config) -> dict[str, Any]:
     if d.max_eval_samples > 0:
         eval_fp["split"] = _eval_source_split(cfg)
         eval_fp["content_partition"] = "eval" if _content_holdout_enabled(cfg) else "all"
-        if d.packing_mode in ("bin", "multipack"):
-            # Evaluation emits B rows per cycle rather than training's A*B,
-            # so a raw lookahead change can be inert for train but active here.
+        # Row layout decides what eval_loss means, so it is fingerprinted even
+        # when it merely inherits the packing section above: 'train' and
+        # 'onedoc' score the same documents under different conditioning.
+        eval_fp["packing"] = d.eval_packing
+        if d.eval_packing == "train" and d.packing_mode in ("bin", "multipack"):
+            # Evaluation emits B rows per cycle rather than training's A*B, so a
+            # raw lookahead change can be inert for train but active here. The
+            # one-document instrument pins its lookahead to that row count
+            # instead, which train.batch_size above already covers.
             eval_fp["packing_lookahead_docs"] = resolve_ffd_lookahead(
                 cfg,
                 rows_per_pack=cfg.train.batch_size,
@@ -1121,6 +1156,7 @@ class _SequenceProducer:
             self._text_stream = _build_backend_text_stream(cfg)
 
         self._packer = _build_packer(cfg, rows_per_pack=rows_per_pack)
+        self._window_shuffle_rows = resolve_window_shuffle_rows(cfg)
 
     def _push_next_document(self) -> None:
         """Fetch one item from the text stream and add it to the packer."""
@@ -1183,10 +1219,58 @@ class _SequenceProducer:
     def set_state(self, state: dict[str, Any]) -> None:
         """Restore producer state from a checkpoint.
 
+        The corpus position and the packer's in-flight buffers are stored
+        separately, and only the buffers are packer-specific. When a resume
+        changes `data.packing_mode` the buffers cannot transfer, but the stream
+        position can — so the new phase continues reading where the old one
+        stopped instead of replaying the corpus from the beginning. This is the
+        path a phased run takes when it switches packing, and it is reachable
+        only under `checkpoint.resume_compat: warn`, because a packing-mode
+        change is an error under `strict` and aborts before any restore. A
+        cross-family switch is also refused when packed-window shuffling is
+        active because Grain restores the producer to the start of the current
+        window and replays its saved row offset; that offset is meaningful only
+        under the packer that created the window.
+
         :param dict[str, Any] state: State dict from get_state().
+        :raises RuntimeError: If the packer family changes under window shuffle.
         """
+        packer_state = state["packer"]
+        can_restore = self._packer.can_restore_state(packer_state)
+        if not can_restore:
+            source_family, buffered = summarize_packer_buffer(packer_state)
+            if self._window_shuffle_rows > 0:
+                raise RuntimeError(
+                    "Cannot resume into a different data.packing_mode while packed-window "
+                    f"shuffle is active ({self._window_shuffle_rows} rows): Grain restores "
+                    "the current window from its start, and the saved row offset cannot be "
+                    "replayed with a different packer family. Use --init-from to start a "
+                    "new data stream with the checkpoint's parameters."
+                )
+
         self._text_stream.set_state(state["text"])
-        self._packer.set_state(state["packer"])
+        if can_restore:
+            self._packer.set_state(packer_state)
+            return
+        # Counters carry; buffers do not. How much that costs depends entirely
+        # on which family wrote the state: a sequential carry is bounded by one
+        # window plus a document tail, while an FFD pending queue holds up to
+        # max(bins_per_pack, lookahead_docs) chunks and can run to hundreds of
+        # thousands of tokens. Ask the writing family for the real numbers
+        # rather than quoting the smaller bound for both.
+        self._packer.load_shared_state(packer_state)
+        logger.warning(
+            "Resumed into a different data.packing_mode: the checkpointed %s buffer "
+            "cannot load into a %s. Corpus position and document counters were "
+            "restored, so the stream continues where it stopped, but the %d buffered "
+            "tokens it held (%d pending documents, %d rendered rows) were already "
+            "consumed from the stream and will never be trained on.",
+            source_family,
+            type(self._packer).__name__,
+            buffered["tokens"],
+            buffered["documents"],
+            buffered["rows"],
+        )
 
     def get_stats(self) -> dict[str, int | float]:
         """Return source- and packer-level document stats if available.
@@ -1217,6 +1301,11 @@ class _EvalBatchIterator:
         :param Config cfg: Training configuration.
         :param list[list[int]] tokens: Ordered pre-tokenized documents.
         """
+        # Rows are laid out under the eval instrument's packing, which by
+        # default is not the training packer's. `make_eval_step` derives the
+        # same config, so the segment semantics the batches carry and the ones
+        # the forward pass executes cannot disagree.
+        cfg = eval_config(cfg)
         self._producer = _SequenceProducer(
             cfg,
             tokenizer=None,

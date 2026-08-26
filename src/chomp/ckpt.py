@@ -398,15 +398,75 @@ def restore_meta_at_step(manager: ocp.CheckpointManager, *, step: int) -> dict[s
     return meta
 
 
+def _validate_restored_params(restored: Any, abstract_params: Any, *, step_dir: Path) -> None:
+    """Refuse a params restore that did not fully satisfy the requested tree.
+
+    ``transforms={}`` makes Orbax permissive by design so the saved
+    opt_state/rng/step subtrees can be skipped, and that permissiveness extends
+    to params: a leaf missing from the checkpoint comes back as the requested
+    :class:`jax.ShapeDtypeStruct` rather than raising, and a leaf whose saved
+    shape differs is restored at the *checkpoint's* shape. Both would otherwise
+    reach the optimizer as uninitialized or wrongly shaped parameters.
+
+    :param Any restored: Params pytree returned by Orbax.
+    :param Any abstract_params: ShapeDtypeStruct tree the caller asked for.
+    :param Path step_dir: Source step directory, for the error message.
+    :raises RuntimeError: If any leaf is unrestored or has the wrong shape/dtype.
+    """
+    import jax
+
+    mismatches: list[str] = []
+
+    def _check(path: Any, expected: Any, actual: Any) -> None:
+        """Record one leaf that the checkpoint did not satisfy.
+
+        :param Any path: Key path of the leaf within the params tree.
+        :param Any expected: Requested ShapeDtypeStruct leaf.
+        :param Any actual: Leaf Orbax returned for that position.
+        """
+        where = jax.tree_util.keystr(path)
+        if isinstance(actual, jax.ShapeDtypeStruct):
+            mismatches.append(
+                f"{where}: absent from the checkpoint "
+                f"(this run expects {expected.shape} {expected.dtype})"
+            )
+        elif actual.shape != expected.shape or actual.dtype != expected.dtype:
+            mismatches.append(
+                f"{where}: checkpoint has {actual.shape} {actual.dtype}, "
+                f"this run expects {expected.shape} {expected.dtype}"
+            )
+
+    jax.tree_util.tree_map_with_path(_check, abstract_params, restored)
+    if not mismatches:
+        return
+
+    shown = "\n".join(f"  {line}" for line in mismatches[:5])
+    if len(mismatches) > 5:
+        shown += f"\n  ... and {len(mismatches) - 5} more"
+    raise RuntimeError(
+        f"Checkpoint parameters in {step_dir} do not match the model this run built.\n"
+        f"{shown}\n"
+        "Parameters are copied verbatim, so the architecture must match. Compare "
+        "model.* against the source run's config_resolved.json."
+    )
+
+
 def restore_params_only(step_dir: Path, abstract_params: Any) -> Any:
     """Restore only the params subtree from a checkpoint step directory.
 
     Inference-side helper: loads train_state/params without opt_state/rng/step,
     directly from a step dir (no CheckpointManager needed).
 
+    Every requested leaf is verified to have been restored at the requested
+    shape and dtype; see :func:`_validate_restored_params` for why Orbax alone
+    does not enforce that. Parameters present in the checkpoint but absent from
+    ``abstract_params`` are dropped without comment, which is what lets this
+    function ignore the saved opt_state/rng/step subtrees.
+
     :param Path step_dir: Checkpoint step directory (contains train_state/).
     :param Any abstract_params: ShapeDtypeStruct tree matching params.
     :raises FileNotFoundError: If the step dir has no train_state.
+    :raises RuntimeError: If the checkpoint does not satisfy abstract_params.
     :return Any: Restored params pytree.
     """
     import orbax.checkpoint as ocp
@@ -433,7 +493,154 @@ def restore_params_only(step_dir: Path, abstract_params: Any) -> Any:
                 restore_args=ocp.checkpoint_utils.construct_restore_args(abstract_train_state),
             ),
         )
-    return restored["params"]
+    params = restored["params"]
+    _validate_restored_params(params, abstract_params, step_dir=Path(step_dir))
+    return params
+
+
+def read_warm_start_source(step_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read a warm-start source checkpoint and the tokenizer identity it recorded.
+
+    Split out from :func:`load_warm_start_params` so the destination run can be
+    gated on the source before it creates anything: both refusals here depend
+    only on the source checkpoint, and failing them after the new run directory
+    exists would leave a directory that the next attempt refuses to clobber.
+
+    :param Path step_dir: Source checkpoint step directory.
+    :raises RuntimeError: If metadata is missing or records no tokenizer identity.
+    :return tuple[dict[str, Any], dict[str, Any]]: Checkpoint metadata and its tokenizer identity.
+    """
+    from chomp.utils.ckpt_paths import read_checkpoint_meta
+
+    step_dir = Path(step_dir)
+    try:
+        meta = read_checkpoint_meta(step_dir)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"Cannot warm start from {step_dir}: checkpoint metadata is missing, so the "
+            "source tokenizer cannot be proven compatible. Warm start requires a schema "
+            f"{CHECKPOINT_META_SCHEMA_VERSION} checkpoint."
+        ) from exc
+
+    source_identity = meta.get("tokenizer_identity")
+    if not isinstance(source_identity, dict):
+        raise RuntimeError(
+            f"Cannot warm start from {step_dir}: checkpoint metadata records no tokenizer "
+            "identity. Loading parameters trained under an unknown tokenizer would "
+            "silently reinterpret every embedding row."
+        )
+    return meta, source_identity
+
+
+def _read_tokenizer_manifest(run_dir: Path | None) -> dict[str, Any] | None:
+    """Read a run's tokenizer identity manifest, or None if unavailable.
+
+    :param Path | None run_dir: Run directory holding a tokenizer snapshot.
+    :return dict[str, Any] | None: Parsed manifest, or None if missing or unreadable.
+    """
+    from chomp.data.pipeline import TOKENIZER_MANIFEST_FILENAME
+
+    if run_dir is None:
+        return None
+    path = Path(run_dir) / "tokenizer" / TOKENIZER_MANIFEST_FILENAME
+    try:
+        manifest = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return manifest if isinstance(manifest, dict) else None
+
+
+def _tokenizer_mismatch_detail(
+    step_dir: Path,
+    source_identity: dict[str, Any],
+    tokenizer_identity: dict[str, Any],
+    run_dir: Path | None,
+) -> str:
+    """Describe a tokenizer identity mismatch by field where the manifests allow it.
+
+    The identities are hashes of whole manifests, so on their own they cannot
+    distinguish a rebuilt environment from a different vocabulary. When both
+    manifests are readable — and the source's still hashes to what the
+    checkpoint recorded — the differing fields are named instead.
+
+    :param Path step_dir: Source checkpoint step directory.
+    :param dict[str, Any] source_identity: Identity recorded by the checkpoint.
+    :param dict[str, Any] tokenizer_identity: This run's tokenizer identity.
+    :param Path | None run_dir: Destination run directory, holding this run's manifest.
+    :return str: Indented mismatch detail for the refusal message.
+    """
+    from chomp.data.pipeline import tokenizer_checkpoint_identity, tokenizer_manifest_mismatches
+
+    fallback = (
+        f"  checkpoint: {source_identity}\n"
+        f"  this run:   {tokenizer_identity}\n"
+        f"  (no comparable manifests; {step_dir} and this run must share a tokenizer)"
+    )
+    # A step dir is <run>/<checkpoint root>/<step>, so its run dir is two up.
+    source_manifest = _read_tokenizer_manifest(Path(step_dir).parent.parent)
+    observed_manifest = _read_tokenizer_manifest(run_dir)
+    if source_manifest is None or observed_manifest is None:
+        return fallback
+    # A snapshot that no longer hashes to the recorded identity describes some
+    # other tokenizer than the one that trained these weights.
+    if tokenizer_checkpoint_identity(source_manifest) != source_identity:
+        return fallback
+
+    fields = tokenizer_manifest_mismatches(source_manifest, observed_manifest)
+    if not fields:
+        return fallback
+    return f"  differing manifest fields: {', '.join(fields)}"
+
+
+def load_warm_start_params(
+    step_dir: Path,
+    *,
+    abstract_params: Any,
+    tokenizer_identity: dict[str, Any],
+    run_dir: Path | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Load parameters from a foreign checkpoint to seed a fresh run.
+
+    Warm start is deliberately not resume. Only parameters cross the boundary;
+    optimizer state, RNG, step counter, and corpus position all start fresh.
+    That is what lets the data pipeline change shape between phases (packing
+    mode, corpus, schedule) where exact resume must refuse.
+
+    :func:`restore_params_only` verifies that every parameter this run needs was
+    restored at the expected shape and dtype, so an architecture change is
+    refused. Tokenizer identity is checked here instead because it is the one
+    mismatch no structural check can see: a different tokenizer with the same
+    vocab size restores cleanly and then trains on embeddings whose rows mean
+    something else.
+
+    :param Path step_dir: Source checkpoint step directory.
+    :param Any abstract_params: ShapeDtypeStruct tree for the new run's params.
+    :param dict[str, Any] tokenizer_identity: New run's tokenizer identity.
+    :param Path | None run_dir: Destination run directory, used to explain a mismatch.
+    :raises RuntimeError: If source metadata or tokenizer identity cannot be proven equal.
+    :return tuple[Any, dict[str, Any]]: Restored params and a provenance record.
+    """
+    step_dir = Path(step_dir)
+    meta, source_identity = read_warm_start_source(step_dir)
+    if source_identity != tokenizer_identity:
+        raise RuntimeError(
+            f"Cannot warm start from {step_dir}: tokenizer identity mismatch.\n"
+            f"{_tokenizer_mismatch_detail(step_dir, source_identity, tokenizer_identity, run_dir)}\n"
+            "Warm start copies embedding and output-head rows verbatim, so they are only "
+            "meaningful under the tokenizer that trained them."
+        )
+
+    params = restore_params_only(step_dir, abstract_params)
+
+    provenance = {
+        "source_step_dir": str(step_dir.resolve()),
+        "source_step": int(meta["step"]),
+        "source_tokens_seen": int(meta.get("tokens_seen", 0)),
+        "source_schema_version": meta.get("schema_version"),
+        "source_megalodon_jax": meta.get("megalodon_jax"),
+        "tokenizer_identity": dict(tokenizer_identity),
+    }
+    return params, provenance
 
 
 def check_resume_compat(
@@ -517,6 +724,15 @@ def check_resume_compat(
 
     cur_fp = data_fingerprint(cfg)
     semantic_severity = "error" if cfg.checkpoint.resume_compat == "strict" else "warning"
+    pack_prev = meta_fp.get("packing") or {}
+    pack_cur = cur_fp.get("packing") or {}
+    packed_window_replay = bool(pack_prev.get("window_shuffle_rows", 0)) or bool(
+        pack_cur.get("window_shuffle_rows", 0)
+    )
+    # Grain restores this layer from the producer state at the current packed
+    # window's start, then advances the saved row cursor. Anything that can
+    # rebuild different rows must therefore remain equal even in warn mode.
+    replay_severity = "error" if packed_window_replay else semantic_severity
 
     _cmp(
         "checkpoint_meta.schema_version",
@@ -537,39 +753,93 @@ def check_resume_compat(
         "tokenizer_identity",
         tokenizer_identity,
         meta.get("tokenizer_identity", _MISSING),
-        severity=semantic_severity,
+        severity=replay_severity,
     )
 
     _cmp_mapping(
         "",
         cur_fp,
         meta_fp,
-        keys={"seq_len", "batch_size", "grad_accum"},
+        keys={"seq_len"},
         labels={
             "seq_len": "train.seq_len",
+        },
+        severity=replay_severity,
+    )
+    _cmp_mapping(
+        "",
+        cur_fp,
+        meta_fp,
+        keys={"batch_size", "grad_accum"},
+        labels={
             "batch_size": "train.batch_size",
             "grad_accum": "train.grad_accum",
         },
         severity=semantic_severity,
     )
+    if packed_window_replay:
+        previous_cycle_rows = _MISSING
+        previous_batch_size = meta_fp.get("batch_size", _MISSING)
+        previous_grad_accum = meta_fp.get("grad_accum", _MISSING)
+        if isinstance(previous_batch_size, int) and isinstance(previous_grad_accum, int):
+            previous_cycle_rows = previous_batch_size * previous_grad_accum
+        _cmp(
+            "data.packing_cycle_rows",
+            int(cfg.train.batch_size) * int(cfg.train.grad_accum),
+            previous_cycle_rows,
+            severity="error",
+        )
 
     # Fingerprint sections contain only active backend/mode keys. Every current
     # key must be present because missing metadata cannot establish equality.
     src_prev = meta_fp.get("source") or {}
     src_cur = cur_fp.get("source") or {}
+    hf_window_replay = (src_prev.get("backend") == "hf" and bool(src_prev.get("shuffle"))) or (
+        src_cur.get("backend") == "hf" and bool(src_cur.get("shuffle"))
+    )
+    source_replay_fields = {
+        "backend",
+        "dataset",
+        "name",
+        "split",
+        "text_key",
+        "revision",
+        "shuffle",
+        "shuffle_buffer_size",
+        "shuffle_buffer_bytes",
+        "seed",
+        "content_partition",
+        "eval_holdout_fraction",
+        "local_text",
+    }
+    if packed_window_replay:
+        # Reconstructing packed rows can cross source exhaustion, so repeat is
+        # part of that outer window's replay recipe as well.
+        source_replay_fields.add("repeat")
+    source_labels = {
+        "backend": "data.source.backend",
+        "dataset": "data.hf_dataset",
+        "name": "data.hf_name",
+        "split": "data.hf_split",
+        "revision": "data.hf_revision",
+        "eval_holdout_fraction": "data.hf_eval_holdout_fraction",
+    }
+    source_active = set(src_cur)
     _cmp_mapping(
         "data",
         src_cur,
         src_prev,
-        labels={
-            "backend": "data.source.backend",
-            "dataset": "data.hf_dataset",
-            "name": "data.hf_name",
-            "split": "data.hf_split",
-            "revision": "data.hf_revision",
-            "eval_holdout_fraction": "data.hf_eval_holdout_fraction",
-        },
+        keys=source_active & source_replay_fields,
+        severity="error" if packed_window_replay or hf_window_replay else semantic_severity,
+        labels=source_labels,
+    )
+    _cmp_mapping(
+        "data",
+        src_cur,
+        src_prev,
+        keys=source_active - source_replay_fields,
         severity=semantic_severity,
+        labels=source_labels,
     )
 
     tok_prev = meta_fp.get("tokenizer") or {}
@@ -584,27 +854,48 @@ def check_resume_compat(
         "vocab_size_multiple",
         "auto_set_special_tokens",
     }
+    tokenizer_replay_fields = {
+        "kind",
+        "add_bos",
+        "add_eos",
+        "max_doc_tokens",
+        "byte_offset",
+    }
+    tokenizer_active = set(tok_cur) - tokenizer_contextual
     _cmp_mapping(
         "tokenizer",
         tok_cur,
         tok_prev,
-        keys=set(tok_cur) - tokenizer_contextual,
+        keys=tokenizer_active & tokenizer_replay_fields,
+        severity=replay_severity,
+    )
+    _cmp_mapping(
+        "tokenizer",
+        tok_cur,
+        tok_prev,
+        keys=tokenizer_active - tokenizer_replay_fields,
         severity=semantic_severity,
     )
 
     # Fingerprinted packing knobs change data order or the training objective.
-    pack_prev = meta_fp.get("packing") or {}
-    pack_cur = cur_fp.get("packing") or {}
     # Knobs whose DataConfig field carries the packing_ prefix; the rest are
     # top-level data.* fields recorded in the fingerprint's packing section.
     packing_prefixed = {"mode", "buffer_docs", "max_docs_per_bin", "group_docs", "strict_segments"}
+    packer_replay_fields = {
+        "mode",
+        "buffer_docs",
+        "max_docs_per_bin",
+        "group_docs",
+        "window_shuffle_rows",
+        "window_shuffle_seed",
+    }
     for key in sorted(pack_cur):
         label = f"data.packing_{key}" if key in packing_prefixed else f"data.{key}"
         _cmp(
             label,
             pack_cur.get(key, _MISSING),
             pack_prev.get(key, _MISSING),
-            severity=semantic_severity,
+            severity=replay_severity if key in packer_replay_fields else semantic_severity,
         )
 
     # Eval tokens are rebuilt from the live stream on every start; selection
@@ -615,7 +906,10 @@ def check_resume_compat(
         "data.eval",
         eval_cur,
         eval_prev,
-        labels={"max_eval_samples": "data.max_eval_samples"},
+        labels={
+            "max_eval_samples": "data.max_eval_samples",
+            "packing": "data.eval_packing",
+        },
         severity=semantic_severity,
     )
 
@@ -691,13 +985,21 @@ def check_resume_compat(
             "output_size",
             "param_dtype",
         }
+    model_replay_fields = {"pad_token_id", "bos_token_id", "eos_token_id"} & model_active
     model_structural &= model_active
     _cmp_mapping("model", model_cur, model_prev, keys=model_structural, severity="error")
     _cmp_mapping(
         "model",
         model_cur,
         model_prev,
-        keys=model_active - model_structural,
+        keys=model_replay_fields - model_structural,
+        severity=replay_severity,
+    )
+    _cmp_mapping(
+        "model",
+        model_cur,
+        model_prev,
+        keys=model_active - model_structural - model_replay_fields,
         severity=semantic_severity,
     )
 
@@ -706,9 +1008,13 @@ def check_resume_compat(
     optim_name_cur = optim_cur.get("name")
     _cmp_mapping("optim", optim_cur, optim_prev, keys={"name"}, severity="error")
 
+    # warmup_ratio is an input to warmup_steps, which is compared below as part
+    # of the schedule horizon. Comparing the ratio too would reject a resume
+    # that merely restates the same warmup as an explicit step count.
     optim_value_keys = set(optim_cur) - {
         "name",
         "decay_steps",
+        "warmup_ratio",
         "adam",
         "muon",
     }

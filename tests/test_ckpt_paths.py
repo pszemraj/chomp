@@ -91,11 +91,7 @@ def test_standalone_step_recovers_metadata_run_dir(tmp_path: Path) -> None:
     assert found_step == step_dir
     assert found_run == run_dir
 
-    loaded = load_config_for_checkpoint(
-        step_dir=step_dir,
-        run_dir=found_run,
-        config_override=None,
-    )
+    loaded = load_config_for_checkpoint(step_dir=step_dir, config_override=None)
     assert loaded.logging.run_dir == str(run_dir)
     assert loaded.model.rope_base == 100_000.0
 
@@ -113,17 +109,18 @@ def test_checkpoint_metadata_beats_run_start_config(tmp_path: Path) -> None:
     (step_dir / "meta").mkdir()
     (step_dir / "meta" / "metadata").write_text(json.dumps({"config": checkpoint_cfg.to_dict()}))
 
-    loaded = load_config_for_checkpoint(
-        step_dir=step_dir,
-        run_dir=run_dir,
-        config_override=None,
-    )
+    loaded = load_config_for_checkpoint(step_dir=step_dir, config_override=None)
 
     assert loaded.model.attention_window == 128
 
 
-def test_run_start_config_is_legacy_fallback(tmp_path: Path) -> None:
-    """A metadata-free legacy checkpoint should fall back to its run config."""
+def test_metadata_free_checkpoint_refuses_the_run_start_config(tmp_path: Path) -> None:
+    """A checkpoint without its own config must not borrow the run's starting one.
+
+    ``config_resolved.json`` records what the run began with, which a later
+    checkpoint may have long since diverged from. Silently substituting it
+    would hand back a model whose static semantics disagree with the arrays.
+    """
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     run_cfg = replace(Config(), model=replace(Config().model, rope_base=20_000.0))
@@ -131,13 +128,8 @@ def test_run_start_config_is_legacy_fallback(tmp_path: Path) -> None:
     step_dir = run_dir / "checkpoints" / "1"
     (step_dir / "train_state").mkdir(parents=True)
 
-    loaded = load_config_for_checkpoint(
-        step_dir=step_dir,
-        run_dir=run_dir,
-        config_override=None,
-    )
-
-    assert loaded.model.rope_base == 20_000.0
+    with pytest.raises(FileNotFoundError, match="no config metadata"):
+        load_config_for_checkpoint(step_dir=step_dir, config_override=None)
 
 
 def test_explicit_checkpoint_config_override_has_highest_priority(tmp_path: Path) -> None:
@@ -154,10 +146,6 @@ def test_explicit_checkpoint_config_override_has_highest_priority(tmp_path: Path
     override_path = tmp_path / "override.yaml"
     override_path.write_text("model:\n  rope_base: 30000.0\n")
 
-    loaded = load_config_for_checkpoint(
-        step_dir=step_dir,
-        run_dir=run_dir,
-        config_override=str(override_path),
-    )
+    loaded = load_config_for_checkpoint(step_dir=step_dir, config_override=str(override_path))
 
     assert loaded.model.rope_base == 30_000.0

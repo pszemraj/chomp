@@ -40,6 +40,7 @@ PackingMode = Literal["sequential", "bin", "multipack"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 ResumeCompat = Literal["strict", "warn"]
 EvalFailurePolicy = Literal["fatal", "disable"]
+EvalPacking = Literal["train", "onedoc"]
 
 
 class _UniqueKeySafeLoader(yaml.SafeLoader):
@@ -140,7 +141,6 @@ class ModelConfig:
     # megalodon-jax); both it and harness gradient accumulation stay fp32.
     accum_dtype: Literal["float32"] = "float32"
     attention_softmax_dtype: Literal["float32", "bfloat16"] = "float32"
-    loss_chunk_size: int | None = None
 
 
 @dataclass(frozen=True)
@@ -267,6 +267,12 @@ class DataConfig:
 
     # Validation set creation from the explicitly selected split/source.
     max_eval_samples: int = 1000
+    # How evaluation rows are packed. "onedoc" puts one document per row, so
+    # eval_loss measures the condition generation actually runs under and does
+    # not move when the *training* packer changes. "train" packs eval rows with
+    # the training knobs above, which reads the model under its own training
+    # distribution but makes eval_loss incomparable across packing changes.
+    eval_packing: EvalPacking = "onedoc"
 
     # Tokenizer
     tokenizer: TokenizerConfig = TokenizerConfig()
@@ -333,6 +339,7 @@ class OptimConfig:
     lr: float = 3e-4
     weight_decay: float = 0.01
     grad_clip_norm: float = 1.0
+    warmup_ratio: float | None = None
     warmup_steps: int = 10
     decay_steps: int | None = None
     min_lr_ratio: float = 0.0
@@ -350,6 +357,18 @@ class CheckpointConfig:
     max_to_keep: int = 3
     async_save: bool = True
     resume_compat: ResumeCompat = "warn"
+
+
+@dataclass(frozen=True)
+class ExportConfig:
+    """Portable weight export written when a run finishes cleanly."""
+
+    on_finish: bool = True
+    #: Directory name under the run directory. A single path segment, never a
+    #: path: export writes into the run's own tree and must not be able to
+    #: reach outside it, or overwrite the run's checkpoints and tokenizer.
+    dir_name: str = "export"
+    verify: bool = True
 
 
 @dataclass(frozen=True)
@@ -393,6 +412,7 @@ class Config:
     train: TrainConfig = TrainConfig()
     optim: OptimConfig = OptimConfig()
     checkpoint: CheckpointConfig = CheckpointConfig()
+    export: ExportConfig = ExportConfig()
     logging: LoggingConfig = LoggingConfig()
     debug: DebugConfig = DebugConfig()
 
@@ -529,17 +549,57 @@ def build_config(data: dict[str, Any], overrides: Iterable[str] | None = None) -
     :return Config: Validated configuration object.
     """
     data = _resolve_variables(data)
+    _reject_conflicting_warmup_keys(data)
     cfg = _from_nested_dict(data)
 
+    overridden: set[str] = set()
     if overrides:
         for o in overrides:
             if "=" not in o:
                 raise ValueError(f"Invalid override {o!r}. Expected format like train.steps=123")
             k, v = o.split("=", 1)
+            overridden.add(k.strip())
             cfg = _set_by_dotted_path(cfg, k.strip(), v.strip())
 
+    if "optim.warmup_steps" in overridden and cfg.optim.warmup_ratio is not None:
+        raise ValueError(
+            "override 'optim.warmup_steps' conflicts with optim.warmup_ratio="
+            f"{cfg.optim.warmup_ratio}, which derives the step count; pass "
+            "'optim.warmup_ratio=null' as well to set the step count directly"
+        )
+
+    # Resolve after overrides so that shortening train.steps rescales warmup.
+    cfg = resolve_warmup(cfg)
     validate_config(cfg)
     return cfg
+
+
+def _reject_conflicting_warmup_keys(data: dict[str, Any]) -> None:
+    """Reject configs whose warmup ratio and explicit step count disagree.
+
+    Setting both is allowed only when they already agree, because
+    ``config_resolved.json`` and checkpoint metadata store the ratio next to
+    the step count it produced and must round-trip through `build_config`.
+
+    :param dict[str, Any] data: Raw nested config mapping.
+    :raises ValueError: If optim.warmup_steps contradicts optim.warmup_ratio.
+    """
+    optim = data.get("optim")
+    if not isinstance(optim, dict) or "warmup_steps" not in optim:
+        return
+    ratio = optim.get("warmup_ratio")
+    if ratio is None:
+        return
+    _validate_warmup_ratio(ratio)
+    train = data.get("train")
+    steps = train.get("steps", TrainConfig.steps) if isinstance(train, dict) else TrainConfig.steps
+    expected = warmup_steps_from_ratio(steps=steps, warmup_ratio=ratio)
+    if optim["warmup_steps"] != expected:
+        _vfail(
+            f"optim.warmup_steps ({optim['warmup_steps']}) contradicts optim.warmup_ratio "
+            f"({ratio}), which implies {expected} at train.steps={steps}; the ratio derives "
+            "the step count, so set only one"
+        )
 
 
 def load_config(path: str | Path, overrides: Iterable[str] | None = None) -> Config:
@@ -652,7 +712,17 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
     :return Config: Fully constructed Config with all sub-configs.
     """
 
-    allowed = {"model", "data", "train", "optim", "checkpoint", "logging", "debug", "derived"}
+    allowed = {
+        "model",
+        "data",
+        "train",
+        "optim",
+        "checkpoint",
+        "export",
+        "logging",
+        "debug",
+        "derived",
+    }
     unknown = sorted(set(data) - allowed)
     if unknown:
         _vfail(f"unknown top-level config section(s): {', '.join(unknown)}")
@@ -701,6 +771,7 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
     logging = LoggingConfig(wandb=wandb, **logging_d)
     debug = DebugConfig(**_section(data.get("debug"), "debug"))
     checkpoint = CheckpointConfig(**_section(data.get("checkpoint"), "checkpoint"))
+    export = ExportConfig(**_section(data.get("export"), "export"))
 
     # Data + nested tokenizer
     data_d = _section(data.get("data"), "data")
@@ -716,6 +787,7 @@ def _from_nested_dict(data: dict[str, Any]) -> Config:
         train=train,
         optim=optim,
         checkpoint=checkpoint,
+        export=export,
         logging=logging,
         debug=debug,
     )
@@ -843,6 +915,21 @@ def _validate_optim(cfg: Config) -> None:
         _vfail(f"optim.grad_clip_norm must be >= 0, got {cfg.optim.grad_clip_norm}")
     if cfg.optim.warmup_steps < 0:
         _vfail(f"optim.warmup_steps must be >= 0, got {cfg.optim.warmup_steps}")
+    if cfg.optim.warmup_ratio is not None:
+        _validate_warmup_ratio(cfg.optim.warmup_ratio)
+        # resolve_warmup() runs before validation on every loaded config, so a
+        # disagreement here means the ratio was never applied and would be
+        # silently ignored by the schedule.
+        expected = warmup_steps_from_ratio(
+            steps=cfg.train.steps, warmup_ratio=cfg.optim.warmup_ratio
+        )
+        if cfg.optim.warmup_steps != expected:
+            _vfail(
+                f"optim.warmup_ratio ({cfg.optim.warmup_ratio}) implies "
+                f"optim.warmup_steps={expected}, got {cfg.optim.warmup_steps}; build the "
+                "config through load_config/build_config so the ratio is resolved, or set "
+                "optim.warmup_ratio to null"
+            )
     if cfg.optim.decay_steps is not None and cfg.optim.decay_steps <= 0:
         _vfail(f"optim.decay_steps must be positive when set, got {cfg.optim.decay_steps}")
     if cfg.optim.min_lr_ratio < 0 or cfg.optim.min_lr_ratio > 1:
@@ -865,8 +952,13 @@ def _validate_optim(cfg: Config) -> None:
     if adam.eps <= 0:
         _vfail(f"optim.adam.eps must be positive, got {adam.eps}")
     if cfg.optim.warmup_steps >= cfg.train.steps:
+        source = (
+            f" (derived from optim.warmup_ratio={cfg.optim.warmup_ratio})"
+            if cfg.optim.warmup_ratio is not None
+            else ""
+        )
         _vfail(
-            f"optim.warmup_steps ({cfg.optim.warmup_steps}) must be < train.steps "
+            f"optim.warmup_steps ({cfg.optim.warmup_steps}){source} must be < train.steps "
             f"({cfg.train.steps})"
         )
 
@@ -883,6 +975,21 @@ def _validate_checkpoint(cfg: Config) -> None:
             _vfail(f"checkpoint.save_every must be positive, got {cfg.checkpoint.save_every}")
         if cfg.checkpoint.max_to_keep <= 0:
             _vfail(f"checkpoint.max_to_keep must be positive, got {cfg.checkpoint.max_to_keep}")
+
+
+def _validate_export(cfg: Config) -> None:
+    """Validate the end-of-run export destination.
+
+    ``dir_name`` is joined onto the run directory, so anything but a plain
+    name could send the export outside the run or on top of the run's own
+    ``checkpoints/`` and ``tokenizer/``.
+    """
+    name = cfg.export.dir_name
+    if not name or name in {".", ".."} or name != Path(name).name:
+        _vfail(
+            "export.dir_name must be a single directory name inside the run directory, "
+            f"got {name!r}"
+        )
 
 
 def _validate_model(cfg: Config) -> None:
@@ -920,8 +1027,6 @@ def _validate_model(cfg: Config) -> None:
     if cfg.model.backend == "dummy":
         if cfg.model.d_model <= 0:
             _vfail(f"model.d_model must be positive, got {cfg.model.d_model}")
-        if cfg.model.loss_chunk_size is not None:
-            _vfail("model.loss_chunk_size is supported only when model.backend='megalodon'")
     else:
         positive_fields = {
             "model_dim": cfg.model.model_dim,
@@ -980,10 +1085,6 @@ def _validate_model(cfg: Config) -> None:
             _vfail(f"model.attention_dropout must be in [0, 1), got {cfg.model.attention_dropout}")
         if not 0 <= cfg.model.hidden_dropout < 1:
             _vfail(f"model.hidden_dropout must be in [0, 1), got {cfg.model.hidden_dropout}")
-        if cfg.model.loss_chunk_size is not None and cfg.model.loss_chunk_size <= 0:
-            _vfail(
-                f"model.loss_chunk_size must be positive when set, got {cfg.model.loss_chunk_size}"
-            )
     if cfg.model.output_size != -1 and cfg.model.output_size <= 0:
         _vfail(f"model.output_size must be -1 or positive, got {cfg.model.output_size}")
     if cfg.model.share_emb and cfg.model.output_size not in (-1, cfg.model.vocab_size):
@@ -1069,6 +1170,8 @@ def _validate_data(cfg: Config) -> None:
             "data.packing_mode must be 'sequential', 'bin', or 'multipack', got "
             f"{cfg.data.packing_mode!r}"
         )
+    if cfg.data.eval_packing not in ("train", "onedoc"):
+        _vfail(f"data.eval_packing must be 'train' or 'onedoc', got {cfg.data.eval_packing!r}")
     if (
         cfg.data.packing_mode in ("bin", "multipack")
         and cfg.data.packing_max_docs_per_bin is not None
@@ -1208,10 +1311,21 @@ def validate_config(cfg: Config) -> None:
     _validate_train(cfg)
     _validate_optim(cfg)
     _validate_checkpoint(cfg)
+    _validate_export(cfg)
     _validate_model(cfg)
     _validate_data(cfg)
     _validate_logging(cfg)
     _validate_tokenizer(cfg)
+
+
+def scheduled_token_counts(cfg: Config) -> tuple[int, int]:
+    """Return the configured token-slot and causal-loss ceilings.
+
+    :param Config cfg: Validated training configuration.
+    :return tuple[int, int]: Scheduled token slots and maximum causal loss tokens.
+    """
+    sequences = int(cfg.train.steps) * int(cfg.train.grad_accum) * int(cfg.train.batch_size)
+    return sequences * int(cfg.train.seq_len), sequences * (int(cfg.train.seq_len) - 1)
 
 
 def derived_deterministic(cfg: Config) -> bool:
@@ -1266,6 +1380,91 @@ def strict_packed_segments(cfg: Config) -> bool:
     :return bool: True iff a multi-document packing mode is active with strict isolation.
     """
     return cfg.data.packing_mode in ("bin", "multipack") and cfg.data.packing_strict_segments
+
+
+def eval_config(cfg: Config) -> Config:
+    """The configuration the evaluation path assembles rows and scores under.
+
+    Evaluation is a measuring instrument, and an instrument that changes with
+    the thing it measures is not one. Under ``data.eval_packing='onedoc'`` the
+    training packing knobs are rewritten to one document per row, so
+    ``eval_loss`` reads the condition generation actually runs under -- a single
+    document in context, no recurrent state carried in from an unrelated one --
+    and two runs that train under different packing stay directly comparable.
+    ``'train'`` returns the config unchanged, scoring the model under its own
+    training distribution instead.
+
+    The eval document set is unaffected either way: packing decides how those
+    documents are laid out in rows, not which ones are selected.
+
+    :param Config cfg: Training configuration.
+    :return Config: Configuration for eval data assembly and the eval step.
+    """
+    if cfg.data.eval_packing == "train":
+        return cfg
+    return replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            packing_mode="bin",
+            # One document per row. `_place_first_fit` rejects every non-empty
+            # bin, so a row holds one document or one capacity-sized chunk of a
+            # long one, right-padded.
+            packing_max_docs_per_bin=1,
+            # Clamped up to one packing cycle's worth of rows. FFD seeds every
+            # bin with the oldest candidate and a one-document cap leaves it
+            # nothing to fill afterwards, so this lays the eval documents out in
+            # source order and keeps the instrument independent of the training
+            # lookahead knobs.
+            packing_buffer_docs=1,
+            # Nothing to isolate a lone segment from, so strict execution would
+            # buy no separation and cost roughly 2x.
+            packing_strict_segments=False,
+        ),
+    )
+
+
+def warmup_steps_from_ratio(*, steps: int, warmup_ratio: float) -> int:
+    """Warmup step count implied by a fraction of the total step budget.
+
+    :param int steps: Total training steps (``train.steps``).
+    :param float warmup_ratio: Warmup fraction of the step budget, in [0, 1).
+    :return int: Rounded warmup step count.
+    """
+    return int(round(warmup_ratio * steps))
+
+
+def _validate_warmup_ratio(ratio: float) -> None:
+    """Check that a warmup ratio is a fraction that leaves room to decay.
+
+    :param float ratio: Configured ``optim.warmup_ratio``.
+    :raises ValueError: If the ratio is outside [0, 1).
+    """
+    if not isinstance(ratio, (int, float)) or isinstance(ratio, bool):
+        _vfail(f"optim.warmup_ratio must be a number or null, got {ratio!r}")
+    if ratio < 0 or ratio >= 1:
+        _vfail(f"optim.warmup_ratio must be in [0, 1), got {ratio}")
+
+
+def resolve_warmup(cfg: Config) -> Config:
+    """Materialize ``optim.warmup_ratio`` into ``optim.warmup_steps``.
+
+    The ratio is authoritative when set, so ``warmup_steps`` becomes a derived
+    value and every downstream consumer — schedule construction, resume
+    compatibility, checkpoint metadata — keeps reading one resolved step count.
+    Because this runs after CLI overrides, shortening ``train.steps`` rescales
+    warmup with it instead of failing the ``warmup_steps < steps`` check.
+
+    :param Config cfg: Configuration with a possibly unresolved warmup ratio.
+    :raises ValueError: If the ratio is outside [0, 1).
+    :return Config: Configuration whose warmup_steps agrees with warmup_ratio.
+    """
+    ratio = cfg.optim.warmup_ratio
+    if ratio is None:
+        return cfg
+    _validate_warmup_ratio(ratio)
+    resolved = warmup_steps_from_ratio(steps=cfg.train.steps, warmup_ratio=ratio)
+    return replace(cfg, optim=replace(cfg.optim, warmup_steps=resolved))
 
 
 def decay_horizon_from_values(

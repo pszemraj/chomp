@@ -1,6 +1,11 @@
-# Upper-capacity 974,619,648-parameter template at the authored 32,128-token vocabulary.
+# Upper-capacity 976,978,944-parameter template at the authored 32,128-token vocabulary.
 # It keeps released mega1.3B widths/projection ratios, but uses 18 rather than 24 layers
 # and ties the LM head. One dry run fits a 32 GB RTX 5090; this is not a 24 GB fit claim.
+#
+# Gated FFN at a param-matched width: swiglu adds a third d x f matrix rather than
+# rescaling ffn_hidden_dim, so 4864 -> 3264 holds the parameter count to within 0.25%
+# (974,619,648 -> 976,978,944). 3232 would match closer (-0.12%) but 3264 is a multiple
+# of 64 and tiles better. See docs/training.md "Gated FFN and ffn_hidden_dim".
 
 model:
   backend: megalodon
@@ -10,11 +15,13 @@ model:
   num_heads: 2
   z_dim: 512
   value_dim: 4096
-  ffn_hidden_dim: 4864
+  # 3264, not 4864: param-matched for swiglu below (3 x d x f ~= 2 x d x 4864).
+  ffn_hidden_dim: 3264
   cema_ndim: 16
   norm_num_groups: 64
   norm_eps: 1.0e-5
-  swiglu: false
+  # Gated FFN: silu(fc1(h)) * fc3(h) -> fc2. Upstream's paper presets all set this.
+  swiglu: true
   rescale_nffn: false
   scale_emb: false
   share_emb: true
@@ -33,7 +40,6 @@ model:
   compute_dtype: bfloat16
   accum_dtype: float32
   attention_softmax_dtype: float32
-  loss_chunk_size: 256
   output_size: -1
 
 data:

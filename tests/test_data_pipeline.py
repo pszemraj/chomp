@@ -27,7 +27,7 @@ from chomp.data.grain import (
     _TrainSequenceIterDataset,
 )
 from chomp.data.hf import HFStreamingTextStream, HFStreamSpec, resolve_dataset_revision
-from chomp.data.pack import FFDPacker, FFDPackerState, TokenPacker
+from chomp.data.pack import FFDPacker, FFDPackerState, TokenPacker, summarize_packer_buffer
 from chomp.data.pipeline import (
     _TOKENIZER_CANARIES,
     TOKENIZER_MANIFEST_FILENAME,
@@ -36,6 +36,7 @@ from chomp.data.pipeline import (
     _build_packer,
     _SequenceProducer,
     build_eval_iterator,
+    build_tokenizer,
     build_train_iterator,
     data_fingerprint,
     effective_window_shuffle_seed,
@@ -419,11 +420,16 @@ def test_eval_fingerprint_tracks_effective_ffd_geometry(
     lookahead_name: str,
     fingerprint_key: str,
 ) -> None:
-    """Eval lookahead changes below the train clamp must change its arrays and identity."""
+    """Eval lookahead changes below the train clamp must change its arrays and identity.
+
+    Scoped to ``eval_packing='train'``: the training lookahead only reaches the
+    eval rows when eval inherits the training packer.
+    """
     common = {
         "batch_size": 2,
         "seq_len": 8,
         "packing_mode": mode,
+        "eval_packing": "train",
         "max_eval_samples": 4,
         "tokenizer": TokenizerConfig(
             kind="byte",
@@ -1434,3 +1440,145 @@ def test_byte_tokenizer_skips_special_tokens() -> None:
     tok = ByteTokenizer(byte_offset=4)
     ids = [0, 1] + tok.encode("hi")
     assert tok.decode(ids) == "hi"
+
+
+def _drain_producer(producer: _SequenceProducer, windows: int) -> None:
+    """Advance a producer by a fixed number of packed windows.
+
+    :param _SequenceProducer producer: Producer to advance.
+    :param int windows: Number of windows to pop.
+    """
+    for _ in range(windows):
+        producer.next_window()
+
+
+def test_packer_state_discriminators_are_family_specific() -> None:
+    """Each packer family must recognize only its own checkpointed state."""
+    cfg_seq = make_pipeline_cfg(packing_mode="sequential")
+    cfg_bin = make_pipeline_cfg(packing_mode="bin", packing_max_docs_per_bin=1)
+    seq_state = _build_packer(cfg_seq).get_state()
+    bin_state = _build_packer(cfg_bin).get_state()
+
+    assert TokenPacker.can_restore_state(seq_state)
+    assert not TokenPacker.can_restore_state(bin_state)
+    assert FFDPacker.can_restore_state(bin_state)
+    assert not FFDPacker.can_restore_state(seq_state)
+
+
+def test_resume_across_packing_mode_keeps_stream_position(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Switching data.packing_mode on resume must keep the corpus position.
+
+    A phased run that changes packing cannot load the previous packer's
+    buffers -- the two families store disjoint state. Restoring the text
+    stream anyway is what lets phase two continue reading the corpus instead
+    of replaying it from the start.
+    """
+    corpus = "".join(f"document number {i} with some filler text. " for i in range(64))
+    cfg_seq = make_pipeline_cfg(packing_mode="sequential", local_text=corpus)
+    cfg_bin = make_pipeline_cfg(packing_mode="bin", packing_max_docs_per_bin=1, local_text=corpus)
+
+    source = _SequenceProducer(cfg_seq, tokenizer=build_tokenizer(cfg_seq))
+    _drain_producer(source, 5)
+    saved = source.get_state()
+    assert saved["packer"]["document_stats"]["docs_seen"] > 0
+
+    target = _SequenceProducer(cfg_bin, tokenizer=build_tokenizer(cfg_bin))
+    with caplog.at_level(logging.WARNING, logger="chomp.data.pipeline"):
+        target.set_state(saved)
+
+    assert "different data.packing_mode" in caplog.text
+    # Document counters carry across the phase boundary so docs_seen and the
+    # source_tokens_* totals stay continuous.
+    assert target.get_state()["packer"]["document_stats"] == saved["packer"]["document_stats"]
+    # The stream resumes rather than restarting, and the new packer works.
+    assert target.get_state()["text"] == saved["text"]
+    tokens, segments = target.next_window()
+    assert tokens.shape == (cfg_bin.train.seq_len,)
+    assert segments.shape == (cfg_bin.train.seq_len,)
+
+
+@pytest.mark.parametrize(
+    ("source_mode", "target_mode"),
+    [("sequential", "bin"), ("bin", "sequential")],
+)
+def test_resume_across_packer_families_rejects_window_shuffle(
+    source_mode: str,
+    target_mode: str,
+) -> None:
+    """A shuffled-window row cursor cannot be replayed by another packer family.
+
+    :param str source_mode: Packing mode that wrote the iterator state.
+    :param str target_mode: Packing mode asked to restore that state.
+    """
+    corpus = "".join(f"document number {i} with some filler text. " for i in range(64))
+
+    def _cfg(mode: str) -> Config:
+        """Build one side of the cross-family restore.
+
+        :param str mode: Packing mode for this iterator.
+        :return Config: Iterator config with an eight-row shuffle window.
+        """
+        return make_pipeline_cfg(
+            batch_size=2,
+            packing_mode=mode,
+            packing_buffer_docs=4,
+            packing_max_docs_per_bin=1,
+            local_text=corpus,
+            window_shuffle_tokens=64,
+            window_shuffle_max_rows=8,
+            grain_prefetch=0,
+        )
+
+    source = build_train_iterator(_cfg(source_mode))
+    _ = next(source)
+    state = source.get_state()
+
+    target = build_train_iterator(_cfg(target_mode))
+    with pytest.raises(RuntimeError, match="different data.packing_mode.*window shuffle"):
+        target.set_state(state)
+
+
+def test_resume_from_bin_reports_the_dropped_buffer_size(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Leaving `bin` must report how many buffered tokens the switch discards.
+
+    The FFD pending queue holds up to max(bins_per_pack, lookahead_docs)
+    chunks, so it is orders of magnitude larger than the sequential token
+    carry. Those tokens were consumed from the stream and are never trained
+    on, so the warning has to state the real count rather than a bound
+    borrowed from the other packer family.
+    """
+    corpus = "".join(f"document number {i} with some filler text. " for i in range(64))
+    cfg_bin = make_pipeline_cfg(packing_mode="bin", packing_buffer_docs=32, local_text=corpus)
+    cfg_seq = make_pipeline_cfg(packing_mode="sequential", local_text=corpus)
+
+    source = _SequenceProducer(cfg_bin, tokenizer=build_tokenizer(cfg_bin))
+    _drain_producer(source, 5)
+    saved = source.get_state()
+
+    family, buffered = summarize_packer_buffer(saved["packer"])
+    assert family == "FFDPacker"
+    # The queue must actually hold something, or the assertions below pass
+    # against an empty buffer and prove nothing.
+    assert buffered["tokens"] > 0
+
+    target = _SequenceProducer(cfg_seq, tokenizer=build_tokenizer(cfg_seq))
+    with caplog.at_level(logging.WARNING, logger="chomp.data.pipeline"):
+        target.set_state(saved)
+
+    assert "different data.packing_mode" in caplog.text
+    assert "FFDPacker" in caplog.text
+    assert f"{buffered['tokens']} buffered tokens" in caplog.text
+    assert "never be trained on" in caplog.text
+    # The superseded claim must not come back; it understates FFD by ~55x.
+    assert "one document tail" not in caplog.text
+
+    # Counters and stream position still carry, and the new packer runs.
+    assert target.get_state()["packer"]["document_stats"] == saved["packer"]["document_stats"]
+    assert target.get_state()["text"] == saved["text"]
+    tokens, segments = target.next_window()
+    assert tokens.shape == (cfg_seq.train.seq_len,)
+    assert segments.shape == (cfg_seq.train.seq_len,)

@@ -128,10 +128,6 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
             lambda cfg: replace(cfg, model=replace(cfg.model, attention_softmax_dtype="float16")),
             "attention_softmax_dtype",
         ),
-        (
-            lambda cfg: replace(cfg, model=replace(cfg.model, loss_chunk_size=0)),
-            "loss_chunk_size",
-        ),
         (lambda cfg: replace(cfg, model=replace(cfg.model, output_size=0)), "output_size"),
         (
             lambda cfg: replace(cfg, model=replace(cfg.model, share_emb=True, output_size=128)),
@@ -193,10 +189,19 @@ def test_model_and_train_validation_rejects_invalid_values() -> None:
         with pytest.raises(ValueError, match=match):
             validate_config(mutate(_base_cfg()))
 
-    base = _base_cfg()
-    dummy = replace(base, model=replace(base.model, backend="dummy", loss_chunk_size=8))
-    with pytest.raises(ValueError, match="only when model.backend='megalodon'"):
-        validate_config(dummy)
+
+def test_export_dir_name_must_stay_inside_the_run_directory() -> None:
+    """dir_name is joined onto the run directory, so only a plain name is safe.
+
+    Anything with a separator could put the export outside the run, or on top of
+    the run's own checkpoints and tokenizer snapshot.
+    """
+    for name in ("../escape", "nested/export", "/absolute", "", ".", ".."):
+        cfg = replace(_base_cfg(), export=replace(_base_cfg().export, dir_name=name))
+        with pytest.raises(ValueError, match="export.dir_name"):
+            validate_config(cfg)
+
+    validate_config(replace(_base_cfg(), export=replace(_base_cfg().export, dir_name="model")))
 
 
 def test_build_config_rejects_unknown_top_level_sections() -> None:
@@ -216,6 +221,93 @@ def test_build_config_allows_resolved_derived_section() -> None:
     cfg = build_config(data)
 
     assert cfg == _base_cfg()
+
+
+def test_warmup_ratio_resolves_to_steps() -> None:
+    """A warmup ratio should derive warmup_steps from the step budget."""
+    data = _base_cfg().to_dict()
+    data["train"]["steps"] = 62000
+    data["optim"]["warmup_ratio"] = 0.032
+    del data["optim"]["warmup_steps"]
+
+    cfg = build_config(data)
+
+    assert cfg.optim.warmup_steps == 1984
+    assert cfg.optim.warmup_ratio == 0.032
+
+
+def test_warmup_ratio_rescales_when_overrides_shorten_the_run() -> None:
+    """Shortening train.steps must rescale warmup instead of failing validation."""
+    data = _base_cfg().to_dict()
+    data["train"]["steps"] = 62000
+    data["optim"]["warmup_ratio"] = 0.05
+    del data["optim"]["warmup_steps"]
+
+    cfg = build_config(data, overrides=["train.steps=200"])
+
+    assert cfg.optim.warmup_steps == 10
+
+
+def test_warmup_ratio_round_trips_through_resolved_dict() -> None:
+    """config_resolved.json stores ratio and resolved steps together."""
+    data = _base_cfg().to_dict()
+    data["train"]["steps"] = 1000
+    data["optim"]["warmup_ratio"] = 0.1
+    del data["optim"]["warmup_steps"]
+
+    cfg = build_config(data)
+
+    assert build_config(cfg.to_dict()) == cfg
+
+
+def test_warmup_ratio_rejects_contradictory_step_count() -> None:
+    """An explicit warmup_steps that disagrees with the ratio must fail loudly."""
+    data = _base_cfg().to_dict()
+    data["train"]["steps"] = 1000
+    data["optim"]["warmup_ratio"] = 0.1
+    data["optim"]["warmup_steps"] = 25
+
+    with pytest.raises(ValueError, match="contradicts optim.warmup_ratio"):
+        build_config(data)
+
+
+def test_warmup_steps_override_conflicts_with_active_ratio() -> None:
+    """Overriding the derived value would be silently discarded, so reject it."""
+    data = _base_cfg().to_dict()
+    data["train"]["steps"] = 1000
+    data["optim"]["warmup_ratio"] = 0.1
+    del data["optim"]["warmup_steps"]
+
+    with pytest.raises(ValueError, match="conflicts with optim.warmup_ratio"):
+        build_config(data, overrides=["optim.warmup_steps=25"])
+
+    cfg = build_config(data, overrides=["optim.warmup_ratio=null", "optim.warmup_steps=25"])
+    assert cfg.optim.warmup_steps == 25
+    assert cfg.optim.warmup_ratio is None
+
+
+@pytest.mark.parametrize("ratio", [-0.1, 1.0, 2.0])
+def test_warmup_ratio_rejects_out_of_range(ratio: float) -> None:
+    """The ratio is a fraction of the run that must leave room to decay."""
+    data = _base_cfg().to_dict()
+    data["optim"]["warmup_ratio"] = ratio
+    del data["optim"]["warmup_steps"]
+
+    with pytest.raises(ValueError, match=r"optim.warmup_ratio must be in \[0, 1\)"):
+        build_config(data)
+
+
+def test_unresolved_warmup_ratio_fails_validation() -> None:
+    """A hand-built Config must not silently ignore its warmup ratio."""
+    base = _base_cfg()
+    cfg = replace(
+        base,
+        train=replace(base.train, steps=1000),
+        optim=replace(base.optim, warmup_ratio=0.1, warmup_steps=0),
+    )
+
+    with pytest.raises(ValueError, match="implies optim.warmup_steps=100"):
+        validate_config(cfg)
 
 
 @pytest.mark.parametrize(
@@ -286,12 +378,12 @@ def test_dev_smoke_configs_load(name: str, data_backend: str, allow_cpu: bool) -
 
 
 @pytest.mark.parametrize(
-    ("name", "expected_parameters", "batch_size", "grad_accum", "loss_chunk_size"),
+    ("name", "expected_parameters", "batch_size", "grad_accum"),
     [
-        ("megalodon_100m_2048.yaml", 113_854_464, 2, 8, None),
-        ("megalodon_200m_2048.yaml", 187_991_040, 2, 8, None),
-        ("megalodon_500m_2048.yaml", 513_672_192, 1, 16, 256),
-        ("megalodon_1b_2048.yaml", 974_619_648, 1, 16, 256),
+        ("megalodon_100m_2048.yaml", 113_854_464, 2, 8),
+        ("megalodon_200m_2048.yaml", 188_777_472, 2, 8),
+        ("megalodon_500m_2048.yaml", 513_672_192, 1, 16),
+        ("megalodon_1b_2048.yaml", 976_978_944, 1, 16),
     ],
 )
 def test_maintained_pretrain_recipe_contract(
@@ -299,7 +391,6 @@ def test_maintained_pretrain_recipe_contract(
     expected_parameters: int,
     batch_size: int,
     grad_accum: int,
-    loss_chunk_size: int | None,
 ) -> None:
     """Maintained recipes should preserve their labeled scale and correctness policy."""
     config_path = Path(__file__).parents[1] / "configs/pretrain" / name
@@ -311,6 +402,11 @@ def test_maintained_pretrain_recipe_contract(
 
     assert param_count(abstract_params) == expected_parameters
     assert cfg.model.backend == "megalodon"
+    # Gated FFN at a param-matched width. swiglu adds a third model_dim x
+    # ffn_hidden_dim matrix rather than rescaling it, so flipping this without
+    # also rescaling ffn_hidden_dim silently inflates the recipe by ~50% of its
+    # feed-forward mass -- which the parameter assertion above would catch.
+    assert cfg.model.swiglu is True
     assert cfg.model.share_emb is True
     assert cfg.model.chunk_size == 512
     assert cfg.model.attention_window is None
@@ -320,7 +416,6 @@ def test_maintained_pretrain_recipe_contract(
     assert cfg.model.compute_dtype == "bfloat16"
     assert cfg.model.accum_dtype == "float32"
     assert cfg.model.attention_softmax_dtype == "float32"
-    assert cfg.model.loss_chunk_size == loss_chunk_size
     assert cfg.data.packing_strict_segments is True
     assert cfg.data.mask_boundary_loss is True
     assert strict_packed_segments(cfg) is True
@@ -505,6 +600,10 @@ def test_data_and_logging_validation_rejects_invalid_values() -> None:
             "packing_max_docs_per_bin",
         ),
         (lambda cfg: replace(cfg, data=replace(cfg.data, packing_mode="unknown")), "packing_mode"),
+        (
+            lambda cfg: replace(cfg, data=replace(cfg.data, eval_packing="bin")),
+            "eval_packing",
+        ),
         (
             lambda cfg: replace(cfg, data=replace(cfg.data, max_eval_samples=-1)),
             "max_eval_samples",
@@ -943,9 +1042,7 @@ train:
 """
     )
 
-    cfg = load_config_for_checkpoint(
-        step_dir=tmp_path, run_dir=None, config_override=str(config_path)
-    )
+    cfg = load_config_for_checkpoint(step_dir=tmp_path, config_override=str(config_path))
 
     assert cfg.train.seq_len == 64
 
@@ -968,9 +1065,7 @@ data:
 """
     )
 
-    cfg = load_config_for_checkpoint(
-        step_dir=tmp_path, run_dir=None, config_override=str(config_path)
-    )
+    cfg = load_config_for_checkpoint(step_dir=tmp_path, config_override=str(config_path))
 
     assert cfg.model.vocab_size == 300
 

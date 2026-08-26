@@ -25,6 +25,7 @@ from chomp.ckpt import (
     CheckpointMeta,
     build_meta,
     default_ckpt_dir,
+    load_warm_start_params,
     make_manager,
     megalodon_jax_identity,
     restore_at_step,
@@ -55,7 +56,9 @@ from chomp.data import (
     build_train_iterator,
     data_fingerprint,
     prepare_tokenizer_and_config,
+    tokenizer_checkpoint_identity,
 )
+from chomp.data.pipeline import TOKENIZER_MANIFEST_FILENAME
 from chomp.model import build_model, loss_sum_and_count, supports_packed_segments
 from chomp.train import (
     _METRICS_FILE_DROP,
@@ -476,6 +479,263 @@ def test_restore_params_only(
 
     with pytest.raises(FileNotFoundError, match="train_state"):
         restore_params_only(ckpt_dir / "999", abstractify_tree(state.params))
+
+
+def test_restore_params_only_rejects_a_shape_mismatch(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
+    """A widened parameter must refuse, not silently restore at the saved width."""
+    _cfg, state, _mgr, ckpt_dir = _saved_step1_checkpoint(
+        tmp_path / "run_params_wide", track_checkpoint_manager
+    )
+
+    wider = {"w": jax.ShapeDtypeStruct((4,), jnp.float32)}
+    with pytest.raises(RuntimeError, match=r"do not match the model.*\n.*expects \(4,\)"):
+        restore_params_only(ckpt_dir / "1", wider)
+
+
+def test_restore_params_only_rejects_a_parameter_absent_from_the_checkpoint(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
+    """A parameter the checkpoint never saved must refuse rather than stay abstract."""
+    _cfg, state, _mgr, ckpt_dir = _saved_step1_checkpoint(
+        tmp_path / "run_params_extra", track_checkpoint_manager
+    )
+
+    grown = dict(abstractify_tree(state.params))
+    grown["extra_layer"] = jax.ShapeDtypeStruct((3,), jnp.float32)
+    with pytest.raises(RuntimeError, match="absent from the checkpoint"):
+        restore_params_only(ckpt_dir / "1", grown)
+
+
+def test_load_warm_start_params_refuses_an_architecture_change(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
+    """Warm start into a changed architecture must fail loudly at restore."""
+    _cfg, state, _mgr, ckpt_dir = _saved_step1_checkpoint(
+        tmp_path / "run_warm_arch", track_checkpoint_manager
+    )
+
+    grown = dict(abstractify_tree(state.params))
+    grown["extra_layer"] = jax.ShapeDtypeStruct((3,), jnp.float32)
+    with pytest.raises(RuntimeError, match="absent from the checkpoint"):
+        load_warm_start_params(
+            ckpt_dir / "1",
+            abstract_params=grown,
+            tokenizer_identity=_TEST_TOKENIZER_IDENTITY,
+        )
+
+
+def test_load_warm_start_params_returns_params_and_provenance(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
+    """Warm start loads the saved params verbatim and records where they came from."""
+    _cfg, state, _mgr, ckpt_dir = _saved_step1_checkpoint(
+        tmp_path / "run_warm_src", track_checkpoint_manager
+    )
+
+    params, provenance = load_warm_start_params(
+        ckpt_dir / "1",
+        abstract_params=abstractify_tree(state.params),
+        tokenizer_identity=_TEST_TOKENIZER_IDENTITY,
+    )
+
+    assert eqx.tree_equal(params, state.params)
+    assert provenance["source_step"] == 1
+    assert provenance["source_step_dir"] == str((ckpt_dir / "1").resolve())
+    assert provenance["tokenizer_identity"] == _TEST_TOKENIZER_IDENTITY
+
+
+def test_load_warm_start_params_rejects_tokenizer_mismatch(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
+    """A different tokenizer must fail loudly: embeddings would be silently reinterpreted."""
+    _cfg, state, _mgr, ckpt_dir = _saved_step1_checkpoint(
+        tmp_path / "run_warm_tok", track_checkpoint_manager
+    )
+
+    with pytest.raises(RuntimeError, match="tokenizer identity mismatch"):
+        load_warm_start_params(
+            ckpt_dir / "1",
+            abstract_params=abstractify_tree(state.params),
+            tokenizer_identity={"manifest_version": 1, "sha256": "some-other-tokenizer"},
+        )
+
+
+def test_load_warm_start_params_requires_recorded_tokenizer_identity(
+    tmp_path: Path, track_checkpoint_manager: Callable[[Any], Any]
+) -> None:
+    """A checkpoint that never recorded its tokenizer cannot be proven compatible."""
+    run_dir = tmp_path / "run_warm_legacy"
+    _cfg, state, _mgr, ckpt_dir = _saved_step1_checkpoint(run_dir, track_checkpoint_manager)
+
+    meta_path = ckpt_dir / "1" / "meta" / "metadata"
+    meta = json.loads(meta_path.read_text())
+    del meta["tokenizer_identity"]
+    meta_path.write_text(json.dumps(meta))
+
+    with pytest.raises(RuntimeError, match="no tokenizer identity"):
+        load_warm_start_params(
+            ckpt_dir / "1",
+            abstract_params=abstractify_tree(state.params),
+            tokenizer_identity=_TEST_TOKENIZER_IDENTITY,
+        )
+
+
+def test_warm_start_resets_optimizer_step_and_data_position(tmp_path: Path) -> None:
+    """Warm start begins a new run: params carry over, training history does not."""
+    source_cfg = make_small_run_cfg(tmp_path, run_subdir="phase1", decay_steps=3)
+    source_cfg = replace(source_cfg, train=replace(source_cfg.train, steps=3))
+    source_run_dir = run(source_cfg, config_path=None, resume="none", dry_run=False)
+    assert _checkpoint_steps(source_run_dir) == {2, 3}
+
+    warm_cfg = make_small_run_cfg(tmp_path, run_subdir="phase2", decay_steps=2)
+    warm_cfg = replace(warm_cfg, train=replace(warm_cfg.train, steps=2))
+    warm_run_dir = run(
+        warm_cfg,
+        config_path=None,
+        resume="none",
+        init_from=default_ckpt_dir(source_run_dir) / "3",
+        dry_run=False,
+    )
+
+    assert warm_run_dir != source_run_dir
+    # Step counter restarts rather than continuing from the source's step 3.
+    assert _checkpoint_steps(warm_run_dir) == {1, 2}
+    assert min(_losses_by_step(warm_run_dir)) == 1
+    # The source run is read-only during warm start.
+    assert _checkpoint_steps(source_run_dir) == {2, 3}
+
+    provenance = json.loads((warm_run_dir / "warm_start.json").read_text())
+    assert provenance["source_step"] == 3
+    assert provenance["source_step_dir"] == str((default_ckpt_dir(source_run_dir) / "3").resolve())
+
+    # Params came from the checkpoint, not from this run's seed.
+    control_cfg = make_small_run_cfg(tmp_path, run_subdir="control", decay_steps=2)
+    control_cfg = replace(control_cfg, train=replace(control_cfg.train, steps=2))
+    control_run_dir = run(control_cfg, config_path=None, resume="none", dry_run=False)
+    warm_losses = _losses_by_step(warm_run_dir)
+    control_losses = _losses_by_step(control_run_dir)
+    assert warm_losses[1] != control_losses[1]
+
+
+def test_warm_start_accepts_changed_packing_mode(tmp_path: Path) -> None:
+    """The point of warm start: phase 2 may repack the corpus however it likes."""
+    source_cfg = make_small_run_cfg(tmp_path, run_subdir="pack1", decay_steps=2)
+    source_cfg = replace(source_cfg, train=replace(source_cfg.train, steps=2))
+    source_run_dir = run(source_cfg, config_path=None, resume="none", dry_run=False)
+
+    warm_cfg = make_small_run_cfg(tmp_path, run_subdir="pack2", decay_steps=2)
+    warm_cfg = replace(
+        warm_cfg,
+        train=replace(warm_cfg.train, steps=2),
+        data=replace(warm_cfg.data, packing_mode="bin", packing_max_docs_per_bin=1),
+        checkpoint=replace(warm_cfg.checkpoint, resume_compat="strict"),
+    )
+    warm_run_dir = run(
+        warm_cfg,
+        config_path=None,
+        resume="none",
+        init_from=default_ckpt_dir(source_run_dir) / "2",
+        dry_run=False,
+    )
+
+    assert (warm_run_dir / "warm_start.json").exists()
+    assert _checkpoint_steps(warm_run_dir) == {1, 2}
+
+
+def test_warm_start_refusal_leaves_no_run_directory_behind(tmp_path: Path) -> None:
+    """A refused warm start must not block its own retry with a half-built run dir."""
+    source_cfg = make_small_run_cfg(tmp_path, run_subdir="tokgate1", decay_steps=2)
+    source_cfg = replace(source_cfg, train=replace(source_cfg.train, steps=2))
+    source_run_dir = run(source_cfg, config_path=None, resume="none", dry_run=False)
+
+    source_step = default_ckpt_dir(source_run_dir) / "2"
+    meta_path = source_step / "meta" / "metadata"
+    meta = json.loads(meta_path.read_text())
+    meta["tokenizer_identity"] = {"manifest_version": 1, "sha256": "a-different-tokenizer"}
+    meta_path.write_text(json.dumps(meta))
+
+    warm_cfg = make_small_run_cfg(tmp_path, run_subdir="tokgate2", decay_steps=2)
+    warm_cfg = replace(warm_cfg, train=replace(warm_cfg.train, steps=2))
+    warm_run_dir = Path(warm_cfg.logging.run_dir)
+
+    with pytest.raises(RuntimeError, match="tokenizer identity mismatch"):
+        run(warm_cfg, config_path=None, resume="none", init_from=source_step, dry_run=False)
+    assert not warm_run_dir.exists()
+
+    # The retry fails on the real problem again, not on "run dir already exists".
+    with pytest.raises(RuntimeError, match="tokenizer identity mismatch"):
+        run(warm_cfg, config_path=None, resume="none", init_from=source_step, dry_run=False)
+
+
+def test_warm_start_reports_which_tokenizer_manifest_fields_differ(tmp_path: Path) -> None:
+    """Two hashes cannot separate a rebuilt environment from a different vocabulary."""
+    source_cfg = make_small_run_cfg(tmp_path, run_subdir="fielddiff1", decay_steps=2)
+    source_cfg = replace(source_cfg, train=replace(source_cfg.train, steps=2))
+    source_run_dir = run(source_cfg, config_path=None, resume="none", dry_run=False)
+    source_step = default_ckpt_dir(source_run_dir) / "2"
+
+    # Doctor one manifest field and re-point the checkpoint at the new identity,
+    # so the source snapshot still proves it describes these weights.
+    manifest_path = source_run_dir / "tokenizer" / TOKENIZER_MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest["packages"] = {**manifest["packages"], "transformers": "0.0.0-doctored"}
+    manifest_path.write_text(json.dumps(manifest))
+    meta_path = source_step / "meta" / "metadata"
+    meta = json.loads(meta_path.read_text())
+    meta["tokenizer_identity"] = tokenizer_checkpoint_identity(manifest)
+    meta_path.write_text(json.dumps(meta))
+
+    warm_cfg = make_small_run_cfg(tmp_path, run_subdir="fielddiff2", decay_steps=2)
+    warm_cfg = replace(warm_cfg, train=replace(warm_cfg.train, steps=2))
+
+    with pytest.raises(RuntimeError, match="differing manifest fields: packages"):
+        run(warm_cfg, config_path=None, resume="none", init_from=source_step, dry_run=False)
+
+
+def test_warm_start_source_without_tokenizer_identity_is_refused_before_the_run_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal that depends only on the source must fire before anything is created."""
+    source_cfg = make_small_run_cfg(tmp_path, run_subdir="nogate1", decay_steps=2)
+    source_cfg = replace(source_cfg, train=replace(source_cfg.train, steps=2))
+    source_run_dir = run(source_cfg, config_path=None, resume="none", dry_run=False)
+
+    source_step = default_ckpt_dir(source_run_dir) / "2"
+    meta_path = source_step / "meta" / "metadata"
+    meta = json.loads(meta_path.read_text())
+    del meta["tokenizer_identity"]
+    meta_path.write_text(json.dumps(meta))
+
+    def _fail_if_called(*args: Any, **kwargs: Any) -> Path:
+        """Fail the test if run-directory creation is reached at all."""
+        raise AssertionError("create_run_dir was reached despite an unusable warm-start source")
+
+    monkeypatch.setattr("chomp.train.create_run_dir", _fail_if_called)
+
+    warm_cfg = make_small_run_cfg(tmp_path, run_subdir="nogate2", decay_steps=2)
+    warm_cfg = replace(warm_cfg, train=replace(warm_cfg.train, steps=2))
+
+    with pytest.raises(RuntimeError, match="no tokenizer identity"):
+        run(warm_cfg, config_path=None, resume="none", init_from=source_step, dry_run=False)
+    assert not Path(warm_cfg.logging.run_dir).exists()
+
+
+def test_warm_start_and_resume_are_mutually_exclusive(tmp_path: Path) -> None:
+    """Continuing a history and seeding a new one are different operations."""
+    cfg = make_small_run_cfg(tmp_path, run_subdir="excl", decay_steps=2)
+    cfg = replace(cfg, train=replace(cfg.train, steps=1))
+    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
+
+    with pytest.raises(RuntimeError, match="mutually exclusive"):
+        run(
+            replace(cfg, train=replace(cfg.train, steps=2)),
+            config_path=None,
+            resume="latest",
+            init_from=default_ckpt_dir(run_dir) / "1",
+            dry_run=False,
+        )
 
 
 def test_checkpoint_data_state_roundtrip(
@@ -1547,13 +1807,14 @@ def test_checkpoint_disabled_run_rejects_nonfinite_final_metrics(
 
 
 def test_resume_warns_for_seq_len_mismatch(tmp_path: Path, caplog: LogCaptureFixture) -> None:
-    """A changed batch shape warns but remains resumable when state shapes fit."""
+    """Without row-window replay, a changed batch shape warns when state shapes fit."""
     base = Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
         data=DataConfig(
             backend="local_text",
             repeat=True,
             local_text="Deterministic local text for resume mismatch test.\n",
+            window_shuffle_tokens=0,
             tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
         ),
         train=TrainConfig(
@@ -2361,6 +2622,48 @@ def test_resume_requires_checkpoint_bound_tokenizer_identity(
     assert "tokenizer_identity mismatch" in caplog.text
 
 
+def test_strict_resume_uses_identity_from_checkpoint_after_warn_drift(tmp_path: Path) -> None:
+    """A later checkpoint can supersede the preserved run-start tokenizer manifest.
+
+    :param Path tmp_path: Temporary run directory root.
+    """
+    cfg = make_small_run_cfg(tmp_path, run_subdir="tokenizer_drift", decay_steps=4)
+    cfg = replace(cfg, train=replace(cfg.train, steps=1))
+    run_dir = run(cfg, config_path=None, resume="none", dry_run=False)
+
+    manifest_path = run_dir / "tokenizer" / TOKENIZER_MANIFEST_FILENAME
+    stale_manifest = json.loads(manifest_path.read_text())
+    stale_manifest["packages"] = {"stale-tokenizer-runtime": "0.0.0"}
+    manifest_path.write_text(json.dumps(stale_manifest))
+    stale_identity = tokenizer_checkpoint_identity(stale_manifest)
+
+    step_one_meta_path = default_ckpt_dir(run_dir) / "1" / "meta" / "metadata"
+    step_one_meta = json.loads(step_one_meta_path.read_text())
+    step_one_meta["tokenizer_identity"] = stale_identity
+    step_one_meta_path.write_text(json.dumps(step_one_meta))
+
+    warn_cfg = replace(
+        cfg,
+        train=replace(cfg.train, steps=2),
+        checkpoint=replace(cfg.checkpoint, resume_compat="warn"),
+    )
+    run(warn_cfg, config_path=None, resume="latest", dry_run=False)
+
+    step_two_meta_path = default_ckpt_dir(run_dir) / "2" / "meta" / "metadata"
+    step_two_identity = json.loads(step_two_meta_path.read_text())["tokenizer_identity"]
+    assert step_two_identity != stale_identity
+    assert json.loads(manifest_path.read_text()) == stale_manifest
+
+    strict_cfg = replace(
+        warn_cfg,
+        train=replace(warn_cfg.train, steps=3),
+        checkpoint=replace(warn_cfg.checkpoint, resume_compat="strict"),
+    )
+    run(strict_cfg, config_path=None, resume="latest", dry_run=False)
+
+    assert 3 in _checkpoint_steps(run_dir)
+
+
 def test_segment_scan_resume_semantics_are_contextual(
     tmp_path: Path,
     caplog: LogCaptureFixture,
@@ -2422,7 +2725,7 @@ def test_segment_scan_resume_semantics_are_contextual(
 
 @pytest.mark.parametrize(
     ("field", "changed_value", "deterministic"),
-    [("loss_chunk_size", 4, True), ("use_checkpoint", True, False)],
+    [("use_checkpoint", True, False)],
 )
 def test_megalodon_runtime_resume_semantics_are_active(
     tmp_path: Path,
@@ -2694,10 +2997,6 @@ def test_resume_compat_requires_valid_token_count(tmp_path: Path, tokens_seen: A
     ("mutate", "match"),
     [
         (
-            lambda c: replace(c, data=replace(c.data, window_shuffle_tokens=64)),
-            "window_shuffle_rows",
-        ),
-        (
             lambda c: replace(
                 c, data=replace(c.data, mask_boundary_loss=not c.data.mask_boundary_loss)
             ),
@@ -2712,7 +3011,7 @@ def test_resume_compat_requires_valid_token_count(tmp_path: Path, tokens_seen: A
             "deterministic",
         ),
     ],
-    ids=["window_shuffle", "mask_boundary", "train_on_eos", "deterministic"],
+    ids=["mask_boundary", "train_on_eos", "deterministic"],
 )
 def test_resume_compat_warns_for_stream_and_objective_drift(
     tmp_path: Path, mutate: Any, match: str, caplog: LogCaptureFixture
@@ -2723,6 +3022,91 @@ def test_resume_compat_warns_for_stream_and_objective_drift(
     with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
         check_resume_compat(mutate(cfg), meta)
     assert match in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (
+            lambda c: replace(c, data=replace(c.data, packing_mode="multipack")),
+            "packing_mode",
+        ),
+        (
+            lambda c: replace(c, data=replace(c.data, packing_buffer_docs=16)),
+            "packing_buffer_docs",
+        ),
+        (
+            lambda c: replace(c, data=replace(c.data, packing_max_docs_per_bin=2)),
+            "packing_max_docs_per_bin",
+        ),
+        (
+            lambda c: replace(c, data=replace(c.data, seed=c.data.seed + 1)),
+            "window_shuffle_seed",
+        ),
+        (
+            lambda c: replace(c, data=replace(c.data, window_shuffle_tokens=128)),
+            "window_shuffle_rows",
+        ),
+        (
+            lambda c: replace(
+                c,
+                train=replace(c.train, seq_len=16),
+                data=replace(c.data, window_shuffle_tokens=128),
+            ),
+            "train.seq_len",
+        ),
+        (
+            lambda c: replace(c, train=replace(c.train, batch_size=2)),
+            "packing_cycle_rows",
+        ),
+        (
+            lambda c: replace(
+                c,
+                data=replace(
+                    c.data,
+                    tokenizer=replace(c.data.tokenizer, add_eos=True),
+                ),
+            ),
+            "tokenizer.add_eos",
+        ),
+    ],
+    ids=[
+        "ffd_mode",
+        "ffd_lookahead",
+        "ffd_doc_cap",
+        "window_seed",
+        "window_geometry",
+        "sequence_length",
+        "packing_cycle",
+        "token_preparation",
+    ],
+)
+def test_warn_resume_rejects_packed_window_reconstruction_drift(
+    tmp_path: Path,
+    mutate: Any,
+    match: str,
+) -> None:
+    """Warn mode cannot apply an old row cursor to a rebuilt, different window.
+
+    :param Path tmp_path: Temporary run directory root.
+    :param Any mutate: Configuration mutation affecting packed-row reconstruction.
+    :param str match: Expected incompatibility field.
+    """
+    cfg = _base_cfg(tmp_path / "run_packed_window_replay")
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            packing_mode="bin",
+            packing_buffer_docs=8,
+            packing_max_docs_per_bin=1,
+            window_shuffle_tokens=64,
+        ),
+    )
+    meta = _checkpoint_record(cfg).to_dict()
+
+    with pytest.raises(RuntimeError, match=match):
+        check_resume_compat(mutate(cfg), meta)
 
 
 def test_resume_compat_strict_rejects_semantic_drift(tmp_path: Path) -> None:
@@ -2935,7 +3319,11 @@ def test_strict_resume_detects_eval_effective_lookahead_change(
     mode: str,
     lookahead_name: str,
 ) -> None:
-    """Strict resume must reject lookahead drift that changes only eval packing."""
+    """Strict resume must reject lookahead drift that changes only eval packing.
+
+    Requires ``eval_packing='train'``; the default instrument pins its own
+    lookahead and is deliberately deaf to these knobs.
+    """
     cfg = _base_cfg(tmp_path / f"run_eval_lookahead_{mode}")
     cfg = replace(
         cfg,
@@ -2943,6 +3331,7 @@ def test_strict_resume_detects_eval_effective_lookahead_change(
         data=replace(
             cfg.data,
             packing_mode=mode,
+            eval_packing="train",
             max_eval_samples=4,
             **{lookahead_name: 2},
         ),
@@ -2956,6 +3345,40 @@ def test_strict_resume_detects_eval_effective_lookahead_change(
 
     with pytest.raises(RuntimeError, match="data.eval.packing_lookahead_docs"):
         check_resume_compat(drifted, meta)
+
+
+def test_strict_resume_detects_eval_packing_change(tmp_path: Path) -> None:
+    """Swapping the eval instrument mid-run must not pass silently.
+
+    The eval_loss series either measures one thing for the whole run or it is
+    not a series, so this is the same class of drift as changing the eval split.
+    """
+    cfg = _base_cfg(tmp_path / "run_eval_packing")
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, packing_mode="bin", max_eval_samples=4),
+        checkpoint=replace(cfg.checkpoint, resume_compat="strict"),
+    )
+    meta = _checkpoint_record(cfg).to_dict()
+    drifted = replace(cfg, data=replace(cfg.data, eval_packing="train"))
+
+    with pytest.raises(RuntimeError, match="data.eval_packing"):
+        check_resume_compat(drifted, meta)
+
+
+def test_eval_packing_change_is_inert_when_eval_disabled(tmp_path: Path) -> None:
+    """With no eval data there is no instrument to keep stable."""
+    cfg = _base_cfg(tmp_path / "run_eval_packing_disabled")
+    cfg = replace(
+        cfg,
+        data=replace(cfg.data, packing_mode="bin", max_eval_samples=0),
+        checkpoint=replace(cfg.checkpoint, resume_compat="strict"),
+    )
+    meta = _checkpoint_record(cfg).to_dict()
+    drifted = replace(cfg, data=replace(cfg.data, eval_packing="train"))
+
+    assert data_fingerprint(drifted) == data_fingerprint(cfg)
+    check_resume_compat(drifted, meta)
 
 
 @pytest.mark.parametrize(
@@ -2999,35 +3422,95 @@ def test_lookahead_change_is_inert_when_eval_disabled(
         ("shuffle_buffer_size", 10_000, 200_000, "shuffle_buffer_size"),
         ("shuffle_buffer_bytes", 1024, 2048, "shuffle_buffer_bytes"),
         ("hf_revision", "abc123", "def456", "hf_revision"),
-        ("repeat", True, False, "data.repeat"),
+        ("seed", 1, 2, "data.seed"),
+        ("hf_dataset", "dummy", "other", "hf_dataset"),
     ],
 )
-def test_resume_compat_warns_for_hf_source_drift(
+def test_warn_resume_rejects_hf_window_replay_drift(
     tmp_path: Path,
     field: str,
     initial: Any,
     changed: Any,
     match: str,
-    caplog: LogCaptureFixture,
 ) -> None:
-    """HF source-order and identity changes warn in the default mode."""
+    """An HF document cursor is valid only for its saved replay recipe.
+
+    :param Path tmp_path: Temporary run directory root.
+    :param str field: Source or shuffle field to change.
+    :param Any initial: Value recorded by the checkpoint.
+    :param Any changed: Value requested for resume.
+    :param str match: Expected incompatibility field.
+    """
     cfg = _base_cfg(tmp_path / f"run_{field}")
-    data = replace(
-        cfg.data,
-        backend="hf",
-        hf_dataset="dummy",
-        hf_name="dummy",
-        hf_split="train",
-        shuffle=True,
-        **{field: initial},
-    )
+    source = {
+        "backend": "hf",
+        "hf_dataset": "dummy",
+        "hf_name": "dummy",
+        "hf_split": "train",
+        "shuffle": True,
+        field: initial,
+    }
+    data = replace(cfg.data, **source)
     cfg = replace(cfg, data=data)
     meta = _checkpoint_record(cfg).to_dict()
     drifted = replace(cfg, data=replace(cfg.data, **{field: changed}))
 
-    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+    with pytest.raises(RuntimeError, match=match):
         check_resume_compat(drifted, meta)
-    assert match in caplog.text
+
+
+def test_hf_repeat_change_retains_warn_mode_semantics(
+    tmp_path: Path, caplog: LogCaptureFixture
+) -> None:
+    """Repeat changes future exhaustion behavior, not active-window replay.
+
+    :param Path tmp_path: Temporary run directory root.
+    :param LogCaptureFixture caplog: Captured compatibility warning.
+    """
+    cfg = _base_cfg(tmp_path / "run_repeat")
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_split="train",
+            shuffle=True,
+            repeat=True,
+        ),
+    )
+    meta = _checkpoint_record(cfg).to_dict()
+
+    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+        check_resume_compat(replace(cfg, data=replace(cfg.data, repeat=False)), meta)
+    assert "data.repeat" in caplog.text
+
+
+def test_packed_window_replay_rejects_unshuffled_hf_source_drift(tmp_path: Path) -> None:
+    """The outer row window also binds an otherwise unshuffled HF source.
+
+    :param Path tmp_path: Temporary run directory root.
+    """
+    cfg = _base_cfg(tmp_path / "run_outer_source_replay")
+    cfg = replace(
+        cfg,
+        data=replace(
+            cfg.data,
+            backend="hf",
+            hf_dataset="dummy",
+            hf_name="dummy",
+            hf_split="train",
+            hf_revision="abc123",
+            shuffle=False,
+            window_shuffle_tokens=64,
+        ),
+    )
+    meta = _checkpoint_record(cfg).to_dict()
+    drifted = replace(cfg, data=replace(cfg.data, hf_revision="def456"))
+
+    with pytest.raises(RuntimeError, match="hf_revision"):
+        check_resume_compat(drifted, meta)
 
 
 def test_resume_compat_ignores_inert_shuffle_values(tmp_path: Path) -> None:
@@ -3069,10 +3552,8 @@ def test_resume_compat_ignores_inert_shuffle_values(tmp_path: Path) -> None:
     check_resume_compat(inert_hf_drift, _checkpoint_record(hf).to_dict())
 
 
-def test_resume_compat_warns_for_local_window_shuffle_seed_drift(
-    tmp_path: Path, caplog: LogCaptureFixture
-) -> None:
-    """Local window-shuffle seed drift warns in the default mode."""
+def test_resume_compat_rejects_local_window_shuffle_seed_drift(tmp_path: Path) -> None:
+    """An old packed-row cursor is invalid under a new window permutation."""
     cfg = _base_cfg(tmp_path / "run_window_seed")
     cfg = replace(cfg, data=replace(cfg.data, window_shuffle_tokens=64))
     assert cfg.data.backend == "local_text"
@@ -3080,9 +3561,8 @@ def test_resume_compat_warns_for_local_window_shuffle_seed_drift(
     meta = _checkpoint_record(cfg).to_dict()
 
     drifted = replace(cfg, data=replace(cfg.data, seed=cfg.data.seed + 1))
-    with caplog.at_level(logging.WARNING, logger="chomp.ckpt"):
+    with pytest.raises(RuntimeError, match="window_shuffle_seed"):
         check_resume_compat(drifted, meta)
-    assert "window_shuffle_seed" in caplog.text
 
     disabled = replace(cfg, data=replace(cfg.data, window_shuffle_tokens=0))
     disabled_meta = _checkpoint_record(disabled).to_dict()
@@ -3164,14 +3644,12 @@ def test_loss_sum_adapter_passes_segments_iff_packed() -> None:
             position_ids: jax.Array | None = None,
             reduction: str = "mean",
             return_valid_count: bool = False,
-            loss_chunk_size: int | None = None,
         ) -> jax.Array | tuple[jax.Array, jax.Array]:
             _ = (input_ids, labels, attention_mask, deterministic, key)
             calls["segment_ids"] = segment_ids
             calls["position_ids"] = position_ids
             calls["reduction"] = reduction
             calls["return_valid_count"] = return_valid_count
-            calls["loss_chunk_size"] = loss_chunk_size
             loss = jnp.zeros((), dtype=jnp.float32)
             count = jnp.array(7, dtype=jnp.int32)
             return (loss, count) if return_valid_count else loss
@@ -3190,20 +3668,17 @@ def test_loss_sum_adapter_passes_segments_iff_packed() -> None:
         deterministic=True,
         key=None,
         use_packed_segments=True,
-        loss_chunk_size=7,
     )
     assert calls["segment_ids"] is not None
     assert calls["position_ids"] is None
     assert calls["reduction"] == "sum"
     assert calls["return_valid_count"] is True
-    assert calls["loss_chunk_size"] == 7
 
     loss_sum_and_count(
         params, static, batch=micro, deterministic=True, key=None, use_packed_segments=False
     )
     assert calls["segment_ids"] is None
     assert calls["position_ids"] is None
-    assert calls["loss_chunk_size"] is None
 
     with pytest.raises(TypeError, match="unexpected keyword argument 'cache'"):
         loss_sum_and_count(  # type: ignore[call-arg]
