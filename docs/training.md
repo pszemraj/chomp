@@ -8,7 +8,7 @@ Related: [Config Reference](config-reference.yaml), [Optimization and Optimizers
 
 Checked-in scenarios are separated by intent. [`configs/dev/`](../configs/dev/) contains short infrastructure checks, while [`configs/pretrain/`](../configs/pretrain/) contains the four Megalodon scale recipes. Exact parameter counts, measurements, and fit qualifications are in the [README recipe table](../README.md#shipped-recipes-and-measured-expectations); the recipes are executable examples, and their per-field contracts live only in the [Config Reference](config-reference.yaml).
 
-The configured maximum target budget is `steps * grad_accum * batch_size * (seq_len - 1)`; boundary, EOS, and padding masks reduce the realized `tokens_seen`. The maintained schedules provide at least roughly 20 maximum target positions per parameter, but that is a starting budget rather than a claim of compute optimality for a specific corpus or research objective.
+After config validation and CLI overrides, `chomp train` reports the exact scheduled token slots (`steps * grad_accum * batch_size * seq_len`) and maximum causal loss tokens (`steps * grad_accum * batch_size * (seq_len - 1)`). Boundary, EOS, and padding masks reduce the realized `tokens_seen`, and a finite non-repeating source may exhaust before the configured schedule completes. The maintained schedules provide at least roughly 20 maximum target positions per parameter, but that is a starting budget rather than a claim of compute optimality for a specific corpus or research objective.
 
 ## Gated FFN and `ffn_hidden_dim`
 

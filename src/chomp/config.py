@@ -1318,6 +1318,16 @@ def validate_config(cfg: Config) -> None:
     _validate_tokenizer(cfg)
 
 
+def scheduled_token_counts(cfg: Config) -> tuple[int, int]:
+    """Return the configured token-slot and causal-loss ceilings.
+
+    :param Config cfg: Validated training configuration.
+    :return tuple[int, int]: Scheduled token slots and maximum causal loss tokens.
+    """
+    sequences = int(cfg.train.steps) * int(cfg.train.grad_accum) * int(cfg.train.batch_size)
+    return sequences * int(cfg.train.seq_len), sequences * (int(cfg.train.seq_len) - 1)
+
+
 def derived_deterministic(cfg: Config) -> bool:
     """Compute training determinism.
 

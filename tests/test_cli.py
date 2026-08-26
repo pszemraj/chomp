@@ -143,6 +143,32 @@ def test_train_validates_run_dir_override(tmp_path: Path) -> None:
     assert "logging.run_dir must be a non-empty string" in result.output
 
 
+def test_train_reports_scheduled_token_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI should report exact token ceilings from the validated config."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "model:\n"
+        "  backend: dummy\n"
+        "train:\n"
+        "  steps: 5\n"
+        "  batch_size: 3\n"
+        "  seq_len: 16\n"
+        "  grad_accum: 2\n"
+        "optim:\n"
+        "  warmup_steps: 0\n"
+    )
+    monkeypatch.setattr("chomp.train.run", lambda cfg, **kwargs: tmp_path / "run")
+
+    result = CliRunner().invoke(cli, ["train", str(config_path), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "[chomp] scheduled token slots: 480" in result.output
+    assert "[chomp] maximum causal loss tokens: 450" in result.output
+
+
 def test_train_init_from_requires_an_existing_checkpoint(tmp_path: Path) -> None:
     """--init-from is wired and rejects a path that is not there before JAX starts."""
     config_path = tmp_path / "config.yaml"

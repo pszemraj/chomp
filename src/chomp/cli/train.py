@@ -10,7 +10,7 @@ from dataclasses import replace
 import click
 
 from chomp.cli.main import BANNER, parse_resume
-from chomp.config import load_config, validate_config
+from chomp.config import load_config, scheduled_token_counts, validate_config
 from chomp.utils.io import setup_python_logging
 
 
@@ -78,6 +78,9 @@ def train(
         raise click.ClickException(f"Invalid config: {exc}") from exc
 
     resume = parse_resume(resume_raw)
+    token_slots, causal_loss_tokens = scheduled_token_counts(cfg)
+    click.echo(f"[chomp] scheduled token slots: {token_slots:,}")
+    click.echo(f"[chomp] maximum causal loss tokens: {causal_loss_tokens:,}")
 
     # Logging first so subsequent errors are readable
     setup_python_logging(cfg.logging.level, use_rich=cfg.logging.console_use_rich)
