@@ -1807,13 +1807,14 @@ def test_checkpoint_disabled_run_rejects_nonfinite_final_metrics(
 
 
 def test_resume_warns_for_seq_len_mismatch(tmp_path: Path, caplog: LogCaptureFixture) -> None:
-    """A changed batch shape warns but remains resumable when state shapes fit."""
+    """Without row-window replay, a changed batch shape warns when state shapes fit."""
     base = Config(
         model=ModelConfig(backend="dummy", vocab_size=256, d_model=32, dropout=0.0),
         data=DataConfig(
             backend="local_text",
             repeat=True,
             local_text="Deterministic local text for resume mismatch test.\n",
+            window_shuffle_tokens=0,
             tokenizer=TokenizerConfig(kind="byte", byte_offset=0, add_bos=False, add_eos=False),
         ),
         train=TrainConfig(
