@@ -1499,6 +1499,47 @@ def test_resume_across_packing_mode_keeps_stream_position(
     assert segments.shape == (cfg_bin.train.seq_len,)
 
 
+@pytest.mark.parametrize(
+    ("source_mode", "target_mode"),
+    [("sequential", "bin"), ("bin", "sequential")],
+)
+def test_resume_across_packer_families_rejects_window_shuffle(
+    source_mode: str,
+    target_mode: str,
+) -> None:
+    """A shuffled-window row cursor cannot be replayed by another packer family.
+
+    :param str source_mode: Packing mode that wrote the iterator state.
+    :param str target_mode: Packing mode asked to restore that state.
+    """
+    corpus = "".join(f"document number {i} with some filler text. " for i in range(64))
+
+    def _cfg(mode: str) -> Config:
+        """Build one side of the cross-family restore.
+
+        :param str mode: Packing mode for this iterator.
+        :return Config: Iterator config with an eight-row shuffle window.
+        """
+        return make_pipeline_cfg(
+            batch_size=2,
+            packing_mode=mode,
+            packing_buffer_docs=4,
+            packing_max_docs_per_bin=1,
+            local_text=corpus,
+            window_shuffle_tokens=64,
+            window_shuffle_max_rows=8,
+            grain_prefetch=0,
+        )
+
+    source = build_train_iterator(_cfg(source_mode))
+    _ = next(source)
+    state = source.get_state()
+
+    target = build_train_iterator(_cfg(target_mode))
+    with pytest.raises(RuntimeError, match="different data.packing_mode.*window shuffle"):
+        target.set_state(state)
+
+
 def test_resume_from_bin_reports_the_dropped_buffer_size(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

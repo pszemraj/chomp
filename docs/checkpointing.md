@@ -75,6 +75,8 @@ The resume compatibility preflight validates the tokenizer snapshot and selected
 
 After restoring model parameters, optimizer state, RNG, and step, chomp requires Grain to restore the matching iterator state. A data-state restore failure aborts resume in both compatibility modes; restarting the corpus behind a restored optimizer would produce a contradictory training history.
 
+Warn mode can switch between the sequential and FFD packer families only when packed-window shuffling is disabled. With shuffling enabled, Grain checkpoints the producer at the current window's start plus a packed-row cursor; replaying that cursor with another packer would consume a different number of source documents and corrupt the restored corpus position, so resume refuses the switch. Use `--init-from` when a new packing phase should start from the old parameters under the maintained shuffled pipeline.
+
 Comparisons use effective execution semantics: inactive or request-only settings may be equivalent when resolved behavior is unchanged, while active objective/runtime settings follow the configured policy. Per-key classifications live in the Config Reference. Every active current fingerprint field must be present in checkpoint metadata; missing is distinct from a recorded `null`.
 
 For Megalodon runs, strict resume rejects a changed or missing structured backend identity; warn mode reports it clearly. A legacy flat version or a checkpoint without this field is not treated as proven equal. The selected checkpoint is authoritative: `config_resolved.json` records the run-start identity for provenance but never fills a missing checkpoint field.

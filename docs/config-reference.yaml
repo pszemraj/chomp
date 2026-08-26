@@ -381,7 +381,7 @@ checkpoint:
   # checkpoint.async_save -- bool; default: true; used only when enabled. Overlaps I/O with training and is recommended for GPU runs; graceful shutdown waits, but abrupt termination can lose the newest in-flight save.
   async_save: "<bool>"
 
-  # checkpoint.resume_compat -- string; default: warn; one of: strict | warn. Warn mode permits intentional data, objective, schedule, Megalodon-JAX identity, and optimizer-value changes while logging each mismatch; strict rejects them, including missing identity in old checkpoints. Missing metadata is never treated as proven equal. Parameter/optimizer-state structure and Grain restore failures always abort. Maintained long-run recipes select strict.
+  # checkpoint.resume_compat -- string; default: warn; one of: strict | warn. Warn mode permits intentional data, objective, schedule, Megalodon-JAX identity, and optimizer-value changes while logging each mismatch; strict rejects them, including missing identity in old checkpoints. Missing metadata is never treated as proven equal. Parameter/optimizer-state structure and Grain restore failures always abort. A sequential <-> bin/multipack switch also aborts when packed-window shuffle is active because its saved row cursor is packer-dependent; use --init-from for that phased change. Maintained long-run recipes select strict.
   resume_compat: "<strict | warn>"
 
 # export -- mapping | null; default: {}. Controls the portable safetensors model written when a run finishes. See docs/export.md.

@@ -1150,6 +1150,7 @@ class _SequenceProducer:
             self._text_stream = _build_backend_text_stream(cfg)
 
         self._packer = _build_packer(cfg, rows_per_pack=rows_per_pack)
+        self._window_shuffle_rows = resolve_window_shuffle_rows(cfg)
 
     def _push_next_document(self) -> None:
         """Fetch one item from the text stream and add it to the packer."""
@@ -1219,13 +1220,30 @@ class _SequenceProducer:
         stopped instead of replaying the corpus from the beginning. This is the
         path a phased run takes when it switches packing, and it is reachable
         only under `checkpoint.resume_compat: warn`, because a packing-mode
-        change is an error under `strict` and aborts before any restore.
+        change is an error under `strict` and aborts before any restore. A
+        cross-family switch is also refused when packed-window shuffling is
+        active because Grain restores the producer to the start of the current
+        window and replays its saved row offset; that offset is meaningful only
+        under the packer that created the window.
 
         :param dict[str, Any] state: State dict from get_state().
+        :raises RuntimeError: If the packer family changes under window shuffle.
         """
-        self._text_stream.set_state(state["text"])
         packer_state = state["packer"]
-        if self._packer.can_restore_state(packer_state):
+        can_restore = self._packer.can_restore_state(packer_state)
+        if not can_restore:
+            source_family, buffered = summarize_packer_buffer(packer_state)
+            if self._window_shuffle_rows > 0:
+                raise RuntimeError(
+                    "Cannot resume into a different data.packing_mode while packed-window "
+                    f"shuffle is active ({self._window_shuffle_rows} rows): Grain restores "
+                    "the current window from its start, and the saved row offset cannot be "
+                    "replayed with a different packer family. Use --init-from to start a "
+                    "new data stream with the checkpoint's parameters."
+                )
+
+        self._text_stream.set_state(state["text"])
+        if can_restore:
             self._packer.set_state(packer_state)
             return
         # Counters carry; buffers do not. How much that costs depends entirely
@@ -1234,7 +1252,6 @@ class _SequenceProducer:
         # max(bins_per_pack, lookahead_docs) chunks and can run to hundreds of
         # thousands of tokens. Ask the writing family for the real numbers
         # rather than quoting the smaller bound for both.
-        source_family, buffered = summarize_packer_buffer(packer_state)
         self._packer.load_shared_state(packer_state)
         logger.warning(
             "Resumed into a different data.packing_mode: the checkpointed %s buffer "
